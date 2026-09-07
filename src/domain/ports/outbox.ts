@@ -1,4 +1,3 @@
-import type { InstanceStore } from "./instance.js";
 import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PromptJob, DeliveryFailureMetadata } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";

@@ -1,5 +1,5 @@
 import type { RunCardView } from "../domain/run-card-view.js";
-import { renderDetailedLarkMarkdownPage, renderDetailedLarkMarkdownRange, renderLarkMarkdownPage } from "./lark-markdown.js";
+import { renderDetailedLarkMarkdownRange, renderLarkMarkdownPage } from "./lark-markdown.js";
 
 /**
  * A Lark streaming element is visually rendered as a whole-card refresh. Keep

@@ -380,29 +380,6 @@ export class SqliteMigrations {
     `);
   }
 
-  private ensureFailedSteeringInteractionKind(): void {
-    const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'card_interactions'").get() as { sql: string } | undefined;
-    if (!schema || schema.sql.includes("'enqueue_failed_steering'")) return;
-    this.context.database.exec(`
-      PRAGMA foreign_keys = OFF;
-      BEGIN IMMEDIATE;
-      ALTER TABLE card_interactions RENAME TO card_interactions_legacy;
-      CREATE TABLE card_interactions(
-        id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
-        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','enqueue_failed_steering','more_actions','session_control')),
-        parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
-        expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
-      );
-      INSERT INTO card_interactions SELECT * FROM card_interactions_legacy;
-      DROP TABLE card_interactions_legacy;
-      CREATE INDEX card_interactions_expiry ON card_interactions(state, expires_at);
-      COMMIT;
-      PRAGMA foreign_keys = ON;
-    `);
-    const violation = this.context.database.prepare("PRAGMA foreign_key_check").get();
-    if (violation) throw new Error(`Card-interaction migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
-  }
-
   private ensureSessionOperations(): void {
     this.context.database.exec(`
       CREATE TABLE IF NOT EXISTS session_operations(

@@ -1,5 +1,5 @@
 import type { Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, HerdrPane, OrphanBindingProjectionInput, OrphanBindingProjectionResult, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RuntimeDegradationInput, RuntimeDegradationResult } from "../types.js";
-import type { HerdrAgentSession, ProjectSelection, ProjectSelectionClaim, RetiredPaneCleanupOperation, RuntimeObservationApplication } from "../types.js";
+import type { ProjectSelection, ProjectSelectionClaim, RetiredPaneCleanupOperation, RuntimeObservationApplication } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 

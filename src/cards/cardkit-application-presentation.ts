@@ -1,5 +1,5 @@
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
-import { cardKitPrimaryPresentation, createCardKitPrimaryPresentation, type CardKitPresentationLimits } from "./cardkit-primary-presentation.js";
+import { createCardKitPrimaryPresentation, type CardKitPresentationLimits } from "./cardkit-primary-presentation.js";
 import { cardKitWorkerPresentation } from "./cardkit-worker-presentation.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard, renderWorkerNewTaskCard, renderWorkerTaskInstructionCard } from "./instance-control-card.js";
 import { renderInstanceDetailCard } from "./instance-detail-card.js";

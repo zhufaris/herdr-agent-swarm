@@ -59,11 +59,6 @@ export function renderLarkMarkdownPage(source: string, pageStart: number, limit:
   return renderLarkMarkdownPageMode(source, pageStart, limit, true);
 }
 
-/** Renders the same canonical page boundary while retaining safe command detail for final cards. */
-export function renderDetailedLarkMarkdownPage(source: string, pageStart: number, limit: number): RenderedLarkMarkdownPage {
-  return renderLarkMarkdownPageMode(source, pageStart, limit, false);
-}
-
 /** Renders one proven canonical range with safe Markdown normalization and command detail. */
 export function renderDetailedLarkMarkdownRange(source: string, pageStart: number, pageEnd: number): string {
   const start = Math.max(0, Math.min(pageStart, source.length));
@@ -338,10 +333,6 @@ function latestFittingEnd(source: string, start: number, limit: number, candidat
     } else high = middle - 1;
   }
   return result;
-}
-
-function renderCardMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {
-  return renderPageRange(source, start, end, blocks, true);
 }
 
 function renderDetailedMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {

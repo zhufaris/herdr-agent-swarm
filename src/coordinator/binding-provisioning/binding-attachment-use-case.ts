@@ -5,7 +5,6 @@ import type { HerdrPort } from "../../domain/ports/external.js";
 import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig, ProjectSelection } from "../../domain/types.js";
 import type { PromptWorkScheduler } from "../../events/prompt-work-scheduler.js";
 import { requireMatchingPane } from "../pane-runtime-identity.js";
-import { PRIMARY_TOOLS_UNAVAILABLE_NOTICE } from "./managed-binding-lifecycle.js";
 
 export class BindingAttachmentUseCase {
   private readonly projectsBySpaceName = new Map<string, ProjectConfig[]>();

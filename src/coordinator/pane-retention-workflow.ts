@@ -5,7 +5,7 @@ import type { PaneRetentionStore } from "../domain/ports/workflow.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PanePresentation } from "../domain/ports/presentation.js";
 import { evaluatePaneClosureSafety, evaluatePaneRetention } from "../domain/pane-retention-policy.js";
-import type { Binding, ProjectConfig } from "../domain/types.js";
+import type { ProjectConfig } from "../domain/types.js";
 import { PeriodicWorkflowRunner } from "../runtime/periodic-workflow-runner.js";
 
 interface Options { projects: readonly ProjectConfig[]; store: PaneRetentionStore; herdr: Pick<HerdrPort, "getPane" | "closePane">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "paneRetentionWarning">; isBindingBusy(bindingId: string): boolean; logger: Pick<Logger, "info" | "warn">; }

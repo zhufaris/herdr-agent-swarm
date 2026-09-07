@@ -316,8 +316,6 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   }
 }
 
-function deliveryTargetKey(reply: OutboundReply): string { return reply.laneKey; }
-
 function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" } } {
   const decoded = JSON.parse(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown; deliveryMode?: unknown } };
   if (!decoded.card || !decoded.stream) return { card: decoded };

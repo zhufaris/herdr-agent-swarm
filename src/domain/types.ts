@@ -1,7 +1,7 @@
-import type { AgentState, HerdrPane } from "./runtime-observation.js";
+import type { HerdrPane } from "./runtime-observation.js";
 import type { DeliveryFailureClass, OutboundReplyKind, OutboundReplyState, OutboxLaneClass } from "./delivery.js";
 import type { Binding, BindingState } from "./binding.js";
-import type { PromptJob, PromptState } from "./prompt.js";
+import type { PromptState } from "./prompt.js";
 export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
 export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";

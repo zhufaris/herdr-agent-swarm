@@ -1,5 +1,4 @@
 import type { Logger } from "pino";
-import { projectSpaceName } from "../config.js";
 import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } from "../domain/types.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
@@ -42,7 +41,6 @@ export interface HerdrRuntimeReconcilerPort {
 
 export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
-  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
   private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
   private skippedPaneReasons = new Map<string, string>();
   private readonly snapshots: HerdrSnapshotCollector;
@@ -54,7 +52,6 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     this.snapshots = new HerdrSnapshotCollector(options.herdr, options.logger);
     this.reconciliationScheduler = new ReconciliationScheduler({ configuredWorkspaceIds: this.configuredWorkspaceIds, execute: (scope) => this.reconcileOnce(scope), logger: options.logger });
     this.converger = new BindingRuntimeConverger(options);
-    this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
     const projectsByWorkspaceAndCwd = new Map<string, ProjectConfig[]>();
     for (const project of options.projects) {
       const key = workspaceCwdKey(project.workspaceId, project.cwd);

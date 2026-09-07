@@ -1,34 +1,22 @@
-import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { estimateQueueWait } from "../domain/queue-wait-estimate.js";
 import type { AcceptInstanceTurnWithCardInput } from "../domain/ports.js";
 import type { AcceptPromptInput } from "../domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../domain/ports/workflow.js";
 import type { TurnControlStore } from "../domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingState, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboxLaneClass, OutboundReply, OutboundReplyState, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptObservationState, PromptState, PromptWorkHint, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DeliveryFailureMetadata, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundFailureTransition, OutboundReply, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../domain/types.js";
 import type { TopicViewState } from "../domain/topic-view.js";
-import type { MainCardLiveStatus } from "../domain/run-card-view.js";
 import type { RunCardView } from "../domain/run-card-view.js";
-import { answerElementId, freezeRunCardWorkerContext, reduceRunCard } from "../domain/run-card-view.js";
-import { initialTopicView, mirrorRunCardToTopic } from "../domain/topic-view.js";
 import type { BridgeEvent } from "../domain/events.js";
-import { transitionSession, type AttachmentState, type SessionLifecycle, type SessionTransition } from "../domain/pane-thread-lifecycle.js";
-import { ANSWER_RECOVERY_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../runtime/answer-stream.js";
-import { paneControlOutcomeSources, type PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
-import { outboundLaneKey, outboundLaneKeySql } from "./outbox-lanes.js";
-import { mapAnswerPage, mapBinding, mapCardInteraction, mapCommandIntent, mapInstanceLease, mapModelPreference, mapOutboundReply, mapPaneControlOperation, mapProjectSelection, mapPrompt, mapRetiredPaneCleanup, mapSessionOperation, mapTurnControlOperation, type AnswerPageRow, type BindingRow, type CardInteractionRow, type CommandIntentRow, type ModelPreferenceRow, type OutboundReplyRow, type PaneControlOperationRow, type ProjectSelectionRow, type PromptRow, type RetiredPaneCleanupRow, type SessionOperationRow, type SqlValue, type TurnControlOperationRow } from "./sqlite-records.js";
+import type { SessionTransition } from "../domain/pane-thread-lifecycle.js";
+import type { PaneControlOutcome } from "../domain/pane-control-lifecycle.js";
 import type { ModelPreference } from "../domain/model-selection.js";
-import { acceptModelSelection } from "../domain/model-selection.js";
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../domain/agent-instance.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../domain/instance-turn.js";
-import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
+import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { WorkerMainView } from "../domain/worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../domain/card-context-invalidation.js";
-import { inspectSqliteIntegrity } from "./sqlite-integrity.js";
-import { sessionOperationRejection } from "../domain/session-operation-policy.js";
-import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../domain/turn-control.js";
-import type { CommandIntent } from "../domain/command-intent.js";
+import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState } from "../domain/turn-control.js";
 import { SqliteContext } from "./sqlite/context.js";
 import { SqliteApprovalStore } from "./sqlite/approval-store.js";
 import { SqliteLeaseStore } from "./sqlite/lease-store.js";
@@ -51,20 +39,6 @@ import { SqliteTurnControlStore } from "./sqlite/turn-control-store.js";
 import { SqliteWorkerCardDisplayStore } from "./sqlite/worker-card-display-store.js";
 import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./sqlite/runtime-stores.js";
 import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./sqlite/workflow-stores.js";
-const TRAEX_COMPATIBLE_AGENT_KINDS = new Set(["traex", "codex", "claude", "pi"]);
-
-const BINDING_COLUMNS: Record<keyof Binding, string> = {
-  id: "id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id",
-    rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id",
-  agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value",
-  title: "title", runtime: "runtime", state: "state", statusMessageId: "status_message_id", statusCardSequence: "status_card_sequence",
-  lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint",
-  lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint",
-  degradationCount: "degradation_count", hasCompletedTurn: "has_completed_turn", lastObservedAt: "last_observed_at",
-  archivedAt: "archived_at", lastActivityAt: "last_activity_at",
-  createdAt: "created_at", updatedAt: "updated_at"
-};
-
 export class SqliteStoreKernel implements TurnControlStore {
   readonly database: DatabaseSync;
   private readonly context: SqliteContext;
@@ -347,7 +321,6 @@ export class SqliteStoreKernel implements TurnControlStore {
   listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } { return this.workerTurns.listInstanceTurns(instanceId, options); }
   listRecentInstanceTurnSummaries(instanceId: string, requestedLimit = 5): InstanceTurnSummary[] { return this.workerTurns.listRecentInstanceTurnSummaries(instanceId, requestedLimit); }
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null { return this.workerTurns.getActiveInstanceTurn(instanceId, expectedGeneration); }
-  private saveWorkerTurnCard(view: WorkerTurnCardView): void { this.workerTurns.saveWorkerTurnCard(view); }
   setBindingPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
     return this.bindings.setPrimaryToolCapability(input);
   }
@@ -838,10 +811,6 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.outbox.markOutboundReplyFailedWithQuarantine(id, error, metadata, retryDelayMs);
   }
 
-  private refreshOutboxLaneHead(laneKey: string): void {
-    this.outbox.refreshOutboxLaneHead(laneKey);
-  }
-
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] {
     return this.outbox.recoverEligibleDeadLetters(cutoff, limit);
   }
@@ -880,15 +849,6 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome {
     return this.projections.reserveMainCard(view, rootMessageId, card);
-  }
-
-  private matchesRuntimeFence(binding: Binding, expectedPaneId: string, expectedGeneration: number): boolean {
-    return binding.paneId === expectedPaneId && binding.generation === expectedGeneration
-      && (binding.lifecycle === "active" || binding.lifecycle === "draining") && binding.attachment !== "orphaned";
-  }
-
-  private reserveMainCardInTransaction(view: TopicViewState, rootMessageId: string | null, card: object): MainCardReservationOutcome {
-    return this.projections.reserveMainCardIntent(view, rootMessageId, card);
   }
 
   saveRunCard(view: RunCardView): RunCardView {
@@ -949,12 +909,6 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   listAnswerPages(promptId: string): AnswerPage[] {
     return this.projections.listAnswerPages(promptId);
-  }
-
-  private requireBinding(id: string): Binding {
-    const binding = this.bindings.getBinding(id);
-    if (!binding) throw new Error(`Binding not found: ${id}`);
-    return binding;
   }
 
   getPrompt(id: string): PromptJob | null {

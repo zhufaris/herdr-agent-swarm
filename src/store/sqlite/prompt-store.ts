@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { estimateQueueWait } from "../../domain/queue-wait-estimate.js";
 import type { AcceptPromptInput, DetachedPromptSkipResult } from "../../domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../../domain/ports/workflow.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";

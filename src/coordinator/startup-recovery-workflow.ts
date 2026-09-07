@@ -3,7 +3,7 @@ import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { LarkPort } from "../domain/ports/external.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
 import type { InboundRoutingStore } from "../domain/ports/workflow.js";
-import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, StartupRecoveryDiagnostics } from "../domain/types.js";
+import type { StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";

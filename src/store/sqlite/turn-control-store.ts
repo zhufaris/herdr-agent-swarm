@@ -7,7 +7,7 @@ import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { Binding, OutboundReply, PromptJob } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
-import { mapOutboundReply, mapTurnControlOperation, type OutboundReplyRow, type TurnControlOperationRow } from "../sqlite-records.js";
+import { mapTurnControlOperation, type OutboundReplyRow, type TurnControlOperationRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import { turnActorProvenance } from "./turn-actor-provenance.js";
 
