@@ -19,7 +19,10 @@ describe("BridgeEventBus", () => {
 
     expect(received).toEqual(["event-1"]);
     expect(bus.snapshot()).toMatchObject({
+      listenerCount: 3,
+      publicationCount: 1,
       subscriberFailures: 2,
+      failuresBySubscriber: { "sync-projector": 1, "async-projector": 1 },
       lastFailedSubscriber: "async-projector"
     });
     expect(bus.snapshot().lastFailureAt).toEqual(expect.any(String));
@@ -42,5 +45,15 @@ describe("BridgeEventBus", () => {
     await bus.publish({ ...event, eventId: "event-2" });
 
     expect(received).toEqual(["first", "second", "first"]);
+    expect(bus.snapshot()).toMatchObject({ listenerCount: 1, publicationCount: 2, subscriberFailures: 0, failuresBySubscriber: {} });
+  });
+
+  it("rejects duplicate subscriber names and permits reuse after unsubscribe", () => {
+    const bus = new BridgeEventBus();
+    const unsubscribe = bus.onBridgeEvent("projector", () => {});
+
+    expect(() => bus.onBridgeEvent("projector", () => {})).toThrow("Lifecycle event subscriber already registered: projector");
+    unsubscribe();
+    expect(() => bus.onBridgeEvent("projector", () => {})).not.toThrow();
   });
 });

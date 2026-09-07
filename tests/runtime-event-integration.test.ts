@@ -16,7 +16,7 @@ describe("RuntimeEventIntegration", () => {
         work: "best-effort-wakeup",
         herdr: "bounded-reconciliation-hint"
       },
-      lifecycle: { subscriberFailures: 0, lastFailureAt: null, lastFailedSubscriber: null }
+      lifecycle: { listenerCount: 0, publicationCount: 0, subscriberFailures: 0, failuresBySubscriber: {}, lastFailureAt: null, lastFailedSubscriber: null }
     });
     expect(events).not.toHaveProperty("publish");
   });

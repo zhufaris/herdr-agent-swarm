@@ -12,7 +12,10 @@ export interface LifecycleEventSubscriber {
 }
 
 export interface LifecycleEventDiagnosticSnapshot {
+  listenerCount: number;
+  publicationCount: number;
   subscriberFailures: number;
+  failuresBySubscriber: Readonly<Record<string, number>>;
   lastFailureAt: string | null;
   lastFailedSubscriber: string | null;
 }
@@ -25,27 +28,33 @@ interface LifecycleEventLogger {
   error(value: object, message: string): void;
 }
 
-interface LifecycleEventRegistration { name: string; listener: BridgeEventListener; }
-
 export class BridgeEventBus implements LifecycleEventPublisher, LifecycleEventSubscriber, LifecycleEventDiagnostics {
-  private readonly listeners = new Set<LifecycleEventRegistration>();
-  private diagnostics: LifecycleEventDiagnosticSnapshot = { subscriberFailures: 0, lastFailureAt: null, lastFailedSubscriber: null };
+  private readonly listeners = new Map<string, BridgeEventListener>();
+  private publicationCount = 0;
+  private subscriberFailures = 0;
+  private readonly failuresBySubscriber = new Map<string, number>();
+  private lastFailureAt: string | null = null;
+  private lastFailedSubscriber: string | null = null;
 
   constructor(private readonly logger?: LifecycleEventLogger) {}
 
   onBridgeEvent(name: string, listener: BridgeEventListener): () => void {
-    const registration = { name, listener };
-    this.listeners.add(registration);
-    return () => this.listeners.delete(registration);
+    if (this.listeners.has(name)) throw new Error(`Lifecycle event subscriber already registered: ${name}`);
+    this.listeners.set(name, listener);
+    return () => { if (this.listeners.get(name) === listener) this.listeners.delete(name); };
   }
 
   async publish(event: BridgeEvent): Promise<void> {
-    const listeners = [...this.listeners];
+    this.publicationCount += 1;
+    const listeners = [...this.listeners.entries()].map(([name, listener]) => ({ name, listener }));
     const results = await Promise.allSettled(listeners.map(({ listener }) => Promise.resolve().then(() => listener(event))));
     results.forEach((result, index) => {
       if (result.status === "fulfilled") return;
       const subscriber = listeners[index]!.name;
-      this.diagnostics = { subscriberFailures: this.diagnostics.subscriberFailures + 1, lastFailureAt: new Date().toISOString(), lastFailedSubscriber: subscriber };
+      this.subscriberFailures += 1;
+      this.failuresBySubscriber.set(subscriber, (this.failuresBySubscriber.get(subscriber) ?? 0) + 1);
+      this.lastFailureAt = new Date().toISOString();
+      this.lastFailedSubscriber = subscriber;
       this.logger?.error({
         event: "lifecycle-subscriber-failed", err: safeLogError(result.reason), eventId: event.eventId,
         bindingId: event.bindingId, bridgeEventType: event.type, subscriber, outcome: "isolated"
@@ -53,5 +62,14 @@ export class BridgeEventBus implements LifecycleEventPublisher, LifecycleEventSu
     });
   }
 
-  snapshot(): LifecycleEventDiagnosticSnapshot { return { ...this.diagnostics }; }
+  snapshot(): LifecycleEventDiagnosticSnapshot {
+    return {
+      listenerCount: this.listeners.size,
+      publicationCount: this.publicationCount,
+      subscriberFailures: this.subscriberFailures,
+      failuresBySubscriber: Object.fromEntries(this.failuresBySubscriber),
+      lastFailureAt: this.lastFailureAt,
+      lastFailedSubscriber: this.lastFailedSubscriber
+    };
+  }
 }
