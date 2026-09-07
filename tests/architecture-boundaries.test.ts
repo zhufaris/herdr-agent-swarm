@@ -24,6 +24,22 @@ describe("application composition boundaries", () => {
     expect(migrations).not.toContain("CREATE TABLE IF NOT EXISTS schema_migrations");
   });
 
+  it("keeps SQLite migration ordering in one runner over isolated domain modules", () => {
+    const runner = readFileSync(new URL("../src/store/sqlite/migrations.ts", import.meta.url), "utf8");
+    const modules = [
+      "binding-session-migrations.ts", "prompt-turn-migrations.ts", "card-outbox-migrations.ts",
+      "worker-migrations.ts", "retired-schema-migrations.ts"
+    ].map((file) => readFileSync(new URL(`../src/store/sqlite/migrations/${file}`, import.meta.url), "utf8"));
+    for (const className of ["BindingSessionMigrations", "PromptTurnMigrations", "CardOutboxMigrations", "WorkerMigrations", "RetiredSchemaMigrations"]) {
+      expect(runner).toContain(`new ${className}(context)`);
+    }
+    expect(runner).toContain("createLatestSchema(this.context)");
+    expect(runner.indexOf("this.binding.ensureAgentSessionColumns()")).toBeLessThan(runner.indexOf("this.retired.removeReportedTraexSessionColumns()"));
+    expect(runner.indexOf("this.cards.ensureRunCardActivityColumn()")).toBeLessThan(runner.indexOf("this.retired.convergeRetiredPromptSteering()"));
+    expect(modules.join("\n")).not.toContain("createLatestSchema");
+    for (const source of modules) expect(source).not.toMatch(/from "\.\/(?:binding-session|prompt-turn|card-outbox|worker|retired-schema)-migrations/);
+  });
+
   it("keeps concrete workflow and adapter construction in the composition factory", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
