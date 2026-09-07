@@ -1,7 +1,13 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
+  it("enforces the source import graph", () => {
+    expect(execFileSync(process.execPath, ["scripts/check-architecture-imports.mjs"], { cwd: new URL("..", import.meta.url), encoding: "utf8" }))
+      .toMatch(/Architecture imports valid/);
+  });
+
   it("keeps durable prompt safety scans out of Herdr reconciliation", () => {
     const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     expect(reconciler).not.toContain("scanDurablePromptWork");

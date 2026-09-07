@@ -200,6 +200,10 @@ The outbound, Primary, Worker, and application composition factories declare
 consumer-specific `Pick<SqliteStoreBundle, ...>` inputs. Only the parent bridge
 composition receives the full bundle. New cross-context capability access in a
 child factory is therefore a TypeScript error.
+`npm run architecture:check` additionally parses static source imports and
+enforces dependency direction in CI: only the SQLite bundle may import the
+kernel, SQLite implementation modules cannot depend outward on workflow or
+delivery layers, and non-composition modules cannot import composition code.
 
 All extracted SQLite capability modules share that context. Their transactional
 entry points use `SqliteContext.transaction()`, where only the outermost call
