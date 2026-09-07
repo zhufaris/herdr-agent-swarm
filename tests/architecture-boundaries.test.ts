@@ -237,6 +237,24 @@ describe("application composition boundaries", () => {
     expect(composition).toContain("new StartupViewConverger({");
   });
 
+  it("gives instance workflows named consumer-shaped store interfaces", () => {
+    const ports = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
+    const consumers = [
+      ["instance-messaging-workflow.ts", "InstanceMessagingStore"],
+      ["instance-turn-supervisor.ts", "InstanceTurnSupervisionStore"],
+      ["worker-turn-observer.ts", "WorkerTurnObservationStore"],
+      ["instance-runtime-reconciler.ts", "InstanceRuntimeReconciliationStore"],
+      ["instance-control-workflow.ts", "InstanceControlStore"]
+    ] as const;
+    for (const [file, interfaceName] of consumers) {
+      expect(ports).toContain(`export type ${interfaceName} = Pick<InstanceStore,`);
+      const source = readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8");
+      expect(source).toContain(`store: ${interfaceName}`);
+      expect(source).not.toMatch(/type Store =/);
+      expect(source).not.toMatch(/store: [^;\n]*(?:InstanceLifecycleStore|InstanceTurnStore|InstanceStore)[^;\n]*&/);
+    }
+  });
+
   it("keeps context-owned delivery, runtime, and project-selection models out of the compatibility type barrel", () => {
     const types = readFileSync(new URL("../src/domain/types.ts", import.meta.url), "utf8");
     expect(types).toContain('export type { AnswerPage');

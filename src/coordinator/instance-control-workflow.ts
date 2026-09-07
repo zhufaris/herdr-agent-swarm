@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
 import { primaryPaneToken } from "../domain/pane-title.js";
-import type { InstanceLifecycleStore, InstanceStore } from "../domain/ports/instance.js";
+import type { InstanceControlStore } from "../domain/ports/instance.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
@@ -12,7 +12,7 @@ import type { WorktreeManager } from "../runtime/worktree-manager.js";
 import { preferredRuntimeSessionId, requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 
 interface Options {
-  projects: readonly ProjectConfig[]; store: InstanceLifecycleStore & Pick<InstanceStore, "getBinding">; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
+  projects: readonly ProjectConfig[]; store: InstanceControlStore; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
 }
 
 export class InstanceControlWorkflow {
@@ -167,7 +167,7 @@ export class InstanceControlWorkflow {
   private requireInstance(id: string): AgentInstance { const value = this.options.store.getAgentInstance(id); if (!value) throw new Error(`Agent instance not found: ${id}`); return value; }
   private requireWorker(instance: AgentInstance): void { if (instance.role !== "worker") throw new Error("Only Worker instances can be controlled"); }
   private requireWorkspace(id: string): WorkspaceLease { const value = this.options.store.getWorkspaceLease(id); if (!value) throw new Error(`Workspace lease not found: ${id}`); return value; }
-  private requireUpdatedWorkspace(input: Parameters<InstanceStore["updateWorkspaceLease"]>[0]): WorkspaceLease { const value = this.options.store.updateWorkspaceLease(input); if (!value) throw new Error("Workspace lease generation changed"); return value; }
+  private requireUpdatedWorkspace(input: Parameters<InstanceControlStore["updateWorkspaceLease"]>[0]): WorkspaceLease { const value = this.options.store.updateWorkspaceLease(input); if (!value) throw new Error("Workspace lease generation changed"); return value; }
   private async resolveWorkerParent(project: ProjectConfig, bindingId: string | null | undefined): Promise<{ identity: NonNullable<AgentInstance["parent"]>; label: string | null }> {
     if (!bindingId) throw new Error("Worker creation requires an active Primary pane");
     const binding = this.options.store.getBinding(bindingId);

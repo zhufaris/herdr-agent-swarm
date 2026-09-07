@@ -113,3 +113,42 @@ export type InstanceTurnStore = Pick<InstanceStore,
   "getInstanceTurnDiagnostics" | "updateInstanceTurn" | "completeInstanceTurn" |
   "listInstanceEvents" | "countPendingInstanceTurns"
 >;
+
+export type InstanceMessagingStore = Pick<InstanceStore,
+  "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "getActiveInstanceTurn" |
+  "getActiveOrdinaryPrompt" | "getAgentInstance" | "getBinding" |
+  "getInstanceTurn" | "listAgentInstances" | "listInstanceEvents" |
+  "listInstanceTurns" | "listWorkerInstancesByParent"
+>;
+
+export type InstanceTurnSupervisionStore = Pick<InstanceStore,
+  "getAgentInstance" | "getInstanceTurn" | "getInstanceTurnDiagnostics" |
+  "getWorkspaceLease" | "listObservableInstanceTurns" |
+  "listObservableInstanceTurnsByPaneIds" | "loadWorkerTurnCard" |
+  "recoverInterruptedInstanceTurns" | "terminateWorkerSession" |
+  "transitionInstanceTurnWithProjection" | "updateAgentInstanceObservation" |
+  "updateInstanceTurn"
+>;
+
+export type WorkerTurnObservationStore = Pick<InstanceStore,
+  "applyInstanceTurnProjection" | "claimInstanceTurnTranscript" |
+  "getAgentInstance" | "getInstanceTurn" | "loadWorkerTurnCard" |
+  "transitionInstanceTurnWithProjection" | "updateInstanceTurn"
+>;
+
+export type InstanceRuntimeReconciliationStore = Pick<InstanceStore,
+  "attachAgentInstanceRuntime" | "countPendingInstanceTurns" |
+  "findAgentInstanceByPane" | "getWorkspaceLease" | "listAgentInstances" |
+  "terminateWorkerSession" | "updateAgentInstanceObservation"
+>;
+
+export type InstanceControlStore = Pick<InstanceStore,
+  "attachAgentInstanceRuntime" | "checkpointAgentInstance" |
+  "consumeInstanceRemovalPlan" | "createInstanceRemovalPlan" |
+  "createWorkerAgentInstance" | "finishAgentInstanceStop" |
+  "getAgentInstance" | "getBinding" | "getInstanceRemovalPlan" |
+  "getWorkspaceLease" | "listAgentInstances" | "listWorkerInstancesByParent" |
+  "removeAgentInstance" | "reserveAgentInstanceStop" |
+  "rollbackAgentInstanceStop" | "updateAgentInstanceLifecycle" |
+  "updateWorkspaceLease"
+>;

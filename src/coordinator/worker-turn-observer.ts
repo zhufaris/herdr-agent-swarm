@@ -1,11 +1,11 @@
-import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
+import type { WorkerTurnObservationStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 
 interface Options {
-  store: InstanceLifecycleStore & InstanceTurnStore;
+  store: WorkerTurnObservationStore;
   transcriptReader: TraexTranscriptReaderPort;
   wakeInstance(instanceId: string): void;
   wakeOutbound(): void;
@@ -142,7 +142,7 @@ function observedProgress(observation: TraexTranscriptObservation, occurredAt: s
   const plans = (observation.mainStatus?.planSteps ?? []).map((step) => ({ key: `plan:${step.key}`, kind: "step" as const, label: safeOutput(step.label), state: step.state, occurredAt }));
   return [...tools, ...plans];
 }
-function sessionFor(instance: ReturnType<InstanceLifecycleStore["getAgentInstance"]>, generation: number) {
+function sessionFor(instance: ReturnType<WorkerTurnObservationStore["getAgentInstance"]>, generation: number) {
   return instance?.runtimeRef?.nativeSessionId && instance.generation === generation && instance.agentKind === "traex"
     ? { source: "traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId }
     : null;

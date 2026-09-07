@@ -3,12 +3,11 @@ import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js"
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceTurn } from "../domain/instance-turn.js";
 import { createQueuedWorkerTurnCard, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
-import type { InstanceLifecycleStore, InstanceStore, InstanceTurnStore } from "../domain/ports/instance.js";
+import type { InstanceMessagingStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 
-type Store = InstanceLifecycleStore & InstanceTurnStore & Pick<InstanceStore, "getBinding" | "getActiveOrdinaryPrompt">;
-interface Options { store: Store; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
+interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
 export interface InstanceConversationView { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] }
 
 export class InstanceMessagingWorkflow {

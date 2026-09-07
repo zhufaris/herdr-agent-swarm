@@ -1,13 +1,13 @@
 import type { Logger } from "pino";
 import { matchesHerdrAgentKind, type AgentInstance, type ObservedInstanceState } from "../domain/agent-instance.js";
-import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
+import type { InstanceRuntimeReconciliationStore } from "../domain/ports/instance.js";
 import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../domain/types.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
-interface Options { projects: readonly ProjectConfig[]; store: InstanceLifecycleStore & Pick<InstanceTurnStore, "countPendingInstanceTurns">; paneHost: PaneHost; wake(instanceId: string): void; wakeCardContext?: () => void; logger?: Pick<Logger, "warn"> }
+interface Options { projects: readonly ProjectConfig[]; store: InstanceRuntimeReconciliationStore; paneHost: PaneHost; wake(instanceId: string): void; wakeCardContext?: () => void; logger?: Pick<Logger, "warn"> }
 interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
 
 export class InstanceRuntimeReconciler {
