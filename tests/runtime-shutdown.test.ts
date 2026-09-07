@@ -69,6 +69,30 @@ describe("bridge runtime shutdown", () => {
     expect(calls).toEqual(["subscriber", "coordinator", "queue-feedback", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
   });
 
+  it("stops periodic and external writers before releasing SQLite ownership", async () => {
+    const calls: string[] = [];
+    const runtime = new BridgeRuntimeShutdown({
+      herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
+      paneRetention: { async stop() { calls.push("pane-retention"); } },
+      externalTurns: { async stop() { calls.push("external-turns"); } },
+      outboxRetention: { async stop() { calls.push("outbox-retention"); } },
+      coordinator: { async stop() { calls.push("coordinator"); } },
+      projector: { async stop() { calls.push("projector"); } },
+      publisher: { async stop() { calls.push("publisher"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, error() {} }
+    });
+
+    await runtime.shutdown("lease-lost");
+
+    expect(calls).toEqual([
+      "subscriber", "pane-retention", "external-turns", "coordinator",
+      "outbox-retention", "projector", "publisher", "health", "fence", "lease", "store"
+    ]);
+  });
+
   it("continues releasing resources when an earlier stop fails", async () => {
     const calls: string[] = [];
     const errors: string[] = [];
@@ -222,5 +246,32 @@ describe("bridge runtime shutdown", () => {
     settleGateway();
     await Promise.resolve();
     vi.useRealTimers();
+  });
+
+  it("retains SQLite ownership when external turn observation does not settle", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let settleObserver!: () => void;
+    const observer = new Promise<void>((resolve) => { settleObserver = resolve; });
+    const runtime = new BridgeRuntimeShutdown({
+      externalTurns: { async stop() { calls.push("external-turns:start"); await observer; calls.push("external-turns:end"); } },
+      coordinator: { async stop() { calls.push("coordinator"); } },
+      projector: { async stop() { calls.push("projector"); } },
+      publisher: { async stop() { calls.push("publisher"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, warn() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
+    });
+
+    const shutdown = runtime.shutdown("lease-lost");
+    await vi.advanceTimersByTimeAsync(70);
+
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["externalTurns"] });
+    expect(calls).not.toContain("fence");
+    expect(calls).not.toContain("lease");
+    expect(calls).not.toContain("store");
+    settleObserver();
+    await Promise.resolve();
   });
 });

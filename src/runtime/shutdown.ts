@@ -10,10 +10,13 @@ interface ShutdownLogger {
 interface ShutdownDependencies {
   primaryToolGateway?: { stop(): Promise<void> };
   herdrSocketSubscriber?: { stop(): Promise<void> };
+  paneRetention?: { stop(): Promise<void> };
+  externalTurns?: { stop(): Promise<void> };
   instanceRuntime?: { stop(): Promise<void> };
   instanceWorker?: { stop(context?: ShutdownContext): Promise<void> };
   integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
   coordinator: { stop(context?: ShutdownContext): Promise<void> };
+  outboxRetention?: { stop(): Promise<void> };
   queueFeedbackProjector?: { stop(context?: ShutdownContext): Promise<void> };
   cardContextRebuilder?: { stop(context?: ShutdownContext): Promise<void> };
   projector: { stop(context?: ShutdownContext): Promise<void> };
@@ -60,7 +63,7 @@ export class BridgeRuntimeShutdown {
   }
 
   private async performShutdown(signal: string): Promise<BridgeRuntimeShutdownOutcome> {
-    const { herdrSocketSubscriber, primaryToolGateway, instanceRuntime, instanceWorker, integrityAuditor, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
+    const { herdrSocketSubscriber, primaryToolGateway, paneRetention, externalTurns, instanceRuntime, instanceWorker, integrityAuditor, coordinator, outboxRetention, queueFeedbackProjector, cardContextRebuilder, projector, publisher, healthServer, lease, store, logger } = this.dependencies;
     const startedAt = Date.now();
     const budgetMs = this.dependencies.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     const { context, abort } = createShutdownContext(budgetMs);
@@ -78,10 +81,13 @@ export class BridgeRuntimeShutdown {
     logger.info({ event: "bridge-shutdown-started", signal, deadlineAt: context.deadlineAt, budgetMs }, "shutting down");
     if (primaryToolGateway) writers.push({ component: "primaryToolGateway", ...(await this.stopComponent("primaryToolGateway", () => primaryToolGateway.stop(), context, logger, failures, timeouts)) });
     if (herdrSocketSubscriber) await this.stopComponent("herdrSocketSubscriber", () => herdrSocketSubscriber.stop(), context, logger, failures, timeouts);
+    if (paneRetention) writers.push({ component: "paneRetention", ...(await this.stopComponent("paneRetention", () => paneRetention.stop(), context, logger, failures, timeouts)) });
+    if (externalTurns) writers.push({ component: "externalTurns", ...(await this.stopComponent("externalTurns", () => externalTurns.stop(), context, logger, failures, timeouts)) });
     if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
     if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(context), context, logger, failures, timeouts)) });
     if (integrityAuditor) await this.stopComponent("integrityAuditor", () => integrityAuditor.stop(context), context, logger, failures, timeouts);
     writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
+    if (outboxRetention) writers.push({ component: "outboxRetention", ...(await this.stopComponent("outboxRetention", () => outboxRetention.stop(), context, logger, failures, timeouts)) });
     if (queueFeedbackProjector) writers.push({ component: "queueFeedbackProjector", ...(await this.stopComponent("queueFeedbackProjector", () => queueFeedbackProjector.stop(context), context, logger, failures, timeouts)) });
     if (cardContextRebuilder) writers.push({ component: "cardContextRebuilder", ...(await this.stopComponent("cardContextRebuilder", () => cardContextRebuilder.stop(context), context, logger, failures, timeouts)) });
     writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
