@@ -3084,6 +3084,18 @@ describe("SQLite store", () => {
     expect(store.loadTopicView("b1")).toMatchObject({ viewVersion: 1, deliveredVersion: 1 });
   });
 
+  it("does not move a delivered outbox row back into failure handling", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "delivered", idempotencyKey: "delivered", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.markOutboundReplyDelivered("delivered", "message-1");
+
+    expect(store.markOutboundReplyFailed("delivered", "late callback")).toBeNull();
+    expect(store.markOutboundReplyDeadLetter("delivered", "late callback", { failureClass: "permanent" })).toBeNull();
+    expect(store.markOutboundReplyFailedWithQuarantine("delivered", "late callback", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toBeNull();
+    expect(store.getOutboundReply("delivered")).toMatchObject({ state: "delivered", attemptCount: 1, error: null });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbox_lane_quarantines").get()).toEqual({ count: 0 });
+  });
+
   it("marks legacy terminal Answer pages finished before startup convergence", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-finish-migration-"));
     const databasePath = join(temporaryDirectory, "bridge.db");

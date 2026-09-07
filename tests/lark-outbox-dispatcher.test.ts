@@ -120,6 +120,24 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("does not reinterpret a successful delivery when a checkpoint listener fails", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+    store.reserveMainCard({ ...initialTopicView("b1"), title: "Version 2", viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 });
+    const updateCard = vi.fn(async () => {});
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard }), logger);
+    publisher.onMainCardCheckpoint(() => { throw new Error("checkpoint failed"); });
+
+    await expect(publisher.requestScan(true)).resolves.toBeUndefined();
+
+    expect(updateCard).toHaveBeenCalledOnce();
+    expect(store.database.prepare("SELECT state, attempt_count FROM outbound_replies").get()).toEqual({ state: "delivered", attempt_count: 1 });
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-checkpoint-listener-failed", outcome: "isolated" }), expect.any(String));
+    store.close();
+  });
+
   it("uses a contiguous CardKit sequence when Main Card view versions skip", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

@@ -128,8 +128,10 @@ export class SqliteOutboxStore {
 
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void {
     this.context.transaction(() => {
-      const row = this.context.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, kind, payload, root_message_id FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string; root_message_id: string } | undefined;
-      this.context.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(messageId, now(), id);
+      const row = this.context.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, kind, payload, root_message_id, state FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; kind: string; payload: string; root_message_id: string; state: OutboundReply["state"] } | undefined;
+      if (!row || row.state !== "pending") return;
+      const delivered = this.context.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'pending'").run(messageId, now(), id);
+      if (delivered.changes !== 1) return;
       if (row?.prompt_id) {
         if (row.card_role === "answer") {
           if (row.kind === "card_reply" || row.kind === "stream_card_create") {
@@ -219,20 +221,23 @@ export class SqliteOutboxStore {
 
   markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null {
     return this.context.transaction(() => {
-      const row = this.context.database.prepare("SELECT attempt_count FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number } | undefined;
-      if (!row) return null;
+      const row = this.context.database.prepare("SELECT attempt_count, state FROM outbound_replies WHERE id = ?").get(id) as { attempt_count: number; state: OutboundReply["state"] } | undefined;
+      if (!row || row.state !== "pending") return null;
       const attempts = Number(row.attempt_count) + 1;
       const timestamp = now();
       const deadLetteredAt = attempts >= 5 ? timestamp : null;
-      this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ?`).run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
+      const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'`).run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
+      if (updated.changes !== 1) return null;
       return this.getOutboundReply(id);
     });
   }
 
   markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null {
-    const timestamp = now();
-    this.context.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(boundedError(error), metadata?.failureClass ?? "permanent", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
-    return this.getOutboundReply(id);
+    return this.context.transaction(() => {
+      const timestamp = now();
+      const updated = this.context.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', error = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'pending'").run(boundedError(error), metadata?.failureClass ?? "permanent", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
+      return updated.changes === 1 ? this.getOutboundReply(id) : null;
+    });
   }
 
   markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null {
@@ -243,6 +248,7 @@ export class SqliteOutboxStore {
         const existing = this.context.database.prepare("SELECT lane_class, action FROM outbox_lane_quarantines WHERE lane_key = ? AND failed_reply_id = ?").get(before.laneKey, id) as { lane_class: OutboxLaneClass; action: OutboundFailureTransition["action"] } | undefined;
         if (existing) return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
       }
+      if (before.state !== "pending") return null;
       const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && (metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
       const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && metadata.larkErrorCode === "300309";
       const failed = metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream

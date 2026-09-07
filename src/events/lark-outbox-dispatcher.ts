@@ -232,9 +232,9 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           await this.lark.updateCardKit(reply.rootMessageId, card, reply.cardSequence ?? 1);
         } else await this.lark.updateCard(reply.rootMessageId, card);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
-        if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
-        if (reply.workerId && reply.workerSessionGeneration !== null) for (const listener of this.workerMainCheckpointListeners) listener(reply.workerId, reply.workerSessionGeneration, reply.viewVersion ?? 0);
-        if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
+        if (reply.workerTurnId) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
+        if (reply.workerId && reply.workerSessionGeneration !== null) this.notifyCheckpointListeners("worker-main", this.workerMainCheckpointListeners, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
+        if (reply.bindingId && reply.targetRole === "session_status") this.notifyCheckpointListeners("main-card", this.mainCardCheckpointListeners, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);
       } else if (reply.kind === "stream_card_create") {
         const decoded = decodeStreamingCardPayload(materializedPayload);
         if (reply.workerTurnId) assertWorkerCardCreateTarget(this.store, reply.workerTurnId, reply.rootMessageId, decoded.card, decoded.stream);
@@ -253,8 +253,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
           const prompt = this.store.getPrompt(reply.promptId);
           if (prompt) this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId });
         }
-        if (reply.promptId && decoded.stream) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, (reply.viewVersion ?? 0) + 1);
-        if (reply.workerTurnId && decoded.stream) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, (reply.viewVersion ?? 0) + 1);
+        if (reply.promptId && decoded.stream) this.notifyCheckpointListeners("answer", this.answerCheckpointListeners, (listener) => listener(reply.promptId!, (reply.viewVersion ?? 0) + 1), reply);
+        if (reply.workerTurnId && decoded.stream) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, (reply.viewVersion ?? 0) + 1), reply);
       } else if (reply.kind === "stream_content") {
         if (!this.lark.streamCardContent) throw new Error("Lark adapter does not support CardKit content streaming");
         const payload = JSON.parse(materializedPayload) as { elementId: string; content: string; sequence: number; pageIndex: number; workerElement?: "progress" };
@@ -266,8 +266,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         if (payload.content) await this.lark.streamCardContent(reply.rootMessageId, payload.elementId, payload.content, payload.sequence);
         else this.logger.info({ event: "lark-outbox-empty-answer-content-skipped", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: payload.sequence, outcome: "checkpointed" }, "checkpointed an empty legacy Answer update without sending it to Lark");
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
-        if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
-        if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
+        if (reply.promptId) this.notifyCheckpointListeners("answer", this.answerCheckpointListeners, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
+        if (reply.workerTurnId) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
       } else if (reply.kind === "stream_finish") {
         if (!this.lark.finishStreamingCard) throw new Error("Lark adapter does not support CardKit stream finalization");
         const payload = JSON.parse(materializedPayload) as { summary: string; sequence: number };
@@ -275,8 +275,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         else assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, reply.rootMessageId);
         await this.lark.finishStreamingCard(reply.rootMessageId, payload.sequence, payload.summary);
         this.store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
-        if (reply.promptId) for (const listener of this.answerCheckpointListeners) listener(reply.promptId, reply.viewVersion ?? 0);
-        if (reply.workerTurnId) for (const listener of this.workerTurnCheckpointListeners) listener(reply.workerTurnId, reply.viewVersion ?? 0);
+        if (reply.promptId) this.notifyCheckpointListeners("answer", this.answerCheckpointListeners, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
+        if (reply.workerTurnId) this.notifyCheckpointListeners("worker-turn", this.workerTurnCheckpointListeners, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
       } else {
         if (reply.kind === "card_reply" && reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainCreateTarget(this.store, reply.workerId, reply.workerSessionGeneration, reply.rootMessageId);
         const sent = reply.kind === "text"
@@ -285,8 +285,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
         const sentCardId = "cardId" in sent && typeof sent.cardId === "string" ? sent.cardId : undefined;
         this.store.markOutboundReplyDelivered(reply.id, sent.messageId, sentCardId);
         this.store.recordBridgeMessage(sent.messageId);
-        if (reply.workerId && reply.workerSessionGeneration !== null) for (const listener of this.workerMainCheckpointListeners) listener(reply.workerId, reply.workerSessionGeneration, reply.viewVersion ?? 0);
-        if (reply.bindingId && reply.targetRole === "session_status") for (const listener of this.mainCardCheckpointListeners) listener(reply.bindingId, reply.viewVersion ?? 0);
+        if (reply.workerId && reply.workerSessionGeneration !== null) this.notifyCheckpointListeners("worker-main", this.workerMainCheckpointListeners, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
+        if (reply.bindingId && reply.targetRole === "session_status") this.notifyCheckpointListeners("main-card", this.mainCardCheckpointListeners, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);
       }
       this.lastDeliveryAt = new Date().toISOString();
       return "delivered";
@@ -312,6 +312,12 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
       blockedTargets.add(reply.laneKey);
       this.lastDeliveryFailureAt = new Date().toISOString();
       return "failed";
+    }
+  }
+
+  private notifyCheckpointListeners<Listener>(name: string, listeners: ReadonlySet<Listener>, notify: (listener: Listener) => void, reply: OutboundReply): void {
+    for (const listener of listeners) try { notify(listener); } catch (error) {
+      this.logger.error({ event: "lark-outbox-checkpoint-listener-failed", err: safeLogError(error), subscriber: name, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, outcome: "isolated" }, "post-delivery checkpoint listener failed; durable delivery remains authoritative");
     }
   }
 }
