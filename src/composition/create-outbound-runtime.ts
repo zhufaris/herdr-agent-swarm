@@ -16,7 +16,9 @@ import { OutboxRetentionMaintainer } from "../runtime/outbox-retention-maintaine
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 
-export function createOutboundRuntime(config: BridgeConfig, stores: SqliteStoreBundle, lark: LarkPort, bus: LifecycleEventPublisher & LifecycleEventSubscriber, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: cardKitPrimaryPresentation, application: cardKitApplicationPresentation }) {
+export type OutboundRuntimeStores = Pick<SqliteStoreBundle, "outboundIntent" | "outbox" | "answerPages" | "mainCards" | "projection" | "queueFeedback" | "cardContext" | "retention">;
+
+export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, lark: LarkPort, bus: LifecycleEventPublisher & LifecycleEventSubscriber, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: cardKitPrimaryPresentation, application: cardKitApplicationPresentation }) {
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   const outbound = new OutboundIntentWriter(stores.outboundIntent, outboundWork);
   const channelPublisher = new LarkOutboxDispatcher(stores.outbox, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);

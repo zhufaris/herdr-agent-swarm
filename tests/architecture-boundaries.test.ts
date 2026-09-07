@@ -50,6 +50,14 @@ describe("application composition boundaries", () => {
     expect(factory).not.toContain("startHealthServer(");
   });
 
+  it("gives child composition factories consumer-specific SQLite capabilities", () => {
+    for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts"]) {
+      const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");
+      expect(source).toMatch(/export type [A-Za-z]+RuntimeStores = Pick<SqliteStoreBundle,/);
+      expect(source).not.toMatch(/stores:\s*SqliteStoreBundle/);
+    }
+  });
+
   it("keeps context-owned delivery, runtime, and project-selection models out of the compatibility type barrel", () => {
     const types = readFileSync(new URL("../src/domain/types.ts", import.meta.url), "utf8");
     expect(types).toContain('export type { AnswerPage');

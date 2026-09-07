@@ -12,8 +12,10 @@ import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import { RuntimeLink } from "./runtime-link.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 
+export type PrimaryRuntimeStores = Pick<SqliteStoreBundle, "externalTurns" | "promptRun">;
+
 export function createPrimaryRuntime(options: {
-  config: BridgeConfig; stores: SqliteStoreBundle; logger: Logger; herdr: HerdrPort; bus: LifecycleEventPublisher;
+  config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: TraexTranscriptReaderPort;
   mainCards: Pick<MainCardWorkflowPort, "converge">;
   presentation?: PrimaryPresentation;

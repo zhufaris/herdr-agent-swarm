@@ -21,8 +21,10 @@ import type { TraexTranscriptReader } from "../runtime/traex-transcript.js";
 import { RuntimeLink } from "./runtime-link.js";
 import { cardKitWorkerPresentation } from "../cards/cardkit-worker-presentation.js";
 
+export type WorkerRuntimeStores = Pick<SqliteStoreBundle, "instance" | "workerCardDisplay">;
+
 export function createWorkerRuntime(options: {
-  config: BridgeConfig; stores: SqliteStoreBundle; logger: Logger; turnControl: TurnControlWorkflow;
+  config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;
   paneHost: HerdrPaneHost; agentDrivers: AgentDriverRegistry; worktrees: WorktreeManager;
   transcriptReader: TraexTranscriptReader; outboundWork: OutboundWorkNotifier;
 }) {

@@ -36,8 +36,15 @@ import type { createPrimaryRuntime } from "./create-primary-runtime.js";
 import type { createWorkerRuntime } from "./create-worker-runtime.js";
 import type { ApplicationPresentation, PanePresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 
+export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
+  | "retiredPaneCleanup" | "bindingProvisioning" | "modelSelection" | "paneControl"
+  | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose"
+  | "paneRetention" | "sessionOperations" | "cardInteraction" | "runtimeReconciliation"
+  | "inboundRouting" | "commandIntents" | "instance" | "promptAcceptance"
+  | "inboundDispatch" | "inboundMessages" | "startupRecovery">;
+
 export function createApplicationRuntime(options: {
-  config: BridgeConfig; stores: SqliteStoreBundle; logger: Logger; turnControl: TurnControlWorkflow;
+  config: BridgeConfig; stores: ApplicationRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;
   bus: BridgeEventBus; scheduler: InProcessPromptWorkScheduler; inboundWork: InProcessInboundWorkNotifier;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
