@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedBridgeRuntime, type ManagedBridgeRuntimeDependencies } from "../src/composition/managed-bridge-runtime.js";
 
 function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
@@ -31,6 +31,8 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
   return { runtime: new ManagedBridgeRuntime(dependencies), runtimeDependencies: dependencies, calls, loseLease: async () => { await onLeaseLost?.(); } };
 }
 
+afterEach(() => vi.useRealTimers());
+
 describe("ManagedBridgeRuntime", () => {
   it("starts the bridge in ownership, recovery, delivery, ingress, and observation order", async () => {
     const { runtime, calls } = fixture();
@@ -46,6 +48,18 @@ describe("ManagedBridgeRuntime", () => {
       "pane-retention:scan", "pane-retention:start", "external-turns:start",
       "instance-runtime:start", "instance-turns:start", "socket:start"
     ]);
+  });
+
+  it("returns the same start promise without starting components twice", async () => {
+    const { runtime, calls } = fixture();
+
+    const first = runtime.start();
+    const second = runtime.start();
+
+    expect(second).toBe(first);
+    await first;
+    expect(calls.filter((call) => call === "coordinator:start")).toHaveLength(1);
+    expect(calls.filter((call) => call === "socket:start")).toHaveLength(1);
   });
 
   it("uses one idempotent shutdown for a signal and lease loss", async () => {
@@ -122,5 +136,66 @@ describe("ManagedBridgeRuntime", () => {
     await expect(starting).rejects.toThrow("startup interrupted");
     expect(calls).not.toContain("instance-runtime:reconcile");
     expect(calls).not.toContain("health:start");
+  });
+
+  it.each([
+    ["primary tools", { primaryToolGateway: { async start() { throw new Error("primary failed"); }, async stop() {} } }, ["fence:stop", "lease:release", "store:close"]],
+    ["integrity audit", { sqliteIntegrity: { start() {}, async run() { throw new Error("integrity failed"); }, async stop() {} } }, ["primary-tools:stop", "fence:stop", "lease:release", "store:close"]],
+    ["queue convergence", { queueFeedbackProjector: { start() {}, async converge() { throw new Error("queue failed"); }, async stop() {} } }, ["outbox-retention:stop", "card-context:stop", "projector:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"]],
+    ["pane scan", { paneRetention: { async scan() { throw new Error("scan failed"); }, start() {}, async stop() {} } }, ["coordinator:stop", "outbox-retention:stop", "health:stop", "fence:stop", "lease:release", "store:close"]]
+  ])("cleans up the started prefix when %s startup fails", async (_phase, overrides, expectedCalls) => {
+    const { runtime, calls } = fixture(overrides as Partial<ManagedBridgeRuntimeDependencies>);
+
+    await expect(runtime.start()).rejects.toThrow("failed");
+
+    for (const call of expectedCalls as string[]) expect(calls).toContain(call);
+    expect(calls.indexOf("fence:stop")).toBeLessThan(calls.indexOf("lease:release"));
+    expect(calls.indexOf("lease:release")).toBeLessThan(calls.indexOf("store:close"));
+  });
+
+  it("stops a coordinator whose asynchronous start partially fails", async () => {
+    const stop = vi.fn(async () => {});
+    const { runtime } = fixture({ coordinator: { async start() { throw new Error("coordinator failed"); }, stop } });
+
+    await expect(runtime.start()).rejects.toThrow("coordinator failed");
+
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("retains ownership and reports the result when lease-loss shutdown cannot settle a writer", async () => {
+    vi.useFakeTimers();
+    const onFatalStop = vi.fn();
+    const { runtime, calls, loseLease } = fixture({
+      externalTurns: { start() { calls.push("external-turns:start"); }, async stop() { await new Promise(() => {}); } },
+      onFatalStop
+    });
+    await runtime.start();
+    calls.length = 0;
+
+    const losingLease = loseLease();
+    await vi.advanceTimersByTimeAsync(31_100);
+    await losingLease;
+
+    const result = { outcome: "ownership_retained", unsettledWriters: ["externalTurns"] };
+    expect(onFatalStop).toHaveBeenCalledWith("lease-lost", result);
+    expect(calls).not.toContain("fence:stop");
+    expect(calls).not.toContain("lease:release");
+    expect(calls).not.toContain("store:close");
+  });
+
+  it("releases ownership when closing the health server fails", async () => {
+    const errors: string[] = [];
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      createHealthServer: async () => ({ close(callback) { callback(new Error("close failed")); } }),
+      logger: { info() {}, error(value) { errors.push(String(value.component)); } }
+    });
+
+    await runtime.start();
+    await expect(runtime.stop("SIGTERM")).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+
+    expect(errors).toContain("healthServer");
+    expect(base.calls.slice(-3)).toEqual(["fence:stop", "lease:release", "store:close"]);
   });
 });
