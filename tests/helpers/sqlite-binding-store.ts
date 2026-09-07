@@ -4,7 +4,7 @@ import type { WorkerCardDisplayStore } from "../../src/domain/ports/worker-card-
 import type { CommandIntentStore } from "../../src/domain/ports/swarm-command.js";
 import type { SessionOperationStore } from "../../src/domain/ports/workflow.js";
 import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
-import { SqliteStoreKernel } from "../../src/store/sqlite-store-kernel.js";
+import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 
 export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & LeaseStore & HealthStore &
   InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & SessionOperationStore & {

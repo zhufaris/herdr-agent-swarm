@@ -51,7 +51,7 @@ describe("application composition boundaries", () => {
     const ingressRecovery = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
     const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
-    const kernel = readFileSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url), "utf8");
+    const kernel = readFileSync(new URL("./helpers/sqlite-store-kernel.ts", import.meta.url), "utf8");
     const composition = `${factory}\n${application}\n${bindingSession}\n${commandControl}\n${ingressRecovery}\n${primary}`;
     expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
@@ -70,8 +70,8 @@ describe("application composition boundaries", () => {
     expect(lifecycle).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
     expect(lifecycle).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
     expect(main).not.toContain("new SqliteBindingStore");
-    expect(storeBundle).toContain("new SqliteStoreKernel");
-    expect(storeBundle).toContain("const modules = store.capabilityModules()");
+    expect(storeBundle).toContain("new SqliteCapabilityGraph(path).capabilityModules()");
+    expect(storeBundle).not.toContain("SqliteStoreKernel");
     const capabilityGraph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
     expect(kernel).toContain("new SqliteCapabilityGraph(path)");
     expect(kernel).not.toContain("new SqliteContext");
@@ -252,6 +252,7 @@ describe("application composition boundaries", () => {
     expect(productionFiles).not.toContain("SqliteBindingStore");
     expect(productionFiles).not.toContain('from "../store/sqlite-store.js"');
     expect(existsSync(new URL("../src/store/sqlite-store.ts", import.meta.url))).toBe(false);
+    expect(existsSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url))).toBe(false);
     const compatibility = readFileSync(new URL("./helpers/sqlite-binding-store.ts", import.meta.url), "utf8");
     expect(compatibility).toContain("new SqliteStoreKernel(path)");
     expect(compatibility).not.toContain("extends SqliteStoreKernel");

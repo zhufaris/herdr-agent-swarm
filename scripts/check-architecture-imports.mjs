@@ -15,11 +15,8 @@ for (const file of files) {
     const imported = resolveImport(file, statement.moduleSpecifier.text);
     if (!imported) continue;
     const target = relative(root, imported);
-    if (target === "src/store/sqlite-store-kernel.ts" && importer !== "src/store/sqlite-store-bundle.ts") {
-      violations.push(`${importer} must consume named SQLite capabilities instead of importing ${target}`);
-    }
-    if (target === "src/store/sqlite/capability-graph.ts" && importer !== "src/store/sqlite-store-kernel.ts") {
-      violations.push(`${importer} may not bypass the transitional SQLite kernel to import ${target}`);
+    if (target === "src/store/sqlite/capability-graph.ts" && importer !== "src/store/sqlite-store-bundle.ts") {
+      violations.push(`${importer} may not bypass the SQLite bundle to import ${target}`);
     }
     if (importer.startsWith("src/store/sqlite/") && /^(src\/(?:adapters|cards|composition|coordinator|events)\/|src\/main\.ts$)/.test(target)) {
       violations.push(`${importer} may not depend outward on ${target}`);

@@ -1,5 +1,5 @@
 import type { SqliteStoreBundle } from "../../src/store/sqlite-store-bundle.js";
-import { SqliteStoreKernel } from "../../src/store/sqlite-store-kernel.js";
+import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 
 export interface TestStoreBundle extends SqliteStoreBundle {
   /** Test setup/inspection driver. Workflows should receive a named capability above. */

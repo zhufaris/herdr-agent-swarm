@@ -13,7 +13,7 @@ import { ClaudeCodeDriver } from "../src/runtime/agents/claude-code-driver.js";
 import { TraexDriver } from "../src/runtime/agents/traex-driver.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { WorktreeManager } from "../src/runtime/worktree-manager.js";
-import { SqliteStoreKernel } from "../src/store/sqlite-store-kernel.js";
+import { SqliteStoreKernel } from "../tests/helpers/sqlite-store-kernel.js";
 import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
 import { InstanceControlWorkflow } from "../src/coordinator/instance-control-workflow.js";
