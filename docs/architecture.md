@@ -95,8 +95,14 @@ the source of workflow policy.
 ```
 
 The composition root creates the concrete infrastructure adapters and injects
-capability-focused ports into the application workflows. Runtime modules do not
-read deployment paths or process-manager state directly.
+capability-focused ports into the application workflows. `main.ts` is only the
+process boundary: it loads configuration and build identity, registers signal
+handlers, reports startup, and applies exit-code policy.
+`createManagedBridgeRuntime()` constructs the store, lease, runtime graph, and
+health server dependencies. `ManagedBridgeRuntime` is the lifecycle authority
+for ordered startup, lease-loss handling, partial-start cleanup, and idempotent
+shutdown. Runtime modules do not read deployment paths or process-manager state
+directly.
 
 ### Current implementation map
 
@@ -104,7 +110,8 @@ The production implementation uses the following modules and seams.
 
 | Module | Responsibility | Seam |
 | --- | --- | --- |
-| `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in `main.ts` |
+| `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
+| `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` | FIFO turn execution, legacy steering rejection, detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced `InstanceStore` transitions and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
@@ -877,6 +884,25 @@ and enables the unit without starting it; `npm run swarm:start` performs the
 explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
 `npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
 
+Inside the process, `ManagedBridgeRuntime` starts components in explicit phases:
+ownership and fencing; recovery preparation and integrity checks; the health
+surface; durable delivery and projection; ingress and startup convergence; then
+periodic and external observation. The lease heartbeat begins before the long
+integrity audit and initial reconciliations. Each possibly started component is
+recorded before an asynchronous start that may partially succeed, so a startup
+failure reuses the same shutdown policy instead of a separate cleanup path.
+
+SIGINT, SIGTERM, lease loss, and startup failure converge on one cached stop
+promise. Shutdown stops new prompt/tool and socket ingress first, then periodic
+and external observers, instance work, integrity and coordination, projection
+and delivery, and finally the health server. Only after every tracked
+write-capable component settles does it deactivate the write fence, release the
+lease, and close SQLite. If a writer remains unsettled after the shared deadline
+and final settlement allowance, the result is `ownership_retained`: the fence,
+lease, and store deliberately remain held and the process receives a non-zero
+exit code. This conservative outcome prevents a replacement process from writing
+while an old task may still hold SQLite access.
+
 ### First-run setup boundary
 
 The standalone `swarm:setup` command uses one deterministic workflow. That
@@ -937,11 +963,9 @@ on lifecycle events and while queued work exists. Each Run Card update and its
 replaceable outbox intent are committed atomically, so restart convergence cannot
 persist a newer view without retaining its delivery intent.
 
-Shutdown uses one shared deadline, stops ingress and both runtime reconcilers,
-waits for known write-capable work, and detaches observers if the
-grace period expires. It does not replay work or delete user state. Logs and
-status deliberately exclude prompt bodies, raw terminal output, card payloads,
-and credentials.
+Shutdown uses one shared deadline and never starts a second cleanup path. It does
+not replay work or delete user state. Logs and status deliberately exclude
+prompt bodies, raw terminal output, card payloads, and credentials.
 
 ## Safety rules
 
