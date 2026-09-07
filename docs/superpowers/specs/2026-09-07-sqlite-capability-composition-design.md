@@ -35,6 +35,13 @@ capability graph for legacy fixtures, but production source and composition must
 not depend on it. New tests continue to use `createTestStoreBundle()` and named
 capabilities.
 
+The first extraction covers lifecycle, lease, health, retention, inbound
+dispatch, operations queries, and Worker-card display. The remaining kernel
+methods implement or assemble ports that currently span multiple capability
+modules. They stay behind the aggregate until each atomic operation has one
+clear owning module; a dynamic proxy would narrow only the TypeScript appearance
+while preserving the same shallow runtime object.
+
 ## Composition inputs
 
 Each runtime factory defines or infers a store slice containing only the named

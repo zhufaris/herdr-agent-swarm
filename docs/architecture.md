@@ -182,7 +182,13 @@ workflow transaction.
 The production composition root creates one `SqliteStoreBundle`. The bundle
 constructs one internal `SqliteStoreKernel`, which creates exactly one
 `SqliteContext`, one `DatabaseSync` connection, and every capability module.
-Each workflow receives only
+Lifecycle, lease, health, retention, inbound-dispatch, operations-query, and
+Worker-card-display consumers receive concrete capability modules or focused
+aggregate adapters directly. The kernel no longer forwards those production
+interfaces. Interfaces that coordinate prompt, binding, projection, and outbox
+changes remain explicit kernel-backed aggregates until their atomic operations
+have one deeper owning module; they must not be mechanically split into table
+repositories. Each workflow receives only
 the domain port it consumes, such as `PromptRunStore`, `InstanceStore`,
 `OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
 facade type. Legacy tests that inspect migration fixtures may still construct the
@@ -190,14 +196,21 @@ test-only `SqliteBindingStore` from `tests/helpers/sqlite-binding-store.ts`. The
 compatibility name does not exist under `src/`, and new workflow tests use
 `createTestStoreBundle()` with named capabilities.
 
+The outbound, Primary, Worker, and application composition factories declare
+consumer-specific `Pick<SqliteStoreBundle, ...>` inputs. Only the parent bridge
+composition receives the full bundle. New cross-context capability access in a
+child factory is therefore a TypeScript error.
+
 All extracted SQLite capability modules share that context. Their transactional
 entry points use `SqliteContext.transaction()`, where only the outermost call
 issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`; nested Prompt, Worker-turn,
 projection, and outbox calls participate in the existing transaction. Capability
 modules never instantiate their own database connection. The compatibility
-facade is an implementation-free test alias and is not part of production
-source or composition. The kernel only wires capability calls and exposes their existing
-domain-port operations; business SQL lives in the capability modules. This
+facade is a test-only adapter and is not part of production source or
+composition. It retains selected legacy convenience methods while fixtures
+migrate to named capabilities. The kernel wires capability calls and retains
+cross-capability aggregate operations plus that temporary test surface; business
+SQL lives in the capability modules. This
 keeps prompt/card/outbox and Worker
 turn/card/page/event changes atomic even though their implementations live in
 separate files.
