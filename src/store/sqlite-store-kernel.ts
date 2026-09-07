@@ -624,6 +624,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.acceptPrompt(input);
   }
 
+  acceptPromptWithEffects(input: AcceptPromptInput): import("../domain/ports/prompt-acceptance.js").PromptAcceptanceReceipt {
+    return this.prompts.acceptPromptWithEffects(input);
+  }
+
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
     this.prompts.ensureAnswerCard(promptId, rootMessageId, card);
   }

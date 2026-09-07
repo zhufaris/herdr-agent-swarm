@@ -2538,6 +2538,27 @@ describe("SQLite store", () => {
     expect(store.getPrompt("p1")).toMatchObject({ wasDetached: true });
   });
 
+  it("returns committed prompt acceptance effects once and none for a duplicate", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "p-effects", bindingId: "b1", bindingGeneration: 2, title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-07T00:00:00.000Z" });
+    const input = { prompt: { id: "p-effects", bindingId: "b1", larkMessageId: "m-effects", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} };
+
+    const accepted = store.acceptPromptWithEffects(input);
+    expect(accepted.commitState).toBe("committed");
+    expect(accepted.consumeEffects()).toMatchObject([
+      { kind: "outbound-wake" },
+      { kind: "prompt-wake", bindingId: "b1" },
+      { kind: "lifecycle-event", event: { type: "PromptQueued", bindingId: "b1", payload: { promptId: "p-effects", queueDepth: 1, actorOpenId: "u1" } } }
+    ]);
+    expect(accepted.consumeEffects()).toEqual([]);
+
+    const duplicate = store.acceptPromptWithEffects({ ...input, prompt: { ...input.prompt, id: "duplicate" }, view: { ...view, promptId: "duplicate" } });
+    expect(duplicate.result).toMatchObject({ inserted: false, prompt: { id: "p-effects" } });
+    expect(duplicate.consumeEffects()).toEqual([]);
+  });
+
 
   it("projects changed queued run cards in one batch with per-card answer lanes", () => {
     store = new SqliteBindingStore(":memory:");

@@ -176,6 +176,18 @@ describe("application composition boundaries", () => {
     expect(recovery).not.toContain("new SqliteOutboxDeliveryStore");
   });
 
+  it("executes prompt acceptance effects only from a committed typed receipt", () => {
+    const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const effects = readFileSync(new URL("../src/coordinator/prompt-acceptance-effects.ts", import.meta.url), "utf8");
+    const context = readFileSync(new URL("../src/store/sqlite/context.ts", import.meta.url), "utf8");
+    expect(routing).toContain("acceptPromptWithEffects");
+    expect(routing).toContain("executePromptAcceptanceEffects(receipt, this.options)");
+    expect(routing).not.toContain('scheduler.wake({ kind: "prompt-ready"');
+    expect(effects).toContain("receipt.consumeEffects()");
+    expect(context).toContain("receipt.markCommitted()");
+    expect(context).toContain("receipt.markRolledBack()");
+  });
+
   it("gives child composition factories consumer-specific SQLite capabilities", () => {
     for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
       const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");

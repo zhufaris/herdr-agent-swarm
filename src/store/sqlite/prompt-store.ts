@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AcceptPromptInput, DetachedPromptSkipResult } from "../../domain/ports/prompt.js";
+import type { PromptAcceptanceEffect, PromptAcceptanceReceipt } from "../../domain/ports/prompt-acceptance.js";
+import { createBridgeEvent } from "../../domain/create-bridge-event.js";
 import type { AdoptExternalTurnInput } from "../../domain/ports/workflow.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
@@ -177,6 +179,20 @@ export class SqlitePromptStore {
       this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
         .run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
       return { prompt: this.requirePrompt(input.prompt.id), view: this.projections.loadRunCard(input.prompt.id)!, inserted: true };
+    });
+  }
+
+  acceptPromptWithEffects(input: AcceptPromptInput): PromptAcceptanceReceipt {
+    return this.context.transaction(() => {
+      const result = this.acceptPrompt(input);
+      const effects: PromptAcceptanceEffect[] = result.inserted ? [
+        { kind: "outbound-wake" },
+        { kind: "prompt-wake", bindingId: input.prompt.bindingId },
+        { kind: "lifecycle-event", event: createBridgeEvent(input.prompt.bindingId, "PromptQueued", "lark", {
+          promptId: result.prompt.id, queueDepth: this.countPendingPrompts(input.prompt.bindingId), actorOpenId: input.prompt.actorOpenId
+        }) }
+      ] : [];
+      return this.context.receipt(result, effects);
     });
   }
 

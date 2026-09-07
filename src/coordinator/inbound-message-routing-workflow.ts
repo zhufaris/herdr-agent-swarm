@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand } from "../domain/commands.js";
-import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
@@ -20,6 +19,7 @@ import type { InstanceInteractionWorkflow } from "./instance-interaction-workflo
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 import { ProjectCatalog } from "./project-catalog.js";
+import { executePromptAcceptanceEffects } from "./prompt-acceptance-effects.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -74,17 +74,16 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     if (!binding.rootMessageId) throw new Error("This binding has no Lark root message");
     const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
     const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(body), sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
-    let result: ReturnType<PromptAcceptanceStore["acceptPrompt"]>;
+    let receipt: ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]>;
     try {
       const view = createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1 });
-      result = this.options.store.acceptPrompt({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, view, rootMessageId: binding.rootMessageId, answerCard: this.options.presentation.answerCard(view), maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation });
+      receipt = this.options.store.acceptPromptWithEffects({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, view, rootMessageId: binding.rootMessageId, answerCard: this.options.presentation.answerCard(view), maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation });
     } catch (error) {
       if (error instanceof Error && error.message === "This topic's prompt queue is full") { await this.reject(message, error.message); return false; }
       throw error;
     }
-    if (!result.inserted) return true;
-    this.options.outboundWork.wake(); const depth = this.options.store.countPendingPrompts(binding.id); this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
-    await this.options.lifecycleEvents.publish(createBridgeEvent(binding.id, "PromptQueued", "lark", { promptId: result.prompt.id, queueDepth: depth, actorOpenId: message.actorOpenId }));
+    if (!receipt.result.inserted) return true;
+    await executePromptAcceptanceEffects(receipt, this.options);
     this.options.store.audit({ actorOpenId: message.actorOpenId, action: "prompt.queue", target: binding.id, outcome: "success" });
     return true;
   }

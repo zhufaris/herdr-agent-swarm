@@ -63,4 +63,32 @@ describe("SqliteContext", () => {
     });
     expect(context.database.prepare("SELECT value FROM values_table").all()).toEqual([{ value: "recovered" }]);
   });
+
+  it("makes nested post-commit receipts consumable only after the outer commit", () => {
+    context = new SqliteContext(":memory:");
+    let receipt!: ReturnType<SqliteContext["receipt"]>;
+
+    context.transaction(() => {
+      context!.transaction(() => { receipt = context!.receipt("durable", [{ kind: "wake" }]); });
+      expect(receipt.commitState).toBe("pending");
+      expect(() => receipt.consumeEffects()).toThrow("before the outer transaction commits");
+    });
+
+    expect(receipt.commitState).toBe("committed");
+    expect(receipt.consumeEffects()).toEqual([{ kind: "wake" }]);
+    expect(receipt.consumeEffects()).toEqual([]);
+  });
+
+  it("discards nested post-commit effects when the outer transaction rolls back", () => {
+    context = new SqliteContext(":memory:");
+    let receipt!: ReturnType<SqliteContext["receipt"]>;
+
+    expect(() => context!.transaction(() => {
+      receipt = context!.transaction(() => context!.receipt("durable", [{ kind: "wake" }]));
+      throw new Error("fail outer transaction");
+    })).toThrow("fail outer transaction");
+
+    expect(receipt.commitState).toBe("rolled_back");
+    expect(receipt.consumeEffects()).toEqual([]);
+  });
 });

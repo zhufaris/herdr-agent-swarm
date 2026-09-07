@@ -11,7 +11,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
       findBindingByLarkScope: vi.fn(() => binding),
       getConversationTarget: vi.fn(() => null),
       countPendingPrompts: vi.fn(() => 0),
-      acceptPrompt: vi.fn(() => ({ inserted: false, prompt: { id: "primary-prompt" } }))
+      acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => true) };
     const workflow = new InboundMessageRoutingWorkflow({
@@ -23,14 +23,14 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     await workflow.handle(message);
 
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
-    expect(store.acceptPrompt).toHaveBeenCalledOnce();
+    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
   });
 
   it("falls back to the active Primary FIFO when the replied card is not a Worker Task Card", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
     const store = {
       findBindingByLarkScope: vi.fn(() => binding), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
-      acceptPrompt: vi.fn(() => ({ inserted: false, prompt: { id: "primary-prompt" } }))
+      acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
@@ -42,14 +42,14 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     await workflow.handle(message);
 
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
-    expect(store.acceptPrompt).toHaveBeenCalledOnce();
+    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
   });
 
   it("keeps a Lark-flattened Task Card reply on the Primary FIFO instead of guessing a Worker", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "primary-root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
     const store = {
       findBindingByLarkScope: vi.fn(() => binding), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
-      acceptPrompt: vi.fn(() => ({ inserted: false, prompt: { id: "primary-prompt" } }))
+      acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
@@ -65,7 +65,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     await workflow.handle(message);
 
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
-    expect(store.acceptPrompt).toHaveBeenCalledOnce();
+    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
   });
 
   it("turns a stopped Worker rejection into a durable terminal disposition", async () => {
