@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { SqliteApprovalStore } from "./approval-store.js";
 import { SqliteBindingLifecycleStore } from "./binding-store.js";
 import { SqliteBindingProjectionStore } from "./binding-projection-store.js";
+import { SqliteBindingSessionCapabilityStore } from "./binding-session-capability-store.js";
 import { SqliteCardContextStore } from "./card-context-store.js";
 import { SqliteCommandIntentStore } from "./command-intent-store.js";
 import { SqliteContext } from "./context.js";
@@ -138,6 +139,7 @@ export class SqliteCapabilityGraph {
 
   capabilityModules() {
     const prompt = new SqlitePromptCapabilityStore(this.prompts, this.bindings, this.bindingProjections, this.projections, this.outbox, this.operations, this.migrations);
+    const bindingSession = new SqliteBindingSessionCapabilityStore(this.bindings, this.bindingProjections, this.prompts, this.projections, this.inboundProjects, this.paneOperations, this.operations);
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       approvals: this.approvals,
@@ -161,6 +163,11 @@ export class SqliteCapabilityGraph {
       workerTurnCards: this.workerTurns,
       promptAcceptance: prompt,
       promptRun: prompt,
+      bindingProvisioning: bindingSession,
+      runtimeReconciliation: bindingSession,
+      retiredPaneCleanup: bindingSession,
+      sessionAdministration: bindingSession,
+      paneRetention: bindingSession,
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox

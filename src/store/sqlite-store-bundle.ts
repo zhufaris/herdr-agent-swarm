@@ -71,12 +71,12 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
     lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: store,
     promptAcceptance: modules.promptAcceptance, promptRun: modules.promptRun, outboundIntent: modules.outbox, outbox: modules.outbox,
     answerPages: modules.answerPages, workerTurnCards: modules.workerTurnCards, mainCards: modules.mainCards, projection: modules.projection,
-    queueFeedback: modules.queueFeedback, cardContext: modules.cardContext, bindingProvisioning: store,
-    runtimeReconciliation: store, retiredPaneCleanup: store, paneControl: store,
+    queueFeedback: modules.queueFeedback, cardContext: modules.cardContext, bindingProvisioning: modules.bindingProvisioning,
+    runtimeReconciliation: modules.runtimeReconciliation, retiredPaneCleanup: modules.retiredPaneCleanup, paneControl: store,
     paneClose: store, inboundRouting: store, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
-    sessionOperations: modules.sessionOperations, modelSelection: store, sessionAdministration: store,
-    paneRetention: store, commandIntents: modules.commandIntents, inboundMessages: store,
+    sessionOperations: modules.sessionOperations, modelSelection: store, sessionAdministration: modules.sessionAdministration,
+    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, inboundMessages: store,
     startupRecovery: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
   };
 }
