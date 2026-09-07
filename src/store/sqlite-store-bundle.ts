@@ -6,10 +6,11 @@ import type { OutboundIntentStore, OutboxStore } from "../domain/ports/outbox.js
 import type { PaneCloseStore, PaneControlStore } from "../domain/ports/pane-operations.js";
 import type { PromptAcceptanceStore, PromptRunStore } from "../domain/ports/prompt.js";
 import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "../domain/ports/projection.js";
-import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
-import type { TurnControlCapabilityStore } from "./sqlite/control-capability-store.js";
+import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
+import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
-import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "../domain/ports/workflow.js";
+import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore, StartupRecoveryStore, StartupViewStore } from "../domain/ports/workflow.js";
+import type { InboundMessageRoutingStore } from "../coordinator/inbound-message-routing-workflow.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 
 export interface SqliteStoreLifecycle {
@@ -31,7 +32,7 @@ export interface SqliteStoreBundle {
   readonly instance: InstanceStore;
   readonly instanceLifecycle: InstanceLifecycleStore;
   readonly instanceTurns: InstanceTurnStore;
-  readonly turnControl: TurnControlCapabilityStore;
+  readonly turnControl: TurnControlWorkflowStore;
   readonly promptAcceptance: PromptAcceptanceStore;
   readonly promptRun: PromptRunStore;
   readonly outboundIntent: OutboundIntentStore;
@@ -57,9 +58,10 @@ export interface SqliteStoreBundle {
   readonly modelSelection: ModelSelectionStore;
   readonly sessionAdministration: SessionAdministrationStore;
   readonly paneRetention: PaneRetentionStore;
-  readonly commandIntents: CommandIntentStore & Pick<DeliveryRecoveryStore, "audit" | "getBinding">;
-  readonly inboundMessages: InboundRoutingStore & PromptAcceptanceStore;
-  readonly startupRecovery: InboundRoutingStore & PromptAcceptanceStore;
+  readonly commandIntents: CommandIntentWorkflowStore;
+  readonly inboundMessages: InboundMessageRoutingStore;
+  readonly startupRecovery: StartupRecoveryStore;
+  readonly startupViews: StartupViewStore;
   readonly retention: SqliteRetentionStore;
   readonly workerCardDisplay: WorkerCardDisplayStore;
 }
@@ -77,6 +79,6 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
     deliveryRecovery: modules.deliveryRecovery, cardInteraction: modules.cardInteraction, externalTurns: modules.externalTurns,
     sessionOperations: modules.sessionOperations, modelSelection: modules.modelSelection, sessionAdministration: modules.sessionAdministration,
     paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, inboundMessages: modules.inboundMessages,
-    startupRecovery: modules.startupRecovery, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
+    startupRecovery: modules.startupRecovery, startupViews: modules.startupViews, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
   };
 }

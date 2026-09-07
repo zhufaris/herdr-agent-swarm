@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { CreateWorkerResult } from "../domain/agent-instance.js";
 import type { CommandIntent, CommandIntentOutcome } from "../domain/command-intent.js";
-import type { CommandIntentStore } from "../domain/ports/swarm-command.js";
+import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { swarmCommandPolicy } from "../domain/swarm-command.js";
@@ -19,7 +19,7 @@ import type { SessionAdministrationWorkflowPort } from "./session-administration
 import { SwarmCommandContextResolver } from "./swarm-command-context-resolver.js";
 
 interface Options {
-  store: CommandIntentStore & { getBinding(id: string): Binding | null; audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void };
+  store: CommandIntentWorkflowStore;
   resolver: SwarmCommandContextResolver; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger;
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;

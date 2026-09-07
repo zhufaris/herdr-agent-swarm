@@ -3,8 +3,6 @@ import type { PromptRunStore } from "../../domain/ports/prompt-run.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
 import type { SqliteBindingProjectionStore } from "./binding-projection-store.js";
 import type { SqliteOperationsStore } from "./operations-store.js";
-import type { SqliteMigrations } from "./migrations.js";
-import type { SqliteOutboxStore } from "./outbox-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 
@@ -14,28 +12,13 @@ export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, Promp
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly bindingProjections: SqliteBindingProjectionStore,
     private readonly projections: SqliteProjectionStore,
-    private readonly outbox: SqliteOutboxStore,
-    private readonly operations: SqliteOperationsStore,
-    private readonly migrations: SqliteMigrations
+    private readonly operations: SqliteOperationsStore
   ) {}
 
   acceptPrompt(input: Parameters<PromptAcceptanceStore["acceptPrompt"]>[0]): ReturnType<PromptAcceptanceStore["acceptPrompt"]> { return this.prompts.acceptPrompt(input); }
   acceptPromptWithEffects(input: Parameters<PromptAcceptanceStore["acceptPromptWithEffects"]>[0]): ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]> { return this.prompts.acceptPromptWithEffects(input); }
   audit(input: Parameters<PromptAcceptanceStore["audit"]>[0]): void { this.operations.audit(input); }
   countPendingPrompts(bindingId: string): number { return this.prompts.countPendingPrompts(bindingId); }
-  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void { this.prompts.ensureAnswerCard(promptId, rootMessageId, card); }
-  getOperationalSummary(): ReturnType<PromptAcceptanceStore["getOperationalSummary"]> { return this.operations.getOperationalSummary(); }
-  hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean { return this.outbox.hasPendingAnswerContinuation(promptId, pageIndex); }
-  listBindings(): ReturnType<PromptAcceptanceStore["listBindings"]> { return this.bindings.listBindings(); }
-  listRunCards(bindingId: string): ReturnType<PromptAcceptanceStore["listRunCards"]> { return this.projections.listRunCards(bindingId); }
-  loadTopicView(bindingId: string): ReturnType<PromptAcceptanceStore["loadTopicView"]> { return this.projections.loadTopicView(bindingId); }
-  recoverLegacyElementIdDeadLetters(): number { return this.operations.recoverLegacyElementIdDeadLetters((timestamp) => this.migrations.canonicalizeLegacyAnswerTargets(timestamp)); }
-  recoverUnsupportedWorkerCardCreates(render: Parameters<PromptAcceptanceStore["recoverUnsupportedWorkerCardCreates"]>[0]): string[] { return this.outbox.recoverUnsupportedWorkerCardCreates(render); }
-  convergeWorkerTaskCardRenderer(revision: string, render: Parameters<PromptAcceptanceStore["convergeWorkerTaskCardRenderer"]>[1]): string[] { return this.outbox.convergeWorkerTaskCardRenderer(revision, render); }
-  recoverStaleOutboxQuarantines(): ReturnType<PromptAcceptanceStore["recoverStaleOutboxQuarantines"]> { return this.outbox.recoverStaleOutboxQuarantines(); }
-  reserveMainCard(...args: Parameters<PromptAcceptanceStore["reserveMainCard"]>): ReturnType<PromptAcceptanceStore["reserveMainCard"]> { return this.projections.reserveMainCard(...args); }
-  saveRunCard(view: Parameters<PromptAcceptanceStore["saveRunCard"]>[0]): ReturnType<PromptAcceptanceStore["saveRunCard"]> { return this.projections.saveRunCard(view); }
-  saveTopicView(view: Parameters<PromptAcceptanceStore["saveTopicView"]>[0]): void { this.projections.saveTopicView(view); }
 
   recoverRunningPrompts(): number { return this.prompts.recoverRunningPrompts(); }
   listDetachedPrompts(): ReturnType<PromptRunStore["listDetachedPrompts"]> { return this.prompts.listDetachedPrompts(); }
@@ -60,5 +43,6 @@ export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, Promp
   transitionBinding(...args: Parameters<PromptRunStore["transitionBinding"]>): ReturnType<PromptRunStore["transitionBinding"]> { return this.bindings.transitionBinding(...args); }
   listQueuedTurnRunCards(bindingId: string): ReturnType<PromptRunStore["listQueuedTurnRunCards"]> { return this.prompts.listQueuedTurnRunCards(bindingId); }
   loadRunCard(promptId: string): ReturnType<PromptRunStore["loadRunCard"]> { return this.projections.loadRunCard(promptId); }
+  loadTopicView(bindingId: string): ReturnType<PromptRunStore["loadTopicView"]> { return this.projections.loadTopicView(bindingId); }
   transitionBindingWithOutbox(input: Parameters<PromptRunStore["transitionBindingWithOutbox"]>[0]): ReturnType<PromptRunStore["transitionBindingWithOutbox"]> { return this.bindingProjections.transitionBindingWithOutbox(input); }
 }

@@ -1,8 +1,7 @@
 import type { Logger } from "pino";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { LarkPort } from "../domain/ports/external.js";
-import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
-import type { InboundRoutingStore } from "../domain/ports/workflow.js";
+import type { StartupRecoveryStore } from "../domain/ports/workflow.js";
 import type { StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -26,9 +25,8 @@ export interface StartupRecoveryWorkflowPort {
   snapshot(): StartupRecoveryDiagnostics;
 }
 
-type Store = InboundRoutingStore & PromptAcceptanceStore;
 export interface StartupRecoveryWorkflowOptions {
-  config: BridgeConfig; store: Store; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; lark: Pick<LarkPort, "start" | "stop">; logger: Logger; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
+  config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; lark: Pick<LarkPort, "start" | "stop">; logger: Logger; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "recover">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; messageRouting: InboundMessageRoutingWorkflowPort;
 }
 

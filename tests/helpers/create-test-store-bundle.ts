@@ -30,7 +30,7 @@ function createCapabilities(store: SqliteStoreKernel, modules = store.capability
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
     sessionOperations: modules.sessionOperations, modelSelection: store, sessionAdministration: store,
     paneRetention: store, commandIntents: modules.commandIntents, inboundMessages: store,
-    startupRecovery: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
+    startupRecovery: store, startupViews: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
   };
 }
 

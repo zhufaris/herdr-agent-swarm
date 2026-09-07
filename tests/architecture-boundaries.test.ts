@@ -115,6 +115,10 @@ describe("application composition boundaries", () => {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
+    expect(storeBundle).toContain("startupViews: modules.startupViews");
+    expect(storeBundle).not.toMatch(/readonly (?:turnControl|commandIntents|inboundMessages|startupRecovery):[^;]*&/);
+    const promptAcceptance = readFileSync(new URL("../src/domain/ports/prompt-acceptance.ts", import.meta.url), "utf8");
+    expect(promptAcceptance).not.toMatch(/recoverLegacyElementIdDeadLetters|recoverUnsupportedWorkerCardCreates|convergeWorkerTaskCardRenderer|recoverStaleOutboxQuarantines|listRunCards|loadTopicView|reserveMainCard/);
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("listPendingCardContextInvalidations");
     const workflowPorts = readFileSync(new URL("../src/domain/ports/workflow.ts", import.meta.url), "utf8");
@@ -262,7 +266,6 @@ describe("application composition boundaries", () => {
     expect(rendererBearing).toEqual([
       "instance.ts",
       "pane-operations.ts",
-      "prompt-acceptance.ts",
       "prompt-run.ts",
       "turn-control.ts",
       "worker-card-display.ts",

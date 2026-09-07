@@ -1,17 +1,16 @@
-import type { CommandIntentStore } from "../../domain/ports/swarm-command.js";
-import type { DeliveryRecoveryStore } from "../../domain/ports/workflow.js";
+import type { CommandIntentStore, CommandIntentWorkflowStore } from "../../domain/ports/swarm-command.js";
 import type { SessionOperationStore } from "../../domain/ports/workflow.js";
 import type { Binding } from "../../domain/types.js";
 import type { SessionOperation } from "../../domain/types.js";
 import type { SqliteCommandIntentStore } from "./command-intent-store.js";
 import type { SqliteSessionOperationStore } from "./session-operation-store.js";
 
-export class SqliteCommandIntentStoreAdapter implements CommandIntentStore, Pick<DeliveryRecoveryStore, "audit" | "getBinding"> {
+export class SqliteCommandIntentStoreAdapter implements CommandIntentWorkflowStore {
   constructor(
     private readonly store: SqliteCommandIntentStore,
     private readonly dependencies: {
-      audit: DeliveryRecoveryStore["audit"];
-      getBinding: DeliveryRecoveryStore["getBinding"];
+      audit: CommandIntentWorkflowStore["audit"];
+      getBinding: CommandIntentWorkflowStore["getBinding"];
     }
   ) {}
 
@@ -21,8 +20,8 @@ export class SqliteCommandIntentStoreAdapter implements CommandIntentStore, Pick
   finishCommandIntent: CommandIntentStore["finishCommandIntent"] = (id, state, outcome) => this.store.finish(id, state, outcome);
   listRecoverableCommandIntents: CommandIntentStore["listRecoverableCommandIntents"] = () => this.store.listRecoverable();
   recoverExecutingCommandIntents: CommandIntentStore["recoverExecutingCommandIntents"] = (recoveredAt) => this.store.recoverExecuting(recoveredAt);
-  audit: DeliveryRecoveryStore["audit"] = (input) => this.dependencies.audit(input);
-  getBinding: DeliveryRecoveryStore["getBinding"] = (id) => this.dependencies.getBinding(id);
+  audit: CommandIntentWorkflowStore["audit"] = (input) => this.dependencies.audit(input);
+  getBinding: CommandIntentWorkflowStore["getBinding"] = (id) => this.dependencies.getBinding(id);
 }
 
 export class SqliteSessionOperationStoreAdapter implements SessionOperationStore {

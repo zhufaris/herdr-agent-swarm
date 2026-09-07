@@ -1,10 +1,11 @@
-import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, IncomingLarkMessage, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary } from "../types.js";
+import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, IncomingLarkMessage, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, StaleOutboxQuarantineRecovery } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
 import type { BridgeEvent } from "../events.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { ModelPreference } from "../model-selection.js";
+import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
@@ -17,6 +18,23 @@ export interface InboundRoutingStore {
   getBinding(id: string): Binding | null;
   isBridgeMessage(messageId: string): boolean;
   listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[];
+}
+
+export interface StartupRecoveryStore {
+  getBinding(id: string): Binding | null;
+  listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[];
+  recoverLegacyElementIdDeadLetters(): number;
+}
+
+export interface StartupViewStore {
+  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
+  listBindings(): Binding[];
+  listRunCards(bindingId: string): RunCardView[];
+  loadTopicView(bindingId: string): TopicViewState | null;
+  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[];
+  convergeWorkerTaskCardRenderer(revision: string, render: (view: WorkerTurnCardView, page?: WorkerTurnCardPage) => object): string[];
+  recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery;
+  saveRunCard(view: RunCardView): RunCardView;
 }
 
 /** Durable inbox operations. Claim/release remains owned by the single SQLite

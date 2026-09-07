@@ -1,7 +1,7 @@
 import type { BridgeConfig } from "../config.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
-import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
+import type { StartupViewStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageWorkflowPort } from "./answer-page-workflow.js";
 import { AnswerPageWorkflow } from "./answer-page-workflow.js";
@@ -26,7 +26,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
 
   constructor(
     config: Pick<BridgeConfig, "projects">,
-    private readonly store: PromptAcceptanceStore,
+    private readonly store: StartupViewStore,
     private readonly outbound: OutboundIntentPort,
     private readonly outboundWork: OutboundWorkNotifier,
     private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
@@ -34,8 +34,8 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     mainCards?: MainCardWorkflowPort,
     private readonly logger?: Pick<Logger, "warn">
   ) {
-    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake(), presentation);
-    this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake(), presentation);
+    this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as StartupViewStore & AnswerPageStore, () => outboundWork.wake(), presentation);
+    this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as StartupViewStore & MainCardStore, () => outboundWork.wake(), presentation);
     this.projectRoutes = new ProjectCatalog(config.projects);
   }
 

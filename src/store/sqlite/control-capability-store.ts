@@ -1,7 +1,5 @@
-import type { InstanceStore } from "../../domain/ports/instance.js";
 import type { PaneCloseStore, PaneControlStore } from "../../domain/ports/pane-operations.js";
-import type { PromptAcceptanceStore } from "../../domain/ports/prompt-acceptance.js";
-import type { TurnControlStore } from "../../domain/ports/turn-control.js";
+import type { TurnControlStore, TurnControlWorkflowStore } from "../../domain/ports/turn-control.js";
 import type { CardInteractionStore, ModelSelectionStore } from "../../domain/ports/workflow.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
 import type { SqliteInstanceStore } from "./instance-store.js";
@@ -13,11 +11,7 @@ import type { SqliteSessionOperationStore } from "./session-operation-store.js";
 import type { SqliteTurnControlStore } from "./turn-control-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
 
-export interface TurnControlCapabilityStore extends TurnControlStore,
-  Pick<InstanceStore, "getBinding" | "getActiveOrdinaryPrompt" | "getAgentInstance" | "getActiveInstanceTurn" | "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "countPendingInstanceTurns">,
-  Pick<PromptAcceptanceStore, "acceptPrompt" | "countPendingPrompts"> {}
-
-export class SqliteTurnControlCapabilityStore implements TurnControlCapabilityStore {
+export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStore {
   constructor(
     private readonly controls: SqliteTurnControlStore,
     private readonly bindings: SqliteBindingLifecycleStore,
@@ -36,15 +30,15 @@ export class SqliteTurnControlCapabilityStore implements TurnControlCapabilitySt
   convertTurnControlToPrimaryPriority: TurnControlStore["convertTurnControlToPrimaryPriority"] = (input) => this.controls.convertToPrimaryPriority(input);
   convertTurnControlToWorkerPriority: TurnControlStore["convertTurnControlToWorkerPriority"] = (input) => this.controls.convertToWorkerPriority(input);
   recoverTurnControlOperations: TurnControlStore["recoverTurnControlOperations"] = (render) => this.controls.recover(render);
-  getBinding: TurnControlCapabilityStore["getBinding"] = (id) => this.bindings.getBinding(id);
-  getActiveOrdinaryPrompt: TurnControlCapabilityStore["getActiveOrdinaryPrompt"] = (id, generation) => this.prompts.getActiveOrdinaryPrompt(id, generation);
-  getAgentInstance: TurnControlCapabilityStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);
-  getActiveInstanceTurn: TurnControlCapabilityStore["getActiveInstanceTurn"] = (id, generation) => this.workerTurns.getActiveInstanceTurn(id, generation);
-  acceptInstanceTurn: TurnControlCapabilityStore["acceptInstanceTurn"] = (input) => this.workerTurns.acceptInstanceTurn(input);
-  acceptInstanceTurnWithCard: TurnControlCapabilityStore["acceptInstanceTurnWithCard"] = (input) => this.workerTurns.acceptInstanceTurnWithCard(input);
-  countPendingInstanceTurns: TurnControlCapabilityStore["countPendingInstanceTurns"] = (id, generation) => this.workerTurns.countPendingInstanceTurns(id, generation);
-  acceptPrompt: TurnControlCapabilityStore["acceptPrompt"] = (input) => this.prompts.acceptPrompt(input);
-  countPendingPrompts: TurnControlCapabilityStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
+  getBinding: TurnControlWorkflowStore["getBinding"] = (id) => this.bindings.getBinding(id);
+  getActiveOrdinaryPrompt: TurnControlWorkflowStore["getActiveOrdinaryPrompt"] = (id, generation) => this.prompts.getActiveOrdinaryPrompt(id, generation);
+  getAgentInstance: TurnControlWorkflowStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);
+  getActiveInstanceTurn: TurnControlWorkflowStore["getActiveInstanceTurn"] = (id, generation) => this.workerTurns.getActiveInstanceTurn(id, generation);
+  acceptInstanceTurn: TurnControlWorkflowStore["acceptInstanceTurn"] = (input) => this.workerTurns.acceptInstanceTurn(input);
+  acceptInstanceTurnWithCard: TurnControlWorkflowStore["acceptInstanceTurnWithCard"] = (input) => this.workerTurns.acceptInstanceTurnWithCard(input);
+  countPendingInstanceTurns: TurnControlWorkflowStore["countPendingInstanceTurns"] = (id, generation) => this.workerTurns.countPendingInstanceTurns(id, generation);
+  acceptPrompt: TurnControlWorkflowStore["acceptPrompt"] = (input) => this.prompts.acceptPrompt(input);
+  countPendingPrompts: TurnControlWorkflowStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
 }
 
 export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneCloseStore, ModelSelectionStore, CardInteractionStore {

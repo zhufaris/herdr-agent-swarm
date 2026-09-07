@@ -1,22 +1,19 @@
 import type { ControlActor } from "../domain/commands.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { HerdrPort } from "../domain/ports/external.js";
-import type { InstanceStore } from "../domain/ports/instance.js";
-import type { PromptAcceptanceStore } from "../domain/ports/prompt-acceptance.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
-import type { TurnControlStore } from "../domain/ports/turn-control.js";
+import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { Binding, HerdrAgentSession, HerdrPane } from "../domain/types.js";
 import type { TurnControlOperation, TurnTarget } from "../domain/turn-control.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../domain/worker-turn-card-view.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-type Store = TurnControlStore & Pick<InstanceStore, "getBinding" | "getActiveOrdinaryPrompt" | "getAgentInstance" | "getActiveInstanceTurn" | "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "countPendingInstanceTurns"> & Pick<PromptAcceptanceStore, "acceptPrompt" | "countPendingPrompts">;
 export type SteerOutcome =
   | { mode: "native"; operation: TurnControlOperation; duplicate: boolean }
   | { mode: "priority"; logicalTurnId: string; duplicate: boolean };
 
-interface Options { store: Store; herdr: Pick<HerdrPort, "getPane" | "steerAgent" | "interruptAgent">; idFactory: () => string; presentation: Pick<PrimaryPresentation, "answerCard"> & Pick<WorkerPresentation, "workerTurn" | "turnControlResult">; wakeOutbound?: () => void; wakePrimary?: (bindingId: string) => void; wakeInstance?: (instanceId: string) => void; maxQueueDepth?: number }
+interface Options { store: TurnControlWorkflowStore; herdr: Pick<HerdrPort, "getPane" | "steerAgent" | "interruptAgent">; idFactory: () => string; presentation: Pick<PrimaryPresentation, "answerCard"> & Pick<WorkerPresentation, "workerTurn" | "turnControlResult">; wakeOutbound?: () => void; wakePrimary?: (bindingId: string) => void; wakeInstance?: (instanceId: string) => void; maxQueueDepth?: number }
 interface SteerCommand { owner: { kind: "binding" | "instance"; id: string }; actor: ControlActor; text: string; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
 interface InterruptCommand { owner: SteerCommand["owner"]; actor: ControlActor; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
 
@@ -87,7 +84,7 @@ export class TurnControlWorkflow {
     return { resumed, uncertain: recovered.uncertain };
   }
 
-  private async resolveTarget(owner: SteerCommand["owner"], kind: "steer" | "interrupt"): Promise<{ kind: "active"; target: TurnTarget } | { kind: "idle"; binding: Binding } | { kind: "idle-instance"; instance: NonNullable<ReturnType<InstanceStore["getAgentInstance"]>> }> {
+  private async resolveTarget(owner: SteerCommand["owner"], kind: "steer" | "interrupt"): Promise<{ kind: "active"; target: TurnTarget } | { kind: "idle"; binding: Binding } | { kind: "idle-instance"; instance: NonNullable<ReturnType<TurnControlWorkflowStore["getAgentInstance"]>> }> {
     if (owner.kind === "binding") {
       const binding = this.options.store.getBinding(owner.id);
       if (!binding?.projectId || !binding.paneId) throw new Error("Primary binding has no active runtime");
@@ -118,7 +115,7 @@ export class TurnControlWorkflow {
     return { kind: "active", target: { owner, projectId: instance.projectId, paneId: instance.runtimeRef.paneId, generation: instance.generation, agentSession: pane.agentSession, logicalTurnId: turn.id, runtimeTurnId: turn.runtimeTurnId } };
   }
 
-  private acceptPriorityTurn(target: { kind: "idle"; binding: Binding } | { kind: "idle-instance"; instance: NonNullable<ReturnType<InstanceStore["getAgentInstance"]>> }, input: SteerCommand): SteerOutcome {
+  private acceptPriorityTurn(target: { kind: "idle"; binding: Binding } | { kind: "idle-instance"; instance: NonNullable<ReturnType<TurnControlWorkflowStore["getAgentInstance"]>> }, input: SteerCommand): SteerOutcome {
     const id = this.options.idFactory();
     const occurredAt = new Date().toISOString();
     if (target.kind === "idle") {

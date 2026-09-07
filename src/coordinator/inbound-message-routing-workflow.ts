@@ -26,9 +26,11 @@ export interface InboundMessageRoutingWorkflowPort {
   enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void>;
 }
 
-type Store = InboundRoutingStore & PromptAcceptanceStore;
+export interface InboundMessageRoutingStore extends
+  Pick<InboundRoutingStore, "findBindingByLarkScope">,
+  PromptAcceptanceStore {}
 interface Options {
-  config: BridgeConfig; store: Store; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
+  config: BridgeConfig; store: InboundMessageRoutingStore; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
 }
 
