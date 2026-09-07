@@ -25,10 +25,12 @@ export class OutboxRetentionMaintainer {
     this.timer.unref?.();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    const running = this.running;
+    if (running) await running;
   }
 
   run(): Promise<number> {

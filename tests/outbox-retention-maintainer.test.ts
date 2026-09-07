@@ -28,4 +28,33 @@ describe("outbox retention maintainer", () => {
     expect(limits).toEqual([500, 500, 500, 500, 500, 500]);
     expect(infos).toEqual([expect.objectContaining({ event: "durable-history-pruned", removed: 2_600, outboundRemoved: 1_000, inboundRemoved: 1_000, sessionOperationRemoved: 600, maxBatches: 2 })]);
   });
+
+  it("waits for the active prune before stop settles", async () => {
+    const maintainer = new OutboxRetentionMaintainer({
+      pruneDeliveredOutboundReplies() { return 500; },
+      pruneAcceptedInboundMessages() { return 0; },
+      pruneTerminalSessionOperations() { return 0; }
+    }, { retentionDays: 14, batchSize: 500 }, { info() {}, error() {} });
+
+    const running = maintainer.run();
+    const stopped = maintainer.stop();
+
+    expect(stopped).toBeInstanceOf(Promise);
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(running).resolves.toBe(500);
+  });
+
+  it("does not begin another retention kind after stop is requested", async () => {
+    const calls: string[] = [];
+    let maintainer!: OutboxRetentionMaintainer;
+    maintainer = new OutboxRetentionMaintainer({
+      pruneDeliveredOutboundReplies() { calls.push("outbound"); void maintainer.stop(); return 500; },
+      pruneAcceptedInboundMessages() { calls.push("inbound"); return 0; },
+      pruneTerminalSessionOperations() { calls.push("session"); return 0; }
+    }, { retentionDays: 14, batchSize: 500 }, { info() {}, error() {} });
+
+    await expect(maintainer.run()).resolves.toBe(500);
+
+    expect(calls).toEqual(["outbound"]);
+  });
 });
