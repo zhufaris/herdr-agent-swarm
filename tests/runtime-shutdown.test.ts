@@ -2,6 +2,41 @@ import { afterEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import { BridgeRuntimeShutdown } from "../src/runtime/shutdown.js";
 import type { ShutdownContext } from "../src/runtime/shutdown-context.js";
+import type { LifecycleCleanupEntry } from "../src/runtime/lifecycle-ledger.js";
+
+type Stoppable = { stop(context?: ShutdownContext): Promise<void> };
+type ShutdownFixtureOptions = {
+  primaryToolGateway?: Stoppable; herdrSocketSubscriber?: Stoppable; paneRetention?: Stoppable;
+  externalTurns?: Stoppable; instanceRuntime?: Stoppable; instanceWorker?: Stoppable;
+  integrityAuditor?: Stoppable; coordinator?: Stoppable; outboxRetention?: Stoppable;
+  queueFeedbackProjector?: Stoppable; cardContextRebuilder?: Stoppable; projector?: Stoppable; publisher?: Stoppable;
+  healthServer?: { close(callback: (error?: Error) => void): unknown };
+  lease: { release(): void }; store: { deactivateWriteFence(): void; close(): void };
+  logger: { info(value: object, message: string): void; warn?(value: object, message: string): void; error(value: object, message: string): void };
+  shutdownGraceMs?: number; abortSettlementMs?: number;
+};
+
+function shutdownFixture(options: ShutdownFixtureOptions): BridgeRuntimeShutdown {
+  const entries: LifecycleCleanupEntry[] = [];
+  const add = (name: string, stage: LifecycleCleanupEntry["stage"], kind: LifecycleCleanupEntry["kind"], value?: Stoppable) => {
+    if (value) entries.push({ name, stage, kind, stop: (context) => value.stop(context) });
+  };
+  add("primaryToolGateway", "ingress", "writer", options.primaryToolGateway);
+  add("herdrSocketSubscriber", "ingress", "non-writer", options.herdrSocketSubscriber);
+  add("paneRetention", "observers", "writer", options.paneRetention);
+  add("externalTurns", "observers", "writer", options.externalTurns);
+  add("instanceRuntime", "workers", "writer", options.instanceRuntime);
+  add("instanceWorker", "workers", "writer", options.instanceWorker);
+  add("integrityAuditor", "workers", "non-writer", options.integrityAuditor);
+  add("coordinator", "workers", "writer", options.coordinator);
+  add("outboxRetention", "projections", "writer", options.outboxRetention);
+  add("queueFeedbackProjector", "projections", "writer", options.queueFeedbackProjector);
+  add("cardContextRebuilder", "projections", "writer", options.cardContextRebuilder);
+  add("projector", "projections", "writer", options.projector);
+  add("publisher", "projections", "writer", options.publisher);
+  if (options.healthServer) entries.push({ name: "healthServer", stage: "health", kind: "non-writer", stop: () => new Promise<void>((resolve, reject) => options.healthServer!.close((error) => error ? reject(error) : resolve())) });
+  return new BridgeRuntimeShutdown({ cleanupEntries: entries, lease: options.lease, store: options.store, logger: options.logger, ...(options.shutdownGraceMs === undefined ? {} : { shutdownGraceMs: options.shutdownGraceMs }), ...(options.abortSettlementMs === undefined ? {} : { abortSettlementMs: options.abortSettlementMs }) });
+}
 
 afterEach(() => vi.useRealTimers());
 
@@ -10,7 +45,7 @@ describe("bridge runtime shutdown", () => {
     const calls: string[] = [];
     let releaseProjector!: () => void;
     const projectorBlocked = new Promise<void>((resolve) => { releaseProjector = resolve; });
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       queueFeedbackProjector: { async stop() { calls.push("queue-feedback"); } },
@@ -35,7 +70,7 @@ describe("bridge runtime shutdown", () => {
 
   it("stops periodic and external writers before releasing SQLite ownership", async () => {
     const calls: string[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
       paneRetention: { async stop() { calls.push("pane-retention"); } },
       externalTurns: { async stop() { calls.push("external-turns"); } },
@@ -60,7 +95,7 @@ describe("bridge runtime shutdown", () => {
   it("continues releasing resources when an earlier stop fails", async () => {
     const calls: string[] = [];
     const errors: string[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       coordinator: { async stop() { calls.push("coordinator"); throw new Error("coordinator failed"); } },
       projector: { async stop() { calls.push("projector"); } },
       publisher: { async stop() { calls.push("publisher"); } },
@@ -78,7 +113,7 @@ describe("bridge runtime shutdown", () => {
 
   it("still closes later resources after the coordinator performs bounded cancellation", async () => {
     const calls: string[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       coordinator: { async stop() { calls.push("coordinator:abort"); } },
       projector: { async stop() { calls.push("projector"); } },
       publisher: { async stop() { calls.push("publisher"); } },
@@ -94,7 +129,7 @@ describe("bridge runtime shutdown", () => {
 
   it("shares one immutable deadline context across write-capable shutdown components", async () => {
     const contexts: ShutdownContext[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       coordinator: { async stop(context) { contexts.push(context!); } },
       projector: { async stop(context) { contexts.push(context!); } },
       publisher: { async stop(context) { contexts.push(context!); } },
@@ -116,7 +151,7 @@ describe("bridge runtime shutdown", () => {
 
   it("stops the integrity auditor within the shared shutdown context", async () => {
     const contexts: ShutdownContext[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       integrityAuditor: { async stop(context) { contexts.push(context!); } },
       coordinator: { async stop(context) { contexts.push(context!); } },
       projector: { async stop() {} }, publisher: { async stop() {} },
@@ -132,7 +167,7 @@ describe("bridge runtime shutdown", () => {
 
   it("stops instance reconciliation within the shared shutdown deadline before releasing SQLite", async () => {
     const calls: string[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       instanceRuntime: { async stop() { calls.push("instance-runtime"); } },
       coordinator: { async stop() { calls.push("coordinator"); } }, projector: { async stop() { calls.push("projector"); } }, publisher: { async stop() { calls.push("publisher"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } }, lease: { release() { calls.push("lease"); } }, store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
@@ -145,7 +180,7 @@ describe("bridge runtime shutdown", () => {
 
   it("stops the primary tool gateway before releasing SQLite", async () => {
     const calls: string[] = [];
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       primaryToolGateway: { async stop() { calls.push("primary-tools"); } },
       coordinator: { async stop() {} }, projector: { async stop() {} }, publisher: { async stop() {} }, healthServer: { close(callback) { callback(); } },
       lease: { release() { calls.push("lease"); } }, store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } }, logger: { info() {}, error() {} }
@@ -160,7 +195,7 @@ describe("bridge runtime shutdown", () => {
     let settleWriter!: () => void;
     const writer = new Promise<void>((resolve) => { settleWriter = resolve; });
     let context: ShutdownContext | undefined;
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       coordinator: { async stop(value) { context = value; await writer; calls.push("coordinator:settled"); } },
       projector: { async stop() { calls.push("projector"); } },
       publisher: { async stop() { calls.push("publisher"); } },
@@ -189,7 +224,7 @@ describe("bridge runtime shutdown", () => {
     const calls: string[] = [];
     let settleGateway!: () => void;
     const gateway = new Promise<void>((resolve) => { settleGateway = resolve; });
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       primaryToolGateway: { async stop() { calls.push("gateway:start"); await gateway; calls.push("gateway:end"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       projector: { async stop() { calls.push("projector"); } },
@@ -217,7 +252,7 @@ describe("bridge runtime shutdown", () => {
     const calls: string[] = [];
     let settleObserver!: () => void;
     const observer = new Promise<void>((resolve) => { settleObserver = resolve; });
-    const runtime = new BridgeRuntimeShutdown({
+    const runtime = shutdownFixture({
       externalTurns: { async stop() { calls.push("external-turns:start"); await observer; calls.push("external-turns:end"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       projector: { async stop() { calls.push("projector"); } },

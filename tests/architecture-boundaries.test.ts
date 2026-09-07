@@ -382,7 +382,8 @@ describe("application composition boundaries", () => {
 
   it("puts the integrity auditor inside the shared runtime shutdown boundary", () => {
     const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
-    expect(lifecycle).toContain("integrityAuditor: d.sqliteIntegrity");
+    expect(lifecycle).toContain('this.registerCleanup("integrityAuditor", "workers", "non-writer"');
+    expect(lifecycle).toContain("cleanupEntries: this.lifecycle.shutdownPlan()");
     expect(lifecycle).not.toContain("await d.sqliteIntegrity.stop(); return shutdown.shutdown(signal)");
   });
 

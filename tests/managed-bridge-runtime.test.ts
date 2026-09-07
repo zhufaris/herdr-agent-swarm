@@ -75,10 +75,10 @@ describe("ManagedBridgeRuntime", () => {
     expect(duplicate).toBe(signalStop);
     await expect(signalStop).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
     expect(calls).toEqual([
-      "primary-tools:stop", "socket:stop", "pane-retention:stop", "external-turns:stop",
-      "instance-runtime:stop", "instance-turns:stop", "instance-work:stop", "integrity:stop",
-      "coordinator:stop", "outbox-retention:stop", "queue-feedback:stop", "card-context:stop",
-      "projector:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
+      "socket:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
+      "instance-turns:stop", "instance-runtime:stop", "instance-work:stop", "coordinator:stop",
+      "integrity:stop", "queue-feedback:stop", "card-context:stop", "projector:stop",
+      "outbox-retention:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
     ]);
     expect(onFatalStop).toHaveBeenCalledWith("lease-lost", { outcome: "completed", unsettledWriters: [] });
   });
@@ -136,6 +136,22 @@ describe("ManagedBridgeRuntime", () => {
     await expect(starting).rejects.toThrow("startup interrupted");
     expect(calls).not.toContain("instance-runtime:reconcile");
     expect(calls).not.toContain("health:start");
+  });
+
+  it("does not start recovery when lease loss is reported synchronously", async () => {
+    const { runtime, calls } = fixture({
+      lease: {
+        acquire() { calls.push("lease:acquire"); },
+        writeFence() { return { ownerId: "owner", fencingToken: 1 }; },
+        start(onLost) { calls.push("lease:start"); void onLost(); },
+        release() { calls.push("lease:release"); }
+      }
+    });
+
+    await expect(runtime.start()).rejects.toThrow("startup interrupted");
+    await expect(runtime.stop("lease-lost")).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    expect(calls).not.toContain("instance-turns:prepare");
+    expect(calls).not.toContain("primary-tools:start");
   });
 
   it.each([

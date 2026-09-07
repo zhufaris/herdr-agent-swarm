@@ -6,7 +6,8 @@ import type { BuildIdentity } from "../runtime/build-identity.js";
 import { detectAgentRuntimeAvailability } from "../runtime/agents/agent-availability.js";
 import { InstanceLeaseController } from "../runtime/instance-lease.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
-import { BridgeRuntimeShutdown, type BridgeRuntimeShutdownOutcome } from "../runtime/shutdown.js";
+import { RuntimeLifecycleLedger, type LifecycleCleanupEntry } from "../runtime/lifecycle-ledger.js";
+import { BridgeRuntimeShutdown, closeHealthServer, type BridgeRuntimeShutdownOutcome } from "../runtime/shutdown.js";
 import { createSqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import { createBridgeRuntime } from "./create-bridge-runtime.js";
 
@@ -98,22 +99,9 @@ export async function createManagedBridgeRuntime(options: {
 export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<BridgeRuntimeShutdownOutcome> | null = null;
-  private healthServer: HealthServer | null = null;
+  private readonly lifecycle = new RuntimeLifecycleLedger();
   private leaseAcquired = false;
   private writeFenceActive = false;
-  private primaryToolGatewayStarted = false;
-  private sqliteIntegrityStarted = false;
-  private publisherStarted = false;
-  private outboxRetentionStarted = false;
-  private projectorStarted = false;
-  private cardContextStarted = false;
-  private queueFeedbackStarted = false;
-  private coordinatorStarted = false;
-  private paneRetentionStarted = false;
-  private externalTurnsStarted = false;
-  private instanceRuntimeStarted = false;
-  private instanceTurnsStarted = false;
-  private socketStarted = false;
 
   constructor(private readonly dependencies: ManagedBridgeRuntimeDependencies) {}
 
@@ -142,11 +130,12 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
         const result = await this.stop("lease-lost");
         await d.onFatalStop?.("lease-lost", result);
       });
+      this.assertStarting();
       d.instanceTurns.prepareRecovery();
-      this.primaryToolGatewayStarted = true;
+      this.registerCleanup("primaryToolGateway", "ingress", "writer", () => d.primaryToolGateway.stop());
       await d.primaryToolGateway.start();
       this.assertStarting();
-      this.sqliteIntegrityStarted = true;
+      this.registerCleanup("integrityAuditor", "workers", "non-writer", (context) => d.sqliteIntegrity.stop(context));
       d.sqliteIntegrity.start();
       await d.sqliteIntegrity.run();
       this.assertStarting();
@@ -154,35 +143,37 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       this.assertStarting();
       await d.instanceTurns.reconcile();
       this.assertStarting();
-      this.healthServer = await d.createHealthServer();
+      const healthServer = await d.createHealthServer();
+      this.registerCleanup("healthServer", "health", "non-writer", () => closeHealthServer(healthServer));
       this.assertStarting();
-      this.publisherStarted = true;
+      this.registerCleanup("publisher", "projections", "writer", (context) => d.channelPublisher.stop(context));
       d.channelPublisher.start();
-      this.outboxRetentionStarted = true;
+      this.registerCleanup("outboxRetention", "projections", "writer", () => d.outboxRetention.stop());
       d.outboxRetention.start();
-      this.projectorStarted = true;
+      this.registerCleanup("projector", "projections", "writer", (context) => d.projector.stop(context));
       d.projector.start();
-      this.cardContextStarted = true;
+      this.registerCleanup("cardContextRebuilder", "projections", "writer", (context) => d.cardContextRebuilder.stop(context));
       d.cardContextRebuilder.start(d.reconcileIntervalMs);
-      this.queueFeedbackStarted = true;
+      this.registerCleanup("queueFeedbackProjector", "projections", "writer", (context) => d.queueFeedbackProjector.stop(context));
       d.queueFeedbackProjector.start(d.bus);
       await d.queueFeedbackProjector.converge();
       this.assertStarting();
-      this.coordinatorStarted = true;
+      this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
+      this.registerCleanup("instanceWork", "workers", "writer", (context) => d.instanceWork.stop(context));
       await d.coordinator.start();
       this.assertStarting();
       await d.paneRetention.scan();
       this.assertStarting();
-      this.paneRetentionStarted = true;
+      this.registerCleanup("paneRetention", "observers", "writer", () => d.paneRetention.stop());
       d.paneRetention.start(d.reconcileIntervalMs);
-      this.externalTurnsStarted = true;
+      this.registerCleanup("externalTurns", "observers", "writer", () => d.externalTurns.stop());
       d.externalTurns.start();
-      this.instanceRuntimeStarted = true;
+      this.registerCleanup("instanceRuntime", "workers", "writer", () => d.instanceRuntime.stop());
       d.instanceRuntime.start(d.reconcileIntervalMs);
-      this.instanceTurnsStarted = true;
+      this.registerCleanup("instanceTurns", "workers", "writer", () => d.instanceTurns.stop());
       d.instanceTurns.start(d.reconcileIntervalMs);
       if (d.herdrSocketSubscriber) {
-        this.socketStarted = true;
+        this.registerCleanup("herdrSocketSubscriber", "ingress", "non-writer", () => d.herdrSocketSubscriber!.stop());
         d.herdrSocketSubscriber.startEvents();
       }
     } catch (error) {
@@ -195,23 +186,8 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
     const d = this.dependencies;
     if (!this.leaseAcquired) { d.store.close(); return Promise.resolve({ outcome: "completed", unsettledWriters: [] }); }
     if (!this.writeFenceActive) { d.lease.release(); d.store.close(); return Promise.resolve({ outcome: "completed", unsettledWriters: [] }); }
-    const instanceTurnsStarted = this.instanceTurnsStarted;
-    const instanceWorkStarted = this.coordinatorStarted;
     const shutdown = new BridgeRuntimeShutdown({
-      ...(this.primaryToolGatewayStarted ? { primaryToolGateway: d.primaryToolGateway } : {}),
-      ...(this.socketStarted && d.herdrSocketSubscriber ? { herdrSocketSubscriber: d.herdrSocketSubscriber } : {}),
-      ...(this.paneRetentionStarted ? { paneRetention: d.paneRetention } : {}),
-      ...(this.externalTurnsStarted ? { externalTurns: d.externalTurns } : {}),
-      ...(this.instanceRuntimeStarted ? { instanceRuntime: d.instanceRuntime } : {}),
-      ...(instanceTurnsStarted || instanceWorkStarted ? { instanceWorker: { async stop(context?: ShutdownContext) { await Promise.all([...(instanceTurnsStarted ? [d.instanceTurns.stop()] : []), ...(instanceWorkStarted ? [d.instanceWork.stop(context)] : [])]); } } } : {}),
-      ...(this.sqliteIntegrityStarted ? { integrityAuditor: d.sqliteIntegrity } : {}),
-      ...(this.coordinatorStarted ? { coordinator: d.coordinator } : {}),
-      ...(this.outboxRetentionStarted ? { outboxRetention: d.outboxRetention } : {}),
-      ...(this.queueFeedbackStarted ? { queueFeedbackProjector: d.queueFeedbackProjector } : {}),
-      ...(this.cardContextStarted ? { cardContextRebuilder: d.cardContextRebuilder } : {}),
-      ...(this.projectorStarted ? { projector: d.projector } : {}),
-      ...(this.publisherStarted ? { publisher: d.channelPublisher } : {}),
-      ...(this.healthServer ? { healthServer: this.healthServer } : {}),
+      cleanupEntries: this.lifecycle.shutdownPlan(),
       lease: d.lease,
       store: d.store,
       logger: d.logger
@@ -221,6 +197,10 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
 
   private assertStarting(): void {
     if (this.stopPromise) throw new Error("Bridge runtime startup interrupted by shutdown");
+  }
+
+  private registerCleanup(name: string, stage: LifecycleCleanupEntry["stage"], kind: LifecycleCleanupEntry["kind"], stop: LifecycleCleanupEntry["stop"]): void {
+    this.lifecycle.register({ name, stage, kind, stop });
   }
 }
 
