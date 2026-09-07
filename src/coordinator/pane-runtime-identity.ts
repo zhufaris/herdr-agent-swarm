@@ -1,11 +1,12 @@
 import type { HerdrPort } from "../domain/ports/external.js";
-import type { Binding, HerdrPane, ProjectConfig } from "../domain/types.js";
+import type { Binding, HerdrPane } from "../domain/types.js";
+import type { ProjectCatalog } from "./project-catalog.js";
 
-export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime">, projectsById: ReadonlyMap<string, ProjectConfig>, binding: Binding, paneId: string): Promise<HerdrPane> {
+export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime">, projects: ProjectCatalog, binding: Binding, paneId: string): Promise<HerdrPane> {
   let pane = (await herdr.observeRuntime(paneId)).pane;
   if (!pane) throw new Error(`Herdr pane ${paneId} not found`);
   if (pane.workspaceId !== binding.workspaceId) throw new Error(`Herdr pane ${paneId} belongs to another workspace`);
-  const project = binding.projectId ? projectsById.get(binding.projectId) : undefined;
+  const project = binding.projectId ? projects.projectById(binding.projectId) : undefined;
   if (project && pane.cwd !== project.cwd) throw new Error(`Herdr pane ${paneId} does not match project ${project.displayName}`);
   requireMatchingRuntimeIdentity(binding, pane);
   if (hasNativeAgentSession(binding) && !pane.agentSession) pane = { ...pane, agentSession: persistedAgentSession(binding) };

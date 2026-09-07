@@ -7,11 +7,12 @@ import type { SessionAdministrationStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import { formatProjectPaneTitle } from "../domain/thread-title.js";
-import type { Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
+import type { Binding, IncomingLarkMessage } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { requireMatchingPane } from "./pane-runtime-identity.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options {
   config: BridgeConfig;
@@ -31,17 +32,17 @@ export interface SessionAdministrationWorkflowPort {
   resume(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>;
 }
 export class SessionAdministrationWorkflow implements SessionAdministrationWorkflowPort {
-  private readonly projectsById: Map<string, ProjectConfig>;
+  private readonly projects: ProjectCatalog;
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
+    this.projects = new ProjectCatalog(options.config.projects);
   }
 
   async emitStatus(binding: Binding): Promise<void> { await this.publish(binding.id, "AgentStateChanged", "bridge", { state: binding.lastAgentState, queueDepth: this.options.store.countPendingPrompts(binding.id) }); }
 
   async rename(message: IncomingLarkMessage, binding: Binding | null, title: string): Promise<boolean> {
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "这个话题没有可重命名的活动 Pane。请进入活动项目话题，或发送 /swarm new。"); return false; }
-    const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, binding.paneId); const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined;
+    const pane = await requireMatchingPane(this.options.herdr, this.projects, binding, binding.paneId); const project = binding.projectId ? this.projects.projectById(binding.projectId) : undefined;
     const displayTitle = formatProjectPaneTitle(project ? projectSpaceName(project) : null, pane.cwd ?? this.options.config.herdr.workspaceCwd, title, binding.paneId);
     await this.options.herdr.renamePane(binding.paneId, title, { tabTitle: title }); this.options.store.updateBindingMetadata(binding.id, { title: displayTitle }); await this.publish(binding.id, "BindingRenamed", "lark", { title: displayTitle }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" }); return true;
   }
@@ -61,7 +62,7 @@ export class SessionAdministrationWorkflow implements SessionAdministrationWorkf
 
   async resume(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding?.paneId || binding.lifecycle !== "archived") { await this.reject(message, "只有已归档且仍保留 Pane 的会话可以恢复。"); return false; }
-    const pane = await requireMatchingPane(this.options.herdr, this.projectsById, binding, binding.paneId);
+    const pane = await requireMatchingPane(this.options.herdr, this.projects, binding, binding.paneId);
     const resumed = this.options.store.transitionBinding(binding.id, { type: "activate", runtime: pane.agentState });
     await this.publish(resumed.id, "BindingActivated", "lark", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: resumed.topicId! }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.resume", target: binding.id, outcome: "success" }); this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true;
   }

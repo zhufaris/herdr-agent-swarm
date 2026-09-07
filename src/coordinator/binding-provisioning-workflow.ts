@@ -19,6 +19,7 @@ import { ManagedBindingLifecycle, PRIMARY_TOOLS_UNAVAILABLE_NOTICE, paneCreation
 import { ProjectSelectionUseCase, ProvisionedPaneMissingError } from "./binding-provisioning/project-selection-use-case.js";
 import { BindingAttachmentUseCase } from "./binding-provisioning/binding-attachment-use-case.js";
 import { BindingStartupRecovery } from "./binding-provisioning/binding-startup-recovery.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null): Promise<void>;
@@ -51,22 +52,22 @@ interface Options {
 }
 
 export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowPort {
-  private readonly projectsById: Map<string, ProjectConfig>;
+  private readonly projects: ProjectCatalog;
   private readonly managedLifecycle: ManagedBindingLifecycle;
   private readonly projectSelection: ProjectSelectionUseCase;
   private readonly attachment: BindingAttachmentUseCase;
   private readonly startupRecovery: BindingStartupRecovery;
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
+    this.projects = new ProjectCatalog(options.config.projects);
     this.managedLifecycle = new ManagedBindingLifecycle({
-      config: options.config, store: options.store, herdr: options.herdr, projectsById: this.projectsById, primaryTools: options.primaryTools,
+      config: options.config, store: options.store, herdr: options.herdr, projects: this.projects, primaryTools: options.primaryTools,
       requireStartedPane: (project, paneId, terminalId) => this.requireStartedPane(project, paneId, terminalId),
       publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3])
     });
     this.projectSelection = new ProjectSelectionUseCase({ projects: options.config.projects, store: options.store, outbound: options.outbound, outboundWork: options.outboundWork, immediateOutbound: options.immediateOutbound, logger: options.logger, presentation: options.presentation, provision: (selection, project, allowPaneCreation) => this.createSelectedProject(selection, project, allowPaneCreation) });
     this.attachment = new BindingAttachmentUseCase({
-      config: options.config, store: options.store, herdr: options.herdr, projectsById: this.projectsById, scheduler: options.scheduler,
+      config: options.config, store: options.store, herdr: options.herdr, projects: this.projects, scheduler: options.scheduler,
       ...(options.wakeRetiredPaneCleanup ? { wakeRetiredPaneCleanup: options.wakeRetiredPaneCleanup } : {}),
       createSelectedProject: (selection, project, allowPaneCreation) => this.createSelectedProject(selection, project, allowPaneCreation),
       discover: (pane, project) => this.discover(pane, project),
@@ -75,7 +76,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       publishAttachSuccess: (message, binding, spaceName, alreadyAttached, resumeRequired, toolsUnavailable) => this.publishAttachSuccess(message, binding, spaceName, alreadyAttached, resumeRequired, toolsUnavailable),
       reject: (message, reason) => this.reject(message, reason)
     });
-    this.startupRecovery = new BindingStartupRecovery({ store: options.store, herdr: options.herdr, lark: options.lark, logger: options.logger, projectsById: this.projectsById, lifecycleEvents: options.lifecycleEvents, presentation: options.presentation, recoverSelection: (selection) => this.projectSelection.recover(selection), publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3]) });
+    this.startupRecovery = new BindingStartupRecovery({ store: options.store, herdr: options.herdr, lark: options.lark, logger: options.logger, projects: this.projects, lifecycleEvents: options.lifecycleEvents, presentation: options.presentation, recoverSelection: (selection) => this.projectSelection.recover(selection), publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3]) });
   }
 
   async selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null = null): Promise<void> {
@@ -120,7 +121,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     if (!binding || binding.lifecycle !== "active" || binding.state !== "active" || !["attached", "degraded"].includes(binding.attachment) || !binding.projectId || !binding.topicId || !binding.rootMessageId) {
       await this.reject(message, "`/swarm reset` 只能在已连接且活动中的项目话题内使用。"); return false;
     }
-    const project = this.projectsById.get(binding.projectId);
+    const project = this.projects.projectById(binding.projectId);
     if (!project) { await this.reject(message, "当前会话的项目配置已不存在，不能开启新会话。"); return false; }
     const paneToken = createPrimaryPaneToken();
     const displayTitle = requestedTitle?.replace(/\s+/g, " " ).trim() || paneToken;

@@ -114,7 +114,7 @@ The production implementation uses the following modules and seams.
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` | FIFO turn execution and detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
-| `ProjectRouteIndex` | Canonical binding-to-project and visible space-name resolution, including fail-closed legacy workspace fallback | Pure immutable index over validated project configuration |
+| `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |

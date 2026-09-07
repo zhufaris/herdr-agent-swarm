@@ -1,6 +1,7 @@
-import { projectSpaceName, type BridgeConfig } from "../config.js";
+import type { BridgeConfig } from "../config.js";
 import type { BridgeCommand, Binding, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import { swarmCommandPolicy, type SwarmCommandContext } from "../domain/swarm-command.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 interface Store { findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null; getBinding?(id: string): Binding | null }
 interface Options {
@@ -14,17 +15,10 @@ export type SwarmCommandContextResolution =
   | { outcome: "rejected"; code: "administrator_required" | "creator_required" | "binding_required" | "project_required"; message: string };
 
 export class SwarmCommandContextResolver {
-  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
-  private readonly projectsBySpaceName: ReadonlyMap<string, readonly ProjectConfig[]>;
+  private readonly projects: ProjectCatalog;
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.config.projects.map((project) => [project.id, project]));
-    const bySpace = new Map<string, ProjectConfig[]>();
-    for (const project of options.config.projects) {
-      const key = projectSpaceName(project);
-      bySpace.set(key, [...(bySpace.get(key) ?? []), project]);
-    }
-    this.projectsBySpaceName = bySpace;
+    this.projects = new ProjectCatalog(options.config.projects);
   }
 
   resolve(message: IncomingLarkMessage, command: BridgeCommand, explicitBindingId?: string): SwarmCommandContextResolution {
@@ -43,7 +37,7 @@ export class SwarmCommandContextResolver {
     }
     const project = this.resolveProject(command, binding);
     if (policy.scope === "project" && !project) {
-      const matches = command.kind === "attach" ? this.projectsBySpaceName.get(command.spaceName) ?? [] : [];
+      const matches = command.kind === "attach" ? this.projects.projectsForSpaceName(command.spaceName) : [];
       const message = matches.length > 1 ? `空间 ${command.kind === "attach" ? command.spaceName : ""} 对应多个项目，无法确定要连接哪一个。`
         : command.kind === "attach" ? `未找到空间 ${command.spaceName}。` : "无法唯一确定命令所属项目。";
       return { outcome: "rejected", code: "project_required", message };
@@ -69,12 +63,12 @@ export class SwarmCommandContextResolver {
   }
 
   private resolveProject(command: BridgeCommand, binding: Binding | null): ProjectConfig | null {
-    if (binding?.projectId) return this.projectsById.get(binding.projectId) ?? null;
+    if (binding?.projectId) return this.projects.projectById(binding.projectId) ?? null;
     if (command.kind === "attach") {
-      const matches = this.projectsBySpaceName.get(command.spaceName) ?? [];
+      const matches = this.projects.projectsForSpaceName(command.spaceName);
       return matches.length === 1 ? matches[0]! : null;
     }
-    if (command.kind === "spaces") return this.projectsById.get(this.options.config.defaultProjectId) ?? null;
+    if (command.kind === "spaces") return this.projects.projectById(this.options.config.defaultProjectId) ?? null;
     return null;
   }
 }

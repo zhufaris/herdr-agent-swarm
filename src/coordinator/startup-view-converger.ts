@@ -13,14 +13,14 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { Logger } from "pino";
 import { safeLogError } from "../runtime/safe-error.js";
 import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
-import { ProjectRouteIndex } from "./project-route-index.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 const WORKER_TASK_CARD_RENDERER_REVISION = "explicit-continuation-v1";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 
 export class StartupViewConverger implements StartupViewConvergerPort {
-  private readonly projectRoutes: ProjectRouteIndex;
+  private readonly projectRoutes: ProjectCatalog;
   private readonly pageWorkflow: AnswerPageWorkflowPort;
   private readonly mainCardWorkflow: MainCardWorkflowPort;
 
@@ -36,7 +36,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   ) {
     this.pageWorkflow = answerPages ?? new AnswerPageWorkflow(store as PromptAcceptanceStore & AnswerPageStore, () => outboundWork.wake(), presentation);
     this.mainCardWorkflow = mainCards ?? new MainCardWorkflow(store as PromptAcceptanceStore & MainCardStore, () => outboundWork.wake(), presentation);
-    this.projectRoutes = new ProjectRouteIndex(config.projects);
+    this.projectRoutes = new ProjectCatalog(config.projects);
   }
 
   async converge(): Promise<void> {

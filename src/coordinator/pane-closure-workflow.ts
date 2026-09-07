@@ -8,14 +8,14 @@ import type { PanePresentation } from "../domain/ports/presentation.js";
 import type { Binding, IncomingLarkMessage } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import { evaluatePaneClosureSafety } from "../domain/pane-retention-policy.js";
-import { ProjectRouteIndex } from "./project-route-index.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: PanePresentation; isBindingBusy(bindingId: string): boolean; confirmationTtlMs?: number; }
 export interface PaneClosureWorkflowPort { recover(): Promise<void>; requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>; }
 
 export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
-  private readonly projectRoutes: ProjectRouteIndex;
-  constructor(private readonly options: Options) { this.projectRoutes = new ProjectRouteIndex(options.config.projects); }
+  private readonly projectRoutes: ProjectCatalog;
+  constructor(private readonly options: Options) { this.projectRoutes = new ProjectCatalog(options.config.projects); }
 
   async recover(): Promise<void> {
     const { store, herdr } = this.options;

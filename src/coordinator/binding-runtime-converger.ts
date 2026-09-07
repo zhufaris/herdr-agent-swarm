@@ -1,5 +1,4 @@
 import type { Logger } from "pino";
-import { projectSpaceName } from "../config.js";
 import { applyMonotonicAgentState, isConfirmedUnregisteredTraexAgent, isTraexCompatiblePane, type ObservedAgentState } from "../domain/binding-runtime-convergence-policy.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
@@ -11,13 +10,13 @@ import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 export class BindingRuntimeConverger {
   private readonly observedAgentStates = new Map<string, ObservedAgentState>();
   private readonly observedTabIds = new Map<string, string | null>();
   private readonly observedWorktreeNames = new Map<string, string | null>();
-  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
-  private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
+  private readonly projects: ProjectCatalog;
 
   constructor(private readonly options: {
     projects: readonly ProjectConfig[]; store: RuntimeReconciliationStore; lifecycleEvents: LifecycleEventPublisher;
@@ -25,10 +24,7 @@ export class BindingRuntimeConverger {
     isBindingBusy(bindingId: string): boolean; worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>; externalTurnObserver?: { observe(binding: Binding): Promise<void> };
     presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">;
   }) {
-    this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
-    const byRoute = new Map<string, ProjectConfig[]>();
-    for (const project of options.projects) { const key = workspaceCwdKey(project.workspaceId, project.cwd); const entries = byRoute.get(key) ?? []; entries.push(project); byRoute.set(key, entries); }
-    this.projectsByWorkspaceAndCwd = byRoute;
+    this.projects = new ProjectCatalog(options.projects);
   }
 
   captureBaseline(pane: HerdrPane): void {
@@ -45,7 +41,7 @@ export class BindingRuntimeConverger {
   async converge(initial: Binding, initialPane: HerdrPane): Promise<void> {
     let existing = initial; let pane = initialPane;
     if (!isTraexCompatiblePane(pane)) return;
-    if (!existing.projectId) { const projects = this.projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? []; if (projects.length === 1) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: projects[0]!.id }); }
+    if (!existing.projectId) { const project = this.projects.projectForWorkspaceAndCwd(pane.workspaceId, pane.cwd); if (project) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: project.id }); }
     if (existing.lifecycle === "provisioning") return;
     const previous = existing.lastAgentState;
     if (existing.attachment === "orphaned") { const recovered = await this.recover(existing, pane); if (!recovered) return; existing = recovered; }
@@ -78,7 +74,7 @@ export class BindingRuntimeConverger {
 
   private withMonotonicAgentState(pane: HerdrPane): HerdrPane { const result = applyMonotonicAgentState(pane, this.observedAgentStates.get(pane.paneId)); if (result.observation) this.observedAgentStates.set(pane.paneId, result.observation); return result.pane; }
   private async recover(binding: Binding, pane: HerdrPane): Promise<Binding | null> {
-    const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: binding.projectId ? projectSpaceName(this.projectsById.get(binding.projectId)!) : binding.workspaceId, paneId: binding.paneId };
+    const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: this.projects.spaceNameForBinding(binding), paneId: binding.paneId };
     const event = createBridgeEvent(binding.id, "BindingActivated", "herdr", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: binding.topicId ?? "unknown" }); const view = reduceTopicView(current, event);
     const result = this.options.store.recoverOrphanBindingWithProjection({ bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, pane, view, rootMessageId: binding.rootMessageId, mainCard: this.options.presentation.mainCard(view) });
     if (result.outcome !== "recovered" || !result.binding) { this.options.logger.warn({ event: "binding-orphan-recovery-skipped", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: pane.paneId, outcome: result.outcome, reason: "runtime_identity_not_proven" }, "kept orphaned binding because the live runtime identity did not match"); return null; }
@@ -86,17 +82,16 @@ export class BindingRuntimeConverger {
   }
   private async degrade(binding: Binding, pane: HerdrPane): Promise<Binding> {
     const reason = `TraeX is running in Herdr pane ${pane.paneId}, but it is not registered as a Herdr Agent. 请由会话创建者发送 \`/swarm reset\` 创建可投递的新会话。`;
-    const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: binding.projectId ? projectSpaceName(this.projectsById.get(binding.projectId)!) : binding.workspaceId, paneId: pane.paneId }; const event = createBridgeEvent(binding.id, "BindingDegraded", "herdr", { reason }); const view = reduceTopicView(current, event);
+    const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: this.projects.spaceNameForBinding(binding), paneId: pane.paneId }; const event = createBridgeEvent(binding.id, "BindingDegraded", "herdr", { reason }); const view = reduceTopicView(current, event);
     const result = this.options.store.degradeBindingWithProjection({ bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, view, rootMessageId: binding.rootMessageId, mainCard: this.options.presentation.mainCard(view) });
     if (result.outcome === "degraded") { if (result.outboxReserved) this.options.wakeOutbound?.(); await this.options.lifecycleEvents.publish(event); this.options.logger.warn({ event: "binding-runtime-degraded", bindingId: binding.id, workspaceId: pane.workspaceId, paneId: pane.paneId, reason: "agent_unregistered", outcome: "degraded" }, "TraeX pane is not registered as a Herdr Agent"); } return result.binding ?? binding;
   }
   private async rename(binding: Binding, pane: HerdrPane): Promise<Binding> {
-    const paneLabel = pane.label?.trim(); const project = binding.projectId ? this.projectsById.get(binding.projectId) : undefined; if (!paneLabel || !project) return binding; const title = formatProjectPaneTitle(projectSpaceName(project), pane.cwd, paneLabel, pane.paneId); if (title === binding.title) return binding;
-    const event = createBridgeEvent(binding.id, "BindingRenamed", "herdr", { title }); const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), paneId: binding.paneId, phase: "ready" }; const view = reduceTopicView(current, event);
+    const paneLabel = pane.label?.trim(); const project = binding.projectId ? this.projects.projectById(binding.projectId) : undefined; if (!paneLabel || !project) return binding; const spaceName = this.projects.spaceNameForBinding(binding); const title = formatProjectPaneTitle(spaceName, pane.cwd, paneLabel, pane.paneId); if (title === binding.title) return binding;
+    const event = createBridgeEvent(binding.id, "BindingRenamed", "herdr", { title }); const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId, phase: "ready" }; const view = reduceTopicView(current, event);
     const result = this.options.store.reconcileBindingTitleWithProjection({ bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, title, view, rootMessageId: binding.rootMessageId, card: this.options.presentation.mainCard(view) }); if (result.outcome !== "projected" || !result.binding) return binding; if (result.outboxReserved) this.options.wakeOutbound?.(); await this.options.lifecycleEvents.publish(event); return result.binding;
   }
   private async publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, payload: BridgeEventOf<T>["payload"]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent<T>(bindingId, type, "herdr", payload)); }
 }
 
-function workspaceCwdKey(workspaceId: string, cwd: string | null): string { return `${workspaceId}\u0000${cwd ?? ""}`; }
 function pruneMissingPaneObservations<Value>(observations: Map<string, Value>, livePaneIds: ReadonlySet<string>): void { for (const paneId of observations.keys()) if (!livePaneIds.has(paneId)) observations.delete(paneId); }

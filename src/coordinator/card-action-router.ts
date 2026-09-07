@@ -10,6 +10,7 @@ import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import { parseCardActionCommand, type CardActionCommand } from "./card-action-command.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 export interface CardActionRouterPort {
   handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void>;
@@ -30,11 +31,11 @@ interface Options {
 }
 
 export class CardActionRouter implements CardActionRouterPort {
-  private readonly projectsById: Map<string, BridgeConfig["projects"][number]>;
+  private readonly projects: ProjectCatalog;
   private readonly tasks = new ActiveWorkTracker();
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
+    this.projects = new ProjectCatalog(options.projects);
   }
 
   async handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
@@ -65,7 +66,7 @@ export class CardActionRouter implements CardActionRouterPort {
       }
       case "pane-claim": {
         if (!this.isAdmin(action)) return { toast: { type: "error", content: "你没有管理权限。" } };
-        const project = this.projectsById.get(command.projectId);
+        const project = this.projects.projectById(command.projectId);
         if (!project || project.workspaceId !== command.workspaceId) return staleAction();
         const synthetic: IncomingLarkMessage = { eventId: `claim:${action.messageId}:${command.paneId}`, messageId: action.messageId, parentMessageId: null, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm attach ${projectSpaceName(project)} ${command.paneId}`, mentionsBot: true, isRootMessage: true };
         const attached = await this.options.provisioning.attach(synthetic, projectSpaceName(project), command.paneId);

@@ -8,12 +8,13 @@ import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfi
 import type { OutboundWorkNotifier } from "../../events/outbound-work-notifier.js";
 import { safeLogError } from "../../runtime/safe-error.js";
 import { provisioningRecoveryMessage } from "../binding-provisioning-policy.js";
+import { ProjectCatalog } from "../project-catalog.js";
 
 type StatusInput = Parameters<ApplicationPresentation["projectSelectionStatus"]>[0];
 
 export class ProjectSelectionUseCase {
-  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
-  constructor(private readonly options: { projects: readonly ProjectConfig[]; store: BindingProvisioningStore; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; immediateOutbound: ImmediateOutboundDispatcher; logger: Logger; presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus">; provision(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> }) { this.projectsById = new Map(options.projects.map((project) => [project.id, project])); }
+  private readonly projects: ProjectCatalog;
+  constructor(private readonly options: { projects: readonly ProjectConfig[]; store: BindingProvisioningStore; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; immediateOutbound: ImmediateOutboundDispatcher; logger: Logger; presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus">; provision(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> }) { this.projects = new ProjectCatalog(options.projects); }
 
   async begin(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null): Promise<void> {
     const selectionId = randomUUID();
@@ -32,12 +33,12 @@ export class ProjectSelectionUseCase {
     const selection = claim.selection;
     if (claim.outcome === "completed") {
       const binding = selection.bindingId ? this.options.store.getBinding(selection.bindingId) : null;
-      const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) : undefined;
+      const project = selection.selectedProjectId ? this.projects.projectById(selection.selectedProjectId) : undefined;
       if (!binding || !project) return null;
       await this.success(selection.id, action.messageId, project, binding);
       return { binding, selection };
     }
-    const project = this.projectsById.get(projectId);
+    const project = this.projects.projectById(projectId);
     if (!project) return null;
     await this.status(action.messageId, selectionId, { status: "processing", projectName: project.displayName, spaceName: projectSpaceName(project) });
     try {
@@ -55,7 +56,7 @@ export class ProjectSelectionUseCase {
   }
 
   async recover(selection: ProjectSelection): Promise<void> {
-    const project = selection.selectedProjectId ? this.projectsById.get(selection.selectedProjectId) ?? null : null;
+    const project = selection.selectedProjectId ? this.projects.projectById(selection.selectedProjectId) ?? null : null;
     if (!selection.bindingId || !project) { this.options.store.failProjectSelection(selection.id, "Interrupted before recoverable project identity was persisted"); return; }
     try {
       const binding = await this.options.provision(selection, project, false);

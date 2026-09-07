@@ -9,6 +9,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 import { HerdrSnapshotCollector } from "./herdr-snapshot-collector.js";
 import { ReconciliationScheduler } from "./reconciliation-scheduler.js";
 import { BindingRuntimeConverger } from "./binding-runtime-converger.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -41,7 +42,7 @@ export interface HerdrRuntimeReconcilerPort {
 
 export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly configuredWorkspaceIds: ReadonlySet<string>;
-  private readonly projectsByWorkspaceAndCwd: ReadonlyMap<string, readonly ProjectConfig[]>;
+  private readonly projects: ProjectCatalog;
   private skippedPaneReasons = new Map<string, string>();
   private readonly snapshots: HerdrSnapshotCollector;
   private readonly reconciliationScheduler: ReconciliationScheduler;
@@ -52,14 +53,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     this.snapshots = new HerdrSnapshotCollector(options.herdr, options.logger);
     this.reconciliationScheduler = new ReconciliationScheduler({ configuredWorkspaceIds: this.configuredWorkspaceIds, execute: (scope) => this.reconcileOnce(scope), logger: options.logger });
     this.converger = new BindingRuntimeConverger(options);
-    const projectsByWorkspaceAndCwd = new Map<string, ProjectConfig[]>();
-    for (const project of options.projects) {
-      const key = workspaceCwdKey(project.workspaceId, project.cwd);
-      const projects = projectsByWorkspaceAndCwd.get(key) ?? [];
-      projects.push(project);
-      projectsByWorkspaceAndCwd.set(key, projects);
-    }
-    this.projectsByWorkspaceAndCwd = projectsByWorkspaceAndCwd;
+    this.projects = new ProjectCatalog(options.projects);
   }
 
   async captureBaselines(): Promise<void> {
@@ -160,8 +154,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       }
       if (!existing) {
         if (!pane.foregroundExecutables.includes("traex")) continue;
-        const projects = this.projectsByWorkspaceAndCwd.get(workspaceCwdKey(pane.workspaceId, pane.cwd)) ?? [];
-        if (projects.length !== 1) {
+        const project = this.projects.projectForWorkspaceAndCwd(pane.workspaceId, pane.cwd);
+        if (!project) {
+          const projects = this.options.projects.filter((candidate) => candidate.workspaceId === pane.workspaceId && candidate.cwd === pane.cwd);
           const reason = projects.length === 0 ? "unregistered" : "ambiguous";
           const signature = `${reason}:${projects.map((project) => project.id).sort().join(",")}`;
           nextSkippedPaneReasons.set(pane.paneId, signature);
@@ -176,15 +171,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
             if (!interruptedProvisioningByProjectId.has(candidate.projectId)) interruptedProvisioningByProjectId.set(candidate.projectId, candidate);
           }
         }
-        const interruptedProvisioning = interruptedProvisioningByProjectId.get(projects[0]!.id);
+        const interruptedProvisioning = interruptedProvisioningByProjectId.get(project.id);
         if (interruptedProvisioning) {
           const signature = `provisioning:${interruptedProvisioning.id}`;
           nextSkippedPaneReasons.set(pane.paneId, signature);
-          if (this.skippedPaneReasons.get(pane.paneId) !== signature) this.options.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: projects[0]!.id, bindingId: interruptedProvisioning.id, reason: "ambiguous_interrupted_provisioning" }, "leaving pane unclaimed until interrupted provisioning is resolved explicitly");
+          if (this.skippedPaneReasons.get(pane.paneId) !== signature) this.options.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: project.id, bindingId: interruptedProvisioning.id, reason: "ambiguous_interrupted_provisioning" }, "leaving pane unclaimed until interrupted provisioning is resolved explicitly");
           continue;
         }
-        if (this.skippedPaneReasons.has(pane.paneId)) this.options.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: projects[0]!.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
-        existing = await this.options.discoverPane(pane, projects[0]!);
+        if (this.skippedPaneReasons.has(pane.paneId)) this.options.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: project.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
+        existing = await this.options.discoverPane(pane, project);
         bindingByPaneId.set(pane.paneId, existing);
         continue;
       }
@@ -201,8 +196,4 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     return new Set(workspaceIds);
   }
 
-}
-
-function workspaceCwdKey(workspaceId: string, cwd: string | null): string {
-  return `${workspaceId}\u0000${cwd ?? ""}`;
 }

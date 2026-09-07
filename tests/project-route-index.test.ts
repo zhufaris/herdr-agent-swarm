@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectConfig } from "../src/domain/types.js";
-import { ProjectRouteIndex } from "../src/coordinator/project-route-index.js";
+import { ProjectCatalog } from "../src/coordinator/project-catalog.js";
 
 const projects: ProjectConfig[] = [
   { id: "alpha", displayName: "Alpha", spaceName: "alpha-space", description: "Alpha project", workspaceId: "shared", cwd: "/repos/alpha" },
@@ -8,8 +8,8 @@ const projects: ProjectConfig[] = [
   { id: "gamma", displayName: "Gamma", description: "Gamma project", workspaceId: "unique", cwd: "/repos/gamma" }
 ];
 
-describe("ProjectRouteIndex", () => {
-  const routes = new ProjectRouteIndex(projects);
+describe("ProjectCatalog", () => {
+  const routes = new ProjectCatalog(projects);
 
   it("looks up configured projects by ID", () => {
     expect(routes.projectById("alpha")).toBe(projects[0]);
@@ -39,5 +39,20 @@ describe("ProjectRouteIndex", () => {
   it("does not resolve an unknown workspace", () => {
     expect(routes.projectForBinding({ projectId: null, workspaceId: "missing" })).toBeUndefined();
     expect(routes.spaceNameForBinding({ projectId: null, workspaceId: "missing" })).toBe("legacy/unresolved");
+  });
+
+  it("resolves only unique space names", () => {
+    expect(routes.projectsForSpaceName("alpha-space")).toEqual([projects[0]]);
+    expect(routes.projectsForSpaceName("missing")).toEqual([]);
+  });
+
+  it("keeps explicit attachment names separate from display-name fallbacks", () => {
+    expect(routes.projectsForExplicitSpaceName("alpha-space")).toEqual([projects[0]]);
+    expect(routes.projectsForExplicitSpaceName("gamma")).toEqual([]);
+  });
+
+  it("resolves only unique workspace and cwd routes", () => {
+    expect(routes.projectForWorkspaceAndCwd("shared", "/repos/beta")).toBe(projects[1]);
+    expect(routes.projectForWorkspaceAndCwd("shared", "/repos/missing")).toBeUndefined();
   });
 });

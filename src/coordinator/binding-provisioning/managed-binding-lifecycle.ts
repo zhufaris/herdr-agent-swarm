@@ -4,19 +4,20 @@ import type { HerdrPort } from "../../domain/ports/external.js";
 import type { Binding, ProjectConfig } from "../../domain/types.js";
 import { createPrimaryPaneToken } from "../../domain/pane-title.js";
 import { requireMatchingPane } from "../pane-runtime-identity.js";
+import type { ProjectCatalog } from "../project-catalog.js";
 
 export interface PrimaryToolConfiguration { environment: Record<string, string>; command: string; args: string[]; agentArgs?: string[] }
 
 export class ManagedBindingLifecycle {
   constructor(private readonly options: {
-    config: BridgeConfig; store: BindingProvisioningStore; herdr: HerdrPort; projectsById: ReadonlyMap<string, ProjectConfig>;
+    config: BridgeConfig; store: BindingProvisioningStore; herdr: HerdrPort; projects: ProjectCatalog;
     primaryTools: { issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolConfiguration };
     requireStartedPane(project: ProjectConfig, paneId: string, expectedTerminalId: string | null): Promise<import("../../domain/types.js").HerdrPane>;
     publish(bindingId: string, type: "BindingArchived" | "PrimaryToolAvailabilityChanged", origin: "lark" | "bridge", payload: Record<string, unknown>): Promise<void>;
   }) {}
 
   async reattach(binding: Binding, paneId: string, actorOpenId: string): Promise<void> {
-    const pane = await requireMatchingPane(this.options.herdr, this.options.projectsById, binding, paneId);
+    const pane = await requireMatchingPane(this.options.herdr, this.options.projects, binding, paneId);
     const next = this.options.store.attachBindingPane(binding.id, pane, false);
     await this.options.publish(next.id, "BindingArchived", "lark", { reason: "Pane 已验证并连接；为避免重放不确定任务，发送 `/swarm resume` 后才继续队列。" });
     await this.options.publish(next.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
@@ -24,7 +25,7 @@ export class ManagedBindingLifecycle {
   }
 
   async replace(binding: Binding, actorOpenId: string): Promise<void> {
-    const project = binding.projectId ? this.options.projectsById.get(binding.projectId) : undefined;
+    const project = binding.projectId ? this.options.projects.projectById(binding.projectId) : undefined;
     if (!project) throw new Error(`Project configuration missing for binding ${binding.id}`);
     const paneTitle = createPrimaryPaneToken();
     const nextGeneration = binding.generation + 1;

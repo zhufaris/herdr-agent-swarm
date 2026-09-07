@@ -323,6 +323,19 @@ describe("application composition boundaries", () => {
     expect(readFileSync(new URL("../src/coordinator/model-selection-workflow.ts", import.meta.url), "utf8")).not.toContain("shutdown(): void");
   });
 
+  it("centralizes coordinator project lookup in ProjectCatalog", () => {
+    const coordinator = new URL("../src/coordinator/", import.meta.url);
+    const coordinatorSources = readdirSync(coordinator).filter((file) => file.endsWith(".ts"));
+    for (const file of coordinatorSources) {
+      const source = readFileSync(new URL(file, coordinator), "utf8");
+      expect(source, file).not.toContain("project-route-index");
+      if (file !== "project-catalog.ts") {
+        expect(source, file).not.toContain("projectsBySpaceName");
+        expect(source, file).not.toContain("projectsByWorkspaceAndCwd");
+      }
+    }
+  });
+
   it("keeps lifecycle publishers and subscribers behind their ports", () => {
     const promptRun = readFileSync(new URL("../src/coordinator/prompt-run-workflow.ts", import.meta.url), "utf8");
     const projector = readFileSync(new URL("../src/events/conversation-view-projector.ts", import.meta.url), "utf8");

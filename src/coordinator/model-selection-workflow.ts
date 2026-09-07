@@ -9,7 +9,7 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { resolveCatalogModel } from "../domain/model-selection.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
-import { ProjectRouteIndex } from "./project-route-index.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options { config: BridgeConfig; store: ModelSelectionStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
@@ -24,10 +24,10 @@ export interface ModelSelectionWorkflowPort {
 }
 
 export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
-  private readonly projectRoutes: ProjectRouteIndex;
+  private readonly projectRoutes: ProjectCatalog;
 
   constructor(private readonly options: Options) {
-    this.projectRoutes = new ProjectRouteIndex(options.config.projects);
+    this.projectRoutes = new ProjectCatalog(options.config.projects);
   }
 
   async recover(): Promise<void> {

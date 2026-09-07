@@ -5,12 +5,13 @@ import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../dom
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options { projects: readonly ProjectConfig[]; store: InstanceLifecycleStore & Pick<InstanceTurnStore, "countPendingInstanceTurns">; paneHost: PaneHost; wake(instanceId: string): void; wakeCardContext?: () => void; logger?: Pick<Logger, "warn"> }
 interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
 
 export class InstanceRuntimeReconciler {
-  private readonly projectsById: ReadonlyMap<string, ProjectConfig>;
+  private readonly projects: ProjectCatalog;
   private running: Promise<void> | null = null;
   private timer: NodeJS.Timeout | null = null;
   private stopping = false;
@@ -19,7 +20,7 @@ export class InstanceRuntimeReconciler {
   private readonly metrics = new ReconciliationRunMetrics();
 
   constructor(private readonly options: Options) {
-    this.projectsById = new Map(options.projects.map((project) => [project.id, project]));
+    this.projects = new ProjectCatalog(options.projects);
   }
 
   reconcile(): Promise<void> {
@@ -68,7 +69,7 @@ export class InstanceRuntimeReconciler {
         for (const paneId of paneIds) {
           const instance = this.options.store.findAgentInstanceByPane(paneId);
           if (!instance) continue;
-          const project = this.projectsById.get(instance.projectId);
+          const project = this.projects.projectById(instance.projectId);
           if (!project) continue;
           const pane = panesById ? panesById.get(paneId) ?? null : await this.options.paneHost.inspectPane(paneId);
           await this.reconcileInstance(instance, project, new Map(pane ? [[paneId, pane]] : []));

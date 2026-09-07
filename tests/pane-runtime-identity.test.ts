@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { requireMatchingPane } from "../src/coordinator/pane-runtime-identity.js";
+import { ProjectCatalog } from "../src/coordinator/project-catalog.js";
 
 const project = { id: "project", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" };
 const binding = { id: "b1", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal-1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" } as never;
 const pane = (overrides: Record<string, unknown> = {}) => ({ paneId: "w1:p1", terminalId: "terminal-1", workspaceId: "w1", cwd: "/repo", agentState: "idle", foregroundExecutables: ["traex"], ...overrides });
-const projects = new Map([[project.id, project]]);
+const projects = new ProjectCatalog([project]);
 
 describe("pane runtime identity", () => {
   it("restores a durable native session when a matching runtime observation omits it", async () => {

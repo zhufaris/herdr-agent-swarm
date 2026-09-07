@@ -20,7 +20,7 @@ import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-wor
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
-import { ProjectRouteIndex } from "./project-route-index.js";
+import { ProjectCatalog } from "./project-catalog.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -34,10 +34,10 @@ interface Options {
 }
 
 export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkflowPort {
-  private readonly projectRoutes: ProjectRouteIndex;
+  private readonly projectRoutes: ProjectCatalog;
 
   constructor(private readonly options: Options) {
-    this.projectRoutes = new ProjectRouteIndex(options.config.projects);
+    this.projectRoutes = new ProjectCatalog(options.config.projects);
   }
 
   async enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void> {
