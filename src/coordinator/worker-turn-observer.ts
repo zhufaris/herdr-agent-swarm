@@ -1,10 +1,10 @@
-import type { InstanceStore } from "../domain/ports/instance.js";
+import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 
 interface Options {
-  store: InstanceStore;
+  store: InstanceLifecycleStore & InstanceTurnStore;
   transcriptReader: TraexTranscriptReaderPort;
   wakeInstance(instanceId: string): void;
   wakeOutbound(): void;
@@ -149,7 +149,7 @@ function observedProgress(observation: TraexTranscriptObservation, occurredAt: s
   const plans = (observation.mainStatus?.planSteps ?? []).map((step) => ({ key: `plan:${step.key}`, kind: "step" as const, label: safeOutput(step.label), state: step.state, occurredAt }));
   return [...tools, ...plans];
 }
-function sessionFor(instance: ReturnType<InstanceStore["getAgentInstance"]>, generation: number) {
+function sessionFor(instance: ReturnType<InstanceLifecycleStore["getAgentInstance"]>, generation: number) {
   return instance?.runtimeRef?.nativeSessionId && instance.generation === generation && instance.agentKind === "traex"
     ? { source: "traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId }
     : null;

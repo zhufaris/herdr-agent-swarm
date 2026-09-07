@@ -59,6 +59,14 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("cardContext: modules.cardContext");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("listPendingCardContextInvalidations");
+    const instancePorts = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
+    expect(instancePorts).toContain("export type InstanceLifecycleStore");
+    expect(instancePorts).toContain("export type InstanceTurnStore");
+    for (const path of ["instance-control-workflow.ts", "instance-runtime-reconciler.ts", "instance-turn-supervisor.ts", "worker-turn-observer.ts"]) {
+      expect(readFileSync(new URL(
+        `../src/coordinator/${path}`, import.meta.url
+      ), "utf8")).not.toMatch(/store: InstanceStore(?:;|,)/);
+    }
     expect(storeBundle).not.toContain("SqliteBindingStore");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.promptRun");
     expect(`${factory}\n${application}\n${primary}`).toContain("stores.instance");

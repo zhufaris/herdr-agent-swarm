@@ -89,3 +89,27 @@ export interface InstanceStore {
   setConversationTarget(input: { chatId: string; projectId: string; target: import("../agent-instance.js").InstanceTarget }): void;
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
 }
+
+export type InstanceLifecycleStore = Pick<InstanceStore,
+  "createAgentInstance" | "createWorkerAgentInstance" | "getAgentInstance" | "findAgentInstanceByPane" |
+  "listWorkerInstancesByParent" | "listAgentInstances" | "setPrimaryAgentInstance" |
+  "attachAgentInstanceRuntime" | "checkpointAgentInstance" | "updateAgentInstanceLifecycle" |
+  "updateAgentInstanceObservation" | "reserveAgentInstanceStop" | "finishAgentInstanceStop" |
+  "rollbackAgentInstanceStop" | "detachAgentInstanceRuntime" | "terminateWorkerSession" |
+  "getWorkspaceLease" | "updateWorkspaceLease" | "createInstanceRemovalPlan" |
+  "getInstanceRemovalPlan" | "consumeInstanceRemovalPlan" | "removeAgentInstance" |
+  "projectLegacyBindingAsAgentInstance"
+>;
+
+export type InstanceTurnStore = Pick<InstanceStore,
+  "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "getInstanceTurn" |
+  "claimInstanceTurnTranscript" | "loadWorkerTurnCard" | "findWorkerTurnByCardMessage" |
+  "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "reserveWorkerTurnContent" |
+  "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" | "reserveWorkerTurnCardHydration" |
+  "reserveWorkerTurnContinuation" | "applyInstanceTurnProjection" |
+  "transitionInstanceTurnWithProjection" | "listInstanceTurns" | "listRecentInstanceTurnSummaries" |
+  "getActiveInstanceTurn" | "claimNextInstanceTurn" | "recoverInterruptedInstanceTurns" |
+  "listObservableInstanceTurns" | "listObservableInstanceTurnsByPaneIds" |
+  "getInstanceTurnDiagnostics" | "updateInstanceTurn" | "completeInstanceTurn" |
+  "listInstanceEvents" | "countPendingInstanceTurns"
+>;

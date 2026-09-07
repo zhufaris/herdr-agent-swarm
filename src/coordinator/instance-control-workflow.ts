@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
 import { primaryPaneToken } from "../domain/pane-title.js";
-import type { InstanceStore } from "../domain/ports/instance.js";
+import type { InstanceLifecycleStore, InstanceStore } from "../domain/ports/instance.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
@@ -12,7 +12,7 @@ import type { WorktreeManager } from "../runtime/worktree-manager.js";
 import { preferredRuntimeSessionId, requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 
 interface Options {
-  projects: readonly ProjectConfig[]; store: InstanceStore; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
+  projects: readonly ProjectConfig[]; store: InstanceLifecycleStore & Pick<InstanceStore, "getBinding">; paneHost: PaneHost; drivers: AgentDriverRegistry; worktrees: WorktreeManager; idFactory: () => string;
 }
 
 export class InstanceControlWorkflow {
