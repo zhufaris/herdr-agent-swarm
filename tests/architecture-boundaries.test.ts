@@ -154,6 +154,24 @@ describe("application composition boundaries", () => {
     expect(delivery).toContain("markOutboundReplyDelivered");
   });
 
+  it("keeps SQLite outbox responsibilities in focused modules over one context", () => {
+    const facade = readFileSync(new URL("../src/store/sqlite/outbox-store.ts", import.meta.url), "utf8");
+    const queue = readFileSync(new URL("../src/store/sqlite/outbox-queue-store.ts", import.meta.url), "utf8");
+    const delivery = readFileSync(new URL("../src/store/sqlite/outbox-delivery-store.ts", import.meta.url), "utf8");
+    const recovery = readFileSync(new URL("../src/store/sqlite/outbox-recovery-store.ts", import.meta.url), "utf8");
+    const retention = readFileSync(new URL("../src/store/sqlite/outbox-retention-store.ts", import.meta.url), "utf8");
+    for (const moduleName of ["SqliteOutboxQueueStore", "SqliteOutboxDeliveryStore", "SqliteOutboxRecoveryStore", "SqliteOutboxRetentionStore"]) {
+      expect(facade).toContain(`new ${moduleName}`);
+    }
+    expect(facade).not.toContain("context.database.prepare");
+    expect(queue).toContain("private readonly context: SqliteContext");
+    expect(delivery).toContain("private readonly context: SqliteContext");
+    expect(recovery).toContain("private readonly context: SqliteContext");
+    expect(retention).toContain("private readonly context: SqliteContext");
+    expect(recovery).not.toContain("new SqliteOutboxQueueStore");
+    expect(recovery).not.toContain("new SqliteOutboxDeliveryStore");
+  });
+
   it("gives child composition factories consumer-specific SQLite capabilities", () => {
     for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
       const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");
