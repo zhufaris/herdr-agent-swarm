@@ -1,0 +1,126 @@
+import { describe, expect, it, vi } from "vitest";
+import { ManagedBridgeRuntime, type ManagedBridgeRuntimeDependencies } from "../src/composition/managed-bridge-runtime.js";
+
+function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
+  const calls: string[] = [];
+  let onLeaseLost: (() => void | Promise<void>) | null = null;
+  const mark = (value: string) => { calls.push(value); };
+  const dependencies: ManagedBridgeRuntimeDependencies = {
+    reconcileIntervalMs: 5_000,
+    store: { activateWriteFence() { mark("fence:start"); }, deactivateWriteFence() { mark("fence:stop"); }, close() { mark("store:close"); } },
+    lease: { acquire() { mark("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; }, start(callback) { mark("lease:start"); onLeaseLost = callback; }, release() { mark("lease:release"); } },
+    primaryToolGateway: { async start() { mark("primary-tools:start"); }, async stop() { mark("primary-tools:stop"); } },
+    sqliteIntegrity: { start() { mark("integrity:start"); }, async run() { mark("integrity:run"); }, async stop() { mark("integrity:stop"); } },
+    instanceRuntime: { async reconcile() { mark("instance-runtime:reconcile"); }, start() { mark("instance-runtime:start"); }, async stop() { mark("instance-runtime:stop"); } },
+    instanceTurns: { prepareRecovery() { mark("instance-turns:prepare"); }, async reconcile() { mark("instance-turns:reconcile"); }, start() { mark("instance-turns:start"); }, async stop() { mark("instance-turns:stop"); } },
+    instanceWork: { async stop() { mark("instance-work:stop"); } },
+    createHealthServer: async () => { mark("health:start"); return { close(callback) { mark("health:stop"); callback(); } }; },
+    channelPublisher: { start() { mark("publisher:start"); }, async stop() { mark("publisher:stop"); } },
+    outboxRetention: { start() { mark("outbox-retention:start"); }, async stop() { mark("outbox-retention:stop"); } },
+    projector: { start() { mark("projector:start"); }, async stop() { mark("projector:stop"); } },
+    cardContextRebuilder: { start() { mark("card-context:start"); }, async stop() { mark("card-context:stop"); } },
+    queueFeedbackProjector: { start() { mark("queue-feedback:start"); }, async converge() { mark("queue-feedback:converge"); }, async stop() { mark("queue-feedback:stop"); } },
+    bus: {},
+    coordinator: { async start() { mark("coordinator:start"); }, async stop() { mark("coordinator:stop"); } },
+    paneRetention: { async scan() { mark("pane-retention:scan"); }, start() { mark("pane-retention:start"); }, async stop() { mark("pane-retention:stop"); } },
+    externalTurns: { start() { mark("external-turns:start"); }, async stop() { mark("external-turns:stop"); } },
+    herdrSocketSubscriber: { startEvents() { mark("socket:start"); }, async stop() { mark("socket:stop"); } },
+    logger: { info() {}, warn() {}, error() {} },
+    ...overrides
+  };
+  return { runtime: new ManagedBridgeRuntime(dependencies), runtimeDependencies: dependencies, calls, loseLease: async () => { await onLeaseLost?.(); } };
+}
+
+describe("ManagedBridgeRuntime", () => {
+  it("starts the bridge in ownership, recovery, delivery, ingress, and observation order", async () => {
+    const { runtime, calls } = fixture();
+
+    await runtime.start();
+
+    expect(calls).toEqual([
+      "lease:acquire", "fence:start", "lease:start",
+      "instance-turns:prepare", "primary-tools:start", "integrity:start", "integrity:run",
+      "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
+      "publisher:start", "outbox-retention:start", "projector:start", "card-context:start",
+      "queue-feedback:start", "queue-feedback:converge", "coordinator:start",
+      "pane-retention:scan", "pane-retention:start", "external-turns:start",
+      "instance-runtime:start", "instance-turns:start", "socket:start"
+    ]);
+  });
+
+  it("uses one idempotent shutdown for a signal and lease loss", async () => {
+    const onFatalStop = vi.fn();
+    const { runtime, calls, loseLease } = fixture({ onFatalStop });
+    await runtime.start();
+    calls.length = 0;
+
+    const signalStop = runtime.stop("SIGTERM");
+    const duplicate = runtime.stop("SIGINT");
+    await loseLease();
+
+    expect(duplicate).toBe(signalStop);
+    await expect(signalStop).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    expect(calls).toEqual([
+      "primary-tools:stop", "socket:stop", "pane-retention:stop", "external-turns:stop",
+      "instance-runtime:stop", "instance-turns:stop", "instance-work:stop", "integrity:stop",
+      "coordinator:stop", "outbox-retention:stop", "queue-feedback:stop", "card-context:stop",
+      "projector:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
+    ]);
+    expect(onFatalStop).toHaveBeenCalledWith("lease-lost", { outcome: "completed", unsettledWriters: [] });
+  });
+
+  it("cleans up only possibly started components when health creation fails", async () => {
+    const calls: string[] = [];
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      createHealthServer: async () => { calls.push("health:start"); throw new Error("bind failed"); },
+      primaryToolGateway: { async start() { calls.push("primary-tools:start"); }, async stop() { calls.push("primary-tools:stop"); } },
+      sqliteIntegrity: { start() { calls.push("integrity:start"); }, async run() { calls.push("integrity:run"); }, async stop() { calls.push("integrity:stop"); } },
+      instanceRuntime: { async reconcile() { calls.push("instance-runtime:reconcile"); }, start() { calls.push("instance-runtime:start"); }, async stop() { calls.push("instance-runtime:stop"); } },
+      instanceTurns: { prepareRecovery() { calls.push("instance-turns:prepare"); }, async reconcile() { calls.push("instance-turns:reconcile"); }, start() { calls.push("instance-turns:start"); }, async stop() { calls.push("instance-turns:stop"); } },
+      store: { activateWriteFence() { calls.push("fence:start"); }, deactivateWriteFence() { calls.push("fence:stop"); }, close() { calls.push("store:close"); } },
+      lease: { acquire() { calls.push("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; }, start() { calls.push("lease:start"); }, release() { calls.push("lease:release"); } }
+    });
+
+    await expect(runtime.start()).rejects.toThrow("bind failed");
+
+    expect(calls).toEqual([
+      "lease:acquire", "fence:start", "lease:start", "instance-turns:prepare",
+      "primary-tools:start", "integrity:start", "integrity:run",
+      "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
+      "primary-tools:stop", "integrity:stop", "fence:stop", "lease:release", "store:close"
+    ]);
+  });
+
+  it("closes the store without releasing an unowned lease when acquisition fails", async () => {
+    const calls: string[] = [];
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      store: { activateWriteFence() { calls.push("fence:start"); }, deactivateWriteFence() { calls.push("fence:stop"); }, close() { calls.push("store:close"); } },
+      lease: { acquire() { calls.push("lease:acquire"); throw new Error("contended"); }, writeFence() { throw new Error("not owned"); }, start() {}, release() { calls.push("lease:release"); } }
+    });
+
+    await expect(runtime.start()).rejects.toThrow("contended");
+
+    expect(calls).toEqual(["lease:acquire", "store:close"]);
+  });
+
+  it("does not start later phases when shutdown begins during startup", async () => {
+    let releaseIntegrity!: () => void;
+    const integrityRun = new Promise<void>((resolve) => { releaseIntegrity = resolve; });
+    const { runtime, calls } = fixture({
+      sqliteIntegrity: { start() { calls.push("integrity:start"); }, async run() { calls.push("integrity:run"); await integrityRun; }, async stop() { calls.push("integrity:stop"); releaseIntegrity(); } }
+    });
+
+    const starting = runtime.start();
+    await vi.waitFor(() => expect(calls).toContain("integrity:run"));
+    const stopping = runtime.stop("SIGTERM");
+
+    await expect(stopping).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    await expect(starting).rejects.toThrow("startup interrupted");
+    expect(calls).not.toContain("instance-runtime:reconcile");
+    expect(calls).not.toContain("health:start");
+  });
+});

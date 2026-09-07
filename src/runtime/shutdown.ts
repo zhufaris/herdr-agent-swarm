@@ -15,13 +15,13 @@ interface ShutdownDependencies {
   instanceRuntime?: { stop(): Promise<void> };
   instanceWorker?: { stop(context?: ShutdownContext): Promise<void> };
   integrityAuditor?: { stop(context?: ShutdownContext): Promise<void> };
-  coordinator: { stop(context?: ShutdownContext): Promise<void> };
+  coordinator?: { stop(context?: ShutdownContext): Promise<void> };
   outboxRetention?: { stop(): Promise<void> };
   queueFeedbackProjector?: { stop(context?: ShutdownContext): Promise<void> };
   cardContextRebuilder?: { stop(context?: ShutdownContext): Promise<void> };
-  projector: { stop(context?: ShutdownContext): Promise<void> };
-  publisher: { stop(context?: ShutdownContext): Promise<void> };
-  healthServer: { close(callback: (error?: Error) => void): unknown };
+  projector?: { stop(context?: ShutdownContext): Promise<void> };
+  publisher?: { stop(context?: ShutdownContext): Promise<void> };
+  healthServer?: { close(callback: (error?: Error) => void): unknown };
   lease: { release(): void };
   store: { deactivateWriteFence(): void; close(): void };
   logger: ShutdownLogger;
@@ -86,13 +86,13 @@ export class BridgeRuntimeShutdown {
     if (instanceRuntime) writers.push({ component: "instanceRuntime", ...(await this.stopComponent("instanceRuntime", () => instanceRuntime.stop(), context, logger, failures, timeouts)) });
     if (instanceWorker) writers.push({ component: "instanceWorker", ...(await this.stopComponent("instanceWorker", () => instanceWorker.stop(context), context, logger, failures, timeouts)) });
     if (integrityAuditor) await this.stopComponent("integrityAuditor", () => integrityAuditor.stop(context), context, logger, failures, timeouts);
-    writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
+    if (coordinator) writers.push({ component: "coordinator", ...(await this.stopComponent("coordinator", () => coordinator.stop(context), context, logger, failures, timeouts)) });
     if (outboxRetention) writers.push({ component: "outboxRetention", ...(await this.stopComponent("outboxRetention", () => outboxRetention.stop(), context, logger, failures, timeouts)) });
     if (queueFeedbackProjector) writers.push({ component: "queueFeedbackProjector", ...(await this.stopComponent("queueFeedbackProjector", () => queueFeedbackProjector.stop(context), context, logger, failures, timeouts)) });
     if (cardContextRebuilder) writers.push({ component: "cardContextRebuilder", ...(await this.stopComponent("cardContextRebuilder", () => cardContextRebuilder.stop(context), context, logger, failures, timeouts)) });
-    writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
-    writers.push({ component: "publisher", ...(await this.stopComponent("publisher", () => publisher.stop(context), context, logger, failures, timeouts)) });
-    await this.stopComponent("healthServer", () => closeServer(healthServer), context, logger, failures, timeouts);
+    if (projector) writers.push({ component: "projector", ...(await this.stopComponent("projector", () => projector.stop(context), context, logger, failures, timeouts)) });
+    if (publisher) writers.push({ component: "publisher", ...(await this.stopComponent("publisher", () => publisher.stop(context), context, logger, failures, timeouts)) });
+    if (healthServer) await this.stopComponent("healthServer", () => closeServer(healthServer), context, logger, failures, timeouts);
     if (!context.signal.aborted && context.remainingMs() === 0) { expired = true; abort(new Error("bridge shutdown deadline exceeded")); }
     const writersSettled = Promise.all(writers.map(({ settled }) => settled));
     if (!await settlesWithin(writersSettled, this.dependencies.abortSettlementMs ?? 1_000)) {
@@ -173,7 +173,7 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
   });
 }
 
-function closeServer(server: ShutdownDependencies["healthServer"]): Promise<void> {
+function closeServer(server: NonNullable<ShutdownDependencies["healthServer"]>): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => {
       if (error) reject(error);
