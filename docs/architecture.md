@@ -125,6 +125,7 @@ The production implementation uses the following modules and seams.
 | `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
+| `StartupViewConverger` | Rebuilds startup-visible Answer and Main Card state from durable canonical projections | Named `StartupViewProjectionStores`; startup recovery, Answer pages, and Main Cards are explicit stores with no type assertion |
 | `LarkOutboxDispatcher` | Durable Lark delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore`; no direct aggregate mutation |
 | `createSqliteStoreBundle` / `SqliteCapabilityGraph` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production code cannot import the broad compatibility facade |
 | `SqliteStoreKernel` / `SqliteBindingStore` | Test and headless-smoke compatibility facades | Non-production adapters over the capability graph; they contain no schema ownership and cannot be imported by production source |
@@ -200,6 +201,17 @@ The outbound, Primary, Worker, and application composition factories declare
 consumer-specific `Pick<SqliteStoreBundle, ...>` inputs. Only the parent bridge
 composition receives the full bundle. New cross-context capability access in a
 child factory is therefore a TypeScript error.
+Startup view composition passes `StartupViewStore`, `AnswerPageStore`, and
+`MainCardStore` as one named consumer dependency. `StartupViewConverger` uses
+the first for recovery and traversal and constructs its two projection
+workflows from the latter stores; it never casts one store into another.
+
+Instance orchestration follows the same consumer-first rule. Messaging, turn
+supervision, exact transcript observation, runtime reconciliation, and lifecycle
+control each depend on a named store interface containing exactly their durable
+operations. The single SQLite instance capability structurally satisfies those
+interfaces, so narrowing the workflow seams adds no forwarding adapter and does
+not split generation-fenced transactions.
 `npm run architecture:check` additionally parses static source imports and
 enforces dependency direction in CI: only the SQLite bundle may import the
 capability graph, no production source may import the compatibility kernel,
