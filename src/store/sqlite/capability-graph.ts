@@ -17,6 +17,7 @@ import { SqliteOutboxStore } from "./outbox-store.js";
 import { SqlitePaneOperationStore } from "./pane-operation-store.js";
 import { SqliteProjectionStore } from "./projection-store.js";
 import { SqlitePromptStore } from "./prompt-store.js";
+import { SqlitePromptCapabilityStore } from "./prompt-capability-store.js";
 import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./runtime-stores.js";
 import { SqliteSessionOperationStore } from "./session-operation-store.js";
 import { SqliteTurnControlStore } from "./turn-control-store.js";
@@ -136,6 +137,7 @@ export class SqliteCapabilityGraph {
   }
 
   capabilityModules() {
+    const prompt = new SqlitePromptCapabilityStore(this.prompts, this.bindings, this.bindingProjections, this.projections, this.outbox, this.operations, this.migrations);
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       approvals: this.approvals,
@@ -157,6 +159,8 @@ export class SqliteCapabilityGraph {
       answerPages: this.projections,
       queueFeedback: this.prompts,
       workerTurnCards: this.workerTurns,
+      promptAcceptance: prompt,
+      promptRun: prompt,
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox

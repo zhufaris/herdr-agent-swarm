@@ -69,7 +69,7 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
   const modules = store.capabilityModules();
   return {
     lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: store,
-    promptAcceptance: store, promptRun: store, outboundIntent: modules.outbox, outbox: modules.outbox,
+    promptAcceptance: modules.promptAcceptance, promptRun: modules.promptRun, outboundIntent: modules.outbox, outbox: modules.outbox,
     answerPages: modules.answerPages, workerTurnCards: modules.workerTurnCards, mainCards: modules.mainCards, projection: modules.projection,
     queueFeedback: modules.queueFeedback, cardContext: modules.cardContext, bindingProvisioning: store,
     runtimeReconciliation: store, retiredPaneCleanup: store, paneControl: store,

@@ -104,6 +104,9 @@ describe("application composition boundaries", () => {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
+    expect(storeBundle).toContain("promptAcceptance: modules.promptAcceptance");
+    expect(storeBundle).toContain("promptRun: modules.promptRun");
+    expect(storeBundle).not.toMatch(/prompt(?:Acceptance|Run):\s*store/);
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("listPendingCardContextInvalidations");
     const workflowPorts = readFileSync(new URL("../src/domain/ports/workflow.ts", import.meta.url), "utf8");
