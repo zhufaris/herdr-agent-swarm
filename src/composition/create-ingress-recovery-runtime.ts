@@ -26,14 +26,13 @@ export function createIngressRecoveryRuntime(options: {
   presentation: { application: ApplicationPresentation; primary: PrimaryPresentation };
 }) {
   const { config, stores, logger, bus, scheduler, inboundWork, infrastructure, delivery, primary, bindingSession, commandControl, presentation } = options;
-  const { herdr, lark } = infrastructure; const { outbound, outboundWork, answerPages, mainCards } = delivery; const { promptRun } = primary;
+  const { herdr, lark } = infrastructure; const { outbound, outboundWork } = delivery; const { promptRun } = primary;
   const { provisioning, paneClosure, reconciler, retiredPaneCleanup } = bindingSession;
   const { paneControl, sessionOperations, cardInteractions, swarmCommands, instanceInteractions, modelSelection } = commandControl;
   const startupViews = new StartupViewConverger({
     config,
     stores: { startupViews: stores.startupViews, answerPages: stores.answerPages, mainCards: stores.mainCards },
-    outbound, outboundWork, presentation: presentation.primary,
-    answerPageWorkflow: answerPages, mainCardWorkflow: mainCards, logger
+    outbound, outboundWork, presentation: presentation.primary, logger
   });
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, inboundWork, logger });
   const messageRouting = new InboundMessageRoutingWorkflow({ config, store: stores.inboundMessages, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions });

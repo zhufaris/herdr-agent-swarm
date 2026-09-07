@@ -235,6 +235,8 @@ describe("application composition boundaries", () => {
     }
     expect(converger).not.toMatch(/store as .*Store/);
     expect(composition).toContain("new StartupViewConverger({");
+    expect(composition).not.toContain("answerPageWorkflow:");
+    expect(composition).not.toContain("mainCardWorkflow:");
   });
 
   it("gives instance workflows named consumer-shaped store interfaces", () => {
