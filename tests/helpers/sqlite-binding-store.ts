@@ -10,7 +10,8 @@ export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & Leas
   InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & SessionOperationStore & {
     inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
     getSessionOperation: ReturnType<SqliteStoreKernel["capabilityModules"]>["sessionOperations"]["getSessionOperation"];
-  } & ReturnType<SqliteStoreKernel["capabilityModules"]>["approvals"];
+  } & ReturnType<SqliteStoreKernel["capabilityModules"]>["approvals"] &
+  Pick<ReturnType<SqliteStoreKernel["capabilityModules"]>["cardContext"], "listPendingCardContextInvalidations" | "markCardContextProjected" | "projectCardContext">;
 
 type StoreConstructor = new (path: string) => SqliteBindingStore;
 
@@ -32,6 +33,7 @@ export const SqliteBindingStore: StoreConstructor = class {
       getOperationalSummary: modules.health.getOperationalSummary.bind(modules.health),
       inspectIntegrity: modules.integrity.inspectIntegrity.bind(modules.integrity),
       ...bindMethods(modules.approvals, ["createApprovalRequest", "resolveApprovalRequest", "consumeApprovalGrant"]),
+      ...bindMethods(modules.cardContext, ["listPendingCardContextInvalidations", "markCardContextProjected", "projectCardContext"]),
       listBindings: modules.health.listBindings.bind(modules.health),
       recordInboundMessage: modules.inboundDispatch.recordInboundMessage.bind(modules.inboundDispatch),
       claimNextInboundMessage: modules.inboundDispatch.claimNextInboundMessage.bind(modules.inboundDispatch),

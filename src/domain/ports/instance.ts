@@ -52,8 +52,6 @@ export interface InstanceStore {
   saveWorkerMainView(view: WorkerMainView): WorkerMainView | null;
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null;
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[];
-  listPendingCardContextInvalidations(limit?: number): CardContextInvalidation[];
-  markCardContextProjected(target: CardContextTarget, dependencyRevision: number): boolean;
   loadWorkerMainProjectionSource(workerId: string, workerSessionGeneration: number): WorkerMainProjectionSource | null;
   loadPrimaryWorkerSummaries(bindingId: string, bindingGeneration: number): PrimaryWorkerSummary[];
   loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): PrimaryWorkerActivitySummary[];

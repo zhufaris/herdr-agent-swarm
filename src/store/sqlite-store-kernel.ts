@@ -178,6 +178,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   capabilityModules(): {
     lifecycle: SqliteStoreLifecycleAdapter;
     approvals: SqliteApprovalStore;
+    cardContext: SqliteCardContextStore;
     lease: SqliteLeaseStore;
     health: SqliteHealthStoreAdapter;
     integrity: SqliteOperationsStore;
@@ -191,6 +192,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       approvals: this.approvals,
+      cardContext: this.cardContexts,
       lease: this.leases,
       health: new SqliteHealthStoreAdapter(this.operations, this.bindings),
       integrity: this.operations,
@@ -234,18 +236,6 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     return this.cardContexts.invalidateCardContexts(targets);
-  }
-
-  listPendingCardContextInvalidations(limit = 100): CardContextInvalidation[] {
-    return this.cardContexts.listPendingCardContextInvalidations(limit);
-  }
-
-  markCardContextProjected(target: CardContextTarget, dependencyRevision: number): boolean {
-    return this.cardContexts.markCardContextProjected(target, dependencyRevision);
-  }
-
-  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
-    return this.cardContexts.projectCardContext(invalidation, renderers);
   }
 
   private loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {

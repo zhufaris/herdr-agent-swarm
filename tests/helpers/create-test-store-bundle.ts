@@ -20,7 +20,7 @@ function createCapabilities(store: SqliteStoreKernel): SqliteStoreBundle {
     lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: store, turnControl: store,
     promptAcceptance: store, promptRun: store, outboundIntent: store, outbox: store,
     answerPages: store, workerTurnCards: store, mainCards: store, projection: store,
-    queueFeedback: store, cardContext: store, bindingProvisioning: store,
+    queueFeedback: store, cardContext: modules.cardContext, bindingProvisioning: store,
     runtimeReconciliation: store, retiredPaneCleanup: store, paneControl: store,
     paneClose: store, inboundRouting: store, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
