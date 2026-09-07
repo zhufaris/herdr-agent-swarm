@@ -285,11 +285,14 @@ describe("application composition boundaries", () => {
   it("keeps card action parsing and authorization outside message routing", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const cardActions = readFileSync(new URL("../src/coordinator/card-action-router.ts", import.meta.url), "utf8");
+    const parser = readFileSync(new URL("../src/coordinator/card-action-command.ts", import.meta.url), "utf8");
     expect(router).toContain("CardActionRouterPort");
-    expect(router).not.toContain("parseModelSelectionAction");
-    expect(router).not.toContain("parsePaneClaimAction");
-    expect(cardActions).toContain("parseModelSelectionAction");
-    expect(cardActions).toContain("parsePaneClaimAction");
+    expect(router).not.toContain("parseCardActionCommand");
+    expect(cardActions).toContain("parseCardActionCommand(action.value, action.option)");
+    expect(cardActions).not.toContain("parseModelSelectionAction");
+    expect(cardActions).not.toContain("parsePaneClaimAction");
+    expect(parser).toContain("export type CardActionCommand");
+    expect(parser).toContain("export function parseCardActionCommand");
   });
 
   it("routes query and session administration through dedicated workflow seams", () => {

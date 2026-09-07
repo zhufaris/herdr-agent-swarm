@@ -8,6 +8,14 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createWorkerMainView } from "../src/domain/worker-main-view.js";
 import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { applicationPresentation } from "./helpers/presentation.js";
+import { parseCardActionCommand } from "../src/coordinator/card-action-command.js";
+import type { IncomingLarkCardAction } from "../src/domain/types.js";
+
+function handleCardAction(workflow: InstanceInteractionWorkflow, action: IncomingLarkCardAction) {
+  const command = parseCardActionCommand(action.value, action.option);
+  if (command.kind !== "instance") throw new Error(`Expected instance action, received ${command.kind}`);
+  return workflow.handleCardAction(action, command);
+}
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -88,10 +96,10 @@ describe("instance routing", () => {
     vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered", durableResult: true });
     const card = renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!);
     const open = callbackValue(card, "worker_task_instruction_form");
-    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const form = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
     const submit = callbackValue(form, "worker_task_instruction_submit");
 
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "focus transactions" } })).resolves.toEqual({ toast: { type: "success", content: "已补充到 reviewer 的当前任务。" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "focus transactions" } })).resolves.toEqual({ toast: { type: "success", content: "已补充到 reviewer 的当前任务。" } });
     expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId, text: "focus transactions" }));
     expect(messaging.submit).not.toHaveBeenCalled();
   });
@@ -101,10 +109,10 @@ describe("instance routing", () => {
     const worker = create("reviewer", "worker"); const task = taskCard(worker.id, state, `turn-action-${state}`);
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 2 } } as never);
     const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
-    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const form = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
     const submit = callbackValue(form, "worker_task_instruction_submit");
 
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "verify again" } })).resolves.toEqual({ toast: { type: "success", content: "已创建 reviewer 的后续任务，当前排队位置 2。" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "verify again" } })).resolves.toEqual({ toast: { type: "success", content: "已创建 reviewer 的后续任务，当前排队位置 2。" } });
     expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ content: { kind: "followup", text: "verify again" }, source: expect.objectContaining({ parentTurnId: task.turnId }) }));
   });
 
@@ -112,11 +120,11 @@ describe("instance routing", () => {
     const { create, workflow, messaging } = setup();
     const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "running", "turn-action-race");
     const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
-    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const form = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
     const submit = callbackValue(form, "worker_task_instruction_submit");
     store!.transitionInstanceTurnWithProjection({ turnId: task.turnId, expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-01T00:02:00.000Z", answer: "done" }, render: renderWorkerTurnCard });
 
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "late" } })).resolves.toEqual({ toast: { type: "warning", content: "任务状态已变化，请重新打开 Task Card 后再操作。" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "late" } })).resolves.toEqual({ toast: { type: "warning", content: "任务状态已变化，请重新打开 Task Card 后再操作。" } });
     expect(messaging.steer).not.toHaveBeenCalled(); expect(messaging.submit).not.toHaveBeenCalled();
   });
 
@@ -128,10 +136,10 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-action", cardId: "card-main" });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 2 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
-    const form = await workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: open });
+    const form = await handleCardAction(workflow, { messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: open });
     const submit = callbackValue(form, "worker_new_task_submit");
 
-    await expect(workflow.handleCardAction({ messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { task_text: "new independent work" } })).resolves.toEqual({ toast: { type: "success", content: "已向 reviewer 发起新任务，当前排队位置 2。" } });
+    await expect(handleCardAction(workflow, { messageId: "worker-main-action", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { task_text: "new independent work" } })).resolves.toEqual({ toast: { type: "success", content: "已向 reviewer 发起新任务，当前排队位置 2。" } });
     expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ content: { kind: "turn", text: "new independent work" }, source: expect.not.objectContaining({ parentTurnId: expect.anything() }) }));
   });
 
@@ -140,13 +148,13 @@ describe("instance routing", () => {
     const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "completed", "turn-repeat");
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
     const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
-    const firstForm = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const firstForm = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
     const firstSubmit = callbackValue(firstForm, "worker_task_instruction_submit");
-    await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: firstSubmit, formValues: { instruction_text: "first follow-up" } });
-    await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: firstSubmit, formValues: { instruction_text: "first follow-up" } });
-    const secondForm = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: firstSubmit, formValues: { instruction_text: "first follow-up" } });
+    await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: firstSubmit, formValues: { instruction_text: "first follow-up" } });
+    const secondForm = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
     const secondSubmit = callbackValue(secondForm, "worker_task_instruction_submit");
-    await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: secondSubmit, formValues: { instruction_text: "second follow-up" } });
+    await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: secondSubmit, formValues: { instruction_text: "second follow-up" } });
 
     const keys = vi.mocked(messaging.submit).mock.calls.map(([input]) => input.idempotencyKey);
     expect(keys).toEqual(["card:interaction-1:task-followup:turn-repeat", "card:interaction-1:task-followup:turn-repeat", "card:interaction-2:task-followup:turn-repeat"]);
@@ -160,10 +168,10 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-repeat", cardId: "card-main-repeat" });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
     const open = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_new_task_form");
-    const first = callbackValue(await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: open }), "worker_new_task_submit");
-    const second = callbackValue(await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: open }), "worker_new_task_submit");
-    await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: first, formValues: { task_text: "first task" } });
-    await workflow.handleCardAction({ messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: second, formValues: { task_text: "second task" } });
+    const first = callbackValue(await handleCardAction(workflow, { messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: open }), "worker_new_task_submit");
+    const second = callbackValue(await handleCardAction(workflow, { messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: open }), "worker_new_task_submit");
+    await handleCardAction(workflow, { messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: first, formValues: { task_text: "first task" } });
+    await handleCardAction(workflow, { messageId: "worker-main-repeat", chatId: "chat", operatorOpenId: "u1", value: second, formValues: { task_text: "second task" } });
 
     expect(vi.mocked(messaging.submit).mock.calls.map(([input]) => input.idempotencyKey)).toEqual([
       `card:interaction-1:worker-new-task:${worker.id}`, `card:interaction-2:worker-new-task:${worker.id}`
@@ -174,15 +182,15 @@ describe("instance routing", () => {
     const { create, workflow, messaging } = setup(["u1", "u2"]);
     const worker = create("reviewer", "worker"); const task = taskCard(worker.id, "completed", "turn-fences");
     const open = callbackValue(renderWorkerTurnCard(store!.loadWorkerTurnCard(task.turnId)!), "worker_task_instruction_form");
-    const form = await workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const form = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
     const submit = callbackValue(form, "worker_task_instruction_submit");
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u2", value: submit, formValues: { instruction_text: "forged" } })).resolves.toMatchObject({ toast: { type: "error" } });
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "   " } })).resolves.toMatchObject({ toast: { type: "error" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u2", value: submit, formValues: { instruction_text: "forged" } })).resolves.toMatchObject({ toast: { type: "error" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "   " } })).resolves.toMatchObject({ toast: { type: "error" } });
     store!.database.prepare("UPDATE agent_instances SET worker_session_generation = worker_session_generation + 1 WHERE id = ?").run(worker.id);
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "stale session" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "stale session" } })).resolves.toMatchObject({ toast: { type: "warning" } });
     store!.database.prepare("UPDATE agent_instances SET worker_session_generation = worker_session_generation - 1 WHERE id = ?").run(worker.id);
     store!.updateBinding("binding-default", { generation: 2 });
-    await expect(workflow.handleCardAction({ messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "stale binding" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "stale binding" } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(messaging.submit).not.toHaveBeenCalled();
   });
 
@@ -231,8 +239,8 @@ describe("instance routing", () => {
     store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", first.id);
     store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-2", "w1:primary-two", second.id);
 
-    await workflow.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: first.id, generation: first.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } });
-    await workflow.handleCardAction({ messageId: "card-2", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: second.id, generation: second.generation, conversationKey: "binding:binding-2", bindingId: "binding-2", bindingGeneration: 1 } });
+    await handleCardAction(workflow, { messageId: "card-1", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: first.id, generation: first.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } });
+    await handleCardAction(workflow, { messageId: "card-2", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: second.id, generation: second.generation, conversationKey: "binding:binding-2", bindingId: "binding-2", bindingGeneration: 1 } });
 
     expect(store!.getConversationTarget("binding:binding-1")?.target).toMatchObject({ kind: "instance", instanceId: first.id });
     expect(store!.getConversationTarget("binding:binding-2")?.target).toMatchObject({ kind: "instance", instanceId: second.id });
@@ -245,8 +253,8 @@ describe("instance routing", () => {
     store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2 });
 
     const stale = { bindingId: "binding-1", bindingGeneration: 1, conversationKey: "binding:binding-1" };
-    await expect(workflow.handleCardAction({ messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...stale }, formValues: { name: "new-worker", agent_kind: "traex", start: "false" } })).resolves.toMatchObject({ toast: { type: "warning" } });
-    await expect(workflow.handleCardAction({ messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_open", instanceId: worker.id, generation: worker.generation, ...stale } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...stale }, formValues: { name: "new-worker", agent_kind: "traex", start: "false" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_open", instanceId: worker.id, generation: worker.generation, ...stale } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(control.createWorker).not.toHaveBeenCalled();
   });
 
@@ -255,7 +263,7 @@ describe("instance routing", () => {
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "one" });
     store!.updateBinding("binding-1", { state: "archived", lifecycle: "archived", attachment: "unattached" });
 
-    await expect(workflow.handleCardAction({ messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
+    await expect(handleCardAction(workflow, { messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
   });
 
   it("includes the binding fence in directory, create-form, and detail controls", async () => {
@@ -269,9 +277,9 @@ describe("instance routing", () => {
     expect(directory).toContain('"bindingId":"binding-1"');
     expect(directory).toContain('"bindingGeneration":3');
 
-    const createForm = await workflow.handleCardAction({ messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
+    const createForm = await handleCardAction(workflow, { messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
     expect(JSON.stringify(createForm)).toContain('"bindingGeneration":3');
-    const detail = await workflow.handleCardAction({ messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_open", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
+    const detail = await handleCardAction(workflow, { messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_open", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
     expect(JSON.stringify(detail)).toContain('"bindingGeneration":3');
   });
 
@@ -281,7 +289,7 @@ describe("instance routing", () => {
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "one" });
     store!.updateBinding("binding-1", { state: "active", lifecycle: "active", attachment: "attached" });
 
-    await expect(workflow.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: otherProjectWorker.id, generation: otherProjectWorker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "实例不属于当前话题项目。" } });
+    await expect(handleCardAction(workflow, { messageId: "card-1", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: otherProjectWorker.id, generation: otherProjectWorker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "实例不属于当前话题项目。" } });
 
     expect(store!.getConversationTarget("binding:binding-1")).toBeNull();
   });
@@ -354,7 +362,7 @@ describe("instance routing", () => {
   it("reloads generation before applying a card callback", async () => {
     const { create, workflow } = setup(); const worker = create("worker", "worker");
     store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "p1", nativeSessionId: null });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: worker.id, generation: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "实例状态已变化，请刷新后重试。" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_set_target", instanceId: worker.id, generation: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "实例状态已变化，请刷新后重试。" } });
     expect(store!.getConversationTarget("chat")).toBeNull();
   });
   it("opens only an owned durable Worker task view behind the current binding fence", async () => {
@@ -366,9 +374,9 @@ describe("instance routing", () => {
     store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     const value = { action: "instance_turn_open", instanceId: worker.id, generation: worker.generation, turnId: task.turnId, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 1 };
 
-    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "🎯 reviewer · Task turn-his" } } } });
-    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, turnId: "missing" } })).resolves.toEqual({ toast: { type: "warning", content: "任务不存在或不属于当前 Worker。" } });
-    await expect(workflow.handleCardAction({ messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, bindingGeneration: 0 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
+    await expect(handleCardAction(workflow, { messageId: "history", chatId: "chat", operatorOpenId: "u1", value })).resolves.toMatchObject({ card: { header: { title: { content: "🎯 reviewer · Task turn-his" } } } });
+    await expect(handleCardAction(workflow, { messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, turnId: "missing" } })).resolves.toEqual({ toast: { type: "warning", content: "任务不存在或不属于当前 Worker。" } });
+    await expect(handleCardAction(workflow, { messageId: "history", chatId: "chat", operatorOpenId: "u1", value: { ...value, bindingGeneration: 0 } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
   });
   it("opens durable Worker card targets by persisted ownership without requiring a conversation key", async () => {
     const { create, workflow } = setup();
@@ -380,8 +388,8 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
     const task = taskCard(worker.id, "completed", "owned-task");
 
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🤖 Worker · reviewer" } } } });
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId } })).resolves.toMatchObject({ card: { header: { title: { content: "🎯 reviewer · Task owned-ta" } } } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🤖 Worker · reviewer" } } } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId } })).resolves.toMatchObject({ card: { header: { title: { content: "🎯 reviewer · Task owned-ta" } } } });
   });
 
   it("rejects stale and cross-Primary Worker card targets", async () => {
@@ -392,16 +400,16 @@ describe("instance routing", () => {
     store!.updateBinding("binding-other", { paneId: "w1:primary-other", state: "active", lifecycle: "active", attachment: "attached" });
     const target = { action: "card_target_open", aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: task.cardMessageId };
 
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, messageId: "stale-message" } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, generation: worker.generation + 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
-    await expect(workflow.handleCardAction({ messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, conversationKey: "binding:binding-other", bindingId: "binding-other", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, messageId: "stale-message" } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, generation: worker.generation + 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, conversationKey: "binding:binding-other", bindingId: "binding-other", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
   });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
     const { workflow, control } = setup(["u1", "u2"]);
-    const form = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", ...defaultBindingCard } });
+    const form = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", ...defaultBindingCard } });
     expect(JSON.stringify(form)).toContain("instance_create_submit");
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
     expect(store!.listAgentInstances("p1").find(({ name }) => name === "reviewer")).toBeDefined();
   });
@@ -418,7 +426,7 @@ describe("instance routing", () => {
     } as never);
 
     expect(action).not.toBeNull();
-    await expect(workflow.handleCardAction(action!)).resolves.toMatchObject({ toast: { type: "success" } });
+    await expect(handleCardAction(workflow, action!)).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.createWorker).toHaveBeenCalledWith(expect.objectContaining({ projectId: "p1", name: "reviewer", agentKind: "traex", start: false }));
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
   });
@@ -428,7 +436,7 @@ describe("instance routing", () => {
     const failed = store!.checkpointAgentInstance({ instanceId: created.id, expectedGeneration: created.generation, checkpoint: "pane-allocated", observedState: "failed", pendingPaneId: "w1:p1", pendingWorkspaceId: "w1", lastError: "Bearer [REDACTED]" })!;
     vi.mocked(control.createWorker).mockResolvedValueOnce({ status: "created-start-failed", instance: failed, error: "Bearer [REDACTED]" });
 
-    const result = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "true" } });
+    const result = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "true" } });
     expect(result).toMatchObject({
       toast: { type: "warning", content: expect.stringContaining("reviewer") },
       card: expect.any(Object)
@@ -439,15 +447,15 @@ describe("instance routing", () => {
   it("rejects forged controls for a legacy Primary row", async () => {
     const { create, workflow, control } = setup();
     const legacy = create("legacy", "primary");
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_start", instanceId: legacy.id, generation: legacy.generation } })).resolves.toEqual({ toast: { type: "warning", content: "仅支持管理 Worker；当前 Thread 是唯一 Primary。" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_start", instanceId: legacy.id, generation: legacy.generation } })).resolves.toEqual({ toast: { type: "warning", content: "仅支持管理 Worker；当前 Thread 是唯一 Primary。" } });
     expect(control.start).not.toHaveBeenCalled();
   });
   it("reloads the current instance before steering from an actor-bound form", async () => {
     const { create, workflow, messaging } = setup(); const worker = create("worker", "worker");
-    const opened = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
+    const opened = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
     expect(JSON.stringify(opened)).toContain("instance_steer_submit");
     store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "p1", nativeSessionId: null });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_submit", instanceId: worker.id, generation: 1, requestedBy: "u1", ...defaultBindingCard }, formValues: { steer_text: "focus tests" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_submit", instanceId: worker.id, generation: 1, requestedBy: "u1", ...defaultBindingCard }, formValues: { steer_text: "focus tests" } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(messaging.steer).not.toHaveBeenCalled();
   });
   it("propagates a binding fence through steer form submission", async () => {
@@ -456,31 +464,31 @@ describe("instance routing", () => {
     store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached", generation: 3 });
     store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
     vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered" });
-    const opened = await workflow.handleCardAction({ messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
+    const opened = await handleCardAction(workflow, { messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_steer_form", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
     const submit = callbackValue(opened, "instance_steer_submit");
     expect(submit).toMatchObject({ bindingId: "binding-1", bindingGeneration: 3 });
-    await expect(workflow.handleCardAction({ messageId: "submit", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { steer_text: "focus tests" } })).resolves.toMatchObject({ toast: { type: "success" } });
+    await expect(handleCardAction(workflow, { messageId: "submit", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { steer_text: "focus tests" } })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(messaging.steer).toHaveBeenCalledOnce();
     store!.updateBinding("binding-1", { generation: 4 });
-    await expect(workflow.handleCardAction({ messageId: "stale", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { steer_text: "stale" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: "stale", chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { steer_text: "stale" } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(messaging.steer).toHaveBeenCalledOnce();
   });
   it("reloads a removal plan and never confirms unsafe or stale evidence", async () => {
     const { create, workflow, control } = setup(); const worker = create("worker", "worker");
-    const planned = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
+    const planned = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
     expect(JSON.stringify(planned)).toContain("instance_confirm_removal");
     store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "p1", nativeSessionId: null });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: 1, planId: "plan-1", requestedBy: "u1", ...defaultBindingCard } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: 1, planId: "plan-1", requestedBy: "u1", ...defaultBindingCard } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(control.confirmRemoval).not.toHaveBeenCalled();
     const current = store!.getAgentInstance(worker.id)!; const currentWorkspace = store!.getWorkspaceLease(current.workspaceLeaseId)!;
     store!.createInstanceRemovalPlan({ id: "dirty-plan", instanceId: current.id, instanceGeneration: current.generation, workspaceGeneration: currentWorkspace.generation, worktreeFingerprint: "dirty-fp", safe: false, reason: "dirty", state: "pending", createdAt: "now" });
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: current.id, generation: current.generation, planId: "dirty-plan", requestedBy: "u1", ...defaultBindingCard } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: current.id, generation: current.generation, planId: "dirty-plan", requestedBy: "u1", ...defaultBindingCard } })).resolves.toMatchObject({ toast: { type: "warning" } });
     expect(control.confirmRemoval).not.toHaveBeenCalled();
   });
   it("confirms a safe removal only while the persisted evidence is current", async () => {
     const { create, workflow, control } = setup(); const worker = create("worker", "worker");
-    await workflow.handleCardAction({ messageId: "plan-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
-    await expect(workflow.handleCardAction({ messageId: "confirm-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: worker.generation, planId: "plan-1", requestedBy: "u1", ...defaultBindingCard } })).resolves.toEqual({ toast: { type: "success", content: "实例 worker 已删除。" } });
+    await handleCardAction(workflow, { messageId: "plan-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, ...defaultBindingCard } });
+    await expect(handleCardAction(workflow, { messageId: "confirm-card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_confirm_removal", instanceId: worker.id, generation: worker.generation, planId: "plan-1", requestedBy: "u1", ...defaultBindingCard } })).resolves.toEqual({ toast: { type: "success", content: "实例 worker 已删除。" } });
     expect(control.confirmRemoval).toHaveBeenCalledWith({ actor: { kind: "human", userId: "u1", channel: "feishu" }, planId: "plan-1" });
   });
   it("propagates a binding fence through removal confirmation", async () => {
@@ -488,16 +496,16 @@ describe("instance routing", () => {
     store!.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root", title: "one" });
     store!.updateBinding("binding-1", { paneId: "w1:primary-one", state: "active", lifecycle: "active", attachment: "attached", generation: 2 });
     store!.database.prepare("UPDATE agent_instances SET parent_binding_id = ?, parent_pane_id = ?, worker_session_lifecycle = 'active' WHERE id = ?").run("binding-1", "w1:primary-one", worker.id);
-    const planned = await workflow.handleCardAction({ messageId: "plan", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 2 } });
+    const planned = await handleCardAction(workflow, { messageId: "plan", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_plan_removal", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 2 } });
     const confirm = callbackValue(planned, "instance_confirm_removal");
     expect(confirm).toMatchObject({ bindingId: "binding-1", bindingGeneration: 2 });
-    await expect(workflow.handleCardAction({ messageId: "confirm", chatId: "chat", operatorOpenId: "u1", value: confirm })).resolves.toMatchObject({ toast: { type: "success" } });
+    await expect(handleCardAction(workflow, { messageId: "confirm", chatId: "chat", operatorOpenId: "u1", value: confirm })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.confirmRemoval).toHaveBeenCalledOnce();
   });
   it("redacts and bounds callback failure messages", async () => {
     const { workflow, control } = setup();
     vi.mocked(control.createWorker).mockRejectedValueOnce(new Error(`Authorization: Basic credential-value password=hunter2 ${"x".repeat(700)}`));
-    const result = await workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", agent_kind: "traex", start: "false" } });
+    const result = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1" }, formValues: { name: "reviewer", agent_kind: "traex", start: "false" } });
     expect(result?.toast).toMatchObject({ type: "error", content: expect.stringContaining("[REDACTED]") });
     expect(result?.toast?.content.length).toBeLessThanOrEqual(500);
     expect(result?.toast?.content).not.toMatch(/credential-value|hunter2/);
@@ -506,6 +514,6 @@ describe("instance routing", () => {
     const { workflow, outbound } = setup(["owner"]);
     await workflow.handleCommand({ ...message("/instances"), actorOpenId: "viewer" }, { kind: "instances" });
     expect(JSON.stringify(outbound.enqueueCard.mock.calls[0]?.[2])).toContain("没有 Agent 管理权限");
-    await expect(workflow.handleCardAction({ messageId: "card", chatId: "chat", operatorOpenId: "viewer", value: { action: "instance_create_form", projectId: "p1" } })).resolves.toEqual({ toast: { type: "error", content: "你没有 Agent 管理权限。" } });
+    await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "viewer", value: { action: "instance_create_form", projectId: "p1" } })).resolves.toEqual({ toast: { type: "error", content: "你没有 Agent 管理权限。" } });
   });
 });

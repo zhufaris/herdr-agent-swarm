@@ -5,6 +5,9 @@ import type { CardInteractionStore } from "../domain/ports/workflow.js";
 import type { IncomingLarkCardAction, LarkCardActionResult } from "../domain/types.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
+import type { CardActionCommand } from "./card-action-command.js";
+
+export type SessionCardActionCommand = Extract<CardActionCommand, { kind: "session" }>;
 
 interface Options {
   store: CardInteractionStore;
@@ -17,17 +20,14 @@ interface Options {
 }
 
 export interface CardInteractionWorkflowPort {
-  handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void>;
+  handle(action: IncomingLarkCardAction, command: SessionCardActionCommand): Promise<LarkCardActionResult>;
 }
 
 export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
   constructor(private readonly options: Options) {}
 
-  async handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
-    if (!action.value || typeof action.value !== "object" || Array.isArray(action.value)) return;
-    const value = action.value as Record<string, unknown>;
-    if (value.action === "open_supplement" || value.action === "submit_supplement") return this.options.presentation.interactionToast("warning", "当前 Agent 不支持立即补充；请将内容作为普通消息发送。");
-    if (value.action === "convert_queued_prompt" || value.action === "enqueue_failed_steering") return this.options.presentation.interactionToast("warning", "该操作已失效，请刷新卡片后重试。");
+  async handle(action: IncomingLarkCardAction, command: SessionCardActionCommand): Promise<LarkCardActionResult> {
+    const value = command.value;
     if (value.action === "open_more_actions") return this.openMoreActions(action, value);
     if (value.action === "view_queue") return this.viewQueue(action, value);
     if (value.action === "view_recovery") return this.viewRecovery(action, value);
@@ -35,7 +35,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (value.action === "open_rename") return this.openRename(action, value);
     if (value.action === "open_reattach") return this.openReattach(action, value);
     if (typeof value.action === "string" && (value.action.startsWith("session_") || value.action === "submit_rename" || value.action === "submit_reattach")) return this.sessionControl(action, value);
-    return undefined;
+    return this.options.presentation.interactionToast("warning", "未知操作。");
   }
 
   private openMoreActions(action: IncomingLarkCardAction, value: Record<string, unknown>): LarkCardActionResult {

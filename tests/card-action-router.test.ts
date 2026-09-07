@@ -1,0 +1,69 @@
+import { describe, expect, it, vi } from "vitest";
+import { CardActionRouter } from "../src/coordinator/card-action-router.js";
+import { instanceCardActionNames, sessionCardActionNames } from "../src/coordinator/card-action-command.js";
+
+function harness() {
+  const cardInteractions = { handle: vi.fn(async () => ({ toast: { type: "success" as const, content: "session" } })) };
+  const instanceInteractions = { handleCardAction: vi.fn(async () => ({ toast: { type: "success" as const, content: "instance" } })) };
+  const modelSelection = { selectModel: vi.fn(async () => {}), selectModelMode: vi.fn(async () => {}) };
+  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}) };
+  const provisioning = { attach: vi.fn(async () => true), completeSelection: vi.fn(async () => null) };
+  const router = new CardActionRouter({
+    chatId: "chat", allowedOpenIds: ["user"], adminOpenIds: ["user"],
+    projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }],
+    store: { getBinding: () => ({ chatId: "chat", creatorOpenId: "user" }) as never },
+    provisioning: provisioning as never, cardInteractions, modelSelection: modelSelection as never, deliveryRecovery, instanceInteractions: instanceInteractions as never,
+    logger: { info: vi.fn(), error: vi.fn() }, enqueueInitialPrompt: vi.fn(async () => {}),
+  });
+  return { router, cardInteractions, instanceInteractions, modelSelection, deliveryRecovery, provisioning };
+}
+
+const action = (value: unknown, option?: string) => ({ messageId: "card", chatId: "chat", operatorOpenId: "user", value, ...(option ? { option } : {}) });
+
+describe("card action router", () => {
+  it.each([
+    ...instanceCardActionNames.map((name) => [name, { action: name }, undefined, "instance"] as const),
+    ...sessionCardActionNames.map((name) => [name, { action: name }, undefined, "session"] as const),
+    ["select_model", { action: "select_model", bindingId: "b1" }, "gpt-5.4", "model"],
+    ["select_model_mode", { action: "select_model_mode", bindingId: "b1", operationId: "op1" }, "high", "model-mode"],
+    ["open_project_thread", { action: "open_project_thread", bindingId: "b1" }, undefined, "open-thread"],
+    ["retry_dead_letter", { action: "retry_dead_letter", replyId: "r1" }, undefined, "dead-letter"],
+    ["dismiss_dead_letter", { action: "dismiss_dead_letter", replyId: "r1" }, undefined, "dead-letter"],
+    ["select_project", { action: "select_project", selectionId: "s1", projectId: "p1" }, undefined, "project-selection"],
+    ["claim_pane", { action: "claim_pane", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }, undefined, "pane-claim"],
+  ] as const)("dispatches %s to exactly one owner", async (_name, value, option, owner) => {
+    const h = harness();
+    await h.router.handle(action(value, option));
+    const owners = {
+      instance: h.instanceInteractions.handleCardAction,
+      session: h.cardInteractions.handle,
+      model: h.modelSelection.selectModel,
+      "model-mode": h.modelSelection.selectModelMode,
+      "open-thread": h.deliveryRecovery.openThread,
+      "dead-letter": h.deliveryRecovery.decideDeadLetter,
+      "project-selection": h.provisioning.completeSelection,
+      "pane-claim": h.provisioning.attach,
+    };
+    expect(owners[owner]).toHaveBeenCalledOnce();
+    expect(Object.values(owners).reduce((count, mock) => count + mock.mock.calls.length, 0)).toBe(1);
+    await h.router.stop();
+  });
+
+  it("keeps retired callbacks side-effect free and preserves their guidance", async () => {
+    const h = harness();
+    await expect(h.router.handle(action({ action: "open_supplement", bindingId: "b1" }))).resolves.toEqual({ toast: { type: "warning", content: "当前 Agent 不支持立即补充；请将内容作为普通消息发送。" } });
+    await expect(h.router.handle(action({ action: "convert_queued_prompt", bindingId: "b1" }))).resolves.toEqual({ toast: { type: "warning", content: "该操作已失效，请刷新卡片后重试。" } });
+    expect(h.cardInteractions.handle).not.toHaveBeenCalled();
+    expect(h.instanceInteractions.handleCardAction).not.toHaveBeenCalled();
+    expect(h.provisioning.attach).not.toHaveBeenCalled();
+  });
+
+  it("returns one generic stale response for unknown and malformed callbacks", async () => {
+    const h = harness();
+    const expected = { toast: { type: "warning", content: "该操作已失效，请刷新卡片后重试。" } };
+    await expect(h.router.handle(action({ action: "future_action" }))).resolves.toEqual(expected);
+    await expect(h.router.handle(action({ action: "select_model", bindingId: "b1" }))).resolves.toEqual(expected);
+    expect(h.cardInteractions.handle).not.toHaveBeenCalled();
+    expect(h.instanceInteractions.handleCardAction).not.toHaveBeenCalled();
+  });
+});

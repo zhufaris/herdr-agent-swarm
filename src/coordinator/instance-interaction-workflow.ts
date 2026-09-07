@@ -11,6 +11,9 @@ import { InstanceConversationContext } from "./instance-interactions/conversatio
 import { InstanceViewQuery } from "./instance-interactions/instance-view-query.js";
 import { WorkerCardActions } from "./instance-interactions/worker-card-actions.js";
 import { WorkerLifecycleActions, type WorkerCreationGateway } from "./instance-interactions/worker-lifecycle-actions.js";
+import type { CardActionCommand } from "./card-action-command.js";
+
+export type InstanceCardActionCommand = Extract<CardActionCommand, { kind: "instance" }>;
 
 interface Options {
   projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort;
@@ -62,10 +65,8 @@ export class InstanceInteractionWorkflow {
     return true;
   }
 
-  async handleCardAction(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
-    if (!action.value || typeof action.value !== "object") return;
-    const value = action.value as Record<string, unknown>;
-    if (typeof value.action !== "string" || (!value.action.startsWith("instance_") && !value.action.startsWith("worker_") && value.action !== "card_target_open")) return;
+  async handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand): Promise<LarkCardActionResult> {
+    const value = command.value;
     if (!this.isOperator(action.operatorOpenId)) return { toast: { type: "error", content: "你没有 Agent 管理权限。" } };
     if (value.action.startsWith("worker_task_")) return this.workerCards.handleTask(action, value);
     if (value.action.startsWith("worker_new_task_")) return this.workerCards.handleNewTask(action, value);

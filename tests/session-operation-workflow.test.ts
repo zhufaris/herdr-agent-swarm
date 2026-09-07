@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
+import { parseCardActionCommand } from "../src/coordinator/card-action-command.js";
+import type { IncomingLarkCardAction } from "../src/domain/types.js";
+
+function handle(workflow: CardInteractionWorkflow, action: IncomingLarkCardAction) {
+  const command = parseCardActionCommand(action.value, action.option);
+  if (command.kind !== "session") throw new Error(`Expected session action, received ${command.kind}`);
+  return workflow.handle(action, command);
+}
 import { SessionOperationWorkflow } from "../src/coordinator/session-operation-workflow.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { applicationPresentation } from "./helpers/presentation.js";
@@ -69,9 +77,9 @@ describe("Session operation workflow", () => {
       logger: { info: vi.fn(), warn: vi.fn() }
     });
 
-    const opened = await cards.handle({ messageId: "main-card", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1", bindingGeneration: 1 } });
+    const opened = await handle(cards, { messageId: "main-card", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1", bindingGeneration: 1 } });
     const callback = callbackValue(opened!.card!, "session_archive");
-    const result = await cards.handle({ messageId: "more-card", chatId: "chat", operatorOpenId: "creator", value: callback });
+    const result = await handle(cards, { messageId: "more-card", chatId: "chat", operatorOpenId: "creator", value: callback });
 
     expect(result?.toast).toEqual({ type: "success", content: "操作已受理。" });
     expect(h.store.listRecoverableSessionOperations()).toEqual([expect.objectContaining({ kind: "archive", state: "accepted" })]);
