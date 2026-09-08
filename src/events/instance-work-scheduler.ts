@@ -75,7 +75,9 @@ export class InstanceWorkScheduler {
           const notice = dispatchUncertainNotice(receipt.reason);
           this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, receipt.reason);
         }
-        else this.transition(turn.id, turn.instanceGeneration, "failed", "turn.failed", { type: "failed", occurredAt: new Date().toISOString(), notice: receipt.reason }, receipt.reason);
+        else if (!observed.runtimeTurnId || !observed.runtimeTurnStartedAt) {
+          this.transition(turn.id, turn.instanceGeneration, "failed", "turn.failed", { type: "failed", occurredAt: new Date().toISOString(), notice: receipt.reason }, receipt.reason);
+        }
         return;
       }
     } catch (error) { this.recordFailure(error, instanceId, this.inFlight.get(instanceId)?.turnId); }

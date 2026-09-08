@@ -34,7 +34,7 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
   let scheduler!: InstanceWorkScheduler;
   const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound, presentation: workerPresentation }) : undefined;
   scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound, presentation: workerPresentation });
-  return { create, workflow, scheduler, wake, wakeOutbound, submit, driver, turnControl };
+  return { create, workflow, scheduler, observer, wake, wakeOutbound, submit, driver, turnControl };
 }
 
 describe("instance messaging", () => {
@@ -322,6 +322,38 @@ describe("instance messaging", () => {
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted", error: null });
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted" });
+  });
+
+  it("keeps observing an exact-owned running turn after a late not-delivered receipt", async () => {
+    const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
+    const startedAt = "2026-09-01T00:00:01.000Z";
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { let read = false; return { mode: "typed" as const, cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          if (read) return { answerDelta: "" };
+          read = true;
+          return { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "active" as const, startedAt } };
+        }
+      } }; }
+    };
+    const { create, workflow, scheduler, observer, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
+    const worker = create("worker");
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      await hooks?.onDispatched?.();
+      await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", runtimeTurnId, runtimeTurnStartedAt: startedAt }));
+      return { status: "not-delivered", reason: "late settlement missed the running turn" };
+    });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root-1" } });
+
+    await scheduler.drain(worker.id);
+
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", error: null, runtimeTurnId, runtimeTurnStartedAt: startedAt });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", notice: null });
+    expect(store!.listInstanceEvents(worker.id).map(({ kind }) => kind)).not.toContain("turn.failed");
+
+    await observer!.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "trusted completion", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "trusted completion" } });
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted completion", error: null });
   });
 
   it("fences a thrown driver call as uncertain without rejecting the drain", async () => {
