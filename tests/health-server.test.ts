@@ -220,6 +220,51 @@ describe("health server", () => {
     expect(await response.json()).toMatchObject({ status: "not_ready", components: { lease: { ok: false, held: false, error: "fence changed" } } });
   });
 
+  it("fails readiness closed when lease diagnostics throw and reads the lease once per request", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const snapshot = vi.fn(() => { throw new Error("lease diagnostics failed"); });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    const ready = await fetch(`http://127.0.0.1:${port}/ready`);
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({ status: "not_ready", components: { lease: { ok: false, held: false, fencingToken: null, error: "lease diagnostics failed" } } });
+    expect(snapshot).toHaveBeenCalledTimes(1);
+
+    const status = await fetch(`http://127.0.0.1:${port}/status`);
+    expect(status.status).toBe(200);
+    const statusBody = await status.json() as { status: string; readiness: { status: string; components: { lease: object } }; lease: object };
+    expect(statusBody).toMatchObject({ status: "degraded", readiness: { status: "not_ready", components: { lease: { ok: false, held: false, error: "lease diagnostics failed" } } }, lease: { held: false, error: "lease diagnostics failed" } });
+    expect(statusBody.lease).not.toHaveProperty("ok");
+    expect(snapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails readiness closed for runtime and Lark diagnostic exceptions without double-reading runtime", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const runtimeSnapshot = vi.fn(() => { throw new Error("runtime diagnostics failed"); });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady() { throw new Error("Lark readiness failed"); } } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      instanceRuntime: { snapshot: runtimeSnapshot }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    const ready = await fetch(`http://127.0.0.1:${port}/ready`);
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toMatchObject({ status: "not_ready", components: { lark: { ok: false, error: "Lark readiness failed" }, instanceRuntime: { ok: false, error: "runtime diagnostics failed" } } });
+    expect(runtimeSnapshot).toHaveBeenCalledTimes(1);
+
+    const status = await fetch(`http://127.0.0.1:${port}/status`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ status: "degraded", reconciliation: { instanceRuntime: { error: "runtime diagnostics failed" } } });
+    expect(runtimeSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it("stays not ready until instance runtime reconciliation completes", async () => {
     store = new SqliteBindingStore(":memory:");
     const runtime = { snapshot: vi.fn(() => ({ ready: false, lastError: "startup snapshot pending" })) };
@@ -304,6 +349,46 @@ describe("health server", () => {
     expect(await status.json()).toMatchObject({ status: "ok", lifecycleEvents: {
       listenerCount: 2, publicationCount: 9, subscriberFailures: 3, failuresBySubscriber: { "conversation-view-projector": 3 }, lastFailureAt: "2026-08-24T00:00:00.000Z", lastFailedSubscriber: "conversation-view-projector"
     } });
+  });
+
+  it("isolates lifecycle diagnostics failure from status and readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      lifecycleEvents: { snapshot() { throw new Error("x".repeat(600)); } }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    const response = await fetch(`http://127.0.0.1:${port}/status`);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { status: string; lifecycleEvents: { error: string } };
+    expect(body.status).toBe("degraded");
+    expect(body.lifecycleEvents.error).toHaveLength(500);
+  });
+
+  it("reports multiple diagnostics collection failures without short-circuiting status", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      workspaceCache: { status() { throw new Error("workspace diagnostics failed"); } },
+      herdrSocket: { status() { throw new Error("socket diagnostics failed"); } },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    const response = await fetch(`http://127.0.0.1:${port}/status`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" },
+      workspaceCache: { error: "workspace diagnostics failed" },
+      herdrSocket: { error: "socket diagnostics failed" }
+    });
   });
 
   it("degrades status while the Herdr transport circuit is open", async () => {

@@ -21,6 +21,7 @@ error handling also makes it easy for a newly added provider to omit isolation.
 - Return the failed provider as `{ "error": "<bounded safe message>" }`.
 - Mark the aggregate status as `degraded` for every provider collection failure.
 - Preserve `/health` behavior and existing `/ready` success/failure semantics.
+- Fail readiness closed if Lark or initial instance-runtime diagnostics throw.
 - Keep diagnostics read-only and process-local; no durable state or workflow
   transition is created by observation.
 - Bound every exposed diagnostic error to 500 characters and avoid serializing
@@ -86,13 +87,14 @@ does not by itself change aggregate status: those failures are already isolated,
 durable state remains authoritative, and the counters are informational. Only a
 failure to collect that snapshot degrades the status surface.
 
-The mandatory lease snapshot is also collected once per request through the safe
-collector. A successful result becomes the existing readiness lease component. A
-failure becomes an `ok: false` component with the bounded error and conservative
-fallback fields (`held: false`, null fencing/expiry data, and an empty owner
-suffix). The `/status` response reuses that readiness component rather than
-calling the provider a second time. This prevents one request from observing two
-different lease values and ensures an unreadable lease can never report ready.
+Mandatory Lark, lease, and initial instance-runtime diagnostics are also
+collected once per request through the safe collector. A lease failure becomes
+an `ok: false` component with the bounded error and conservative fallback fields
+(`held: false`, null fencing/expiry data, and an empty owner suffix). The
+`/status` response reuses those observations rather than calling providers a
+second time, while projecting the top-level lease back to its existing public
+shape. This prevents one request from combining contradictory observations and
+ensures an unreadable readiness dependency can never report ready.
 
 ## Failure semantics
 
@@ -118,7 +120,9 @@ Extend the health-server tests at the public HTTP seam:
    short-circuiting at the first.
 5. A lease snapshot exception makes `/ready` return 503 and makes `/status`
    degraded without invoking the provider twice within either request.
-6. Existing successful-provider and readiness tests continue to pass.
+6. Lark and initial instance-runtime exceptions fail readiness closed; the
+   instance snapshot is collected once per request and reused by `/status`.
+7. Existing successful-provider and readiness response shapes remain compatible.
 
 Verification requires the focused health-server test, TypeScript typecheck, the
 architecture import check, build, and the full test suite because the health
