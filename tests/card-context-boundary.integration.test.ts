@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderProjectEntryCard, renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
@@ -6,6 +6,7 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
+import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
@@ -13,6 +14,56 @@ let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 
 describe("card context boundaries", () => {
+  it("reports a rebuild failure to an explicit scan caller", async () => {
+    const projectionError = new Error("projection unavailable");
+    const error = vi.fn();
+    const rebuilder = new CardContextRebuilder(
+      {
+        listPendingCardContextInvalidations: () => [{
+          targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1,
+          requestedDependencyRevision: 1, projectedDependencyRevision: 0, reason: "turn.accepted",
+          createdAt: "2026-09-08T00:00:00.000Z", updatedAt: "2026-09-08T00:00:00.000Z"
+        }],
+        projectCardContext: () => { throw projectionError; }
+      },
+      () => {}, { debug() {}, error } as never, applicationPresentation
+    );
+
+    await expect(rebuilder.requestScan()).rejects.toBe(projectionError);
+
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "card-context-rebuild-failed", outcome: "retry" }), expect.any(String));
+  });
+
+  it("isolates a background rebuild failure and retries on a later wake", async () => {
+    const invalidation = {
+      targetKind: "worker-session" as const, targetId: "reviewer", targetGeneration: 1,
+      requestedDependencyRevision: 1, projectedDependencyRevision: 0, reason: "turn.accepted",
+      createdAt: "2026-09-08T00:00:00.000Z", updatedAt: "2026-09-08T00:00:00.000Z"
+    };
+    const projectCardContext = vi.fn()
+      .mockImplementationOnce(() => { throw new Error("projection unavailable"); })
+      .mockReturnValueOnce("reserved");
+    const error = vi.fn();
+    const wakeOutbound = vi.fn();
+    const work = new InProcessOutboundWorkNotifier();
+    const rebuilder = new CardContextRebuilder(
+      { listPendingCardContextInvalidations: () => [invalidation], projectCardContext },
+      wakeOutbound, { debug() {}, error } as never, applicationPresentation, work
+    );
+
+    rebuilder.start(60_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    work.wake();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rebuilder.stop();
+
+    expect(projectCardContext).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "card-context-rebuild-failed", outcome: "retry" }), expect.any(String));
+    expect(wakeOutbound).toHaveBeenCalledTimes(1);
+  });
+
   it("converges the four card aggregates, freezes Answer context, and keeps late Worker state in its owning boundary", async () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding", projectId: "project", workspaceId: "herdr", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });

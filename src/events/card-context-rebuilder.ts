@@ -16,10 +16,10 @@ export class CardContextRebuilder {
   start(intervalMs: number): void {
     if (this.timer) return;
     this.stopping = false;
-    this.unsubscribe = this.work?.subscribe(() => this.requestScan()) ?? null;
-    this.timer = setInterval(() => { void this.requestScan(); }, intervalMs);
+    this.unsubscribe = this.work?.subscribe(() => this.wake()) ?? null;
+    this.timer = setInterval(() => this.wake(), intervalMs);
     this.timer.unref?.();
-    void this.requestScan();
+    this.wake();
   }
 
   requestScan(): Promise<void> {
@@ -36,6 +36,10 @@ export class CardContextRebuilder {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     await this.running;
+  }
+
+  private wake(): void {
+    void this.requestScan().catch(() => {});
   }
 
   private async scan(): Promise<void> {
