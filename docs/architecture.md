@@ -5,7 +5,9 @@
 This document is for an engineer taking ownership of the bridge or diagnosing a
 production session. After reading it, they should be able to identify the
 authority for any observed state and follow a request from Lark through Herdr
-and back to a durable Lark delivery.
+and back to a durable Lark delivery. They should also be able to place a change
+at the correct workflow, port, adapter, or composition seam without weakening
+durability or recovery behavior.
 
 ## System purpose
 
@@ -19,7 +21,208 @@ The bridge is a durable workflow coordinator, not a message relay. It does not
 assume that a Lark API call, a Herdr snapshot, or a runtime event is a complete
 transaction by itself.
 
-### Lark authorization
+## Architecture at a glance
+
+The system is a ports-and-adapters application with one production composition
+root. Application workflows depend on consumer-shaped domain ports. Concrete
+Lark, Herdr, and SQLite adapters satisfy those ports at the outside of the
+application. SQLite stores durable workflow facts; Herdr remains authoritative
+for live runtime identity; Lark displays projections.
+
+```text
+┌──────────────────────────── External systems ────────────────────────────┐
+│ Lark / CardKit              Herdr / TraeX                  user systemd │
+│ messages and cards          panes, sessions, turns         process owner │
+└──────────────┬──────────────────────┬───────────────────────────┬────────┘
+               │ SDK / WebSocket      │ CLI / Socket / JSONL      │ lifecycle
+               v                      v                           v
+┌──────────────────────── Infrastructure adapters ────────────────────────┐
+│ Lark adapter · Herdr adapter · PaneHost · TranscriptReader · health     │
+│ command runner · Agent drivers · worktree manager · SQLite bundle       │
+└─────────────────────────────┬────────────────────────────────────────────┘
+                              │ concrete implementations
+                              v
+┌────────────────────────── Composition root ──────────────────────────────┐
+│ Creates adapters, selects implementations, injects ports, and connects  │
+│ lifecycle events, durable-work wake-ups, and runtime reconciliation.    │
+└───────────────┬────────────────────┬───────────────────────┬─────────────┘
+                │                    │                       │
+                v                    v                       v
+┌──────────────────────┐  ┌──────────────────────┐  ┌────────────────────┐
+│ Ingress / Primary    │  │ Worker / Control     │  │ Projection / Outbox│
+│ routing, acceptance  │  │ instance FIFO, exact│  │ card views, durable│
+│ prompt FIFO, recovery│  │ turn observation     │  │ Lark delivery      │
+└──────────┬───────────┘  └──────────┬───────────┘  └─────────┬──────────┘
+           └─────────────────────────┼────────────────────────┘
+                                     │ consumer-shaped ports
+                                     v
+┌────────────────────────── Domain contracts ─────────────────────────────┐
+│ Binding · Prompt · Instance · Turn · lifecycle transitions · reducers   │
+│ FIFO · generation fences · exact-turn identity · no-replay invariants   │
+└─────────────────────────────┬────────────────────────────────────────────┘
+                              │ implemented by
+                              v
+┌────────────────────── SQLite capability graph ──────────────────────────┐
+│ One SqliteContext and one primary connection; named workflow, projection│
+│ and delivery capabilities share transactions and a fenced writer lease. │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+The shortest useful request trace is:
+
+```text
+Lark input
+  -> authorization and normalization
+  -> durable inbound record
+  -> routing and atomic prompt or command acceptance
+  -> FIFO claim
+  -> one fenced Herdr / TraeX effect
+  -> exact transcript observation
+  -> durable view reduction and outbox intent
+  -> ordered Lark delivery
+```
+
+Every arrow across an external-effect boundary has a durable fact on the SQLite
+side. Process-local events and wake-ups reduce latency; durable scans and fresh
+Herdr observations provide convergence when a hint is lost.
+
+## Composition root
+
+The composition root is the only production location that knows the complete
+runtime topology. It creates concrete adapters, selects production
+implementations for domain ports, constructs workflows, connects event and
+wake-up handlers, and returns the runtime modules owned by process lifecycle.
+It answers **who is connected to whom**; it does not decide **what business
+transition should happen next**.
+
+The top-level composition is divided into focused factories so the full graph
+remains reviewable:
+
+```text
+createBridgeRuntime
+│
+├─ RuntimeEventIntegration
+├─ createInfrastructureRuntime
+│    └─ Lark, Herdr, PaneHost, transcripts, drivers, worktrees
+├─ createOutboundRuntime
+│    └─ projections, Answer/Main Card workflows, durable outbox drain
+├─ createPrimaryRuntime
+│    └─ prompt FIFO, exact turn supervision, external-turn observation
+├─ createWorkerRuntime
+│    └─ Worker acceptance, FIFO dispatch, observation, reconciliation
+└─ createApplicationRuntime
+     ├─ createBindingSessionRuntime
+     ├─ createCommandControlRuntime
+     └─ createIngressRecoveryRuntime
+```
+
+Each child factory receives only a typed selection of the capabilities it can
+compose. Only the parent composition sees the complete SQLite bundle. This makes
+an accidental cross-context dependency a compile-time error and keeps the
+workflow interface visible at its construction site.
+
+The composition root may:
+
+- create adapters and workflows;
+- inject consumer-shaped ports and validated configuration;
+- connect lifecycle subscribers, durable-work wake-ups, and Herdr hint routes;
+- select the production presentation and Agent drivers;
+- return startable, stoppable, and observable runtime modules.
+
+It must not:
+
+- claim or reorder a Prompt or Worker-turn FIFO;
+- decide whether an uncertain effect is safe to replay;
+- perform Binding, Prompt, Instance, or outbox state transitions;
+- parse terminal output or render cards;
+- bypass a workflow by writing raw SQLite state or terminal input.
+
+Three similarly shaped modules have deliberately different scopes:
+
+| Module | Scope | Responsibility |
+| --- | --- | --- |
+| Application composition root | Whole running bridge | Connect external adapters, workflows, events, and lifecycle-owned modules |
+| `SqliteCapabilityGraph` | SQLite adapter implementation | Create the single transactional context, run migrations, and expose named capabilities |
+| `RuntimeEventIntegration` | Process-local runtime wiring | Connect four reliability-specific event and wake-up channels without creating another durable authority |
+
+## Key design rules
+
+The following rules define where new behavior belongs and which shortcuts are
+unsafe. The detailed lifecycle, recovery, streaming, and delivery sections below
+explain their implementation.
+
+### Authority is split, not replicated
+
+```text
+Herdr  -> live pane, process, native session, and Agent-state authority
+SQLite -> workflow intent, queues, fences, projections, outbox, audit, lease
+Lark   -> visible messages and cards only
+```
+
+Never infer runtime truth from a card, and never repair SQLite from Lark output.
+Reconcile live identity from Herdr, persist the resulting workflow transition,
+then let projections and the outbox repair Lark.
+
+### Consumer-shaped ports preserve deep modules
+
+A workflow receives the smallest named interface that expresses its complete
+responsibility. Startup view convergence explicitly receives startup recovery,
+Answer-page, and Main-Card stores. Instance messaging, turn supervision, exact
+observation, runtime reconciliation, and lifecycle control each use a named
+consumer port. The concrete SQLite capability can satisfy several ports while
+keeping SQL and transaction ownership internal. Narrowing an interface must not
+split an atomic aggregate transition.
+
+### One SQLite context owns atomic workflow transitions
+
+Production constructs one `SqliteContext` and one primary `DatabaseSync`
+connection. Prompt acceptance, Run Card projection, Worker-turn events, card
+invalidation, and outbox intent can therefore participate in the same outer
+transaction. The read-only integrity worker is the deliberate separate-connection
+exception. New capability modules share the existing context; they do not create
+their own connection or emulate a transaction across repositories.
+
+### External effects are fenced and never guessed
+
+Ordinary Prompt and Worker-turn queues are durable FIFO queues with one active
+ordinary turn per owner. Before steering, stopping, observing, or settling a
+turn, workflows fence the applicable binding or instance generation, pane,
+native session, logical turn, runtime turn, and canonical runtime start time.
+Work proven not to have started may return to dispatch. Work that may have
+reached TraeX becomes detached or uncertain and is observed or explicitly
+resolved; it is never automatically replayed.
+
+### Delivery intent precedes delivery
+
+User-visible workflow intent is committed before any Lark call. The durable
+outbox provides idempotency, strict ordering within a lane, compare-and-swap
+delivery checkpoints, bounded retry, dead-letter handling, and recovery. A Lark
+retry can repeat only the delivery effect, never the corresponding TraeX prompt.
+Frozen Answer pages are immutable; continuation proceeds on a new card.
+
+### Events have four different reliability contracts
+
+| Channel | Contract | Recovery authority |
+| --- | --- | --- |
+| Inbound notification | Durable SQLite record plus a wake-up hint | Inbox scan and interrupted-claim recovery |
+| Lifecycle event | Committed canonical state plus typed process-local fan-out | Current SQLite projections |
+| Work wake-up | Best-effort, coalescing, and owner-keyed | Durable queue scan |
+| Herdr event | Bounded reconciliation hint | Fresh Herdr snapshot or targeted observation |
+
+These channels share composition but not semantics. There is no generic durable
+event log, no event sourcing, and no assumption that receiving an event proves a
+state transition.
+
+### Recovery converges from canonical state
+
+Startup acquires the fenced SQLite lease, runs migrations and integrity checks,
+recovers interrupted local claims, converges durable views, establishes runtime
+baselines, and reconciles against fresh Herdr state. Lost events and process
+restarts may delay convergence but must not change the final state. Recovery
+never treats stale card text or a coarse idle observation as proof that an exact
+turn completed.
+
+## Lark authorization
 
 The configured chat is necessary but not sufficient for access.
 `LARK_ALLOWED_OPEN_IDS` is a mandatory prompt and card-action allowlist.
@@ -61,44 +264,14 @@ input, interrupts TraeX, or replays the prompt.
 
 ## Architecture and dependency direction
 
-The target architecture follows a ports-and-adapters structure. Dependencies
-point inward: the domain defines the language and ports required by use cases;
-application workflows depend on those ports; infrastructure implements them for
-SQLite, Herdr, Lark, and the host runtime. A concrete adapter must not become
-the source of workflow policy.
+Dependencies point inward: domain contracts define the language and capabilities
+required by workflows; workflows coordinate use cases; infrastructure adapters
+implement ports for SQLite, Herdr, Lark, and the host runtime. A concrete adapter
+must not become the source of workflow policy. Workflows do not embed Lark SDK
+calls, Herdr CLI parsing, or SQLite-specific decisions.
 
-```text
-┌──────────────────────────── External systems ────────────────────────────┐
-│ Lark / CardKit                Herdr / TraeX                 user systemd │
-└──────────────┬──────────────────────┬───────────────────────────┬────────┘
-               │ SDK / HTTP           │ CLI / snapshot            │ lifecycle
-               v                      v                           v
-┌──────────────────────── Infrastructure and adapters ─────────────────────┐
-│ Lark adapter · Herdr adapter · command runner · Socket RPC/event client   │
-│ SQLite capability bundle · health server · lease runtime · shutdown        │
-└───────────────────────┬──────────────────────────────────────────────────┘
-                        │ implements ports
-                        v
-┌────────────────────────── Application workflows ─────────────────────────┐
-│ Inbound routing and prompt acceptance · prompt run · runtime reconciliation
-│ binding provisioning · operations · conversation projection · outbox drain
-│                                                                            │
-│ Workflows coordinate use cases and request atomic port operations. They do │
-│ not embed Lark SDK calls, Herdr CLI parsing, or SQLite-specific policy.    │
-└───────────────────────┬──────────────────────────────────────────────────┘
-                        │ depends on domain contracts
-                        v
-┌──────────────────────────────── Domain ──────────────────────────────────┐
-│ Binding and Prompt entities; Turn execution and exact-control concepts;  │
-│ transitions; FIFO, uncertain-dispatch, and approval invariants;          │
-│ lifecycle event types; capability-focused ports.                         │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-The composition root creates the concrete infrastructure adapters and injects
-capability-focused ports into the application workflows. `main.ts` is only the
-process boundary: it loads configuration and build identity, registers signal
-handlers, reports startup, and applies exit-code policy.
+The process entry point only loads configuration and build identity, registers
+signal handlers, reports startup, and applies exit-code policy.
 `createManagedBridgeRuntime()` constructs the store, lease, runtime graph, and
 health server dependencies. `ManagedBridgeRuntime` is the lifecycle authority
 for ordered startup, lease-loss handling, partial-start cleanup, and idempotent
@@ -192,10 +365,9 @@ prompt, binding-session, control, recovery, instance, and outbox aggregate modul
 that share the same context and preserve their outer transaction. Each workflow receives only
 the domain port it consumes, such as `PromptRunStore`, `InstanceLifecycleStore`, `InstanceTurnStore`,
 `OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
-facade type. Legacy tests that inspect migration fixtures may still construct the
-test-only `SqliteBindingStore` from `tests/helpers/sqlite-binding-store.ts`. The
-compatibility name does not exist under `src/`, and new workflow tests use
-`createTestStoreBundle()` with named capabilities.
+facade type. A test-only `SqliteBindingStore` compatibility helper remains for
+migration-fixture inspection, but production code does not expose that name. New
+workflow tests use `createTestStoreBundle()` with named capabilities.
 
 The outbound, Primary, Worker, and application composition factories declare
 consumer-specific `Pick<SqliteStoreBundle, ...>` inputs. Only the parent bridge
@@ -718,7 +890,7 @@ in append mutations is the canonical typed Answer-content source. Assistant
 `function_call` stores a compact descriptor but emits no Answer content. Its
 exact paired `function_call_output` emits one consistently ordered row such as
 <code>✓ Command · `npm test` · 70 files / 680 tests passed</code> or
-`✓ Read · src/main.ts`. Generic completion words are omitted because `✓` already
+`✓ Read · application entrypoint`. Generic completion words are omitted because `✓` already
 expresses success. Successful tool stdout, file contents, serialized arguments,
 patch bodies, and agent payloads never enter the Answer. Explicit failures
 contribute `✗ <Type> · <Target> · <Summary>` plus only the last 20 non-empty,
@@ -983,6 +1155,15 @@ Health endpoints have separate meanings:
 - `/status` returns a sanitized operational snapshot even when dependencies are
   degraded.
 
+Diagnostics are observational and must not become a new availability hazard.
+Each provider is collected independently; a synchronous provider failure becomes
+a bounded error object, leaves sibling diagnostics visible, and degrades the
+aggregate status instead of aborting the HTTP request. Readiness dependencies
+fail closed: if lease, Lark, or initial instance-runtime state cannot be read,
+`/ready` returns not ready. One request reads each volatile readiness provider at
+most once and reuses that observation in `/status`, so a response cannot combine
+contradictory lease or reconciliation snapshots.
+
 `/status` reports active and released outbox quarantines by lane and failure
 class, plus due lane heads that have made no progress for five minutes. An
 active quarantine or stalled head degrades status without changing readiness,
@@ -1052,28 +1233,6 @@ Approval policy has fixed `routine`, `remote-confirmation`, and `local-only`
 tiers. Remote grants are persisted and bind the actor, project, instance
 generation, canonical action fingerprint, resource scope, policy version,
 expiry, and single-use state. Any mismatch fails closed.
-
-## Known implementation gaps
-
-These are concrete correctness or robustness gaps in the current implementation,
-distinct from the architectural evolution priorities above. They do not require a
-boundary change to fix.
-
-- **Runtime tuning**: polling intervals, Herdr snapshot cache TTL, CardKit
-  debounce and size limits, Answer render/page boundaries, and pane-close
-  confirmation TTL are loaded from strict `runtime.yaml` at the composition
-  boundary. Missing files preserve defaults; present invalid files fail closed.
-  Production consumers receive normalized values through constructor seams, so
-  domain workflows remain independent of YAML and environment parsing.
-
-## Current evolution priorities
-
-1. Add operational metrics (prompt latency, queue depth, dead-letter count,
-   reconciliation duration, delivery latency) and lane-level backlog
-   diagnostics; cross-lane concurrency with strict in-lane ordering is already
-   implemented.
-2. Add runtime tuning fields only when an operator-facing need is established;
-   keep each new setting validated and injected at the composition boundary.
 
 ## Related documents
 
