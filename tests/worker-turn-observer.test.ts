@@ -130,24 +130,41 @@ describe("WorkerTurnObserver", () => {
     const readObservation = vi.fn()
       .mockResolvedValueOnce({ turnId: runtimeTurnId, answerDelta: "recovered", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt } })
       .mockResolvedValue({ answerDelta: "" });
-    transcriptReader.openAfterTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
+    transcriptReader.openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
     const submit = vi.fn();
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAfterTurn).toHaveBeenCalledWith({ source: "traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
+    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
     expect(submit).not.toHaveBeenCalled();
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "recovered" });
   });
 
-  it("treats a successfully reopened exact completion boundary as terminal even with no later delta", async () => {
+  it("does not infer completion when the exact recovery cursor has no terminal lifecycle", async () => {
     const { observer, transcriptReader } = setup();
     await observer.observe("turn-1", { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "persisted answer", turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
-    transcriptReader.openAfterTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => "") } }));
+    transcriptReader.openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => "") } }));
 
     await observer.recover("turn-1");
 
-    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "persisted answer" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "persisted answer", resultCapture: "captured" });
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", result: null });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "persisted answer", resultCapture: "pending" });
+  });
+
+  it("recovers the full final answer from the exact turn start boundary", async () => {
+    const { observer, transcriptReader } = setup();
+    await observer.observe("turn-1", { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
+    const observations = Array.from({ length: 40 }, (_, index) => ({
+      turnId: runtimeTurnId, answerDelta: `progress ${index}`, turnLifecycle: { turnId: runtimeTurnId, state: "active" as const, startedAt }
+    }));
+    observations.push({ turnId: runtimeTurnId, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "completed" as const, startedAt, finalAnswer: "full recovered answer" } });
+    const readObservation = vi.fn(async () => observations.shift() ?? { answerDelta: "" });
+    transcriptReader.openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
+
+    await observer.recover("turn-1");
+
+    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "full recovered answer" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "full recovered answer", resultCapture: "captured" });
   });
 });

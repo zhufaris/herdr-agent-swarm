@@ -12,8 +12,9 @@ interface Options {
   presentation: Pick<WorkerPresentation, "workerTurn" | "safeWorkerOutput">;
   pollIntervalMs?: number;
 }
-export interface WorkerTurnWatch { stop(): Promise<void> }
+export interface WorkerTurnWatch { flush(): Promise<void>; stop(): Promise<void>; detach(): Promise<void> }
 const FINAL_DRAIN_LIMIT = 8;
+const RECOVERY_DRAIN_LIMIT = 64;
 
 export class WorkerTurnObserver {
   private readonly headlessChunks = new Map<string, string[]>();
@@ -83,23 +84,37 @@ export class WorkerTurnObserver {
     let stopping = false;
     let timer: NodeJS.Timeout | null = null;
     let active = Promise.resolve();
+    let resolveDetached!: () => void;
+    const detached = new Promise<void>((resolve) => { resolveDetached = resolve; });
+    const finish = () => {
+      if (stopping) return;
+      stopping = true;
+      if (timer) clearInterval(timer);
+      timer = null;
+      resolveDetached();
+    };
     const poll = () => {
       active = active.then(async () => {
         if (stopping) return;
         const result = await opened.cursor.read();
         if (result.kind === "accepted") await this.observe(turnId, result.observation);
+        const current = this.options.store.getInstanceTurn(turnId);
+        if (!current || ["completed", "failed", "cancelled"].includes(current.state)) finish();
       }).catch(() => undefined);
     };
     timer = setInterval(poll, this.options.pollIntervalMs ?? 250);
     timer.unref?.();
     return {
+      flush: async () => {
+        active = active.then(() => this.drain(turnId, opened.cursor, FINAL_DRAIN_LIMIT));
+        await active;
+      },
       stop: async () => {
-        stopping = true;
-        if (timer) clearInterval(timer);
-        timer = null;
+        finish();
         await active;
         await this.drain(turnId, opened.cursor, FINAL_DRAIN_LIMIT);
-      }
+      },
+      detach: () => detached
     };
   }
 
@@ -111,22 +126,11 @@ export class WorkerTurnObserver {
     if (!session) return;
     const opened = await this.exactTurns.open({
       session,
-      boundary: { kind: "after", turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt },
+      boundary: { kind: "at", turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt },
       expected: { turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt }
     });
     if (opened.mode !== "typed") return;
-    await this.drain(turnId, opened.cursor, 32);
-    const current = this.options.store.getInstanceTurn(turnId);
-    const view = this.options.store.loadWorkerTurnCard(turnId);
-    if (current && view && !["completed", "failed", "cancelled"].includes(current.state)) {
-      const occurredAt = new Date().toISOString();
-      const answer = this.safeOutput(view.answer);
-      const projected = this.options.store.transitionInstanceTurnWithProjection({
-        turnId, expectedGeneration: current.instanceGeneration, expectedRuntimeTurnId: current.runtimeTurnId!, expectedRuntimeTurnStartedAt: current.runtimeTurnStartedAt!,
-        state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: this.options.presentation.workerTurn
-      });
-      if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(current.instanceId); }
-    }
+    await this.drain(turnId, opened.cursor, RECOVERY_DRAIN_LIMIT);
   }
   private async drain(turnId: string, cursor: ExactTurnCursor, limit: number): Promise<void> {
     await cursor.drain({ limit, onObservation: async (observation) => {

@@ -9,7 +9,7 @@ import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
 import { workerPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
-afterEach(() => { store?.close(); store = undefined; });
+afterEach(() => { vi.useRealTimers(); store?.close(); store = undefined; });
 
 function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}, options: { nativeSessionId?: string | null; transcriptReader?: TraexTranscriptReaderPort } = {}) {
   store = new SqliteBindingStore(":memory:");
@@ -385,6 +385,44 @@ describe("instance messaging", () => {
 
     await observer!.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "trusted completion", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "trusted completion" } });
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted completion", error: null });
+  });
+
+  it("keeps the transcript watcher alive after an exact-owned stalled receipt", async () => {
+    vi.useFakeTimers();
+    const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
+    const startedAt = "2026-09-01T00:00:01.000Z";
+    const observations = [{
+      turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "",
+      turnLifecycle: { turnId: runtimeTurnId, state: "active" as const, startedAt }
+    }];
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "typed" as const, cursor: {
+        async readDelta() { return ""; },
+        async readObservation() { return observations.shift() ?? { answerDelta: "" }; }
+      } }; }
+    };
+    const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
+    const worker = create("worker");
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      await hooks?.onDispatched?.();
+      await vi.advanceTimersByTimeAsync(250);
+      return { status: "delivery-uncertain", reason: "agent_prompt_stalled" };
+    });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root-1" } });
+
+    await scheduler.drain(worker.id);
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", runtimeTurnId });
+
+    observations.push({ turnId: runtimeTurnId, answerDelta: "late progress", turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "late progress" });
+
+    observations.push({ turnId: runtimeTurnId, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "final answer" } });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "final answer" });
+    expect(driver.submit).toHaveBeenCalledOnce();
+    await scheduler.stop();
+    vi.useRealTimers();
   });
 
   it("keeps observing an exact-owned running turn when the driver throws late", async () => {

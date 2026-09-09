@@ -11,6 +11,7 @@ export class InstanceWorkScheduler {
   private readonly active = new Set<string>();
   private readonly drains = new Set<Promise<void>>();
   private readonly inFlight = new Map<string, { turnId: string; generation: number }>();
+  private readonly detachedWatches = new Set<WorkerTurnWatch>();
   private readonly detachedTurns = new Set<string>();
   private stopping = false;
   private lastFailureAt: string | null = null;
@@ -51,22 +52,24 @@ export class InstanceWorkScheduler {
             },
             onObservation: async () => { /* Runtime state is reconciled separately; trusted output comes from the exact transcript. */ }
           });
-          await watch?.stop();
         } catch (error) {
-          await watch?.stop();
-          if (this.detachedTurns.has(turn.id)) return;
+          if (this.detachedTurns.has(turn.id)) { await watch?.stop(); return; }
+          await watch?.flush();
           const observed = this.options.store.getInstanceTurn(turn.id);
-          if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) continue;
-          if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) return;
+          if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) { await watch?.stop(); continue; }
+          if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) { this.detachWatch(watch); return; }
+          await watch?.stop();
           const message = safeLogError(error).message;
           this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: message }, message);
           this.recordFailure(error, instanceId, turn.id);
           return;
         }
-        if (this.detachedTurns.has(turn.id)) return;
+        if (this.detachedTurns.has(turn.id)) { await watch?.stop(); return; }
+        await watch?.flush();
         const observed = this.options.store.getInstanceTurn(turn.id);
-        if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) continue;
-        if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) return;
+        if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) { await watch?.stop(); continue; }
+        if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) { this.detachWatch(watch); return; }
+        await watch?.stop();
         if (receipt.status === "confirmed-delivered") {
           if (driver.describe().structuredEvents) return;
           this.transition(turn.id, turn.instanceGeneration, "completed", "turn.completed", { type: "completed-without-output", occurredAt: new Date().toISOString(), notice: "该 Worker 不支持结构化输出捕获；请前往对应 Herdr Pane 查看本地会话。" }, null, "");
@@ -97,8 +100,8 @@ export class InstanceWorkScheduler {
   async stop(context?: ShutdownContext): Promise<void> {
     this.stopping = true;
     const settled = Promise.allSettled([...this.drains]);
-    if (!context) { await settled; return; }
-    if (context.remainingMs() > 0 && !context.signal.aborted && await settlesWithin(settled, context.remainingMs(), context.signal)) return;
+    if (!context) { await settled; await this.stopDetachedWatches(); return; }
+    if (context.remainingMs() > 0 && !context.signal.aborted && await settlesWithin(settled, context.remainingMs(), context.signal)) { await this.stopDetachedWatches(); return; }
     for (const { turnId, generation } of this.inFlight.values()) {
       this.detachedTurns.add(turnId);
       const current = this.options.store.getInstanceTurn(turnId);
@@ -106,6 +109,17 @@ export class InstanceWorkScheduler {
       const notice = "Bridge stopped observing an in-flight instance turn; prompt was not replayed";
       this.transition(turnId, generation, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, notice);
     }
+    await this.stopDetachedWatches();
+  }
+  private detachWatch(watch: WorkerTurnWatch | null): void {
+    if (!watch) return;
+    this.detachedWatches.add(watch);
+    void watch.detach().finally(() => this.detachedWatches.delete(watch));
+  }
+  private async stopDetachedWatches(): Promise<void> {
+    const watches = [...this.detachedWatches];
+    await Promise.allSettled(watches.map((watch) => watch.stop()));
+    for (const watch of watches) this.detachedWatches.delete(watch);
   }
   private recordFailure(error: unknown, instanceId: string, turnId?: string): void {
     this.lastFailureAt = new Date().toISOString(); this.lastFailure = safeLogError(error).message;
