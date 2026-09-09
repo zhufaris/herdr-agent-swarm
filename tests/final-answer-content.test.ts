@@ -29,9 +29,33 @@ describe("final answer content", () => {
     });
   });
 
-  it("keeps command activities without detail compact and preserves lookalike prose", () => {
-    const command = ["◆ **Ran** · 运行中", "", "```bash", "npm test", "```"].join("\n");
-    expect(foldFinalAnswerContent(command)).toEqual([{ tag: "markdown", content: "⚙️ **Ran** · `npm test` · … 运行中" }]);
+  it("folds completed commands without output, including the final Answer element", () => {
+    const command = ["◆ **Ran**", "", "```bash", "npm test", "```"].join("\n");
+    expect(foldFinalAnswerContent(`before\n\n${command}`)).toEqual([
+      { tag: "markdown", content: "before" },
+      {
+        tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
+        header: { title: { tag: "plain_text", content: "⚙️ Ran · npm test · ✓ 完成" } },
+        elements: [{ tag: "markdown", content: "```bash\nnpm test\n```\n\n命令已完成，无可展示输出。" }]
+      }
+    ]);
+  });
+
+  it("folds failed commands without detail but keeps running commands compact", () => {
+    const failed = ["◆ **Ran** · ✗ exit 2", "", "```bash", "npm test", "```"].join("\n");
+    expect(foldFinalAnswerContent(failed)[0]).toMatchObject({
+      tag: "collapsible_panel", header: { title: { content: "⚙️ Ran · npm test · ✗ exit 2" } }
+    });
+    const running = ["◆ **Ran** · 运行中", "", "```bash", "npm test", "```"].join("\n");
+    expect(foldFinalAnswerContent(running)).toEqual([{ tag: "markdown", content: "⚙️ **Ran** · `npm test` · … 运行中" }]);
+  });
+
+  it("falls back to compact Markdown when an empty-output command panel exceeds the payload budget", () => {
+    const command = ["◆ **Ran**", "", "```bash", "npm test", "```"].join("\n");
+    expect(foldFinalAnswerContent(command, 100)).toEqual([{ tag: "markdown", content: "⚙️ **Ran** · `npm test` · ✓ 完成" }]);
+  });
+
+  it("preserves command lookalike prose", () => {
     const lookalike = ["◆ **Ran**", "not a bridge command block"].join("\n");
     expect(compactAnswerToolActivity(lookalike)).toBe(lookalike);
   });

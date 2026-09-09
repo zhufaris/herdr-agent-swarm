@@ -12,7 +12,7 @@ const ACTIVITY_EMOJI = { Skill: "🧩", Read: "📖", Search: "🔍", Edit: "✏
 type AnswerContentBlock =
   | { kind: "markdown"; content: string }
   | { kind: "code"; source: string; language: string; code: string }
-  | { kind: "command"; source: string; title: string; compact: string; command: string; output: string | null };
+  | { kind: "command"; source: string; title: string; compact: string; command: string; output: string | null; terminal: boolean };
 
 /** Replaces exact bridge-generated command blocks with Herdr-like summary rows. */
 export function compactAnswerToolActivity(content: string): string {
@@ -50,8 +50,10 @@ export function foldFinalAnswerContent(content: string, payloadLimit = 12_000): 
 function renderBlock(block: AnswerContentBlock): FinalAnswerElement[] {
   if (block.kind === "markdown") return [{ tag: "markdown", content: compactAnswerToolActivity(block.content) }];
   if (block.kind === "command") {
-    if (!block.output) return [{ tag: "markdown", content: block.compact }];
-    const detail = ["```bash", block.command, "```", "", "```text", block.output, "```"].join("\n");
+    if (!block.terminal) return [{ tag: "markdown", content: block.compact }];
+    const detail = block.output
+      ? ["```bash", block.command, "```", "", "```text", block.output, "```"].join("\n")
+      : ["```bash", block.command, "```", "", "命令已完成，无可展示输出。"].join("\n");
     return [{
       tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
       header: { title: { tag: "plain_text", content: block.title } },
@@ -113,12 +115,13 @@ function parseCommandBlock(lines: readonly string[], start: number): { block: Ex
     index = outputEnd + 1;
   }
   const state = commandState(heading[1]);
+  const terminal = heading[1] !== "运行中";
   const normalizedCommand = command.replace(/\s+/g, " ").trim();
   const plainCommand = truncateWithEllipsis(normalizedCommand, COMMAND_TARGET_LIMIT);
   output = output === null ? null : truncateWithEllipsis(output, COMMAND_OUTPUT_LIMIT);
   const title = `⚙️ Ran · ${plainCommand} · ${state}`;
   const compact = `⚙️ **Ran** · \`${plainCommand.replaceAll("`", "\\`")}\` · ${state}`;
-  return { block: { kind: "command", source: lines.slice(start, index).join("\n"), title, compact, command: plainCommand, output }, nextIndex: index };
+  return { block: { kind: "command", source: lines.slice(start, index).join("\n"), title, compact, command: plainCommand, output, terminal }, nextIndex: index };
 }
 
 function truncateWithEllipsis(value: string, limit: number): string {
