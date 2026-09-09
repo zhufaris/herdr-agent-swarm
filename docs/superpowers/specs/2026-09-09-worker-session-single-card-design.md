@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft for written-spec review. This document replaces the visible one-card-per-
+Implemented. This document replaces the visible one-card-per-
 turn Worker presentation with one continuously updated card per Worker session.
 Turn history, FIFO scheduling, exact-turn ownership, and durable recovery remain
 unchanged authorities.

@@ -54,35 +54,31 @@ active turn；没有 active turn、目标已经换代或 Agent 不支持 steerin
 `/stop reviewer` 只中断该 Worker 当前唯一的 exact active turn，不停止 Worker 实例，也不取消
 其 FIFO backlog。旧命令 `/interrupt reviewer` 暂时作为同一操作的兼容别名。
 
-每次 `/to` 都会立即创建独立的 Worker task card。卡片在排队、准备、运行或阻塞期间只展示
-请求、状态和结构化进度；可信输出仍会持久化，但不会把中间草稿持续展示到飞书。任务完成后，
-最终输出会一次性写入卡片，超过 9,000 字符时分页；失败、取消或 `dispatch-uncertain` 只展示
-原因，不展示部分输出。已经冻结的前页不会被后续更新改写。`/instance reviewer` 显示最新五条任务的请求、结果摘要和
-capture 状态，点击“打开”只读取该任务的持久化卡片，不会再次执行任务。
+每个 Worker session generation 只有一张持久 Worker Main Card。每次 `/to` 创建独立的
+Worker turn，但不会新增飞书卡片；同一张 Worker Main Card 会持续展示当前请求、状态、
+结构化进度、受限长度的输出、排队数量和最近五条终态任务。完整输出和历史仍保存在 SQLite，
+不会因为卡片合并而丢失。
 
-每个 Worker session generation 还拥有一张持久 Worker Main Card。它只汇总 Worker 身份、
-runtime 状态、当前任务、排队数量和最近五条终态任务，不复制请求正文、结果或 reasoning。
 runtime 重启、reattach 或 pane replacement 会继续更新同一张 Worker Main；终止后该卡冻结，
 同名重建会创建新的 Worker session 和新卡。Primary Main 只展示当前 Primary pane 拥有的
 Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Worker activity。Answer
-完成后摘要随页面冻结，较晚的 Worker 更新只进入 Worker Task、Worker Main 和 Primary Main。
-卡片间的“打开”按钮只在目标卡已成功投递后出现。
+完成后摘要随页面冻结，较晚的 Worker 更新只进入 Worker Main 和 Primary Main。
 
 Worker prompt 分为三种明确语义，推荐直接围绕卡片操作：
 
-- `补充当前任务`：点击正在运行或 blocked 的 Task Card 上的同名按钮并提交表单；
+- `补充当前任务`：点击 Worker Main Card 当前任务区域的同名按钮并提交表单；
   内容只会 steer 这一个精确 active turn。
-- `继续这个任务`：点击 completed、failed 或 cancelled 的 Task Card 上的同名按钮并
+- `继续这个任务`：点击 Worker Main Card 中 completed、failed 或 cancelled 当前任务的同名按钮并
   提交表单；系统创建一条带父任务关系的新 follow-up，并按 FIFO 排队。
 - `发起新任务`：点击 Worker Main Card 上的同名按钮，或使用 `/to`；系统创建一条
   与历史任务无父子关系的独立 FIFO 任务。
 
-要持续给同一个任务补充要求，必须使用 Task Card 上的按钮。飞书话题会把“回复卡片”
+要持续给同一个任务补充要求，必须使用 Worker Main Card 上的按钮。飞书话题会把“回复卡片”
 产生的文本消息关联到话题根消息，而不是被回复的 Worker Task Card；因此直接回复卡片、
 即使 `@Bot`，也会作为 Primary prompt 处理。系统不会根据 Thread、最近卡片、当前选中的
 Worker 或视觉上的回复位置猜测 Worker 目标。也可使用 `/to <worker> <任务>` 发起独立任务。
 
-Task Card 仅显示当前状态允许的操作。运行中的卡片提供“补充当前任务”和
+Worker Main Card 仅显示当前状态允许的操作。运行中的任务提供“补充当前任务”和
 “停止当前任务”；blocked 卡片允许补充要求，但审批仍必须在 Herdr Pane 本地完成；
 终态卡片提供“继续这个任务”；queued、preparing 和 `dispatch-uncertain` 不提供追加按钮。
 若用户打开表单后任务状态发生变化，提交会被拒绝，系统不会把原本的 steer 自动改成
@@ -97,7 +93,7 @@ Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation
 目标会失效，必须刷新后重新选择。Primary 可直接调用同项目中已存在的 Worker，不需要
 逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
 触发 Primary turn。Primary 通过内置 Worker 工具发起的新任务和 follow-up 也会在当前飞书
-话题创建独立的 Worker Task Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
+话题更新稳定的 Worker Main Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
 不能由工具调用参数伪造。调用 `follow_up_instance` 时必须显式传入 `inspect_instance` 返回的
 已终结 `parentTurnId`；服务端拒绝跨 Worker、跨 generation 或尚未结束的父任务。
 

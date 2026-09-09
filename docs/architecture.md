@@ -568,26 +568,22 @@ Lark inbound -> atomic InstanceTurn + WorkerTurnCard projection + invalidations
              -> independent SQLite outbox lanes -> Lark CardKit
 ```
 
-Acceptance persists the turn, its initial queued card projection, and delivery
-intent before waking the scheduler. A Worker claims at most one ordinary turn at
+Acceptance persists the turn, its internal queued projection, and Worker-session
+context invalidation before waking the scheduler. A Worker claims at most one ordinary turn at
 a time. The Agent driver's dispatch receipt proves only that submission crossed
 the boundary; it is never interpreted as the task result. `WorkerTurnObserver`
 claims output ownership only when the instance generation, runtime turn ID, and
 canonical turn start time all match. Restart recovery reopens that transcript
 boundary for observation and never calls the submission boundary again.
 
-Each task uses a separate `worker-turn:<turnId>` outbox lane. A permanent CardKit
-failure quarantines only that lane, so another task card or unrelated reply can
-still advance. While a task is queued, preparing, running, or blocked, the task
-card publishes only lifecycle and structured progress; transcript output remains
-durable but is not sent as visible draft content. Completion first updates the
-card structure, then publishes the final sanitized output through the ordered task
-lane. Failed, cancelled, and dispatch-uncertain tasks expose only their reason and
-never publish partial output. Final output pages are ordered within the task and
-split at the 9,000-character render boundary. Once a continuation page
-is created, earlier pages are frozen and are not patched. SQLite retains the full
-sanitized canonical result; recent Worker history and card previews are bounded
-render-only summaries.
+One stable Worker Main Card is updated on the
+`worker-main:<workerId>:<workerSessionGeneration>` lane. It shows the current
+request, lifecycle, bounded progress/output, queue state, and recent terminal
+history. Completion remains visible until a newer task becomes current. SQLite
+retains the full sanitized canonical result and internal turn projection; no new
+per-turn card or continuation message is created. Previously delivered Task Cards
+remain immutable historical artifacts, and startup dismisses only legacy create
+intents that are proven never attempted.
 
 The other card contexts are explicit durable projection boundaries. Primary Main
 contains only bounded summaries for Workers owned by its exact binding and pane.
@@ -596,7 +592,8 @@ Primary turn, and freezes that summary when its Answer page becomes terminal.
 Worker Main is keyed by `(workerId, workerSessionGeneration)`; runtime generation,
 pane replacement, and native-session renewal update that card rather than creating
 a new session card. Termination freezes it, while same-name recreation creates a
-new Worker identity and card. Worker output remains exclusive to Worker Task cards.
+new Worker identity and card. Worker output is shown only in the stable Worker
+Main Card and remains bounded at render time.
 
 Context invalidations are committed in the same SQLite transaction as the owning
 Worker transition. Startup, notifier hints, and periodic scans rebuild unfinished
