@@ -57,6 +57,7 @@ export class InstanceWorkScheduler {
           if (this.detachedTurns.has(turn.id)) return;
           const observed = this.options.store.getInstanceTurn(turn.id);
           if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) continue;
+          if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) return;
           const message = safeLogError(error).message;
           this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: message }, message);
           this.recordFailure(error, instanceId, turn.id);
@@ -65,6 +66,7 @@ export class InstanceWorkScheduler {
         if (this.detachedTurns.has(turn.id)) return;
         const observed = this.options.store.getInstanceTurn(turn.id);
         if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) continue;
+        if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) return;
         if (receipt.status === "confirmed-delivered") {
           if (driver.describe().structuredEvents) return;
           this.transition(turn.id, turn.instanceGeneration, "completed", "turn.completed", { type: "completed-without-output", occurredAt: new Date().toISOString(), notice: "该 Worker 不支持结构化输出捕获；请前往对应 Herdr Pane 查看本地会话。" }, null, "");

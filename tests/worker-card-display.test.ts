@@ -37,10 +37,12 @@ describe("WorkerCardDisplayWorkflow", () => {
   });
 
   it("is idempotent and renders a no-task snapshot", () => {
-    const { workflow, input } = setup(false); const first = workflow.show(input); const second = workflow.show(input);
+    const { workflow, input } = setup(false); const first = workflow.show(input);
+    const firstPayload = (store!.database.prepare("SELECT payload FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%'").get() as { payload: string }).payload;
+    const second = workflow.show(input);
     expect(second).toEqual(first);
     const rows = store!.database.prepare("SELECT payload FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%' ORDER BY delivery_order").all() as Array<{ payload: string }>;
-    expect(rows).toHaveLength(1); expect(JSON.stringify(JSON.parse(rows[0]!.payload))).toContain("No task history");
+    expect(rows).toHaveLength(1); expect(rows[0]!.payload).toBe(firstPayload); expect(JSON.stringify(JSON.parse(rows[0]!.payload))).toContain("No task history");
   });
 
   it("rejects mismatched names and conflicting key reuse without reserving cards", () => {

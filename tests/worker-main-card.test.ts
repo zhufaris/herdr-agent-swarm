@@ -11,15 +11,34 @@ function view() {
 
 describe("Worker Main card", () => {
   it("renders one immutable status snapshot with a stable timestamp and canonical-card target", () => {
-    const rendered = JSON.stringify(renderWorkerStatusSnapshot({ ...view(), messageId: "om_worker_main" }, "2026-09-09T13:00:00.000Z"));
+    const card = renderWorkerStatusSnapshot({ ...view(), messageId: "om_worker_main" }, "2026-09-09T13:00:00.000Z") as { config: { update_multi?: boolean } };
+    const rendered = JSON.stringify(card);
+    expect(card.config.update_multi).not.toBe(false);
     expect(rendered).toContain("📸 Worker 状态快照 · reviewer");
     expect(rendered).toContain("一次性快照，不会自动更新");
     expect(rendered).toContain("2026-09-09T13:00:00.000Z");
     expect(rendered).toContain("card_target_open");
     expect(rendered).toContain("om_worker_main");
+    expect(rendered).toContain('\"aggregateId\":\"worker-1\"');
+    expect(rendered).toContain('\"generation\":3');
     expect(rendered).not.toContain("worker_new_task_form");
     expect(rendered).not.toContain("worker_task_instruction_form");
     expect(rendered).not.toContain("worker_task_interrupt");
+  });
+
+  it("preserves current task details in the status snapshot", () => {
+    const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
+      turnId: "turn-current", title: "Review auth boundary", phase: "running", durationSeconds: 74, updatedAt: "2026-09-05T00:01:00.000Z",
+      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null },
+      requestText: "Inspect the exact generation fence", answer: "Found a matching runtime turn", statusTitle: "Reviewing", progressEvents: [], notice: "Keep observing"
+    }, queueCount: 2, nextTaskTitle: "Run recovery tests", recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
+    const rendered = JSON.stringify(renderWorkerStatusSnapshot(projected, "2026-09-09T13:00:00.000Z"));
+
+    expect(rendered).toContain("Review auth boundary");
+    expect(rendered).toContain("Inspect the exact generation fence");
+    expect(rendered).toContain("Found a matching runtime turn");
+    expect(rendered).toContain("Keep observing");
+    expect(rendered).toContain("2 queued");
   });
 
   it("renders the current task in the stable Worker card without Task Card links", () => {

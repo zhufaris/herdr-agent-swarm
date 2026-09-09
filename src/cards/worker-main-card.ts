@@ -49,7 +49,7 @@ export function renderWorkerStatusSnapshot(view: WorkerMainView, generatedAt: st
     : null;
   return {
     ...card,
-    config: { ...card.config, update_multi: false, summary: { content: `${view.workerName} · 状态快照` } },
+    config: { ...card.config, update_multi: true, summary: { content: `${view.workerName} · 状态快照` } },
     header: { ...card.header, title: { tag: "plain_text", content: `📸 Worker 状态快照 · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: "ONE-TIME · READ-ONLY" } },
     body: { elements: [
       { tag: "markdown", content: `**一次性快照，不会自动更新**  ·  生成于 ${safe(generatedAt)}\n持续状态请查看 canonical Worker Main Card。` },
