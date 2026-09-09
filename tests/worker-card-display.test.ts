@@ -26,13 +26,13 @@ function setup(withTask = true) {
 }
 
 describe("WorkerCardDisplayWorkflow", () => {
-  it("atomically reserves Main then latest Task snapshots without creating a turn", () => {
+  it("atomically reserves one consolidated Worker snapshot without creating a turn", () => {
     const { workflow, input } = setup(); const before = store!.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get() as { count: number };
-    expect(workflow.show(input)).toMatchObject({ accepted: true, delivery: "queued", worker: { name: "reviewer" }, cards: ["worker-main", "worker-task"], taskTurnId: "turn" });
+    expect(workflow.show(input)).toMatchObject({ accepted: true, delivery: "queued", worker: { name: "reviewer" }, cards: ["worker-snapshot"], taskTurnId: "turn" });
     const rows = store!.database.prepare("SELECT idempotency_key, lane_key, kind, payload FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%' ORDER BY delivery_order").all() as Array<{ idempotency_key: string; lane_key: string; kind: string; payload: string }>;
-    expect(rows).toHaveLength(2); expect(rows[0]!.idempotency_key).toMatch(/:main$/); expect(rows[1]!.idempotency_key).toMatch(/:task$/); expect(rows[0]!.lane_key).toBe(rows[1]!.lane_key); expect(rows.every(({ kind }) => kind === "card_reply")).toBe(true);
-    expect(JSON.parse(rows[0]!.payload)).toMatchObject({ header: { title: { content: "🤖 Worker · reviewer" } } });
-    expect(rows[1]!.payload).toContain("只读状态快照"); expect(rows[1]!.payload).not.toContain("worker_task_instruction_form");
+    expect(rows).toHaveLength(1); expect(rows[0]!.idempotency_key).toMatch(/:snapshot$/); expect(rows[0]!.kind).toBe("card_reply");
+    expect(JSON.parse(rows[0]!.payload)).toMatchObject({ header: { title: { content: "📸 Worker 状态快照 · reviewer" } } });
+    expect(rows[0]!.payload).toContain("一次性快照，不会自动更新"); expect(rows[0]!.payload).toContain("review"); expect(rows[0]!.payload).not.toContain("worker_task_instruction_form");
     expect((store!.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get() as { count: number }).count).toBe(before.count);
   });
 
@@ -40,7 +40,7 @@ describe("WorkerCardDisplayWorkflow", () => {
     const { workflow, input } = setup(false); const first = workflow.show(input); const second = workflow.show(input);
     expect(second).toEqual(first);
     const rows = store!.database.prepare("SELECT payload FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%' ORDER BY delivery_order").all() as Array<{ payload: string }>;
-    expect(rows).toHaveLength(2); expect(JSON.stringify(JSON.parse(rows[1]!.payload))).toContain("暂无 Task");
+    expect(rows).toHaveLength(1); expect(JSON.stringify(JSON.parse(rows[0]!.payload))).toContain("No task history");
   });
 
   it("rejects mismatched names and conflicting key reuse without reserving cards", () => {
@@ -51,9 +51,9 @@ describe("WorkerCardDisplayWorkflow", () => {
     expect(() => workflow.show({ ...input, workerName: "other" })).toThrow(/different Worker/);
   });
 
-  it("rolls back the request and both cards when rendering fails", () => {
+  it("rolls back the request and snapshot when rendering fails", () => {
     const { input } = setup(false);
-    expect(() => store!.reserveWorkerCardDisplay({ ...input, renderMain: () => { throw new Error("render failed"); }, renderTask: () => ({}) })).toThrow(/render failed/);
+    expect(() => store!.reserveWorkerCardDisplay({ ...input, renderSnapshot: () => { throw new Error("render failed"); } })).toThrow(/render failed/);
     expect(store!.database.prepare("SELECT COUNT(*) AS count FROM worker_card_display_requests").get()).toEqual({ count: 0 });
     expect(store!.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%'").get()).toEqual({ count: 0 });
   });

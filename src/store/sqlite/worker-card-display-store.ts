@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { WorkerCardDisplayReceipt, WorkerCardDisplayStore } from "../../domain/ports/worker-card-display.js";
 import { selectWorkerMainView } from "../../domain/worker-main-selector.js";
 import type { SqliteContext } from "./context.js";
-import { mapWorkerTurnCard } from "./worker-turn-store.js";
 
 export class SqliteWorkerCardDisplayStore implements WorkerCardDisplayStore {
   constructor(private readonly context: SqliteContext, private readonly dependencies: {
@@ -32,15 +31,13 @@ export class SqliteWorkerCardDisplayStore implements WorkerCardDisplayStore {
       const source = this.dependencies.loadWorkerMainProjectionSource(worker.id, worker.worker_session_generation);
       if (!source) throw new Error(`Worker has no displayable state: ${workerName}`);
       const previous = this.dependencies.loadWorkerMainView(worker.id, worker.worker_session_generation);
-      const main = selectWorkerMainView(source, previous, previous?.dependencyRevision ?? 0, now());
-      const taskRow = this.context.database.prepare("SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? ORDER BY created_at DESC, turn_id DESC LIMIT 1").get(worker.id, worker.worker_session_generation) as Record<string, unknown> | undefined;
-      const task = taskRow ? mapWorkerTurnCard(taskRow) : null;
+      const generatedAt = now();
+      const main = selectWorkerMainView(source, previous, previous?.dependencyRevision ?? 0, generatedAt);
       const requestId = randomUUID();
-      const receipt: WorkerCardDisplayReceipt = { accepted: true, delivery: "queued", worker: { id: worker.id, name: worker.name, workerSessionGeneration: worker.worker_session_generation }, cards: ["worker-main", "worker-task"], taskTurnId: task?.turnId ?? null };
-      this.context.database.prepare("INSERT INTO worker_card_display_requests(id, binding_id, binding_generation, parent_prompt_id, idempotency_key, worker_id, worker_session_generation, worker_name, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(requestId, input.bindingId, input.bindingGeneration, input.parentPromptId, idempotencyKey, worker.id, worker.worker_session_generation, worker.name, JSON.stringify(receipt), now());
+      const receipt: WorkerCardDisplayReceipt = { accepted: true, delivery: "queued", worker: { id: worker.id, name: worker.name, workerSessionGeneration: worker.worker_session_generation }, cards: ["worker-snapshot"], taskTurnId: main.currentTask?.turnId ?? null };
+      this.context.database.prepare("INSERT INTO worker_card_display_requests(id, binding_id, binding_generation, parent_prompt_id, idempotency_key, worker_id, worker_session_generation, worker_name, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(requestId, input.bindingId, input.bindingGeneration, input.parentPromptId, idempotencyKey, worker.id, worker.worker_session_generation, worker.name, JSON.stringify(receipt), generatedAt);
       const laneKey = `worker-display:${requestId}`;
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-display:${requestId}:main`, bindingId: input.bindingId, rootMessageId: input.rootMessageId, kind: "card_reply", payload: JSON.stringify(input.renderMain(main)), laneKeyOverride: laneKey });
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-display:${requestId}:task`, bindingId: input.bindingId, rootMessageId: input.rootMessageId, kind: "card_reply", payload: JSON.stringify(input.renderTask(task, worker.name)), laneKeyOverride: laneKey });
+      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-display:${requestId}:snapshot`, bindingId: input.bindingId, rootMessageId: input.rootMessageId, kind: "card_reply", payload: JSON.stringify(input.renderSnapshot(main, generatedAt)), laneKeyOverride: laneKey });
       return receipt;
     });
   }

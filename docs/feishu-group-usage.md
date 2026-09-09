@@ -59,6 +59,11 @@ Worker turn，但不会新增飞书卡片；同一张 Worker Main Card 会持续
 结构化进度、受限长度的输出、排队数量和最近五条终态任务。完整输出和历史仍保存在 SQLite，
 不会因为卡片合并而丢失。
 
+Primary 工具 `show_worker_cards` 用于把某个 Worker 的当前状态重新展示到话题中。每次调用
+只发送一张合并后的只读快照，卡片会标注生成时间和“不会自动更新”；它不是新的 Worker
+Main Card，也不会订阅后续状态。需要持续状态或执行卡片操作时，应点击快照中的入口打开
+canonical Worker Main Card。重复使用相同幂等键不会再次发送快照。
+
 runtime 重启、reattach 或 pane replacement 会继续更新同一张 Worker Main；终止后该卡冻结，
 同名重建会创建新的 Worker session 和新卡。Primary Main 只展示当前 Primary pane 拥有的
 Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Worker activity。Answer
@@ -85,7 +90,7 @@ Worker Main Card 仅显示当前状态允许的操作。运行中的任务提供
 follow-up，也不会把 follow-up 改成 steer。Worker Main 的“发起新任务”会明确显示任务是
 立即执行还是进入 FIFO。
 
-task card 上的结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
+Worker Main Card 上的任务结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
 TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。
 
 在实例详情卡选择“设为当前目标”后，普通消息会持续发给该实例；若目标为 symbolic

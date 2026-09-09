@@ -37,6 +37,29 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   };
 }
 
+export function renderWorkerStatusSnapshot(view: WorkerMainView, generatedAt: string): object {
+  const card = renderWorkerMainCard(view, { snapshot: true }) as {
+    schema: string;
+    config: Record<string, unknown>;
+    header: { title: { tag: string; content: string }; subtitle: { tag: string; content: string }; template: string };
+    body: { elements: object[] };
+  };
+  const target = view.messageId
+    ? callbackButton("查看持续更新的 Worker Main Card", { action: "card_target_open", aggregateKind: "worker-session", aggregateId: view.workerId, generation: view.workerSessionGeneration, messageId: view.messageId }, "primary")
+    : null;
+  return {
+    ...card,
+    config: { ...card.config, update_multi: false, summary: { content: `${view.workerName} · 状态快照` } },
+    header: { ...card.header, title: { tag: "plain_text", content: `📸 Worker 状态快照 · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: "ONE-TIME · READ-ONLY" } },
+    body: { elements: [
+      { tag: "markdown", content: `**一次性快照，不会自动更新**  ·  生成于 ${safe(generatedAt)}\n持续状态请查看 canonical Worker Main Card。` },
+      ...(target ? [{ tag: "column_set", flex_mode: "none", columns: [{ tag: "column", width: "auto", elements: [target] }] }] : []),
+      { tag: "hr" },
+      ...card.body.elements
+    ] }
+  };
+}
+
 function currentTaskContent(task: WorkerMainTaskSummary | null): string {
   return task ? `${cardSection("🎯", "Current Task")}\n${lifecycleMarker(task.phase)} ${safe(task.title)}  ·  ${PHASE_LABEL[task.phase]}${task.durationSeconds === null ? "" : `  ·  ${formatDuration(task.durationSeconds)}`}${task.requestText ? `\n\n${safeOutput(task.requestText)}` : ""}` : `${cardSection("🎯", "Current Task")}\nNo task history`;
 }

@@ -595,6 +595,13 @@ a new session card. Termination freezes it, while same-name recreation creates a
 new Worker identity and card. Worker output is shown only in the stable Worker
 Main Card and remains bounded at render time.
 
+`show_worker_cards` is an explicit read-only observation surface, not another
+projection owner. It selects the current Worker Main state and emits one
+consolidated immutable `card_reply` with a captured snapshot timestamp. The
+snapshot has no Worker mutation controls and is never rebound to later context
+invalidations. When the canonical Worker Main message identity is available, the
+snapshot may link to that continuously updated card.
+
 Context invalidations are committed in the same SQLite transaction as the owning
 Worker transition. Startup, notifier hints, and periodic scans rebuild unfinished
 revisions, so a lost wake-up cannot lose a refresh. Replaceable snapshots use

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
+import { renderWorkerMainCard, renderWorkerStatusSnapshot } from "../src/cards/worker-main-card.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 
 function view() {
@@ -10,6 +10,18 @@ function view() {
 }
 
 describe("Worker Main card", () => {
+  it("renders one immutable status snapshot with a stable timestamp and canonical-card target", () => {
+    const rendered = JSON.stringify(renderWorkerStatusSnapshot({ ...view(), messageId: "om_worker_main" }, "2026-09-09T13:00:00.000Z"));
+    expect(rendered).toContain("📸 Worker 状态快照 · reviewer");
+    expect(rendered).toContain("一次性快照，不会自动更新");
+    expect(rendered).toContain("2026-09-09T13:00:00.000Z");
+    expect(rendered).toContain("card_target_open");
+    expect(rendered).toContain("om_worker_main");
+    expect(rendered).not.toContain("worker_new_task_form");
+    expect(rendered).not.toContain("worker_task_instruction_form");
+    expect(rendered).not.toContain("worker_task_interrupt");
+  });
+
   it("renders the current task in the stable Worker card without Task Card links", () => {
     const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
       turnId: "turn-current", title: "Review auth boundary", phase: "running", durationSeconds: 74, updatedAt: "2026-09-05T00:01:00.000Z",

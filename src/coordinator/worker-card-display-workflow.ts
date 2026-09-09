@@ -1,5 +1,4 @@
-import { renderWorkerMainCard } from "../cards/worker-main-card.js";
-import { renderWorkerNoTaskCard, renderWorkerTurnCard } from "../cards/worker-turn-card.js";
+import { renderWorkerStatusSnapshot } from "../cards/worker-main-card.js";
 import type { WorkerCardDisplayReceipt, WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 
 export class WorkerCardDisplayWorkflow {
@@ -8,8 +7,7 @@ export class WorkerCardDisplayWorkflow {
   show(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; projectId: string; workerName: string; rootMessageId: string; idempotencyKey: string }): WorkerCardDisplayReceipt {
     const receipt = this.store.reserveWorkerCardDisplay({
       ...input,
-      renderMain: (view) => renderWorkerMainCard(view, { snapshot: true }),
-      renderTask: (view, workerName) => view ? renderWorkerTurnCard(view, undefined, { snapshot: true }) : renderWorkerNoTaskCard(workerName)
+      renderSnapshot: renderWorkerStatusSnapshot
     });
     this.wakeOutbound();
     return receipt;

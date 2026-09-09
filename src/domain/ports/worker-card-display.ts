@@ -1,11 +1,10 @@
 import type { WorkerMainView } from "../worker-main-view.js";
-import type { WorkerTurnCardView } from "../worker-turn-card-view.js";
 
 export interface WorkerCardDisplayReceipt {
   accepted: true;
   delivery: "queued";
   worker: { id: string; name: string; workerSessionGeneration: number };
-  cards: ["worker-main", "worker-task"];
+  cards: ["worker-snapshot"] | ["worker-main", "worker-task"];
   taskTurnId: string | null;
 }
 
@@ -18,7 +17,6 @@ export interface WorkerCardDisplayStore {
     workerName: string;
     rootMessageId: string;
     idempotencyKey: string;
-    renderMain(view: WorkerMainView): object;
-    renderTask(view: WorkerTurnCardView | null, workerName: string): object;
+    renderSnapshot(view: WorkerMainView, generatedAt: string): object;
   }): WorkerCardDisplayReceipt;
 }

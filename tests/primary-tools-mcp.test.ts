@@ -13,6 +13,7 @@ describe("Primary tools MCP surface", () => {
     const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string; description: string }> } };
     expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "show_worker_cards", "steer_instance", "wait_instance"].sort());
     expect(response.result.tools.every(({ description }) => description.length > 40)).toBe(true);
+    expect(response.result.tools.find(({ name }) => name === "show_worker_cards")?.description).toMatch(/one-time.*does not update/i);
   });
 
   it("maps an exact-name Worker card display request", async () => {
