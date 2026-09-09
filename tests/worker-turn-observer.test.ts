@@ -77,7 +77,10 @@ describe("WorkerTurnObserver", () => {
         expect.objectContaining({ key: "tool:read", kind: "read", state: "done" })
       ])
     });
-    expect(JSON.stringify(store!.listPendingOutboundReplies())).toContain("Inspecting transaction boundaries");
+    expect(store!.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toEqual([]);
+    expect(store!.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({
+      targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1
+    }));
 
     await observer.observe("turn-1", {
       turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "",

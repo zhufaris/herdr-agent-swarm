@@ -51,8 +51,7 @@ export class SqliteOutboxStore {
 
   markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null { return this.recovery.markOutboundReplyFailedWithQuarantine(id, error, metadata, retryDelayMs); }
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] { return this.recovery.recoverEligibleDeadLetters(cutoff, limit); }
-  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[] { return this.recovery.recoverUnsupportedWorkerCardCreates(render); }
-  convergeWorkerTaskCardRenderer(revision: string, render: (view: WorkerTurnCardView, page?: import("../../domain/worker-turn-card-view.js").WorkerTurnCardPage) => object): string[] { return this.recovery.convergeWorkerTaskCardRenderer(revision, render); }
+  retireUndeliveredWorkerTaskCardIntents(): number { return this.recovery.retireUndeliveredWorkerTaskCardIntents(); }
   recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery { return this.recovery.recoverStaleOutboxQuarantines(); }
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome { return this.recovery.retryDeadLetter(id, chatId, actorOpenId); }
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome { return this.recovery.dismissDeadLetter(id, chatId, actorOpenId); }

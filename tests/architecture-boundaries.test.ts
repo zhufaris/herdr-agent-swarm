@@ -100,7 +100,7 @@ describe("application composition boundaries", () => {
     expect(storeBundle).toContain("commandIntents: modules.commandIntents");
     expect(storeBundle).toContain("sessionOperations: modules.sessionOperations");
     expect(storeBundle).toContain("cardContext: modules.cardContext");
-    for (const capability of ["answerPages", "workerTurnCards", "mainCards", "projection", "queueFeedback"]) {
+    for (const capability of ["answerPages", "mainCards", "projection", "queueFeedback"]) {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
@@ -309,13 +309,11 @@ describe("application composition boundaries", () => {
   it("provides capability-oriented test construction without the compatibility facade", () => {
     const helper = readFileSync(new URL("./helpers/create-test-store-bundle.ts", import.meta.url), "utf8");
     const mainCardTests = readFileSync(new URL("./main-card-workflow.test.ts", import.meta.url), "utf8");
-    const workerCardTests = readFileSync(new URL("./worker-turn-card-workflow.test.ts", import.meta.url), "utf8");
     expect(helper).toContain("createTestStoreBundle");
     expect(helper).toContain("SqliteStoreKernel");
     expect(helper).not.toContain("SqliteBindingStore");
     expect(mainCardTests).toContain("stores.mainCards");
-    expect(workerCardTests).toContain("stores.workerTurnCards");
-    expect(`${mainCardTests}\n${workerCardTests}`).not.toContain("SqliteBindingStore");
+    expect(mainCardTests).not.toContain("SqliteBindingStore");
   });
 
   it("routes prompt workflows through consumer-specific port modules", () => {

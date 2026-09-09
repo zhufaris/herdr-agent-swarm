@@ -85,7 +85,6 @@ export class SqliteCardContextStore {
   invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void {
     const instance = this.dependencies.getAgentInstance(view.instanceId);
     const targets: Array<CardContextTarget & { reason: string }> = [
-      { targetKind: "worker-turn", targetId: view.turnId, targetGeneration: view.instanceGeneration, reason },
       { targetKind: "worker-session", targetId: view.instanceId, targetGeneration: view.workerSessionGeneration, reason }
     ];
     if (instance?.parent?.bindingGeneration) targets.push({ targetKind: "primary-session", targetId: instance.parent.bindingId, targetGeneration: instance.parent.bindingGeneration, reason });
@@ -125,21 +124,17 @@ export class SqliteCardContextStore {
         const source = this.loadWorkerMainProjectionSource(invalidation.targetId, invalidation.targetGeneration);
         if (!source) return this.markStale(invalidation);
         const previous = this.loadWorkerMainView(invalidation.targetId, invalidation.targetGeneration);
-        const next = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
+        const selected = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
+        const next = invalidation.reason === "worker-main.delivered" && previous?.messageId && selected.viewVersion <= selected.deliveredVersion
+          ? { ...selected, viewVersion: selected.viewVersion + 1, updatedAt: now() }
+          : selected;
         const binding = this.dependencies.getBinding(source.parentBindingId);
         if (!binding?.rootMessageId) return this.markStale(invalidation);
         if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
       } else if (invalidation.targetKind === "worker-turn") {
-        const previous = this.dependencies.loadWorkerTurnCard(invalidation.targetId);
-        if (!previous || previous.instanceGeneration !== invalidation.targetGeneration) return this.markStale(invalidation);
-        const main = this.loadWorkerMainView(previous.instanceId, previous.workerSessionGeneration);
-        const answer = previous.primaryAnswer ? this.dependencies.loadRunCard(previous.primaryAnswer.aggregateId) : null;
-        const next = updateWorkerTurnCardTargets(previous, { ...previous.workerMain, messageId: main?.messageId ?? null }, previous.primaryAnswer ? { ...previous.primaryAnswer, messageId: answer?.answerMessageId ?? null } : null, now());
-        if (next !== previous) this.dependencies.saveWorkerTurnCard(next);
-        if (next.messageId && next.viewVersion > next.deliveredVersion) {
-          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(renderers.workerTask(next)) });
-          reserved = true;
-        }
+        // Legacy Task Cards are immutable historical artifacts. Mark old
+        // invalidations converged without creating or patching visible cards.
+        return this.markStale(invalidation);
       } else if (invalidation.targetKind === "primary-session") {
         const binding = this.dependencies.getBinding(invalidation.targetId);
         const previous = this.dependencies.loadTopicView(invalidation.targetId);
@@ -176,17 +171,24 @@ export class SqliteCardContextStore {
     const lease = this.dependencies.getWorkspaceLease(instance.workspaceLeaseId);
     if (!lease) return null;
     const summaryColumns = "turn_id, request_text, phase, started_at, finished_at, message_id, instance_generation, updated_at";
-    const active = this.database.prepare(`SELECT ${summaryColumns} FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('blocked','running','preparing','queued') ORDER BY CASE phase WHEN 'blocked' THEN 0 WHEN 'running' THEN 1 WHEN 'preparing' THEN 2 ELSE 3 END, CASE WHEN phase = 'queued' THEN created_at END ASC, CASE WHEN phase != 'queued' THEN created_at END DESC, CASE WHEN phase = 'queued' THEN turn_id END ASC, CASE WHEN phase != 'queued' THEN turn_id END DESC LIMIT 1`).get(workerId, generation) as unknown as WorkerTaskSummaryRow | undefined;
+    const active = this.database.prepare(`SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('blocked','running','preparing') ORDER BY CASE phase WHEN 'blocked' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, created_at DESC, turn_id DESC LIMIT 1`).get(workerId, generation) as Record<string, unknown> | undefined;
     const queue = this.database.prepare("SELECT COUNT(*) AS count, MIN(created_at) AS first_created_at FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'queued'").get(workerId, generation) as { count: number; first_created_at: string | null };
     const nextQueued = queue.first_created_at === null ? undefined : this.database.prepare("SELECT request_text FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'queued' ORDER BY created_at, turn_id LIMIT 1").get(workerId, generation) as { request_text: string } | undefined;
     const recent = this.database.prepare(`SELECT ${summaryColumns} FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('completed','failed','cancelled','dispatch-uncertain') ORDER BY created_at DESC, turn_id DESC LIMIT 5`).all(workerId, generation) as unknown as WorkerTaskSummaryRow[];
     const first = this.database.prepare("SELECT MIN(created_at) AS created_at FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ?").get(workerId, generation) as { created_at: string | null };
+    const queued = this.database.prepare(`SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'queued' ORDER BY created_at, turn_id LIMIT 1`).get(workerId, generation) as Record<string, unknown> | undefined;
+    const terminal = this.database.prepare(`SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('completed','failed','cancelled','dispatch-uncertain') ORDER BY updated_at DESC, turn_id DESC LIMIT 1`).get(workerId, generation) as Record<string, unknown> | undefined;
     const summary = (row: WorkerTaskSummaryRow) => ({ turnId: row.turn_id, title: summarizeTaskTitle(row.request_text), phase: row.phase as WorkerTurnCardView["phase"], durationSeconds: durationSeconds(row.started_at, row.finished_at), taskCard: { aggregateKind: "worker-turn" as const, aggregateId: row.turn_id, generation: Number(row.instance_generation), messageId: row.message_id }, updatedAt: row.updated_at });
+    const currentRow = active ?? terminal ?? queued;
+    const currentTask = currentRow ? (() => {
+      const card = mapWorkerTurnCard(currentRow);
+      return card ? { ...summary(currentRow as unknown as WorkerTaskSummaryRow), requestText: card.requestText, answer: card.answer, statusTitle: card.statusTitle, progressEvents: card.progressEvents, notice: card.notice, resultCapture: card.resultCapture } : null;
+    })() : null;
     return {
       workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
       runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: (() => { const parent = this.dependencies.getBinding(instance.parent.bindingId); return parent?.generation === instance.parent!.bindingGeneration && parent.paneId === instance.parent!.paneId && parent.state === "active" && parent.lifecycle === "active" && parent.attachment === "attached"; })(),
       lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, ownerName: this.dependencies.getBinding(instance.parent.bindingId)?.title ?? "Primary",
-      workspace: lease.cwd, branch: lease.branch, currentTask: active ? summary(active) : null, queueCount: Number(queue.count), nextTaskTitle: nextQueued ? summarizeTaskTitle(nextQueued.request_text) : null,
+      workspace: lease.cwd, branch: lease.branch, currentTask, queueCount: Number(queue.count), nextTaskTitle: nextQueued ? summarizeTaskTitle(nextQueued.request_text) : null,
       recentTasks: recent.map(summary), createdAt: first.created_at ?? now()
     };
   }

@@ -48,16 +48,18 @@ describe("Lark channel publisher", () => {
 
     expect(replyCard).toHaveBeenCalledOnce();
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-main-message", cardId: "worker-main-card", deliveredVersion: 1 });
+    expect(store.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({ targetKind: "worker-session", targetId: worker.id, targetGeneration: 1, reason: "worker-main.delivered" }));
     expect(checkpoint).toHaveBeenCalledWith(worker.id, 1, 1);
     store.close();
   });
 
-  it("checkpoints a delivered Worker task card and emits a turn-scoped convergence hint", async () => {
+  it("still checkpoints a delivered legacy Worker task card and emits a turn-scoped convergence hint", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
     store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "lark:m1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    store.enqueueOutboundReply({ id: "legacy-create", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", viewVersion: view.viewVersion, rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }) });
     const create = vi.fn(async () => ({ messageId: "worker-message-1", cardId: "worker-card-1" }));
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
     const checkpoint = vi.fn();
@@ -79,8 +81,9 @@ describe("Lark channel publisher", () => {
     for (const turnId of ["turn-a", "turn-b", "turn-c", "turn-d"]) {
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
       store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, render: renderWorkerTurnCard });
-      const create = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === turnId)!;
-      store.markOutboundReplyDelivered(create.id, `worker-message-${turnId}`, `worker-card-${turnId}`);
+      const createId = `legacy-create-${turnId}`;
+      store.enqueueOutboundReply({ id: createId, idempotencyKey: `worker-turn:create:${turnId}:0`, workerTurnId: turnId, viewVersion: view.viewVersion, rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }) });
+      store.markOutboundReplyDelivered(createId, `worker-message-${turnId}`, `worker-card-${turnId}`);
     }
     store.enqueueOutboundReply({ id: "wrong-turn", idempotencyKey: "wrong-turn", workerTurnId: "turn-b", viewVersion: 1, rootMessageId: "worker-card-turn-a", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: "worker_turn_turn_a_0", content: "x", sequence: 1 }) });
     store.enqueueOutboundReply({ id: "wrong-card", idempotencyKey: "wrong-card", workerTurnId: "turn-c", viewVersion: 1, rootMessageId: "worker-card-turn-a", kind: "stream_finish", payload: JSON.stringify({ pageIndex: 0, summary: "done", sequence: 1 }) });

@@ -12,10 +12,7 @@ import type { Binding } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { Logger } from "pino";
 import { safeLogError } from "../runtime/safe-error.js";
-import { renderWorkerTurnCard } from "../cards/worker-turn-card.js";
 import { ProjectCatalog } from "./project-catalog.js";
-
-const WORKER_TASK_CARD_RENDERER_REVISION = "explicit-continuation-v1";
 
 export interface StartupViewConvergerPort { converge(): Promise<void>; }
 export interface StartupViewProjectionStores {
@@ -57,13 +54,12 @@ export class StartupViewConverger implements StartupViewConvergerPort {
   }
 
   async converge(): Promise<void> {
-    const recoveredWorkerTurnIds = this.store.recoverUnsupportedWorkerCardCreates(renderWorkerTurnCard);
-    const refreshedWorkerTurnIds = this.store.convergeWorkerTaskCardRenderer(WORKER_TASK_CARD_RENDERER_REVISION, renderWorkerTurnCard);
+    const retiredWorkerTaskCardIntents = this.store.retireUndeliveredWorkerTaskCardIntents();
     const recovered = this.store.recoverStaleOutboxQuarantines();
-    const deliveryRecovered = recoveredWorkerTurnIds.length > 0 || refreshedWorkerTurnIds.length > 0 || recovered.retriedAnswerPromptIds.length > 0 || recovered.rolledBackAnswerPromptIds.length > 0 || recovered.dismissedNotices > 0;
-    if (deliveryRecovered || recovered.terminalizedQuarantines > 0) {
+    const deliveryRecovered = recovered.retriedAnswerPromptIds.length > 0 || recovered.rolledBackAnswerPromptIds.length > 0 || recovered.dismissedNotices > 0;
+    if (retiredWorkerTaskCardIntents > 0 || deliveryRecovered || recovered.terminalizedQuarantines > 0) {
       if (deliveryRecovered) this.outboundWork.wake();
-      this.logger?.warn({ event: "startup-outbox-quarantines-recovered", recoveredWorkerTurnIds, refreshedWorkerTurnIds, ...recovered, outcome: "converging" }, "recovered stale outbox quarantines and renderer revisions from canonical state");
+      this.logger?.warn({ event: "startup-outbox-quarantines-recovered", retiredWorkerTaskCardIntents, ...recovered, outcome: "converging" }, "recovered stale outbox quarantines and retired undelivered legacy Worker Task Card intents");
     }
     for (const binding of this.store.listBindings()) {
       try {

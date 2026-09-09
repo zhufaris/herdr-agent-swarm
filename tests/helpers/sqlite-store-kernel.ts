@@ -536,13 +536,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId);
   }
 
-  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[] {
-    return this.outbox.recoverUnsupportedWorkerCardCreates(render);
-  }
-
-  convergeWorkerTaskCardRenderer(revision: string, render: (view: WorkerTurnCardView, page?: WorkerTurnCardPage) => object): string[] {
-    return this.outbox.convergeWorkerTaskCardRenderer(revision, render);
-  }
+  retireUndeliveredWorkerTaskCardIntents(): number { return this.outbox.retireUndeliveredWorkerTaskCardIntents(); }
 
   recoverStaleOutboxQuarantines(): import("../domain/types.js").StaleOutboxQuarantineRecovery {
     return this.outbox.recoverStaleOutboxQuarantines();

@@ -107,6 +107,7 @@ describe("TurnControlWorkflow", () => {
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "urgent", idempotencyKey: "worker-steer-idle" }))
       .resolves.toEqual({ mode: "priority", logicalTurnId: "priority-worker", duplicate: false });
     expect(store.getInstanceTurn("priority-worker")).toMatchObject({ priority: "priority", state: "queued" });
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toEqual([]);
     expect(wakeInstance).toHaveBeenCalledWith(worker.id);
   });
 

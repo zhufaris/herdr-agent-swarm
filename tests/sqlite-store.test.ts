@@ -249,7 +249,7 @@ describe("SQLite store", () => {
     ]);
   });
 
-  it("rebuilds unsupported undelivered Worker Task cards without replaying the turn", () => {
+  it("retires a never-attempted legacy Worker Task Card intent without replaying the turn", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
     const created = store.createWorkerAgentInstance({
@@ -258,20 +258,18 @@ describe("SQLite store", () => {
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: created.id, instanceGeneration: created.generation, workerSessionGeneration: 1, workerName: created.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
-    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: created.id, instanceGeneration: created.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "source", view, render: () => ({ schema: "2.0", body: { elements: [{ tag: "note" }] } }) });
-    const create = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDeadLetter(create.id, "unsupported tag note", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "200861" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: created.id, instanceGeneration: created.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "source", view, render: renderWorkerTurnCard });
+    store.enqueueOutboundReply({ id: "never-sent", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}" });
+    store.enqueueOutboundReply({ id: "legacy-followup", idempotencyKey: "worker-turn:update:turn-1:2", workerTurnId: "turn-1", rootMessageId: "task-message", kind: "card_update", payload: "{}" });
 
-    expect(store.recoverUnsupportedWorkerCardCreates(renderWorkerTurnCard)).toEqual(["turn-1"]);
-    const recovered = store.listPendingOutboundReplies();
-    expect(recovered).toHaveLength(1);
-    expect(recovered[0]).toMatchObject({ id: create.id, idempotencyKey: create.idempotencyKey, kind: "stream_card_create", attemptCount: 0 });
-    expect(recovered[0]!.payload).not.toContain('\"tag\":\"note\"');
+    expect(store.retireUndeliveredWorkerTaskCardIntents()).toBe(1);
+    expect(store.getOutboundReply("never-sent")).toMatchObject({ state: "dismissed", error: "Retired by Worker Session single-card migration" });
+    expect(store.getOutboundReply("legacy-followup")).toMatchObject({ state: "pending" });
     expect(store.getInstanceTurn("turn-1")).toMatchObject({ state: "queued", text: "review" });
-    expect(store.recoverUnsupportedWorkerCardCreates(renderWorkerTurnCard)).toEqual([]);
+    expect(store.retireUndeliveredWorkerTaskCardIntents()).toBe(0);
   });
 
-  it("converges a delivered actionable Worker Task card once per renderer revision without replaying its turn", () => {
+  it("preserves delivered and uncertain legacy Worker Task Card effects", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
     const worker = store.createWorkerAgentInstance({
@@ -281,18 +279,15 @@ describe("SQLite store", () => {
     }, 4).instance;
     const queued = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: "source", view: queued, render: renderWorkerTurnCard });
-    const create = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(create.id, "task-message", "task-card");
-    store.transitionInstanceTurnWithProjection({ turnId: queued.turnId, expectedGeneration: worker.generation, state: "completed", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-09-05T00:01:00.000Z", answer: "done" }, render: renderWorkerTurnCard });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.rootMessageId);
+    store.enqueueOutboundReply({ id: "delivered", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}" });
+    store.markOutboundReplyDelivered("delivered", "task-message", "task-card");
+    store.enqueueOutboundReply({ id: "uncertain", idempotencyKey: "worker-turn:create:turn-1:1", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}" });
+    store.checkpointOutboundReplyCard("uncertain", "possibly-created-card");
     const originalTurn = store.getInstanceTurn(queued.turnId);
 
-    expect(store.convergeWorkerTaskCardRenderer("explicit-v1", renderWorkerTurnCard)).toEqual([queued.turnId]);
-    expect(store.convergeWorkerTaskCardRenderer("explicit-v1", renderWorkerTurnCard)).toEqual([]);
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
-      idempotencyKey: `worker-turn:renderer:explicit-v1:${queued.turnId}`, kind: "card_update", rootMessageId: "task-message"
-    })]);
-    expect(store.listPendingOutboundReplies()[0]!.payload).toContain("直接回复卡片仍会进入 Primary");
+    expect(store.retireUndeliveredWorkerTaskCardIntents()).toBe(0);
+    expect(store.getOutboundReply("delivered")).toMatchObject({ state: "delivered" });
+    expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "pending", cardIdCheckpoint: "possibly-created-card" });
     expect(store.getInstanceTurn(queued.turnId)).toEqual(originalTurn);
   });
 
@@ -333,7 +328,7 @@ describe("SQLite store", () => {
     }
 
     const source = store.loadWorkerMainProjectionSource(worker.id, 1)!;
-    expect(source.currentTask).toBeNull();
+    expect(source.currentTask).toMatchObject({ turnId: "turn-7", answer: "large-history-answer".repeat(100) });
     expect(source.queueCount).toBe(0);
     expect(source.recentTasks.map(({ turnId }) => turnId)).toEqual(["turn-7", "turn-6", "turn-5", "turn-4", "turn-3"]);
     expect(source.createdAt).toBe("2026-09-05T00:00:00.000Z");
@@ -479,9 +474,8 @@ describe("SQLite store", () => {
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: true, turn: { id: "turn-1", sourceMessageId: "m1", parentTurnId: null }, view: { turnId: "turn-1", phase: "queued" } });
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: false, turn: { id: "turn-1" } });
     expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ requestText: "review", queuePosition: 1 });
-    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === "turn-1")).toHaveLength(1);
-    expect(store.database.prepare("SELECT stream_page_index, stream_element_id FROM outbound_replies WHERE worker_turn_id = 'turn-1'").get()).toEqual({ stream_page_index: 0, stream_element_id: view.elementId });
-    expect(store.hasPendingOutboundReplyForWorkerTurn("turn-1")).toBe(true);
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === "turn-1")).toHaveLength(0);
+    expect(store.hasPendingOutboundReplyForWorkerTurn("turn-1")).toBe(false);
     expect(store.hasPendingOutboundReplyForWorkerTurn("missing")).toBe(false);
     const pendingPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND state = 'pending' LIMIT 1").all("turn-1") as Array<{ detail: string }>;
     expect(pendingPlan.some(({ detail }) => detail.includes("outbound_replies_worker_pending"))).toBe(true);
@@ -522,8 +516,8 @@ describe("SQLite store", () => {
     store.updateInstanceTurn({ turnId: "first", expectedGeneration: worker.generation, state: "running", eventKind: "turn.started" });
     expect(accept("third", 99).view.queuePosition).toBe(2);
 
-    const payload = JSON.parse(String((store.database.prepare("SELECT payload FROM outbound_replies WHERE worker_turn_id = ?").get("first") as { payload: string }).payload)) as { card: unknown };
-    expect(JSON.stringify(payload.card)).toContain("队列第 1 位");
+    expect(store.loadWorkerTurnCard("first")).toMatchObject({ queuePosition: 1, phase: "queued" });
+    expect(store.loadWorkerTurnCard("second")).toMatchObject({ queuePosition: 2 });
     const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM instance_turns INDEXED BY instance_turns_priority_queue WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").all(worker.id, worker.generation) as Array<{ detail: string }>;
     expect(plan.some(({ detail }) => detail.includes("instance_turns_priority_queue"))).toBe(true);
   });
@@ -541,7 +535,7 @@ describe("SQLite store", () => {
     expect(() => accept("rejected")).toThrow(/queue is full/);
     expect(store.getInstanceTurn("rejected")).toBeNull();
     expect(store.loadWorkerTurnCard("rejected")).toBeNull();
-    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(1);
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(0);
   });
 
   it("validates Worker follow-up parents transactionally", () => {
@@ -587,8 +581,7 @@ describe("SQLite store", () => {
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-06T00:00:00.000Z" });
       store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, render: renderWorkerTurnCard });
     }
-    const reviewerReply = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-reviewer")!;
-    store.markOutboundReplyDelivered(reviewerReply.id, "task-card-reviewer", "cardkit-reviewer");
+    store.database.prepare("UPDATE worker_turn_cards SET message_id = ?, card_id = ? WHERE turn_id = ?").run("task-card-reviewer", "cardkit-reviewer", "turn-reviewer");
 
     expect(store.findWorkerTurnByCardMessage("task-card-reviewer")).toMatchObject({
       turn: { id: "turn-reviewer", instanceId: "reviewer" },
@@ -596,12 +589,12 @@ describe("SQLite store", () => {
     });
     expect(store.findWorkerTurnByCardMessage("missing-card")).toBeNull();
 
-    store.database.prepare("UPDATE worker_turn_card_pages SET message_id = ? WHERE turn_id = ? AND page_index = 0").run("continuation-reviewer", "turn-reviewer");
+    store.database.prepare("INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, state, sequence, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?, ?, 'active', 0, ?, ?)").run("legacy-reviewer-page", "turn-reviewer", "legacy-element", "continuation-reviewer", "legacy-card", "now", "now");
     expect(store.findWorkerTurnByCardMessage("continuation-reviewer")).toMatchObject({
       turn: { id: "turn-reviewer", instanceId: "reviewer" }
     });
 
-    store.database.prepare("UPDATE worker_turn_card_pages SET message_id = ? WHERE turn_id = ? AND page_index = 0").run("task-card-reviewer", "turn-implementer");
+    store.database.prepare("INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, state, sequence, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?, ?, 'active', 0, ?, ?)").run("legacy-implementer-page", "turn-implementer", "legacy-element-2", "task-card-reviewer", "legacy-card-2", "now", "now");
     expect(store.findWorkerTurnByCardMessage("task-card-reviewer")).toBeNull();
   });
 
@@ -630,11 +623,9 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
     store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
-    const create = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(create.id, "worker-message-1", "worker-card-1");
-    store.reserveWorkerTurnContent({ turnId: "turn-1", pageIndex: 0, cardId: "worker-card-1", elementId: view.elementId, content: "finding", sourceEnd: 7 });
-    const content = store.listPendingOutboundReplies().find(({ kind }) => kind === "stream_content")!;
-    store.markOutboundReplyDelivered(content.id, "worker-card-1");
+    store.enqueueOutboundReply({ id: "legacy-create", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", viewVersion: view.viewVersion, rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }) });
+    store.markOutboundReplyDelivered("legacy-create", "worker-message-1", "worker-card-1");
+    store.database.prepare("UPDATE worker_turn_card_pages SET sequence = 1 WHERE turn_id = ? AND page_index = 0").run("turn-1");
     store.database.exec("DELETE FROM schema_migrations WHERE version = 9");
     store.close(); store = undefined;
 
@@ -654,7 +645,11 @@ describe("SQLite store", () => {
       const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
       store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, render: renderWorkerTurnCard });
     }
-    const failed = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-a")!;
+    for (const turnId of ["turn-a", "turn-b"]) {
+      const view = store.loadWorkerTurnCard(turnId)!;
+      store.enqueueOutboundReply({ id: `legacy-${turnId}`, idempotencyKey: `worker-turn:create:${turnId}:0`, workerTurnId: turnId, rootMessageId: "root", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }) });
+    }
+    const failed = store.getOutboundReply("legacy-turn-a")!;
 
     expect(store.markOutboundReplyFailedWithQuarantine(failed.id, "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked" });
     expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ workerTurnId: "turn-b" })]);
@@ -678,7 +673,7 @@ describe("SQLite store", () => {
     expect(result).toMatchObject({ turn: { state: "completed", result: "" }, view: { phase: "completed", queuePosition: 0 } });
     expect(store.loadWorkerTurnCard("turn-b")).toMatchObject({ queuePosition: 1 });
     expect(store.loadWorkerTurnCard("turn-c")).toMatchObject({ queuePosition: 2 });
-    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(3);
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(0);
   });
   it("adds the Session operation inbox to an existing database", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-session-operation-migration-"));
@@ -1555,15 +1550,18 @@ describe("SQLite store", () => {
     const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor, payload: "continue safely" });
     store.claimTurnControlOperation("control-1");
+    const priorityView = createQueuedWorkerTurnCard({ turnId: "priority-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "continue safely", queuePosition: 0, occurredAt: "2026-09-03T00:00:01.000Z" });
 
     const converted = store.convertTurnControlToWorkerPriority({
       operationId: "control-1",
-      turn: { id: "priority-1", idempotencyKey: "steer-1", actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", priority: "priority", text: "continue safely", parentTurnId: null, sourceMessageId: "message-1" },
+      turn: { id: "priority-1", idempotencyKey: "steer-1", actor, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", priority: "priority", text: "continue safely", parentTurnId: null, sourceMessageId: "message-1", view: priorityView, render: renderWorkerTurnCard },
       maxQueueDepth: 2, result: { status: "priority-accepted", logicalTurnId: "priority-1" }
     });
 
     expect(converted).toMatchObject({ operation: { state: "delivered", result: { status: "priority-accepted", logicalTurnId: "priority-1" } }, logicalTurnId: "priority-1" });
     expect(store.getInstanceTurn("priority-1")).toMatchObject({ state: "queued", priority: "priority", text: "continue safely" });
+    expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toEqual([]);
+    expect(store.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({ targetKind: "worker-session", targetId: worker.id }));
     expect(store.database.prepare("SELECT actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id FROM instance_turns WHERE id = 'priority-1'").get()).toEqual({ actor_kind: "human", source_binding_id: null, source_binding_generation: null, source_parent_prompt_id: null });
     expect(store.claimNextInstanceTurn(worker.id, worker.generation)).toBeNull();
   });

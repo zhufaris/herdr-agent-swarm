@@ -32,7 +32,7 @@ describe("WorkerMainView", () => {
   it("keeps one current task, a bounded queue summary, and five newest terminal summaries", () => {
     const view = reduceWorkerMainView(initial(), {
       type: "tasks",
-      currentTask: task(9, "running"),
+      currentTask: { ...task(9, "running"), requestText: "full request", answer: "bounded answer", statusTitle: "working" },
       queueCount: 3,
       nextTaskTitle: "Next safe task",
       recentTasks: [task(1), task(6, "failed"), task(3), task(5), task(2), task(4)],
@@ -43,8 +43,8 @@ describe("WorkerMainView", () => {
     expect(view.queueCount).toBe(3);
     expect(view.nextTaskTitle).toBe("Next safe task");
     expect(view.recentTasks.map(({ turnId }) => turnId)).toEqual(["turn-6", "turn-5", "turn-4", "turn-3", "turn-2"]);
-    expect(JSON.stringify(view)).not.toContain("requestText");
-    expect(JSON.stringify(view)).not.toContain("answer");
+    expect(view.currentTask).toMatchObject({ requestText: "full request", answer: "bounded answer", statusTitle: "working" });
+    expect(view.recentTasks.every((item) => item.requestText === undefined && item.answer === undefined)).toBe(true);
   });
 
   it("does not advance the view version for an unchanged projection", () => {

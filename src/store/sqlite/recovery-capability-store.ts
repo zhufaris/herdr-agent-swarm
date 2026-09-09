@@ -57,8 +57,7 @@ export class SqliteStartupViewCapabilityStore implements StartupViewStore {
   listBindings: StartupViewStore["listBindings"] = () => this.bindings.listBindings();
   listRunCards: StartupViewStore["listRunCards"] = (id) => this.projections.listRunCards(id);
   loadTopicView: StartupViewStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
-  recoverUnsupportedWorkerCardCreates: StartupViewStore["recoverUnsupportedWorkerCardCreates"] = (render) => this.outbox.recoverUnsupportedWorkerCardCreates(render);
-  convergeWorkerTaskCardRenderer: StartupViewStore["convergeWorkerTaskCardRenderer"] = (revision, render) => this.outbox.convergeWorkerTaskCardRenderer(revision, render);
+  retireUndeliveredWorkerTaskCardIntents: StartupViewStore["retireUndeliveredWorkerTaskCardIntents"] = () => this.outbox.retireUndeliveredWorkerTaskCardIntents();
   recoverStaleOutboxQuarantines: StartupViewStore["recoverStaleOutboxQuarantines"] = () => this.outbox.recoverStaleOutboxQuarantines();
   saveRunCard: StartupViewStore["saveRunCard"] = (view) => this.projections.saveRunCard(view);
 }

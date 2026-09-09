@@ -5,7 +5,6 @@ import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
 import type { BridgeEvent } from "../events.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { ModelPreference } from "../model-selection.js";
-import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
@@ -31,8 +30,7 @@ export interface StartupViewStore {
   listBindings(): Binding[];
   listRunCards(bindingId: string): RunCardView[];
   loadTopicView(bindingId: string): TopicViewState | null;
-  recoverUnsupportedWorkerCardCreates(render: (view: WorkerTurnCardView) => object): string[];
-  convergeWorkerTaskCardRenderer(revision: string, render: (view: WorkerTurnCardView, page?: WorkerTurnCardPage) => object): string[];
+  retireUndeliveredWorkerTaskCardIntents(): number;
   recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery;
   saveRunCard(view: RunCardView): RunCardView;
 }

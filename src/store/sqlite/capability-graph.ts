@@ -165,7 +165,6 @@ export class SqliteCapabilityGraph {
       mainCards: this.projections,
       answerPages: this.projections,
       queueFeedback: this.prompts,
-      workerTurnCards: this.workerTurns,
       promptAcceptance: prompt,
       promptRun: prompt,
       bindingProvisioning: bindingSession,

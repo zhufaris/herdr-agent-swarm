@@ -5,7 +5,7 @@ import type { InstanceLifecycleStore, InstanceStore, InstanceTurnStore } from ".
 import type { OutboundIntentStore, OutboxStore } from "../domain/ports/outbox.js";
 import type { PaneCloseStore, PaneControlStore } from "../domain/ports/pane-operations.js";
 import type { PromptAcceptanceStore, PromptRunStore } from "../domain/ports/prompt.js";
-import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore, WorkerTurnCardStore } from "../domain/ports/projection.js";
+import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore } from "../domain/ports/projection.js";
 import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
 import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
@@ -38,7 +38,6 @@ export interface SqliteStoreBundle {
   readonly outboundIntent: OutboundIntentStore;
   readonly outbox: OutboxStore;
   readonly answerPages: AnswerPageStore;
-  readonly workerTurnCards: WorkerTurnCardStore;
   readonly mainCards: MainCardStore;
   readonly projection: ProjectionStore;
   readonly queueFeedback: QueueFeedbackStore;
@@ -71,7 +70,7 @@ export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
   return {
     lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: modules.turnControl,
     promptAcceptance: modules.promptAcceptance, promptRun: modules.promptRun, outboundIntent: modules.outbox, outbox: modules.outbox,
-    answerPages: modules.answerPages, workerTurnCards: modules.workerTurnCards, mainCards: modules.mainCards, projection: modules.projection,
+    answerPages: modules.answerPages, mainCards: modules.mainCards, projection: modules.projection,
     queueFeedback: modules.queueFeedback, cardContext: modules.cardContext, bindingProvisioning: modules.bindingProvisioning,
     runtimeReconciliation: modules.runtimeReconciliation, retiredPaneCleanup: modules.retiredPaneCleanup, paneControl: modules.paneControl,
     paneClose: modules.paneClose, inboundRouting: modules.inboundRouting, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,

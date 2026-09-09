@@ -72,7 +72,6 @@ export class SqliteWorkerTurnStore {
       if (input.view.turnId !== input.id || input.view.instanceId !== input.instanceId || input.view.instanceGeneration !== input.instanceGeneration || input.view.parentTurnId !== input.parentTurnId || input.view.rootMessageId.length === 0) throw new Error("Worker turn card identity does not match the accepted turn");
       const queuePosition = priority === "priority" ? 0 : Number((this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").get(input.instanceId, input.instanceGeneration) as { count: number }).count) + 1;
       const acceptedView = { ...input.view, queuePosition };
-      const card = input.render(acceptedView);
       const actor = turnActorProvenance(input.actor);
       const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
         .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), actor.actorKind, actor.sourceBindingId, actor.sourceBindingGeneration, actor.sourceParentPromptId, input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
@@ -82,7 +81,6 @@ export class SqliteWorkerTurnStore {
       if (inserted) {
         this.saveWorkerTurnCard(acceptedView);
         this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
-        this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id, viewVersion: acceptedView.viewVersion, rootMessageId: acceptedView.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card, stream: { pageIndex: 0, pageStart: 0, elementId: acceptedView.elementId } }) });
         this.dependencies.invalidateWorkerCardContexts(acceptedView, "turn.accepted");
       }
       const view = this.loadWorkerTurnCard(turn.id);
@@ -213,8 +211,6 @@ export class SqliteWorkerTurnStore {
       if (next !== current) {
         this.saveWorkerTurnCard(next);
         this.dependencies.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
-        if (!next.messageId) this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
-        else if (input.change.type !== "output" && input.change.type !== "completed") this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(input.render(next)) });
       }
       return next;
     });
@@ -233,8 +229,6 @@ export class SqliteWorkerTurnStore {
       if (next !== currentView) {
         this.saveWorkerTurnCard(next);
         this.dependencies.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
-        if (!next.messageId) this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${next.turnId}:0`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.render(next), stream: { pageIndex: next.pageIndex, pageStart: next.pageStart, elementId: next.elementId } }) });
-        else if (input.change.type !== "output" && input.change.type !== "completed") this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:update:${next.turnId}:${next.viewVersion}`, bindingId: null, workerTurnId: next.turnId, viewVersion: next.viewVersion, rootMessageId: next.messageId, kind: "card_update", payload: JSON.stringify(input.render(next)) });
       }
       if (["completed", "failed", "cancelled"].includes(input.state)) {
         const queued = this.context.database.prepare("SELECT c.* FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE t.instance_id = ? AND t.instance_generation = ? AND t.state = 'queued' ORDER BY t.created_at, t.rowid").all(current.instanceId, input.expectedGeneration) as Array<Record<string, unknown>>;
@@ -243,7 +237,7 @@ export class SqliteWorkerTurnStore {
           if (!queuedView || queuedView.queuePosition === index + 1) continue;
           const reordered = reduceWorkerTurnCard(queuedView, { type: "queue-position", occurredAt: timestamp, queuePosition: index + 1 });
           this.saveWorkerTurnCard(reordered);
-          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: reordered.messageId ? `worker-turn:update:${reordered.turnId}:${reordered.viewVersion}` : `worker-turn:create:${reordered.turnId}:0`, bindingId: null, workerTurnId: reordered.turnId, viewVersion: reordered.viewVersion, rootMessageId: reordered.messageId ?? reordered.rootMessageId, kind: reordered.messageId ? "card_update" : "stream_card_create", payload: JSON.stringify(reordered.messageId ? input.render(reordered) : { card: input.render(reordered), stream: { pageIndex: reordered.pageIndex, pageStart: reordered.pageStart, elementId: reordered.elementId } }) });
+          this.dependencies.invalidateWorkerCardContexts(reordered, "turn.queue-position");
         }
       }
       const turn = this.getInstanceTurn(input.turnId);

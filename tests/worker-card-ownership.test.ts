@@ -36,6 +36,13 @@ describe("Worker card ownership policy", () => {
     expect(decideWorkerMainCardOwnership({ ...input, view, requireTaskSubmission: false })).toEqual({ allowed: true });
   });
 
+  it("rejects a stable-card callback after the current turn changes", () => {
+    const input = mainInput();
+    const view = { ...input.view!, currentTask: { turnId: "new-turn" } } as WorkerMainView;
+    expect(decideWorkerMainCardOwnership({ ...input, view, expectedTurnId: "old-turn", requireTaskSubmission: false })).toEqual({ allowed: false, reason: "stale_card" });
+    expect(decideWorkerMainCardOwnership({ ...input, view, expectedTurnId: "new-turn", requireTaskSubmission: false })).toEqual({ allowed: true });
+  });
+
   it("validates optional binding context fences", () => {
     const binding = activeBinding();
     const base = { chatId: "chat", bindingId: binding.id, bindingGeneration: binding.generation, parentPaneId: binding.paneId!, binding };

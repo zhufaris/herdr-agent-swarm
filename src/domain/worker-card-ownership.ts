@@ -51,6 +51,7 @@ export interface WorkerMainCardOwnershipInput {
   view: WorkerMainView | null;
   binding: Binding | null;
   requireTaskSubmission?: boolean;
+  expectedTurnId?: string;
 }
 
 export function decideWorkerMainCardOwnership(input: WorkerMainCardOwnershipInput): WorkerCardOwnershipDecision {
@@ -64,6 +65,7 @@ export function decideWorkerMainCardOwnership(input: WorkerMainCardOwnershipInpu
   const parentActive = binding.lifecycle === "active" && binding.state === "active" && binding.attachment === "attached"
     && binding.generation === view.parentBindingGeneration;
   if (!parentActive) return rejected("inactive_parent");
+  if (input.expectedTurnId !== undefined && view.currentTask?.turnId !== input.expectedTurnId) return rejected("stale_card");
   if (input.requireTaskSubmission !== false && !canSubmitWorkerMainTask({
     ...view, runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive
   })) return rejected("action_unavailable");

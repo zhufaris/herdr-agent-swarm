@@ -68,8 +68,6 @@ export class SqliteOutboxDeliveryStore {
           if (updated.changes > 0) {
             if (pageIndex > 0) this.context.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, pageIndex);
             this.context.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'").run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, pageIndex);
-            const task = this.dependencies.loadWorkerTurnCard(row.worker_turn_id);
-            if (task) this.dependencies.invalidateCardContexts([{ targetKind: "worker-turn", targetId: task.turnId, targetGeneration: task.instanceGeneration, reason: "worker-task.delivered" }]);
           }
         } else {
           this.context.database.prepare("UPDATE worker_turn_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ?").run(row.view_version ?? 0, now(), row.worker_turn_id);
@@ -86,18 +84,14 @@ export class SqliteOutboxDeliveryStore {
         this.context.database.prepare(`UPDATE worker_main_views SET delivered_version = MAX(delivered_version, ?), message_id = COALESCE(?, message_id), card_id = COALESCE(?, card_id), state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?), '$.messageId', COALESCE(?, json_extract(state_json, '$.messageId')), '$.cardId', COALESCE(?, json_extract(state_json, '$.cardId'))), updated_at = ? WHERE worker_id = ? AND worker_session_generation = ?`).run(row.view_version ?? 0, messageCheckpoint, cardCheckpoint, row.view_version ?? 0, messageCheckpoint, cardCheckpoint, now(), row.worker_id, row.worker_session_generation);
         if (messageCheckpoint) {
           const main = this.dependencies.loadWorkerMainView(row.worker_id, row.worker_session_generation);
-          if (main) {
-            const tasks = this.context.database.prepare("SELECT turn_id, instance_generation FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ?").all(row.worker_id, row.worker_session_generation) as Array<{ turn_id: string; instance_generation: number }>;
-            this.dependencies.invalidateCardContexts([
-              ...tasks.map((task) => ({ targetKind: "worker-turn" as const, targetId: task.turn_id, targetGeneration: Number(task.instance_generation), reason: "worker-main.delivered" })),
-              { targetKind: "primary-session" as const, targetId: main.parentBindingId, targetGeneration: main.parentBindingGeneration, reason: "worker-main.delivered" }
-            ]);
-          }
+          if (main) this.dependencies.invalidateCardContexts([
+            { targetKind: "worker-session", targetId: main.workerId, targetGeneration: main.workerSessionGeneration, reason: "worker-main.delivered" },
+            { targetKind: "primary-session", targetId: main.parentBindingId, targetGeneration: main.parentBindingGeneration, reason: "worker-main.delivered" }
+          ]);
         }
       }
       if (row.prompt_id && row.card_role === "answer" && (row.kind === "card_reply" || row.kind === "stream_card_create")) {
-        const tasks = this.context.database.prepare("SELECT c.turn_id, c.instance_generation FROM instance_turns t INDEXED BY instance_turns_primary_source JOIN worker_turn_cards c ON c.turn_id = t.id WHERE t.actor_kind = 'thread-primary' AND t.source_parent_prompt_id = ?").all(row.prompt_id) as Array<{ turn_id: string; instance_generation: number }>;
-        this.dependencies.invalidateCardContexts(tasks.map((task) => ({ targetKind: "worker-turn" as const, targetId: task.turn_id, targetGeneration: Number(task.instance_generation), reason: "primary-answer.delivered" })));
+        // Historical Worker Task Cards no longer mirror Primary Answer delivery.
       }
       if (row.selection_id && row.kind === "card_reply") this.context.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
       if (row.binding_id && row.target_role === "session_status") {

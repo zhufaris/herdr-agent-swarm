@@ -17,10 +17,10 @@ export class WorkerCardActions {
   async handleTask(action: IncomingLarkCardAction, command: WorkerTaskCommand): Promise<LarkCardActionResult> {
     const owned = this.resolveTask(action, command);
     if (!owned) return warning("Worker Task 卡片已过期、状态已变化或不属于当前 Primary。");
-    const { instance, turn, view, intent } = owned;
+    const { instance, turn, view, sourceCardMessageId, intent } = owned;
     if (command.action === "worker_task_instruction_form") {
       if (intent === "reject") return warning(workerTaskInteraction(view.phase).guidance);
-      return { card: this.options.presentation.workerTaskInstruction({ workerName: instance.name, turnId: turn.id, intent, interactionId: this.options.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId: view.messageId!, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
+      return { card: this.options.presentation.workerTaskInstruction({ workerName: instance.name, turnId: turn.id, intent, interactionId: this.options.idFactory(), requestedBy: action.operatorOpenId, sourceCardMessageId, instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration }) };
     }
     if (command.action === "worker_task_interrupt") {
       if (!workerTaskInteraction(view.phase).canInterrupt) return warning("任务已不处于可停止的运行状态。");
@@ -56,13 +56,14 @@ export class WorkerCardActions {
     } catch (error) { return failed(error); }
   }
 
-  private resolveTask(action: IncomingLarkCardAction, command: WorkerTaskCommand): { instance: AgentInstance; turn: NonNullable<ReturnType<InstanceStore["getInstanceTurn"]>>; view: NonNullable<ReturnType<InstanceStore["loadWorkerTurnCard"]>>; intent: WorkerTaskReplyIntent } | null {
+  private resolveTask(action: IncomingLarkCardAction, command: WorkerTaskCommand): { instance: AgentInstance; turn: NonNullable<ReturnType<InstanceStore["getInstanceTurn"]>>; view: NonNullable<ReturnType<InstanceStore["loadWorkerTurnCard"]>>; sourceCardMessageId: string; intent: WorkerTaskReplyIntent } | null {
     const turn = this.options.store.getInstanceTurn(command.turnId);
     const view = this.options.store.loadWorkerTurnCard(command.turnId);
     const instance = turn ? this.options.store.getAgentInstance(turn.instanceId) : null;
     const binding = instance?.parent ? this.options.store.getBinding(instance.parent.bindingId) : null;
-    const decision = decideWorkerTaskCardOwnership({ chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId: command.sourceCardMessageId, expectedInstanceGeneration: command.generation, expectedWorkerSessionGeneration: command.workerSessionGeneration, instance, turn, view, binding });
-    return decision.allowed && turn && view && instance ? { instance, turn, view, intent: workerTaskInteraction(view.phase).replyIntent } : null;
+    const main = instance ? this.options.store.loadWorkerMainView(instance.id, command.workerSessionGeneration) : null;
+    const decision = decideWorkerMainCardOwnership({ chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId: command.sourceCardMessageId, expectedInstanceGeneration: command.generation, expectedWorkerSessionGeneration: command.workerSessionGeneration, expectedTurnId: command.turnId, instance, view: main, binding, requireTaskSubmission: false });
+    return decision.allowed && turn && view && instance && main?.messageId ? { instance, turn, view, sourceCardMessageId: main.messageId, intent: workerTaskInteraction(view.phase).replyIntent } : null;
   }
 
   private resolveMain(action: IncomingLarkCardAction, command: WorkerNewTaskCommand): { instance: AgentInstance; view: NonNullable<ReturnType<InstanceStore["loadWorkerMainView"]>> } | null {

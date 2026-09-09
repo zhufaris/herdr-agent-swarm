@@ -10,28 +10,37 @@ function view() {
 }
 
 describe("Worker Main card", () => {
-  it("renders bounded summaries and hides links until their delivery checkpoint exists", () => {
+  it("renders the current task in the stable Worker card without Task Card links", () => {
     const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
       turnId: "turn-current", title: "Review auth boundary", phase: "running", durationSeconds: 74, updatedAt: "2026-09-05T00:01:00.000Z",
-      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null }
+      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null },
+      requestText: "Review auth boundary and summarize findings", statusTitle: "Inspecting ownership fences",
+      progressEvents: [{ key: "inspect", kind: "tool", label: "Read ownership policy", state: "done", occurredAt: "2026-09-05T00:00:30.000Z" }],
+      answer: "Current bounded output"
     }, queueCount: 1, nextTaskTitle: "Run recovery tests", recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
-    const withoutLink = JSON.stringify(renderWorkerMainCard(projected));
-    const withLink = JSON.stringify(renderWorkerMainCard({ ...projected, messageId: "om_worker_main", currentTask: { ...projected.currentTask!, taskCard: { ...projected.currentTask!.taskCard, messageId: "om_task_card" } } }));
+    const rendered = JSON.stringify(renderWorkerMainCard({ ...projected, messageId: "om_worker_main" }));
 
-    expect(withoutLink).toContain("reviewer");
-    expect(withoutLink).toContain("🤖 Worker · reviewer");
-    expect(withoutLink).toContain("**🎯 Current Task**");
-    expect(withoutLink).toContain("🧠 Review auth boundary");
-    expect(withoutLink).toContain("**📨 Queue**");
-    expect(withoutLink).toContain("Review auth boundary");
-    expect(withoutLink).toContain("Run recovery tests");
-    expect(withoutLink).not.toContain("om_task_card");
-    expect(withLink).toContain("om_task_card");
-    expect(withLink).not.toContain("requestText");
-    expect(withLink).not.toContain("answer");
-    expect(withLink).toContain("发起新任务");
-    expect(withLink).toContain("worker_new_task_form");
-    expect(withLink).toContain("新任务将进入 FIFO 队列");
+    expect(rendered).toContain("🤖 Worker · reviewer");
+    expect(rendered).toContain("Review auth boundary and summarize findings");
+    expect(rendered).toContain("Inspecting ownership fences");
+    expect(rendered).toContain("Read ownership policy");
+    expect(rendered).toContain("Current bounded output");
+    expect(rendered).toContain("Run recovery tests");
+    expect(rendered).toContain("worker_task_instruction_form");
+    expect(rendered).toContain("worker_task_interrupt");
+    expect(rendered).not.toContain("card_target_open");
+    expect(rendered).toContain("worker_new_task_form");
+  });
+
+  it("keeps the latest terminal result visible and offers an explicit follow-up", () => {
+    const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
+      turnId: "turn-done", title: "Finished task", phase: "completed", durationSeconds: 8, updatedAt: "2026-09-05T00:01:00.000Z",
+      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-done", generation: 4, messageId: null }, answer: "Final result"
+    }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
+    const rendered = JSON.stringify(renderWorkerMainCard({ ...projected, messageId: "om_worker_main" }));
+    expect(rendered).toContain("Final result");
+    expect(rendered).toContain("worker_task_instruction_form");
+    expect(rendered).not.toContain("worker_task_interrupt");
   });
 
   it("exposes no live controls after termination", () => {
@@ -47,6 +56,12 @@ describe("Worker Main card", () => {
     const text = JSON.stringify(renderWorkerMainCard({ ...view(), messageId: "om_worker_main", runtimeState: "idle" }));
     expect(text).toContain("立即执行");
     expect(text).toContain("发起新任务");
+  });
+
+  it("does not emit callbacks until the stable card message identity is checkpointed", () => {
+    const text = JSON.stringify(renderWorkerMainCard(view()));
+    expect(text).not.toContain("worker_new_task_form");
+    expect(text).not.toContain("sourceCardMessageId");
   });
 
   it.each(["unprovisioned", "starting", "detached", "stopped", "failed", "terminated"] as const)("hides new-task controls while runtime is %s", (runtimeState) => {

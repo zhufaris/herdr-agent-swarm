@@ -1,6 +1,8 @@
 import type { ObservedInstanceState } from "./agent-instance.js";
 import { sameCardTargetRef, type CardTargetRef } from "./card-target-ref.js";
 import type { WorkerTurnCardPhase } from "./worker-turn-card-view.js";
+import type { WorkerTurnResultCapture } from "./worker-turn-card-view.js";
+import type { RunProgressEvent } from "./run-card-view.js";
 
 export const WORKER_MAIN_RECENT_TASK_LIMIT = 5;
 export type WorkerMainRuntimeState = ObservedInstanceState | "terminated";
@@ -12,6 +14,12 @@ export interface WorkerMainTaskSummary {
   durationSeconds: number | null;
   taskCard: CardTargetRef;
   updatedAt: string;
+  requestText?: string;
+  answer?: string;
+  statusTitle?: string | null;
+  progressEvents?: RunProgressEvent[];
+  notice?: string | null;
+  resultCapture?: WorkerTurnResultCapture;
 }
 
 export interface WorkerMainView {
@@ -102,5 +110,16 @@ function sameTask(left: WorkerMainTaskSummary | null, right: WorkerMainTaskSumma
   if (left === right) return true;
   if (!left || !right) return false;
   return left.turnId === right.turnId && left.title === right.title && left.phase === right.phase && left.durationSeconds === right.durationSeconds
-    && left.updatedAt === right.updatedAt && sameCardTargetRef(left.taskCard, right.taskCard);
+    && left.updatedAt === right.updatedAt && left.requestText === right.requestText && left.answer === right.answer && left.statusTitle === right.statusTitle
+    && left.notice === right.notice && left.resultCapture === right.resultCapture && sameProgress(left.progressEvents, right.progressEvents)
+    && sameCardTargetRef(left.taskCard, right.taskCard);
+}
+
+function sameProgress(left: readonly RunProgressEvent[] | undefined, right: readonly RunProgressEvent[] | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((event, index) => {
+    const other = right[index];
+    return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state && event.occurredAt === other.occurredAt;
+  });
 }

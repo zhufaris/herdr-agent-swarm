@@ -38,7 +38,7 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
 }
 
 describe("instance messaging", () => {
-  it("atomically accepts each Feishu Worker turn with one queued task card", async () => {
+  it("atomically accepts each Feishu Worker turn without creating per-turn cards", async () => {
     const { create, workflow, wake, wakeOutbound } = setup();
     const worker = create("worker");
     const actor = { kind: "human" as const, userId: "u1", channel: "feishu" as const };
@@ -50,10 +50,10 @@ describe("instance messaging", () => {
     const duplicate = await workflow.submit({ idempotencyKey: "message-B", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "B" }, source: { messageId: "message-B", rootMessageId: "root-1" } });
     expect(duplicate.inserted).toBe(false);
     expect(store!.listInstanceTurns(worker.id).items).toHaveLength(3);
-    expect(store!.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(3);
-    expect(store!.database.prepare("SELECT lane_key FROM outbound_replies WHERE worker_turn_id IS NOT NULL ORDER BY delivery_order").all()).toEqual([
-      { lane_key: "worker-turn:turn-1" }, { lane_key: "worker-turn:turn-2" }, { lane_key: "worker-turn:turn-3" }
-    ]);
+    expect(store!.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toEqual([]);
+    expect(store!.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({
+      targetKind: "worker-session", targetId: worker.id, targetGeneration: worker.workerSessionGeneration
+    }));
     expect(wakeOutbound).toHaveBeenCalledTimes(3);
     expect(wake).toHaveBeenCalledTimes(3);
     expect(wakeOutbound.mock.invocationCallOrder[0]).toBeLessThan(wake.mock.invocationCallOrder[0]!);
