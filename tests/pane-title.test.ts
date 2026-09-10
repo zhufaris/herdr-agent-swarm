@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPrimaryPaneToken, primaryPaneToken } from "../src/domain/pane-title.js";
+import { canonicalPrimaryPaneToken, createPrimaryPaneToken, primaryPaneToken } from "../src/domain/pane-title.js";
 
 describe("Primary pane tokens", () => {
   it("creates exactly four lowercase base36 characters", () => {
@@ -14,8 +14,14 @@ describe("Primary pane tokens", () => {
     ["task-ilcs", "ilcs"],
     ["  lark_iLcS  ", "ilcs"]
   ])("extracts a canonical token from %s", (label, expected) => {
+    expect(canonicalPrimaryPaneToken(label)).toBe(expected);
     expect(primaryPaneToken(label, "pane-1")).toBe(expected);
   });
+
+  it.each([null, "", "primary-ilcs", "prefix-lark_ilcs", "lark_ilcs-extra", "abc", "abcde"])
+    ("does not expose a fallback token for noncanonical label %s", (label) => {
+      expect(canonicalPrimaryPaneToken(label)).toBeNull();
+    });
 
   it.each([null, "", "primary-ilcs", "prefix-lark_ilcs", "lark_ilcs-extra", "abc", "abcde"])
     ("uses a deterministic pane-id fallback for noncanonical label %s", (label) => {

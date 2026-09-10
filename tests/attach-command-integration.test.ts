@@ -46,6 +46,23 @@ describe("attach existing pane command", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
+  it.each(["cum7", "CUM7"])("resolves canonical four-character Pane token %s", async (reference) => {
+    let exposePane = false;
+    const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    const pane = { paneId: "w5:p40", workspaceId: "w5", cwd: "/repo", label: "task-cum7", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePane ? [pane] : []; }, async getPane() { return null; }, async createPane() { throw new Error("unused"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePane = true;
+
+    await coordinator.handleMessage(command(1, reference));
+
+    expect(store.findBindingByPane("w5:p40")).toMatchObject({ state: "active" });
+    expect(createTopic).toHaveBeenCalledTimes(1);
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("attaches an eligible pane without mutating or starting it and is idempotent", async () => {
     let exposePane = false;
     let onAction: Parameters<LarkPort["start"]>[1];
@@ -231,6 +248,25 @@ describe("attach existing pane command", () => {
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
 
     await coordinator.handleMessage({ ...command(1), text: "/swarm attach datasage_semantic_knowledge tidy" });
+
+    expect(store.listBindings()).toEqual([]);
+    expect(JSON.stringify(cards.at(-1))).toContain("w5:p1, w5:p2");
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("rejects an ambiguous canonical Pane token and lists candidate ids", async () => {
+    let exposePanes = false; const cards: object[] = [];
+    const panes = [
+      { paneId: "w5:p1", workspaceId: "w5", cwd: "/repo", label: "task-bb1j", agentState: "idle" as const, foregroundExecutables: ["traex"] },
+      { paneId: "w5:p2", workspaceId: "w5", cwd: "/repo", label: "lark_bb1j", agentState: "idle" as const, foregroundExecutables: ["traex"] }
+    ];
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); }, async replyText() { return { messageId: "text" }; }, async replyCard(_root, card) { cards.push(card); return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = { async assertWorkspace() {}, async listPanes() { return exposePanes ? panes : []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} };
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePanes = true;
+
+    await coordinator.handleMessage(command(1, "bb1j"));
 
     expect(store.listBindings()).toEqual([]);
     expect(JSON.stringify(cards.at(-1))).toContain("w5:p1, w5:p2");

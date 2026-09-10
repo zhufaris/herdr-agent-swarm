@@ -248,10 +248,12 @@ prompt。失败任务只用于诊断。
 
 ```text
 /swarm attach datasage_semantic_knowledge w5:p3G
+/swarm attach datasage_semantic_knowledge cum7
 ```
 
-`space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID，
-也可以是该 Space 中唯一的精确 Pane 名称；名称重名时会返回候选 ID。Bridge 只会在该项目的
+`space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID、
+该 Space 中唯一的精确 Pane 名称，或 Pane 名称中可见的 4 字 token（例如 `task-cum7`
+可输入 `cum7`）；名称或 token 重名时会返回候选 ID。Bridge 只会在该项目的
 Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
 不会创建第二个绑定，而会返回已有连接信息。首次连接成功和重复连接的结果卡都会提供
 “打开话题”按钮；点击后 Bridge 会在当前群发送飞书原生的话题转发卡片，再点击该卡片

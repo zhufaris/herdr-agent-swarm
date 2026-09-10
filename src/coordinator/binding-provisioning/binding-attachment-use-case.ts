@@ -4,6 +4,7 @@ import type { BindingProvisioningStore } from "../../domain/ports/binding.js";
 import type { HerdrPort } from "../../domain/ports/external.js";
 import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig, ProjectSelection } from "../../domain/types.js";
 import type { PromptWorkScheduler } from "../../events/prompt-work-scheduler.js";
+import { canonicalPrimaryPaneToken } from "../../domain/pane-title.js";
 import { requireMatchingPane } from "../pane-runtime-identity.js";
 import type { ProjectCatalog } from "../project-catalog.js";
 
@@ -24,7 +25,9 @@ export class BindingAttachmentUseCase {
     if (projects.length !== 1) { await this.options.reject(message, projects.length === 0 ? `未找到空间 ${spaceName}。` : `空间 ${spaceName} 对应多个项目，无法确定要连接哪一个。`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: projects.length === 0 ? "unknown_space" : "ambiguous_space" }); return false; }
     const project = projects[0]!; const panes = (await herdr.listPanes(project.workspaceId, { forceRefresh: true })).filter((candidate) => candidate.workspaceId === project.workspaceId); const exactId = panes.find((candidate) => candidate.paneId === paneReference); const labelMatches = exactId ? [] : panes.filter((candidate) => candidate.label === paneReference);
     if (!exactId && labelMatches.length > 1) { await this.options.reject(message, `Pane 名称 ${paneReference} 不唯一，请改用 Pane ID：${labelMatches.map((candidate) => candidate.paneId).sort().join(", ")}`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: "ambiguous_pane_label" }); return false; }
-    const pane = exactId ?? labelMatches[0];
+    const tokenMatches = exactId || labelMatches.length > 0 || !/^[a-z0-9]{4}$/i.test(paneReference) ? [] : panes.filter((candidate) => canonicalPrimaryPaneToken(candidate.label) === paneReference.toLowerCase());
+    if (tokenMatches.length > 1) { await this.options.reject(message, `Pane token ${paneReference} 不唯一，请改用 Pane ID：${tokenMatches.map((candidate) => candidate.paneId).sort().join(", ")}`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: "ambiguous_pane_token" }); return false; }
+    const pane = exactId ?? labelMatches[0] ?? tokenMatches[0];
     if (!pane) { await this.options.reject(message, `在空间 ${spaceName} 的 Herdr workspace ${project.workspaceId} 中未找到 Pane ${paneReference}。`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: paneReference, outcome: "pane_not_found" }); return false; }
     const existing = store.findBindingByPane(pane.paneId);
     if (existing) {
