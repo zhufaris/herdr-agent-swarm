@@ -16,6 +16,10 @@ interface Options { config: BridgeConfig; store: ModelSelectionStore; traexContr
 
 const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。";
 
+type ModelReplyTarget =
+  | { kind: "text"; rootMessageId: string; sourceMessageId: string }
+  | { kind: "card"; messageId: string };
+
 export interface ModelSelectionWorkflowPort {
   recover(): Promise<void>;
   runModel(message: IncomingLarkMessage, binding: Binding | null, name: string | null): Promise<boolean>;
@@ -55,13 +59,13 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
       this.options.store.audit({ actorOpenId: message.actorOpenId, action: "model.run", target, outcome: "inactive_binding" });
       return false;
     }
-    return this.queryOrSelect(binding, name, message.actorOpenId, message.messageId);
+    return this.queryOrSelect(binding, name, message.actorOpenId, { kind: "text", rootMessageId: message.rootMessageId ?? message.messageId, sourceMessageId: message.messageId });
   }
 
   async selectModel(action: IncomingLarkCardAction, bindingId: string, model: string): Promise<void> {
     const binding = this.options.store.getBinding(bindingId);
     if (!binding?.paneId || binding.chatId !== action.chatId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return;
-    await this.queryOrSelect(binding, model, action.operatorOpenId, action.messageId);
+    await this.queryOrSelect(binding, model, action.operatorOpenId, { kind: "card", messageId: action.messageId });
   }
 
   async selectModelMode(action: IncomingLarkCardAction, bindingId: string, operationId: string, _mode: string): Promise<void> {
@@ -76,16 +80,16 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
 
   private async publishUnsupported(binding: Binding, messageId: string, operationId: string): Promise<void> {
     if (!binding.paneId) return;
-    await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${operationId}:unsupported`, this.options.presentation.modelResult({
+    await this.publish(binding, { kind: "card", messageId }, `model:${operationId}:unsupported`, this.options.presentation.modelResult({
       bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
     }));
   }
 
-  private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, messageId: string): Promise<boolean> {
+  private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, replyTarget: ModelReplyTarget): Promise<boolean> {
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
     if (!isNativeTraexSession(session)) {
-      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:unavailable`, this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
+      await this.publish(binding, replyTarget, "unavailable", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
       return false;
     }
     try {
@@ -107,12 +111,20 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
         }
       }
       const preference = this.options.store.getModelPreference(binding.id);
-      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, models, preference, ...(notice ? { notice } : {}) }));
+      await this.publish(binding, replyTarget, `${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, models, preference, ...(notice ? { notice } : {}) }));
       return selected;
     } catch (error) {
-      await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:failed`, this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
+      await this.publish(binding, replyTarget, "failed", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
       return false;
     }
+  }
+
+  private async publish(binding: Binding, target: ModelReplyTarget, suffix: string, card: object): Promise<void> {
+    if (target.kind === "card") {
+      await this.options.outbound.enqueueCardUpdate(binding.id, target.messageId, `model:${target.messageId}:${suffix}`, card);
+      return;
+    }
+    await this.options.outbound.enqueueCard(target.rootMessageId, `model:${target.sourceMessageId}:${suffix}`, card, binding.id, "operation_result");
   }
 
   private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }

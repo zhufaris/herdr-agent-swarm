@@ -12,12 +12,24 @@ import { primaryPresentation } from "./helpers/presentation.js";
 const UNSUPPORTED = "运行中的 Agent 不支持远程切换模型";
 
 describe("model command without terminal interaction", () => {
+  it("creates a model catalog card for a text query", async () => {
+    const fixture = await setup();
+
+    await fixture.coordinator.handleMessage(message("/swarm model"));
+
+    await vi.waitFor(() => expect(fixture.cards.some((card) => JSON.stringify(card).includes("GPT-5.5"))).toBe(true));
+    expect(fixture.updates.some((update) => update.messageId === "message-/swarm model")).toBe(false);
+    expect(fixture.herdrCalls).toContain("listModels");
+    await fixture.close();
+  });
+
   it("validates and stores a runtime model for the next ordinary prompt", async () => {
     const fixture = await setup();
 
     await fixture.coordinator.handleMessage(message("/swarm model GPT-5.5"));
 
-    await vi.waitFor(() => expect(fixture.updates.some((update) => JSON.stringify(update.card).includes("将在下一条普通消息生效"))).toBe(true));
+    await vi.waitFor(() => expect(fixture.cards.some((card) => JSON.stringify(card).includes("将在下一条普通消息生效"))).toBe(true));
+    expect(fixture.updates.some((update) => update.messageId === "message-/swarm model GPT-5.5")).toBe(false);
     expect(fixture.herdrCalls).toContain("listModels");
     expect(fixture.store.countPendingPrompts(fixture.bindingId)).toBe(0);
     expect(fixture.store.getModelPreference(fixture.bindingId)).toMatchObject({ desiredModel: "GPT-5.5", state: "pending" });
