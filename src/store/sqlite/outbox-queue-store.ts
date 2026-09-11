@@ -104,7 +104,9 @@ export class SqliteOutboxQueueStore {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     const exclusions = excludedLaneKeys.length > 0 ? `AND h.lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
     const due = dueAt === null ? "" : "AND h.next_attempt_at <= ?";
-    const laneFilter = laneClass === "interactive" ? "AND (h.lane_key GLOB 'answer:*' OR h.lane_key GLOB 'primary-answer:*' OR h.lane_key GLOB 'reply:*')" : "";
+    const laneFilter = laneClass === "interactive"
+      ? "AND o.kind IN ('stream_card_create', 'stream_content', 'stream_finish', 'card_reply', 'text')"
+      : "";
     const parameters: SqlValue[] = [...excludedLaneKeys];
     if (dueAt !== null) parameters.push(dueAt);
     parameters.push(limit);

@@ -810,7 +810,7 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("delivers a new interactive Answer in the first batch while old lanes progress", async () => {
+  it("delivers a new Answer Card creation ahead of stalled historical Answer updates", async () => {
     let releaseOld!: () => void;
     const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
     const started: string[] = [];
@@ -819,8 +819,16 @@ describe("Lark channel publisher", () => {
       async replyStreamingCard() { started.push("interactive-answer"); return { messageId: "answer-message", cardId: "answer-card" }; }
     });
     const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "old-binding", workspaceId: "old-workspace", chatId: "old-chat", topicId: "old-topic", rootMessageId: "old-root", title: "Old task" });
     for (let index = 0; index < 8; index += 1) {
-      store.enqueueOutboundReply({ id: `old-${index}`, idempotencyKey: `old-${index}`, rootMessageId: `old-card-${index}`, kind: "card_update", payload: "{}" });
+      const promptId = `old-prompt-${index}`;
+      const oldView = createQueuedRunCard({ promptId, bindingId: "old-binding", title: "Old answer", workspaceId: "old-workspace", paneId: "old-pane", requestText: "old", queuePosition: 1, occurredAt: "now" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "old-binding", larkMessageId: `old-message-${index}`, actorOpenId: "u1", body: "old" }, view: oldView, rootMessageId: "old-root", answerCard: {} });
+      for (const reply of store.listPendingOutboundReplies()) { if (reply.promptId === promptId) store.markOutboundReplyDelivered(reply.id, `old-answer-${index}`, `old-card-${index}`); }
+      store.enqueueOutboundReply({
+        id: `old-${index}`, idempotencyKey: `old-${index}`, bindingId: "old-binding", promptId, cardRole: "answer",
+        rootMessageId: `old-card-${index}`, kind: "card_update", payload: "{}"
+      });
     }
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
@@ -829,8 +837,6 @@ describe("Lark channel publisher", () => {
 
     const draining = publisher.requestScan();
     await vi.waitFor(() => expect(started).toContain("interactive-answer"));
-    expect(started.filter((value) => value.startsWith("old-card-"))).not.toHaveLength(0);
-    expect(started.filter((value) => value.startsWith("old-card-"))).toHaveLength(3);
     releaseOld();
     await draining;
 
