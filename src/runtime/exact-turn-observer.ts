@@ -8,6 +8,7 @@ export interface ExactTurnIdentity {
 
 export type TranscriptBoundary =
   | { kind: "latest" }
+  | { kind: "first" }
   | ({ kind: "at" | "after" } & ExactTurnIdentity);
 
 export type ExactTurnReadResult =
@@ -35,6 +36,10 @@ export class ExactTurnObserver {
 
   private openBoundary(session: HerdrAgentSession | null, boundary: TranscriptBoundary) {
     if (boundary.kind === "latest") return this.reader.open(session);
+    if (boundary.kind === "first") {
+      if (!this.reader.openFirstTurn) return Promise.resolve({ mode: "unavailable" as const, reason: "recovery_cursor_unavailable" as const });
+      return this.reader.openFirstTurn(session);
+    }
     if (boundary.kind === "at") {
       if (!this.reader.openAtTurn) return Promise.resolve({ mode: "unavailable" as const, reason: "recovery_cursor_unavailable" as const });
       return this.reader.openAtTurn(session, boundary.turnId, boundary.startedAt);

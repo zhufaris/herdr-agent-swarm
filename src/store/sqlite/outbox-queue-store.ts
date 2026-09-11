@@ -100,14 +100,15 @@ export class SqliteOutboxQueueStore {
     return Number(updated.changes) === 1;
   }
 
-  listLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = []): OutboundReply[] {
+  listLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], laneClass?: "interactive"): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     const exclusions = excludedLaneKeys.length > 0 ? `AND h.lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
     const due = dueAt === null ? "" : "AND h.next_attempt_at <= ?";
+    const laneFilter = laneClass === "interactive" ? "AND (h.lane_key GLOB 'answer:*' OR h.lane_key GLOB 'primary-answer:*' OR h.lane_key GLOB 'reply:*')" : "";
     const parameters: SqlValue[] = [...excludedLaneKeys];
     if (dueAt !== null) parameters.push(dueAt);
     parameters.push(limit);
-    return (this.context.database.prepare(`SELECT o.* FROM outbox_lane_heads h JOIN outbound_replies o ON o.id = h.reply_id WHERE 1 = 1 ${exclusions} ${due} ORDER BY h.delivery_order LIMIT ?`).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
+    return (this.context.database.prepare(`SELECT o.* FROM outbox_lane_heads h JOIN outbound_replies o ON o.id = h.reply_id WHERE 1 = 1 ${exclusions} ${due} ${laneFilter} ORDER BY h.delivery_order LIMIT ?`).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
   getNextLaneHeadAttemptAt(): string | null {

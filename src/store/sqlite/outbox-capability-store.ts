@@ -25,7 +25,7 @@ export class SqliteOutboxCapabilityStore implements OutboxStore {
   getBinding(id: string): ReturnType<OutboxStore["getBinding"]> { return this.bindings.getBinding(id); }
   getNextOutboundLaneHeadAttemptAt(): string | null { return this.outbox.getNextOutboundLaneHeadAttemptAt(); }
   getPrompt(id: string): ReturnType<OutboxStore["getPrompt"]> { return this.prompts.getPrompt(id); }
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[]): OutboundReply[] { return this.outbox.listOutboundLaneHeads(limit, dueAt, excludedLaneKeys); }
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], laneClass?: "interactive"): OutboundReply[] { return this.outbox.listOutboundLaneHeads(limit, dueAt, excludedLaneKeys, laneClass); }
   loadRunCard(promptId: string): ReturnType<OutboxStore["loadRunCard"]> { return this.projections.loadRunCard(promptId); }
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void { this.outbox.markOutboundReplyDelivered(id, messageId, cardId); }
   markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null { return this.outbox.markOutboundReplyFailedWithQuarantine(id, error, metadata, retryDelayMs); }

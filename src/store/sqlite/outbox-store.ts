@@ -39,7 +39,7 @@ export class SqliteOutboxStore {
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean { return this.queue.hasPendingForWorkerTurn(turnId); }
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean { return this.queue.hasPendingAnswerContinuation(promptId, pageIndex); }
   dismissSupersededAnswerStream(replyId: string): boolean { return this.queue.dismissSupersededAnswerStream(replyId); }
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = []): OutboundReply[] { return this.queue.listLaneHeads(limit, dueAt, excludedLaneKeys); }
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], laneClass?: "interactive"): OutboundReply[] { return this.queue.listLaneHeads(limit, dueAt, excludedLaneKeys, laneClass); }
   getNextOutboundLaneHeadAttemptAt(): string | null { return this.queue.getNextLaneHeadAttemptAt(); }
   refreshOutboxLaneHead(laneKey: string): void { this.queue.refreshLaneHead(laneKey); }
   getOutboundReply(id: string): OutboundReply | null { return this.queue.get(id); }

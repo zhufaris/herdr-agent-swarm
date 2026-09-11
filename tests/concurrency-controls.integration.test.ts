@@ -937,6 +937,63 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
+  it("adopts a native session created by first dispatch and reads its exact transcript", async () => {
+    const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
+    const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    let startedAt = new Date().toISOString();
+    let dispatched = false;
+    let transcriptAvailable = false;
+    const opens: Array<string | null> = [];
+    const transcriptReader: TraexTranscriptReaderPort = {
+      async open(session) {
+        opens.push(session?.value ?? null);
+        if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
+        if (!transcriptAvailable) return { mode: "unavailable", reason: "transcript_not_found" };
+        let emitted = false;
+        return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
+          if (emitted) return { answerDelta: "" };
+          emitted = true;
+          return { turnId, freshTurnStart: true, requestText: "first native turn", answerDelta: "authoritative first-turn answer", turnLifecycle: { turnId, state: "completed", startedAt, finalAnswer: "authoritative first-turn answer" } };
+        } } };
+      },
+      async openFirstTurn(session) { return this.open(session); }
+    };
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      dispatched = true;
+      startedAt = new Date().toISOString();
+      await onDispatched?.();
+      await vi.waitFor(() => expect(transcriptAvailable).toBe(true));
+      return "done" as const;
+    });
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", terminalId: "terminal-1", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, runPrompt, async renamePane() {},
+      async observeRuntime() {
+        if (!dispatched) return { pane: { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", terminalId: "terminal-1", foregroundExecutables: ["traex"], agentState: "idle" }, traexProcess: true, composerReady: true, evidenceSource: "structured" };
+        transcriptAvailable = true;
+        return { pane: { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", terminalId: "terminal-1", foregroundExecutables: ["traex"], agentState: "working", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }, traexProcess: true, composerReady: true, evidenceSource: "structured" };
+      }
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "first-native-e1", messageId: "first-native-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first native turn", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "authoritative first-turn answer" }), { timeout: 8_000 });
+
+    expect(runPrompt).toHaveBeenCalledOnce();
+    expect(store.getBinding("b1")).toMatchObject({ generation: 1, traexSessionId: "terminal-1", agentSessionSource: "herdr:traex", agentSessionValue: sessionId });
+    expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)).toMatchObject({ transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt });
+    expect(opens).toContain(sessionId);
+
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("waits for a first-turn transcript to appear after its session identity is known", async () => {
     const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";

@@ -52,6 +52,7 @@ interface PromptRunWorkflowOptions {
   safetyScanIntervalMs?: number;
   staleClaimGraceMs?: number;
   transcriptReader?: TraexTranscriptReaderPort;
+  adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;
   transcriptPolling?: { identityMs: number; attachedMs: number };
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
   observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
@@ -80,7 +81,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       maintainObserverCaches: () => this.transcriptObserver.prune()
     });
     this.transcriptObserver = new TranscriptObserver({
-      store: options.store, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
+      store: options.store, herdr: options.herdr, adoptRuntimeIdentity: options.adoptRuntimeIdentity, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
       ...(options.transcriptPolling ? { identityPollMs: options.transcriptPolling.identityMs, attachedPollMs: options.transcriptPolling.attachedMs } : {}),
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       publishObservation: async (bindingId, promptId, observation) => {

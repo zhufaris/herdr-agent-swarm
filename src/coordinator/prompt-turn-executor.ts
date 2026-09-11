@@ -100,6 +100,9 @@ export class PromptTurnExecutor {
       stopAttachedTranscript.abort();
       await attachedTranscriptObserver;
       attachedTranscriptObserver = null;
+      const recovered = await this.options.transcript.recoverFirstTurn(outputSource, binding);
+      outputSource = recovered.source;
+      binding = recovered.binding;
       await turnStartedPublication;
       if (!this.options.isBindingActive(bindingId) && this.options.store.getBinding(bindingId)?.lifecycle !== "draining") {
         observerDetached = true;

@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
@@ -14,6 +14,8 @@ export type TurnOutputSource =
 interface TranscriptObserverOptions {
   store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn">;
   reader?: TraexTranscriptReaderPort;
+  herdr: Pick<HerdrPort, "observeRuntime">;
+  adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;
   logger: Logger;
   isBindingActive(bindingId: string): boolean;
   isStopping(): boolean;
@@ -90,6 +92,23 @@ export class TranscriptObserver {
     return source;
   }
 
+  async recoverFirstTurn(source: TurnOutputSource, binding: Binding): Promise<{ source: TurnOutputSource; binding: Binding }> {
+    if (source.mode !== "unavailable" || source.reason !== "missing_session_identity" || binding.hasCompletedTurn || !binding.paneId || !this.exactTurns) return { source, binding };
+    try {
+      const observation = await this.options.herdr.observeRuntime(binding.paneId);
+      if (!observation.pane) return { source, binding };
+      const applied = this.options.adoptRuntimeIdentity({ bindingId: binding.id, expectedPaneId: binding.paneId, expectedGeneration: binding.generation, pane: observation.pane });
+      if (applied.outcome !== "applied" || !applied.binding.agentSessionValue) return { source, binding };
+      const opened = await this.exactTurns.open({ session: transcriptSessionFor(applied.binding), boundary: { kind: "first" } });
+      if (opened.mode !== "typed") return { source, binding: applied.binding };
+      this.options.logger.info({ event: "traex-transcript-source-upgraded", bindingId: binding.id, paneId: binding.paneId, outcome: "typed_after_dispatch" }, "acquired first-turn TraeX session identity after prompt dispatch");
+      return { source: { mode: "typed", cursor: opened.cursor, emitted: false, chunks: [] }, binding: applied.binding };
+    } catch (error) {
+      this.options.logger.warn({ event: "traex-transcript-source-upgrade-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "structured_output_unavailable" }, "could not recover first-turn TraeX transcript identity");
+      return { source, binding };
+    }
+  }
+
   async read(source: TurnOutputSource, binding: Binding, promptId: string): Promise<{ source: TurnOutputSource; observation: TraexTranscriptObservation }> {
     if (source.mode === "unavailable") return { source, observation: { answerDelta: "" } };
     try {
@@ -106,6 +125,11 @@ export class TranscriptObserver {
     let source = input.source;
     await abortableWait(this.attachedPollMs, input.signal).catch(() => undefined);
     while (!this.options.isStopping() && !input.signal.aborted && this.options.isBindingActive(input.binding.id)) {
+      if (source.mode === "unavailable" && source.reason === "missing_session_identity") {
+        const recovered = await this.recoverFirstTurn(source, input.binding);
+        source = recovered.source;
+        input.updateSource(source);
+      }
       const typed = await this.read(source, input.binding, input.prompt.id);
       source = typed.source;
       input.updateSource(source);

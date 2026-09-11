@@ -118,6 +118,20 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     }
   }
 
+  async openFirstTurn(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
+    if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
+    if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) {
+      return { mode: "unavailable", reason: "unsupported_session_identity" };
+    }
+    try {
+      const path = await this.resolveTranscriptPath(session.value);
+      if (!path) return { mode: "unavailable", reason: "transcript_not_found" };
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, 0, this.maxReadBytes, this.maxRenderedDeltaChars, 0, undefined) };
+    } catch {
+      return { mode: "unavailable", reason: "transcript_validation_failed" };
+    }
+  }
+
   async openAfterTurn(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult> {
     if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
     if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value) || !SESSION_ID.test(turnId)) {

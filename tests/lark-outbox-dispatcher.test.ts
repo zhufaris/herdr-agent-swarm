@@ -810,6 +810,35 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("delivers a new interactive Answer in the first batch while old lanes progress", async () => {
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const started: string[] = [];
+    const lark = fakeLark({
+      async updateCard(messageId) { started.push(messageId); await oldGate; },
+      async replyStreamingCard() { started.push("interactive-answer"); return { messageId: "answer-message", cardId: "answer-card" }; }
+    });
+    const store = new SqliteBindingStore(":memory:");
+    for (let index = 0; index < 8; index += 1) {
+      store.enqueueOutboundReply({ id: `old-${index}`, idempotencyKey: `old-${index}`, rootMessageId: `old-card-${index}`, kind: "card_update", payload: "{}" });
+    }
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
+
+    const draining = publisher.requestScan();
+    await vi.waitFor(() => expect(started).toContain("interactive-answer"));
+    expect(started.filter((value) => value.startsWith("old-card-"))).not.toHaveLength(0);
+    expect(started.filter((value) => value.startsWith("old-card-"))).toHaveLength(3);
+    releaseOld();
+    await draining;
+
+    expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-message", cardId: "answer-card" });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.close();
+  });
+
   it("stops a scan when a delivered lane head does not advance", async () => {
     const updateCard = vi.fn(async () => {});
     const store = new SqliteBindingStore(":memory:");

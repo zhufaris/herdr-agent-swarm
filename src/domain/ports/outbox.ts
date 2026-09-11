@@ -9,7 +9,7 @@ export interface OutboxStore {
   getBinding(id: string): Binding | null;
   getNextOutboundLaneHeadAttemptAt(): string | null;
   getPrompt(id: string): PromptJob | null;
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[]): OutboundReply[];
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], laneClass?: "interactive"): OutboundReply[];
   loadRunCard(promptId: string): RunCardView | null;
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void;
   markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;

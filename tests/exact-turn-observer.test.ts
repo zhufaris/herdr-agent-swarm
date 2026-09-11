@@ -10,21 +10,24 @@ function reader(observations: TraexTranscriptObservation[]): TraexTranscriptRead
   const opened = { mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } };
   return {
     open: vi.fn(async () => opened),
+    openFirstTurn: vi.fn(async () => opened),
     openAtTurn: vi.fn(async () => opened),
     openAfterTurn: vi.fn(async () => opened)
   };
 }
 
 describe("ExactTurnObserver", () => {
-  it("opens latest, at-turn, and after-turn cursors through one interface", async () => {
+  it("opens latest, first-turn, at-turn, and after-turn cursors through one interface", async () => {
     const source = reader([]);
     const observer = new ExactTurnObserver(source);
 
     expect((await observer.open({ session, boundary: { kind: "latest" } })).mode).toBe("typed");
+    expect((await observer.open({ session, boundary: { kind: "first" } })).mode).toBe("typed");
     expect((await observer.open({ session, boundary: { kind: "at", ...exact } })).mode).toBe("typed");
     expect((await observer.open({ session, boundary: { kind: "after", ...exact } })).mode).toBe("typed");
 
     expect(source.open).toHaveBeenCalledWith(session);
+    expect(source.openFirstTurn).toHaveBeenCalledWith(session);
     expect(source.openAtTurn).toHaveBeenCalledWith(session, exact.turnId, exact.startedAt);
     expect(source.openAfterTurn).toHaveBeenCalledWith(session, exact.turnId, exact.startedAt);
   });
@@ -87,6 +90,8 @@ describe("ExactTurnObserver", () => {
   it("reports an unsupported recovery cursor without falling back to latest", async () => {
     const source: TraexTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
 
+    await expect(new ExactTurnObserver(source).open({ session, boundary: { kind: "first" } }))
+      .resolves.toEqual({ mode: "unavailable", reason: "recovery_cursor_unavailable" });
     await expect(new ExactTurnObserver(source).open({ session, boundary: { kind: "after", ...exact } }))
       .resolves.toEqual({ mode: "unavailable", reason: "recovery_cursor_unavailable" });
     expect(source.open).not.toHaveBeenCalled();

@@ -57,6 +57,26 @@ describe("TraexTranscriptReader", () => {
     await expect(new TraexTranscriptReader({ sessionsRoot: root }).open(session())).resolves.toMatchObject({ mode: "typed" });
   });
 
+  it("opens the first turn from the start of an existing transcript", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "user_message", message: "first request" }),
+      eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_305, last_agent_message: "first answer" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openFirstTurn(session()));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({ answerDelta: "" });
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId,
+      freshTurnStart: true,
+      requestText: "first request",
+      turnLifecycle: { turnId, state: "completed", finalAnswer: "first answer" }
+    });
+  });
+
   it("skips an oversized appended record and continues with the next turn", async () => {
     const { root, path } = await createTranscript();
     const reader = new TraexTranscriptReader({ sessionsRoot: root, maxReadBytes: 256 });

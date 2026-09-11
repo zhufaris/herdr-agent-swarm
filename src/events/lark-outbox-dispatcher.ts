@@ -157,11 +157,12 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     let outcome: "idle" | "delivered" | "failed" = "idle";
     while (true) {
       if (this.stopping) return outcome;
-      const batch = this.store.listOutboundLaneHeads(
-        Math.min(LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES, LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN - deliveryCount),
-        force ? null : new Date().toISOString(),
-        [...blockedTargets]
-      );
+      const batchLimit = Math.min(LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES, LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN - deliveryCount);
+      const dueAt = force ? null : new Date().toISOString();
+      const interactive = this.store.listOutboundLaneHeads(Math.min(2, batchLimit), dueAt, [...blockedTargets], "interactive");
+      const selectedLaneKeys = [...blockedTargets, ...interactive.map((reply) => reply.laneKey)];
+      const oldest = this.store.listOutboundLaneHeads(batchLimit - interactive.length, dueAt, selectedLaneKeys);
+      const batch = [...interactive, ...oldest];
       if (batch.length === 0) return outcome;
       const repeated = batch.filter((reply) => attemptedReplyIds.has(reply.id));
       for (const reply of repeated) blockedTargets.add(reply.laneKey);

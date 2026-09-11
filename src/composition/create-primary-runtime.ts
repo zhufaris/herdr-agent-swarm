@@ -12,7 +12,7 @@ import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import { RuntimeLink } from "./runtime-link.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 
-export type PrimaryRuntimeStores = Pick<SqliteStoreBundle, "externalTurns" | "promptRun">;
+export type PrimaryRuntimeStores = Pick<SqliteStoreBundle, "externalTurns" | "promptRun" | "runtimeReconciliation">;
 
 export function createPrimaryRuntime(options: {
   config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;
@@ -31,6 +31,7 @@ export function createPrimaryRuntime(options: {
   });
   const promptRun = new PromptRunWorkflow({
     store: stores.promptRun, herdr, traexControl, bus, scheduler, outboundWork, logger, presentation, turnTimeoutMs: config.turnTimeoutMs,
+    adoptRuntimeIdentity: (input) => stores.runtimeReconciliation.applyRuntimeObservation(input),
     transcriptReader, mainCards, transcriptPolling: { identityMs: config.runtimeTuning.polling.transcriptIdentityMs, attachedMs: config.runtimeTuning.polling.attachedTranscriptMs }, handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId),
     observeSupersedingExternalTurn: (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation),
     recoverExternalTurns: (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt)
