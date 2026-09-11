@@ -19,6 +19,8 @@ order to acquire that ownership.
 - Keep SQLite as the single durable ownership authority.
 - Use the same SQLite connection for lease bootstrap, migration, capability
   construction, write fencing, and runtime work.
+- Keep a synchronous migration safe even when its wall-clock duration exceeds
+  the ordinary lease TTL.
 - Release ownership and close the connection in the right order after any
   startup failure.
 - Preserve direct capability-graph construction as a test-fixture convenience,
@@ -71,14 +73,25 @@ Add `openSqliteLeaseBootstrap(path)`. The returned object owns one
 `SqliteContext` and exposes three operations:
 
 - `lease`: the `LeaseStore` backed by that context;
-- `complete()`: run `SqliteMigrations`, construct the capability graph over the
-  existing context, and return `SqliteStoreBundle`;
+- `complete(owner)`: verify the supplied owner ID and fencing token identify a
+  live lease, run `SqliteMigrations`, verify the same lease again, construct the
+  capability graph over the existing context, and return `SqliteStoreBundle`;
 - `close()`: close the context if completion did not transfer ownership to the
   returned bundle.
 
-`complete()` is one-shot. Calling it twice or completing after close is rejected.
+`complete()` is one-shot. Calling it twice, completing after close, or completing
+without a live matching lease is rejected.
 The bootstrap must not construct business stores or inspect business tables
 before completion.
+
+After its first ownership check, `complete()` temporarily changes the owner
+connection to SQLite `locking_mode=EXCLUSIVE` and forces lock acquisition before
+running migrations. The connection retains exclusive database access across the
+individual migration transactions, preventing another process from reading or
+updating the lease while the synchronous migration runner blocks the Node event
+loop. A `finally` boundary restores `locking_mode=NORMAL` and forces a database
+access that releases the retained exclusive lock. An unsuccessful migration also
+rolls back any unexpectedly open transaction before releasing the lock.
 
 `SqliteCapabilityGraph` accepts either its existing path-based construction for
 tests or an already-open `SqliteContext` for the production bootstrap. In both
@@ -93,7 +106,8 @@ read-only agent availability detection:
 1. Open the lease bootstrap.
 2. Construct `InstanceLeaseController` over `bootstrap.lease`.
 3. Acquire the instance lease.
-4. Complete migrations and build `SqliteStoreBundle` over the same context.
+4. Complete migrations with the held owner ID and fencing token, then build
+   `SqliteStoreBundle` over the same context.
 5. Construct application workflows and `ManagedBridgeRuntime`.
 6. Mark the managed runtime dependency as already owning the lease.
 
@@ -105,9 +119,12 @@ the existing acquire-on-start default.
 There is no `await` or unrelated external work between acquisition and migration
 completion. Existing migration operations are synchronous and bounded by the
 same SQLite connection and busy-timeout assumptions already used by runtime
-writes. After migration, the heartbeat starts at the existing lifecycle point.
-This change closes the concrete defect in which a known live owner is ignored;
-it does not introduce a second special migration TTL.
+writes. The bootstrap revalidates ownership after migration, and production
+renews the lease before composition continues. If migration crossed the lease
+deadline, startup fails instead of exposing business capabilities; the exclusive
+lock ensures no contender could take over during that interval. After that
+validation, the heartbeat starts at the existing lifecycle point. This change
+does not introduce a second special migration TTL.
 
 ## Failure handling
 
@@ -134,11 +151,14 @@ Add focused tests using a real temporary SQLite database and two connections:
    unchanged.
 3. The owner can complete migration on the same connection, activate its write
    fence, and use the resulting bundle.
-4. Bootstrap completion and close are one-shot and reject invalid lifecycle
+4. While the completion callback holds exclusive access, a pre-opened second
+   connection cannot read or take over the lease; after completion it can read
+   normally again.
+5. Bootstrap completion and close are one-shot and reject invalid lifecycle
    calls.
-5. Managed runtime tests prove a pre-acquired production lease is not acquired
+6. Managed runtime tests prove a pre-acquired production lease is not acquired
    again, while ordinary fixtures retain acquire-on-start behavior.
-6. Architecture tests enforce `acquire()` before `complete()` in production and
+7. Architecture tests enforce `acquire()` before `complete()` in production and
    prevent the production composition root from calling the eager unleased
    bundle factory.
 
