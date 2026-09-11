@@ -1,6 +1,26 @@
 #!/usr/bin/env node
 
-const endpoint = process.env.BRIDGE_STATUS_URL ?? "http://127.0.0.1:8787/status";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { parseEnv } from "node:util";
+
+export function resolveStatusEndpoint(environment = process.env) {
+  if (environment.BRIDGE_STATUS_URL) return environment.BRIDGE_STATUS_URL;
+  const configDirectory = environment.SWARM_CONFIG_DIR
+    ?? join(environment.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "herdr-agent-swarm");
+  const environmentFile = join(configDirectory, ".env");
+  const configured = existsSync(environmentFile) ? parseEnv(readFileSync(environmentFile, "utf8")) : {};
+  const configuredHost = configured.BRIDGE_HTTP_HOST ?? "127.0.0.1";
+  const host = configuredHost === "0.0.0.0" || configuredHost === "::" ? "127.0.0.1" : configuredHost;
+  const port = configured.BRIDGE_HTTP_PORT ?? "8787";
+  const urlHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `http://${urlHost}:${port}/status`;
+}
+
+export async function main() {
+const endpoint = resolveStatusEndpoint();
 const marker = `herdr-smoke-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 const timeoutMs = Number(process.env.SMOKE_TIMEOUT_MS ?? 120_000);
 const intervalMs = 2_000;
@@ -36,3 +56,6 @@ while (Date.now() - startedAt < timeoutMs) {
   await new Promise((resolve) => setTimeout(resolve, intervalMs));
 }
 console.log(JSON.stringify({ marker, observationSeconds: Math.round((Date.now() - startedAt) / 1000), statusPollFailures: failures, manualConfirmationRequired: true }));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
