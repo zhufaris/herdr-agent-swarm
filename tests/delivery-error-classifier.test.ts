@@ -9,6 +9,8 @@ describe("delivery error classifier", () => {
     [Object.assign(new Error("socket reset"), { code: "ECONNRESET" }), { failureClass: "transient" }],
     [Object.assign(new Error("request timeout"), { code: "ERR_BAD_REQUEST" }), { failureClass: "transient" }],
     [{ response: { status: 400, data: { code: 200740 } } }, { failureClass: "permanent", httpStatus: 400, larkErrorCode: "200740" }],
+    [{ response: { status: 400, data: { code: 300309 } } }, { failureClass: "permanent", larkErrorCode: "300309", recoveryKind: "closed_answer_stream" }],
+    [{ response: { status: 400, data: { code: 300317 } } }, { failureClass: "permanent", larkErrorCode: "300317", recoveryKind: "stale_main_card" }],
     [{ response: { status: 400, data: { code: 230099 } } }, { failureClass: "unknown", httpStatus: 400, larkErrorCode: "230099" }]
   ])("classifies structured failures conservatively", (error, expected) => {
     expect(classifyDeliveryError(error)).toMatchObject(expected);

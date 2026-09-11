@@ -116,7 +116,7 @@ export class OutboundDeliveryExecutor {
 
   private fail(reply: OutboundReply, error: unknown): OutboundDeliveryOutcome {
     const classified = classifyDeliveryError(error);
-    const metadata = { failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode };
+    const metadata = { failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, ...(classified.recoveryKind === undefined ? {} : { recoveryKind: classified.recoveryKind }) };
     const transition = this.store.markOutboundReplyFailedWithQuarantine(reply.id, classified.message, metadata, classified.retryDelayMs);
     const failed = transition?.reply ?? null;
     const context = { event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled", err: safeLogError(error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt, failureClass: classified.failureClass, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, autoRecoveryCount: failed?.autoRecoveryCount ?? reply.autoRecoveryCount, laneClass: transition?.laneClass, quarantineAction: transition?.action, outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry" };

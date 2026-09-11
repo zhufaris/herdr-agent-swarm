@@ -452,7 +452,7 @@ describe("Lark channel publisher", () => {
     await convergence;
 
     expect(store.listAnswerPages("p1")).toEqual(expect.arrayContaining([expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" })]));
-    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
+    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 0, outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" })]);
 
     await publisher.requestScan();

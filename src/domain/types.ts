@@ -174,6 +174,8 @@ export interface OperationalSummary {
   pendingOutbox: number;
   deadLetters: number;
   deadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
+  unresolvedDeadLetters: number;
+  unresolvedDeadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
   eligibleDeadLetterRecoveries: number;
   oldestPendingAt: string | null;
   outboxLanes: {

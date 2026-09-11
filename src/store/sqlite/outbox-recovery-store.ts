@@ -36,8 +36,8 @@ export class SqliteOutboxRecoveryStore {
         if (existing) return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
       }
       if (before.state !== "pending") return null;
-      const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && (metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
-      const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && metadata.larkErrorCode === "300309";
+      const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && (metadata.recoveryKind === "stale_main_card" || metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
+      const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && (metadata.recoveryKind === "closed_answer_stream" || metadata.larkErrorCode === "300309");
       const failed = metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream
         ? this.delivery.markDeadLetter(id, error, metadata)
         : this.delivery.markFailed(id, error, retryDelayMs, metadata);

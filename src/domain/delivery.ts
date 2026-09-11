@@ -2,7 +2,11 @@ import type { DeliveryIntentKind } from "./delivery-intent.js";
 
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
-export interface DeliveryFailureMetadata { failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null }
+export type CardKitRecoveryKind = "closed_answer_stream" | "stale_main_card";
+export interface DeliveryFailureMetadata {
+  failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null;
+  recoveryKind?: CardKitRecoveryKind;
+}
 export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
 export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_terminalized";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "stream_card_create" | "stream_content" | "stream_finish";

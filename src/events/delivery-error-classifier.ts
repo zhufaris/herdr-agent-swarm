@@ -8,18 +8,23 @@ export interface ClassifiedDeliveryFailure extends DeliveryFailureMetadata { mes
 // expired entity. Repeating the same durable intent cannot repair the target.
 const PERMANENT_LARK_CODES = new Set(["10002", "200740", "200750"]);
 const TRANSIENT_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "ERR_NETWORK"]);
+const CARDKIT_RECOVERY_KINDS = new Map([
+  ["300309", "closed_answer_stream"],
+  ["300317", "stale_main_card"]
+] as const);
 
 export function classifyDeliveryError(error: unknown, currentTime = Date.now()): ClassifiedDeliveryFailure {
   const safe = safeLogError(error);
   const httpStatus = safe.status ?? null;
   const larkErrorCode = safe.larkCode === undefined ? null : String(safe.larkCode).slice(0, 128);
   const code = safe.code === undefined ? null : String(safe.code).toUpperCase();
+  const recoveryKind = larkErrorCode === "300309" || larkErrorCode === "300317" ? CARDKIT_RECOVERY_KINDS.get(larkErrorCode) : undefined;
   const timeout = error instanceof Error && (error.name === "AbortError" || /timeout|timed out/i.test(error.message));
   let failureClass: DeliveryFailureMetadata["failureClass"] = "unknown";
-  if (error instanceof PermanentDeliveryError || larkErrorCode !== null && PERMANENT_LARK_CODES.has(larkErrorCode)) failureClass = "permanent";
+  if (error instanceof PermanentDeliveryError || recoveryKind !== undefined || larkErrorCode !== null && PERMANENT_LARK_CODES.has(larkErrorCode)) failureClass = "permanent";
   else if (httpStatus === 429 || httpStatus !== null && httpStatus >= 500 || timeout || code !== null && TRANSIENT_CODES.has(code)) failureClass = "transient";
   const retryDelayMs = httpStatus === 429 ? retryAfterDelayMs(error, currentTime) : undefined;
-  return { failureClass, httpStatus, larkErrorCode, message: safe.message, ...(retryDelayMs === undefined ? {} : { retryDelayMs }) };
+  return { failureClass, httpStatus, larkErrorCode, message: safe.message, ...(recoveryKind === undefined ? {} : { recoveryKind }), ...(retryDelayMs === undefined ? {} : { retryDelayMs }) };
 }
 
 function retryAfterDelayMs(error: unknown, currentTime: number): number | undefined {
