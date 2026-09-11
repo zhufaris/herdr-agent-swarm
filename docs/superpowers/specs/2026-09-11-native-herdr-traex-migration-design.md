@@ -2,10 +2,13 @@
 
 ## Goal
 
-Move Agent Swarm from its PATH-level TraeX compatibility shim to Herdr 0.9's
-native `traex` Agent kind without replacing, orphaning, or replaying work owned by
-existing bindings. Keep TraeX-specific transcript observation and model control
-behind explicit internal interfaces instead of presenting them as Herdr features.
+Complete the move from the retired PATH-level TraeX compatibility shim to Herdr
+0.9's native `traex` Agent kind as a deliberate clean break. `herdr:traex` is the
+only valid live TraeX session source. Legacy `herdr:codex` and
+`herdr-traex-shim` records remain immutable audit history but are not reconciled,
+recovered, controlled, or rewritten. Keep TraeX-specific transcript observation
+and model control behind explicit internal interfaces instead of presenting them
+as Herdr features.
 
 ## Observed baseline
 
@@ -19,12 +22,12 @@ kind   = id
 value  = <TraeX thread UUID>
 ```
 
-The service still resolves `HERDR_BIN` to the installed command shim. Persisted
-bindings predominantly use the older `herdr:codex` source, while some code and
-tests use `herdr-traex-shim`. Five observed active, attached bindings still carry
-the legacy source. Herdr 0.9 exposes native Agent start, prompt, wait, read, and
-attach behavior, but its public CLI does not expose the shim's `steer`,
-`model-list`, or `model-prompt` extensions.
+The installed service and private environment resolve `HERDR_BIN` to the official
+Herdr 0.9 binary. Persisted bindings may still contain the older `herdr:codex` or
+`herdr-traex-shim` source, and already-running panes may retain process-local
+artifacts from the environment in which they started. Herdr 0.9 exposes native
+Agent start, prompt, wait, read, and attach behavior, but its public CLI does not
+expose the retired shim's `steer`, `model-list`, or `model-prompt` extensions.
 
 ## Considered approaches
 
@@ -39,9 +42,10 @@ make a live turn look stale or make an unchanged pane look replaced.
 ### Permanent multi-source compatibility
 
 Treat all three source strings as interchangeable forever and never rewrite
-stored identity. This is operationally safe but leaves historical transport
-details embedded throughout domain logic and makes future fencing changes harder
-to audit.
+stored identity. This reduces immediate disruption but leaves historical
+transport details embedded throughout domain logic and makes future fencing
+changes harder to audit. It is rejected because the migration explicitly no
+longer carries compatibility behavior.
 
 ### Staged native cutover with one compatibility seam
 
@@ -52,48 +56,46 @@ new bindings store the native tuple. A later transactional migration may rewrite
 quiescent legacy identities together with every dependent durable fence. Once the
 native path is proven, delete only the shim responsibilities that Herdr now owns.
 
-This is the chosen approach because it preserves no-replay and exact-turn fencing
-while making the compatibility logic small and removable.
+This was the initial migration approach and enabled the live cutover. It is no
+longer the target end state because the native release has been installed and
+verified.
+
+### Native-only clean break
+
+Accept only the exact native tuple shape headed by `source = herdr:traex`. Remove
+the semantic alias layer, legacy-source eligibility, and tests that promise legacy
+recovery. Do not rewrite old durable tuples: rewriting a session source without
+atomically proving every prompt and control fence is riskier than allowing the
+existing reconciliation path to orphan an obsolete binding. Operators create or
+claim a native binding when continued work is required.
+
+This is the chosen final approach. It produces one runtime identity contract and
+preserves the no-replay invariant by refusing to adopt ambiguous historical work.
 
 ## Session identity policy
 
-Add a pure domain module that distinguishes exact representation from semantic
-TraeX identity. For sessions whose agent is `traex`, these sources are aliases:
+A live TraeX session is valid only when its exact tuple has:
 
 ```text
-herdr:codex
-herdr-traex-shim
-herdr:traex
+source = herdr:traex
+agent  = traex
+kind   = id
+value  = <non-empty TraeX thread UUID>
 ```
 
-The canonical semantic source is `herdr:traex`. Source aliasing is allowed only
-when agent, kind, and value also match exactly. It must never make different
-thread UUIDs, path identities, agents, panes, binding generations, or terminal
-identities equivalent. Unknown sources remain exact strings. In particular, an
-ordinary Codex session is never normalized to TraeX merely because its source is
-`herdr:codex`.
+Runtime equality is exact equality across source, agent, kind, and value. Pane,
+terminal, binding generation, and turn identity fences remain independent and
+must also match wherever the workflow currently requires them. There is no
+canonical alias function and no special treatment for `herdr:codex` or
+`herdr-traex-shim`.
 
-The shared policy supplies:
-
-- semantic equality for pane/binding reconciliation;
-- a canonical cache identity for transcript observers;
-- canonicalization for newly persisted native observations;
-- explicit detection of a legacy representation for diagnostics and later
-  migration.
-
-All existing session comparisons must be audited. In-memory comparisons use the
-semantic policy. Durable operations that intentionally fence against a stored
-tuple continue to use the exact stored representation until that tuple and all
-dependent rows can be migrated atomically. This prevents an active prompt or
-turn-control operation from becoming stale merely because its source spelling
-changed.
-
-The first native cutover does not bulk-update SQLite. Existing bindings retain
-their stored tuple, while transcript cache identity no longer churns when Herdr
-reports the native alias. Newly provisioned or attached bindings persist
-`herdr:traex`. A follow-up migration is allowed only when it either proves the
-binding is quiescent or updates the binding and every durable session fence in
-one transaction. It must not increment generation.
+Existing database rows are not bulk-rewritten or deleted. A legacy source can be
+shown in diagnostics and retained for audit, but it is ineligible for transcript
+observation, model control, prompt dispatch, attachment recovery, and orphan
+recovery. Normal reconciliation moves it through the existing detached, orphaned,
+or failed lifecycle according to the surrounding durable state. No code may infer
+that changing only the source spelling proves continuity. Operators must create
+or claim a native binding to continue work.
 
 ## Native capability gate
 
@@ -112,10 +114,10 @@ they no longer recommend installing this repository's shim. The probe must rejec
 a PATH wrapper that reports a stale validated Herdr version even if delegated
 workspace commands happen to work.
 
-The operational cutover updates `HERDR_BIN` to the official absolute Herdr
-binary only after compatibility tests pass. It uses the normal install and
-restart safety gates. A failed readiness check rolls configuration back to the
-previous release; it never retries or replays a prompt.
+The operational configuration uses the official absolute Herdr binary. Install
+and restart continue through the normal safety gates. A failed readiness check
+rolls configuration back to the previous release; it never retries or replays a
+prompt.
 
 ## Runtime ownership after cutover
 
@@ -134,8 +136,8 @@ be simplified.
 
 Model listing and interactive model selection are not Herdr 0.9 CLI operations.
 Move them from shim-shaped Herdr commands to a narrow `TraexControlPort` and a
-TraeX adapter. Model selection accepts any semantically valid TraeX session,
-including native `herdr:traex`, while preserving exact session-value fencing.
+TraeX adapter. Model selection accepts only native `herdr:traex` sessions while
+preserving the complete exact session tuple and turn fences.
 
 Active-turn steering remains unsupported unless a separately tested TraeX-native
 control channel is introduced. Removing the shim's `steer` route must not cause
@@ -157,16 +159,28 @@ Removal must be based on import and behavior audits, not directory deletion. The
 TraeX transcript reader, terminal redaction, exact-turn fences, detached observer
 recovery, and uncertain-dispatch no-replay behavior remain. The installed shim is
 unlinked only after the running service uses the official binary and passes live
-verification.
+verification. The installed shim must remain absent after the running service
+uses the official binary. Stale release directories may be removed only when
+their exact paths are resolved and no live process references them. Historical
+source strings may remain only in database contents, archived design documents,
+and migration notes—not in active runtime branches or promises.
+
+The real-user smoke command resolves its status endpoint in this order:
+
+1. explicit `BRIDGE_STATUS_URL`;
+2. `BRIDGE_HTTP_HOST` and `BRIDGE_HTTP_PORT` loaded from the private service
+   environment;
+3. application schema defaults.
+
+It remains observational and never sends a Lark message itself.
 
 ## Delivery slices
 
-### Slice 1: compatibility seam
+### Slice 1: remove the compatibility seam
 
-Add the session identity policy and focused tests. Apply it to pane identity,
-reconciliation, transcript observer keys, and model-session eligibility. Audit
-all exact comparisons and document why durable SQL fences remain exact. No
-service configuration or database rows change in this slice.
+Delete source canonicalization and make pane identity, reconciliation, transcript
+observer keys, model-session eligibility, and persistence accept only exact native
+sessions. Keep durable SQL fences exact. Do not rewrite database rows.
 
 ### Slice 2: native setup and doctor gate
 
@@ -179,8 +193,9 @@ integration, and success. Update operator-facing remediation.
 Build and install an immutable service release, update the private environment to
 the official absolute Herdr binary, and restart through the supported safety
 gate. Verify readiness, build identity, active binding identity, prompt/outbox
-health, and one non-destructive native TraeX observation. Roll back if legacy
-bindings detach, generations change, or session values diverge.
+health, and one non-destructive native TraeX observation. Roll back if native
+bindings unexpectedly detach, generations change, session values diverge, or any
+prompt is replayed. Legacy bindings becoming ineligible is expected.
 
 ### Slice 4: control-port extraction and shim removal
 
@@ -188,38 +203,41 @@ Extract model control, remove unsupported steering claims, delete the obsolete
 shim implementation and tests, and update README and architecture documentation.
 Run a final source/reference audit before unlinking the installed wrapper.
 
-### Slice 5: optional cleanup
+### Slice 5: operational cleanup
 
-Design a transactional canonical-source migration only if retaining legacy source
-strings has measurable operational cost. Separately validate Herdr 0.9's socket
-subscription contract before simplifying event subscriptions. Neither cleanup is
-required for native cutover.
+Fix the real-user smoke endpoint resolution, verify the installed native release,
+and allow legacy bindings to age out through normal lifecycle handling. A
+transactional legacy-source migration is explicitly out of scope. Separately
+validate Herdr 0.9's socket subscription contract before simplifying event
+subscriptions.
 
 ## Verification
 
 Focused tests must prove:
 
-- all three TraeX source representations compare equal only with identical
-  agent, kind, and value;
-- native/legacy alias changes do not increment generation, replace a binding, or
-  change transcript observer identity;
+- only `herdr:traex` is a valid TraeX session source;
+- `herdr:codex`, `herdr-traex-shim`, unknown sources, mismatched agents,
+  mismatched kinds, and changed values are rejected;
+- legacy/native source changes detach or orphan rather than preserving a binding;
 - different session values still detach or reject stale work;
 - exact durable prompt and turn-control fences remain effective;
 - setup rejects pre-0.9 Herdr, missing `traex`, non-current integration, malformed
   output, and the stale shim path;
-- model selection accepts native sessions without weakening value fencing.
+- model selection accepts native sessions without weakening tuple/value fencing;
+- the real-user smoke resolves explicit overrides and configured non-default
+  endpoints without sending external messages.
 
 Before each source handoff, run affected Vitest files, `npm run typecheck`, and
 `npm run build`. Because reconciliation and shared runtime behavior change, run
 the full test suite before live cutover. Live acceptance requires unchanged
-generations for existing attached bindings, no newly failed prompts, no stalled
-outbox lanes, ready health, and a native snapshot whose exact thread UUID resolves
-to the expected TraeX transcript.
+generations for native attached bindings, expected orphaning of legacy bindings,
+no prompt replay, no stalled outbox lanes, ready health, and a native snapshot
+whose exact thread UUID resolves to the expected TraeX transcript.
 
 ## Non-goals
 
-- Bulk-rewriting live binding identities during the initial cutover.
-- Treating source aliasing as permission to ignore session value or generation.
+- Bulk-rewriting or deleting legacy binding identities.
+- Preserving runtime compatibility for legacy session sources.
 - Replacing snapshot reconciliation with socket events.
 - Implementing remote approvals, arbitrary terminal input, or process control.
 - Claiming Herdr provides model selection or steering when its public contract
