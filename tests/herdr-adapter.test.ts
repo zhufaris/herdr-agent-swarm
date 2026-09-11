@@ -91,6 +91,24 @@ describe("Herdr adapter structured control", () => {
     expect(calls).toEqual([["agent", "get", "w1:p1"], ["agent", "send-keys", "w1:p1", "ctrl+c"]]);
   });
 
+  it("accepts a native Herdr TraeX source when interrupting a legacy-owned turn", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "agent" && args[1] === "get") return json({ agent: {
+        pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "working", active_turn_id: "turn-1",
+        agent_session: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }
+      } });
+      return { stdout: "", stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).interruptAgent({
+      paneId: "w1:p1", agentSession: { source: "herdr:codex", agent: "traex", kind: "id", value: "session-1" },
+      runtimeTurnId: "turn-1", idempotencyKey: "control-1"
+    })).resolves.toEqual({ status: "interrupted" });
+    expect(calls.at(-1)).toEqual(["agent", "send-keys", "w1:p1", "ctrl+c"]);
+  });
+
   it("does not interrupt when the native runtime turn changed", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {

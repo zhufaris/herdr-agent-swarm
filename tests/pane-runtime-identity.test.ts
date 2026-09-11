@@ -24,6 +24,12 @@ describe("pane runtime identity", () => {
       .resolves.toMatchObject({ terminalId: "terminal-1", agentSession: { value: "session-1" } });
   });
 
+  it("accepts the native Herdr TraeX source for a legacy binding", async () => {
+    const legacy = { ...binding, agentSessionSource: "herdr:codex" } as never;
+    await expect(requireMatchingPane({ observeRuntime: async () => ({ pane: pane({ agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }), traexProcess: true, composerReady: true, evidenceSource: "structured" }) } as never, projects, legacy, "w1:p1"))
+      .resolves.toMatchObject({ terminalId: "terminal-1", agentSession: { source: "herdr:traex", value: "session-1" } });
+  });
+
   it("does not treat arbitrary reporter sources as aliases", async () => {
     await expect(requireMatchingPane({ observeRuntime: async () => ({ pane: pane({ agentSession: { source: "other-reporter", agent: "traex", kind: "id", value: "session-1" } }), traexProcess: true, composerReady: true, evidenceSource: "structured" }) } as never, projects, binding, "w1:p1"))
       .rejects.toThrow(/session identity changed/);

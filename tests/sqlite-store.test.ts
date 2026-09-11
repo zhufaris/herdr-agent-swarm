@@ -2256,6 +2256,23 @@ describe("SQLite store", () => {
     expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
   });
 
+  it("treats native Herdr TraeX source as the same observed binding session", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "herdr:codex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-1", state: "active", lifecycle: "active", attachment: "attached"
+    });
+
+    const applied = store.applyRuntimeObservation({
+      bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1,
+      pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
+    });
+
+    expect(applied).toMatchObject({ outcome: "applied", terminalIdentityRefreshed: true, nativeSessionMismatch: false });
+    expect(store.getBinding("b1")).toMatchObject({ generation: 1, traexSessionId: "term-2", agentSessionSource: "herdr:codex", agentSessionValue: "session-1" });
+  });
+
   it("atomically cancels queued turns with terminal delivery intents", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });

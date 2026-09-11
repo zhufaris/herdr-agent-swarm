@@ -1,5 +1,6 @@
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { Binding, HerdrPane } from "../domain/types.js";
+import { sameAgentSession } from "../domain/traex-session-identity.js";
 import type { ProjectCatalog } from "./project-catalog.js";
 
 export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime">, projects: ProjectCatalog, binding: Binding, paneId: string): Promise<HerdrPane> {
@@ -16,11 +17,7 @@ export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime
 
 export function hasNativeAgentSession(binding: Binding): boolean { return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue); }
 export function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {
-  return Boolean(pane.agentSession
-    && normalizeAgentSessionSource(binding.agentSessionSource!) === normalizeAgentSessionSource(pane.agentSession.source)
-    && binding.agentSessionAgent === pane.agentSession.agent
-    && binding.agentSessionKind === pane.agentSession.kind
-    && binding.agentSessionValue === pane.agentSession.value);
+  return Boolean(pane.agentSession && sameAgentSession(persistedAgentSession(binding), pane.agentSession));
 }
 
 export function requireMatchingRuntimeIdentity(binding: Binding, pane: HerdrPane): void {
@@ -32,10 +29,6 @@ export function requireMatchingRuntimeIdentity(binding: Binding, pane: HerdrPane
 export function preferredRuntimeSessionId(binding: Binding, pane: HerdrPane): string | null {
   requireMatchingRuntimeIdentity(binding, pane);
   return pane.agentSession?.value ?? (hasNativeAgentSession(binding) ? binding.agentSessionValue! : pane.terminalId ?? null);
-}
-
-function normalizeAgentSessionSource(source: string): string {
-  return source === "herdr:codex" || source === "herdr-traex-shim" ? "herdr-traex" : source;
 }
 
 function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSession"]> {

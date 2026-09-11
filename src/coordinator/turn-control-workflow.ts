@@ -4,6 +4,7 @@ import type { HerdrPort } from "../domain/ports/external.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { Binding, HerdrAgentSession, HerdrPane } from "../domain/types.js";
+import { sameAgentSession } from "../domain/traex-session-identity.js";
 import type { TurnControlOperation, TurnTarget } from "../domain/turn-control.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../domain/worker-turn-card-view.js";
@@ -175,13 +176,13 @@ export class TurnControlWorkflow {
 
   private async convertNotActiveToPriority(operation: TurnControlOperation, input: SteerCommand): Promise<SteerOutcome | null> {
     const pane = await this.options.herdr.getPane(operation.target.paneId);
-    if (!pane?.agentSession || pane.agentState !== "idle" && pane.agentState !== "done" || pane.activeTurnId !== null && pane.activeTurnId !== undefined || !sameSession(operation.target.agentSession, pane.agentSession)) return null;
+    if (!pane?.agentSession || pane.agentState !== "idle" && pane.agentState !== "done" || pane.activeTurnId !== null && pane.activeTurnId !== undefined || !sameAgentSession(operation.target.agentSession, pane.agentSession)) return null;
     const id = this.options.idFactory();
     const occurredAt = new Date().toISOString();
     const result = { status: "priority-accepted", logicalTurnId: id };
     if (operation.target.owner.kind === "binding") {
       const binding = this.options.store.getBinding(operation.target.owner.id);
-      if (!binding?.rootMessageId || binding.generation !== operation.target.generation || binding.paneId !== operation.target.paneId || !bindingSession(binding) || !sameSession(bindingSession(binding)!, operation.target.agentSession)) return null;
+      if (!binding?.rootMessageId || binding.generation !== operation.target.generation || binding.paneId !== operation.target.paneId || !bindingSession(binding) || !sameAgentSession(bindingSession(binding)!, operation.target.agentSession)) return null;
       const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, title: "Priority steer", sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: input.text, queuePosition: 0, occurredAt });
       const converted = this.options.store.convertTurnControlToPrimaryPriority({ operationId: operation.id, prompt: { id, bindingId: binding.id, larkMessageId: `priority-steer:${input.idempotencyKey}`, actorOpenId: actorId(input.actor), body: input.text, priority: "priority" }, view, rootMessageId: binding.rootMessageId, answerCard: this.options.presentation.answerCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20, expectedBindingGeneration: binding.generation, result, card: this.options.presentation.turnControlResult({ ...operation, state: "delivered", result }) });
       if (!converted) return null;
@@ -215,7 +216,7 @@ export class TurnControlWorkflow {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane) throw new Error("Herdr pane is no longer active");
     if (!pane.agentSession) throw new Error("Herdr pane has no native Agent session");
-    if (expectedSession && !sameSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
+    if (expectedSession && !sameAgentSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
     if (kind === "steer" && pane.steeringCapability !== "native") throw new Error("Native steering is unsupported for this pane");
     if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
     if (pane.activeTurnId !== runtimeTurnId) throw new Error("Runtime turn identity changed");
@@ -225,7 +226,7 @@ export class TurnControlWorkflow {
   private async requireIdlePane(paneId: string, expectedSession: HerdrAgentSession | null): Promise<HerdrPane> {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane?.agentSession) throw new Error("Herdr pane has no native Agent session");
-    if (expectedSession && !sameSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
+    if (expectedSession && !sameAgentSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
     if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
     if (pane.agentState !== "idle" && pane.agentState !== "done") throw new Error("Agent runtime state is not safely idle");
     return pane;
@@ -243,9 +244,6 @@ function actorId(actor: ControlActor): string { return actor.kind === "human" ? 
 function bindingSession(binding: Binding): HerdrAgentSession | null {
   return binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
     ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
-}
-function sameSession(left: HerdrAgentSession, right: HerdrAgentSession): boolean {
-  return left.source === right.source && left.agent === right.agent && left.kind === right.kind && left.value === right.value;
 }
 function sameControlRequest(operation: TurnControlOperation, kind: "steer" | "interrupt", input: SteerCommand | InterruptCommand): boolean {
   const payload = kind === "steer" ? (input as SteerCommand).text : null;

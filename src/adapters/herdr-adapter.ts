@@ -6,6 +6,7 @@ import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservatio
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
 import type { TraexModelSummary } from "../domain/model-selection.js";
+import { sameAgentSession } from "../domain/traex-session-identity.js";
 import { createHash } from "node:crypto";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
@@ -541,10 +542,6 @@ function paneCreationTitle(options: HerdrPaneCreationOptions): string {
 
 function normalizePaneTitle(title: string | undefined): string {
   return (title ?? "TraeX pane").replace(/\s+/g, " " ).trim() || "TraeX pane";
-}
-
-function sameAgentSession(left: HerdrAgentSession, right: HerdrAgentSession): boolean {
-  return left.source === right.source && left.agent === right.agent && left.kind === right.kind && left.value === right.value;
 }
 
 function isReadyTraexAgent(pane: HerdrPane | null): boolean {

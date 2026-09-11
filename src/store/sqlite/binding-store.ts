@@ -1,4 +1,5 @@
 import { transitionSession, type SessionTransition } from "../../domain/pane-thread-lifecycle.js";
+import { sameAgentSession } from "../../domain/traex-session-identity.js";
 import type { Binding, BindingMetadataPatch, BindingState, FailureSummary, HerdrPane, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../../domain/types.js";
 import { mapBinding, mapRetiredPaneCleanup, type BindingRow, type RetiredPaneCleanupRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
@@ -68,7 +69,7 @@ export class SqliteBindingLifecycleStore {
       if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || (binding.lifecycle !== "active" && binding.lifecycle !== "draining") || binding.attachment === "orphaned") return { outcome: "stale_binding" };
       const persisted = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
       const observed = input.pane.agentSession ?? null;
-      const sameSession = Boolean(persisted && observed && persisted.source === observed.source && persisted.agent === observed.agent && persisted.kind === observed.kind && persisted.value === observed.value);
+      const sameSession = Boolean(persisted && observed && sameAgentSession(persisted, observed));
       const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
       if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) return { outcome: "terminal_identity_changed", binding };
       const nativeSessionMismatch = Boolean(persisted && observed && !sameSession);
