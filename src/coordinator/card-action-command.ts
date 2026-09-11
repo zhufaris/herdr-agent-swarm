@@ -13,6 +13,7 @@ export const sessionCardActionNames = [
   "submit_rename", "submit_reattach", "session_status", "session_stop", "session_model", "session_reset",
   "session_archive", "session_replace", "session_resume", "session_pane_close", "primary_continue_form", "primary_continue_submit",
 ] as const;
+export const paneDirectoryCardActionNames = ["pane_card_send"] as const;
 
 export const retiredCardActionNames = ["open_supplement", "submit_supplement", "convert_queued_prompt", "enqueue_failed_steering"] as const;
 export type RetiredCardActionName = typeof retiredCardActionNames[number];
@@ -51,6 +52,7 @@ export type InstanceCardActionCommand =
   | ({ kind: "instance"; action: "worker_task_instruction_submit"; interactionId: string; requestedBy: string; intent: "steer" | "followup" } & WorkerTaskIdentity);
 
 export type CardActionCommand = InstanceCardActionCommand | SessionCardActionCommand
+  | { kind: "pane-directory"; action: "pane_card_send"; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string }
   | { kind: "model"; bindingId: string; model: string }
   | { kind: "model-mode"; bindingId: string; operationId: string; mode: string }
   | { kind: "open-thread"; bindingId: string }
@@ -72,6 +74,7 @@ export function parseCardActionCommand(value: unknown, option?: string | null): 
   if (retiredActions.has(action)) return { kind: "retired", action: action as RetiredCardActionName };
   const session = parseSession(action, item);
   if (session) return session;
+  if (action === "pane_card_send") { const bindingId = string(item.bindingId); const bindingGeneration = integer(item.bindingGeneration); const paneId = string(item.paneId); const sourceMainMessageId = string(item.sourceMainMessageId); return bindingId && bindingGeneration !== null && paneId && sourceMainMessageId ? { kind: "pane-directory", action, bindingId, bindingGeneration, paneId, sourceMainMessageId } : unknown(); }
   const instance = parseInstance(action, item);
   if (instance) return instance;
   if (action === "select_model") return string(item.bindingId) && typeof option === "string" && modelPattern.test(option) ? { kind: "model", bindingId: item.bindingId as string, model: option } : unknown();

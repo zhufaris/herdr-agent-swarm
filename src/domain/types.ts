@@ -303,6 +303,7 @@ export type BridgeCommand =
   | { kind: "new"; title: string | null }
   | { kind: "projects" }
   | { kind: "spaces" }
+  | { kind: "panes" }
   | { kind: "sessions" }
   | { kind: "failures" }
   | { kind: "status" }

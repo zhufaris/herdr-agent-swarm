@@ -13,6 +13,7 @@ export const SWARM_COMMAND_POLICIES = {
   help: { mode: "query", scope: "global", authorization: "allowed-user", replay: "none", handler: "help" },
   projects: { mode: "query", scope: "global", authorization: "administrator", replay: "none", handler: "provisioning" },
   spaces: { mode: "query", scope: "project", authorization: "allowed-user", replay: "none", handler: "operations-query" },
+  panes: { mode: "query", scope: "global", authorization: "allowed-user", replay: "none", handler: "operations-query" },
   sessions: { mode: "query", scope: "global", authorization: "allowed-user", replay: "none", handler: "operations-query" },
   failures: { mode: "query", scope: "global", authorization: "allowed-user", replay: "none", handler: "operations-query" },
   status: { mode: "query", scope: "primary-session", authorization: "allowed-user", replay: "none", handler: "session" },

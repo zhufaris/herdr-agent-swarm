@@ -331,6 +331,7 @@ export function renderHelpCard(): object {
         "`/swarm steer <文本>`  active 时注入 exact turn，idle 时优先于普通队列执行",
         "`/swarm projects`  打开项目选择卡片",
         "`/swarm spaces`  按 Space 查看全部 Pane",
+        "`/swarm panes`  列出当前群的 active Pane，并将所选主卡发送到当前话题",
         "`/swarm sessions`  查看当前群的会话",
         "`/swarm failures`  查看并处理发送失败",
         "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",

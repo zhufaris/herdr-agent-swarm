@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { ApplicationPresentation, SpaceDirectoryGroup } from "../domain/ports/presentation.js";
+import type { ApplicationPresentation, SpaceDirectoryGroup, TopicPaneDirectoryEntry } from "../domain/ports/presentation.js";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
@@ -7,10 +7,11 @@ import type { OperationsQueryStore } from "../domain/ports/workflow.js";
 import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQueryStore; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<ApplicationPresentation, "spaces" | "sessions" | "failures">; logger: Logger; }
+interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQueryStore; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<ApplicationPresentation, "spaces" | "topicPanes" | "sessions" | "failures">; logger: Logger; }
 
 export interface OperationsQueryWorkflowPort {
   listSpaces(message: IncomingLarkMessage): Promise<void>;
+  listTopicPanes(message: IncomingLarkMessage): Promise<void>;
   listSessions(message: IncomingLarkMessage): Promise<void>;
   listFailures(message: IncomingLarkMessage): Promise<void>;
 }
@@ -37,6 +38,17 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
       }
     }
     await this.publishCards(message, "spaces", this.options.presentation.spaces(groups));
+  }
+
+  async listTopicPanes(message: IncomingLarkMessage): Promise<void> {
+    const entries = this.options.store.listBindings()
+      .filter((binding) => binding.chatId === message.chatId && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.paneId !== null && binding.statusMessageId !== null)
+      .flatMap((binding): TopicPaneDirectoryEntry[] => {
+        const view = this.options.store.loadTopicView(binding.id);
+        return view && binding.statusMessageId ? [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState }] : [];
+      })
+      .sort((left, right) => left.spaceName.localeCompare(right.spaceName) || left.title.localeCompare(right.title) || left.paneId.localeCompare(right.paneId));
+    await this.publishCards(message, "panes", [this.options.presentation.topicPanes(entries)]);
   }
 
   async listSessions(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "sessions", this.options.presentation.sessions(this.options.store.listSessions(message.chatId))); }

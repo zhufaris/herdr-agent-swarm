@@ -39,6 +39,7 @@ export interface SpaceDirectoryPane {
   paneId: string; name: string; agentState: import("../types.js").AgentState; foregroundExecutables: string[]; bindingId?: string; claimProjectId?: string;
 }
 export interface SpaceDirectoryGroup { spaceName: string; workspaceId: string; directories: string[]; panes: SpaceDirectoryPane[]; error?: string; unregistered?: boolean; }
+export interface TopicPaneDirectoryEntry { bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; title: string; spaceName: string; agentState: import("../runtime-observation.js").AgentState; }
 export interface InstanceDirectoryEntry { instance: AgentInstance; workspace: WorkspaceLease; capabilities: AgentCapabilities; queueDepth: number; approvalCount?: number; }
 export interface ThreadPrimaryView { bindingId: string; generation: number; paneId: string | null; state: Binding["state"]; }
 export type InteractionToast = { toast: { type: "success" | "warning" | "error"; content: string } };
@@ -55,6 +56,7 @@ export interface ApplicationPresentation extends PrimaryPresentation, WorkerPres
   sessions(sessions: SessionSummary[]): object[];
   failures(failures: FailureSummary[], notice?: string): object[];
   spaces(groups: SpaceDirectoryGroup[]): object[];
+  topicPanes(entries: TopicPaneDirectoryEntry[]): object;
   interactionToast(type: "success" | "warning" | "error", content: string): InteractionToast;
   interactionGuidance(input: { kind: "recovery" | "new_task"; message?: string | null }): object;
   moreActions(input: { bindingId: string; bindingGeneration: number; interactionId?: string; creator: boolean; lifecycle: string; attachment: string }): object;

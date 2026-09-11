@@ -66,12 +66,14 @@ export class SqliteDeliveryRecoveryCapabilityStore implements DeliveryRecoverySt
   constructor(
     private readonly outbox: SqliteOutboxStore,
     private readonly bindings: SqliteBindingLifecycleStore,
+    private readonly projections: SqliteProjectionStore,
     private readonly operations: SqliteOperationsStore
   ) {}
 
   audit: DeliveryRecoveryStore["audit"] = (input) => this.operations.audit(input);
   dismissDeadLetter: DeliveryRecoveryStore["dismissDeadLetter"] = (id, chatId, actorOpenId) => this.outbox.dismissDeadLetter(id, chatId, actorOpenId);
   getBinding: DeliveryRecoveryStore["getBinding"] = (id) => this.bindings.getBinding(id);
+  loadTopicView: DeliveryRecoveryStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
   listFailures: DeliveryRecoveryStore["listFailures"] = (chatId) => this.bindings.listFailures(chatId);
   retryDeadLetter: DeliveryRecoveryStore["retryDeadLetter"] = (id, chatId, actorOpenId) => this.outbox.retryDeadLetter(id, chatId, actorOpenId);
 }

@@ -229,6 +229,17 @@ Bridge 会继续重试。
 TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
 校验。卡片不会提供关闭或删除动作。
 
+### `/swarm panes`
+
+在当前群的任意话题中列出已连接且仍为 active 的 Primary Pane。每一项显示
+任务标题、Space、Pane ID 和观测到的 Agent 状态；点击“发送卡片”会把该 Pane **当前**
+Primary Main Card 作为一张新卡片发送到点击按钮所在的话题。
+
+目录不会显示其他群、已归档、orphaned、detached、未绑定的 Pane，也不会转发原话题、
+修改原主卡或向 TraeX 发送输入。点击时 Bridge 会再次校验群、binding generation、Pane
+和主卡身份；任一项变化时会提示刷新目录后重试。卡片投递由 durable outbox 处理，
+重试不会重放 TraeX 任务。
+
 ### `/swarm sessions`
 
 列出当前群的会话，包括 Space、Pane ID、lifecycle、attachment、TraeX 状态、

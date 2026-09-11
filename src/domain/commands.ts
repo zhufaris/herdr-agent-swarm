@@ -35,6 +35,8 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "projects" };
     case "spaces":
       return argument ? { kind: "help" } : { kind: "spaces" };
+    case "panes":
+      return argument ? { kind: "help" } : { kind: "panes" };
     case "sessions":
       return argument ? { kind: "help" } : { kind: "sessions" };
     case "failures":

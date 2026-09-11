@@ -55,6 +55,10 @@ export class CardActionRouter implements CardActionRouterPort {
         return this.options.modelSelection.selectModelMode(action, command.bindingId, command.operationId, command.mode);
       case "open-thread":
         return this.options.deliveryRecovery.openThread(action, command.bindingId);
+      case "pane-directory": {
+        const outcome = await this.options.deliveryRecovery.sendPaneCard(action, command);
+        return { toast: { type: outcome === "sent" ? "success" : "warning", content: outcome === "sent" ? "已发送该 Pane 的最新卡片。" : "该 Pane 已变化，请刷新目录后重试。" } };
+      }
       case "dead-letter":
         return this.options.deliveryRecovery.decideDeadLetter(action, command.replyId, command.decision);
       case "project-selection": {

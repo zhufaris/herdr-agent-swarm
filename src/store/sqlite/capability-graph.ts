@@ -13,6 +13,7 @@ import { SqliteInstanceStore } from "./instance-store.js";
 import { SqliteLeaseStore } from "./lease-store.js";
 import { SqliteMigrations } from "./migrations.js";
 import { SqliteOperationsStore } from "./operations-store.js";
+import { SqliteOperationsQueryCapabilityStore } from "./operations-query-capability-store.js";
 import { SqliteOutboxCapabilityStore } from "./outbox-capability-store.js";
 import { SqliteOutboxStore } from "./outbox-store.js";
 import { SqlitePaneOperationStore } from "./pane-operation-store.js";
@@ -153,7 +154,7 @@ export class SqliteCapabilityGraph {
       health: new SqliteHealthStoreAdapter(this.operations, this.bindings),
       integrity: this.operations,
       inboundDispatch: this.inboundProjects,
-      operationsQuery: this.bindings,
+      operationsQuery: new SqliteOperationsQueryCapabilityStore(this.bindings, this.projections),
       retention: new SqliteRetentionStoreAdapter(this.outbox, this.inboundProjects, this.sessionOperations),
       workerCardDisplay: this.workerCardDisplays,
       commandIntents: new SqliteCommandIntentStoreAdapter(this.commandIntents, {
@@ -181,7 +182,7 @@ export class SqliteCapabilityGraph {
       inboundMessages: ingress,
       startupRecovery: new SqliteStartupRecoveryCapabilityStore(routing, this.operations, (timestamp) => this.migrations.canonicalizeLegacyAnswerTargets(timestamp)),
       startupViews: new SqliteStartupViewCapabilityStore(this.bindings, this.prompts, this.projections, this.outbox),
-      deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.operations),
+      deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.projections, this.operations),
       externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.bindings),
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),

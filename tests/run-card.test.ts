@@ -29,6 +29,7 @@ describe("run card", () => {
     expect(help).toContain("/swarm attach <space> <pane>");
     expect(help).toContain("ID 或唯一名称");
     expect(help).toContain("/swarm spaces");
+    expect(help).toContain("/swarm panes");
   });
 
   it("documents Primary-scoped Worker creation", () => {

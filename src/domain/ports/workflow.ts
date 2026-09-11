@@ -9,6 +9,7 @@ import type { AcceptPromptInput } from "./prompt.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
+  loadTopicView(bindingId: string): TopicViewState | null;
   listFailures(chatId: string): FailureSummary[];
   listSessions(chatId: string): SessionSummary[];
 }
@@ -51,6 +52,7 @@ export interface DeliveryRecoveryStore {
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
   getBinding(id: string): Binding | null;
+  loadTopicView(bindingId: string): TopicViewState | null;
   listFailures(chatId: string): FailureSummary[];
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
 }

@@ -6,7 +6,7 @@ function harness() {
   const cardInteractions = { handle: vi.fn(async () => ({ toast: { type: "success" as const, content: "session" } })) };
   const instanceInteractions = { handleCardAction: vi.fn(async () => ({ toast: { type: "success" as const, content: "instance" } })) };
   const modelSelection = { selectModel: vi.fn(async () => {}), selectModelMode: vi.fn(async () => {}) };
-  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}) };
+  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}), sendPaneCard: vi.fn(async () => "sent" as const) };
   const provisioning = { attach: vi.fn(async () => true), completeSelection: vi.fn(async () => null) };
   const router = new CardActionRouter({
     chatId: "chat", allowedOpenIds: ["user"], adminOpenIds: ["user"],
@@ -31,6 +31,7 @@ describe("card action router", () => {
     ["dismiss_dead_letter", { action: "dismiss_dead_letter", replyId: "r1" }, undefined, "dead-letter"],
     ["select_project", { action: "select_project", selectionId: "s1", projectId: "p1" }, undefined, "project-selection"],
     ["claim_pane", { action: "claim_pane", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }, undefined, "pane-claim"],
+    ["pane_card_send", { action: "pane_card_send", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }, undefined, "pane-directory"],
   ] as const)("dispatches %s to exactly one owner", async (_name, value, option, owner) => {
     const h = harness();
     await h.router.handle(action(value, option));
@@ -43,6 +44,7 @@ describe("card action router", () => {
       "dead-letter": h.deliveryRecovery.decideDeadLetter,
       "project-selection": h.provisioning.completeSelection,
       "pane-claim": h.provisioning.attach,
+      "pane-directory": h.deliveryRecovery.sendPaneCard,
     };
     expect(owners[owner]).toHaveBeenCalledOnce();
     expect(Object.values(owners).reduce((count, mock) => count + mock.mock.calls.length, 0)).toBe(1);
