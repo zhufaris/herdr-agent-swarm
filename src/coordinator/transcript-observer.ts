@@ -5,6 +5,7 @@ import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
+import { transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 
 export type TurnOutputSource =
   | { mode: "unavailable"; reason: string }
@@ -50,9 +51,7 @@ export class TranscriptObserver {
 
   async open(binding: Binding): Promise<TurnOutputSource> {
     if (!this.exactTurns) return { mode: "unavailable", reason: "transcript_not_found" };
-    const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
-      ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
-      : null;
+    const session = transcriptSessionFor(binding);
     try {
       const result = await this.exactTurns.open({ session, boundary: { kind: "latest" } });
       return result.mode === "typed"

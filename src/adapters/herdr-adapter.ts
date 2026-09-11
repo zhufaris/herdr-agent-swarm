@@ -5,7 +5,7 @@ import type { InterruptReceipt } from "../domain/agent-runtime.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
-import { sameAgentSession } from "../domain/traex-session-identity.js";
+import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -22,7 +22,6 @@ const agentSessionSchema = z.object({
 });
 const snapshotPaneSchema = paneSchema.extend({
   agent: z.string().nullish(),
-  display_agent: z.string().nullish(),
   agent_session: agentSessionSchema.nullish(),
   revision: z.number().int().nullish(),
   state_change_seq: z.number().int().nullish(),
@@ -107,7 +106,7 @@ export class HerdrCliAdapter implements HerdrPort {
   async observeRuntime(paneId: string): Promise<RuntimeObservation> {
     const pane = await this.getPane(paneId);
     if (!pane) return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" };
-    const nativeTraex = pane.agentKind === "traex" || pane.agentKind === "codex" || pane.agentKind === "claude" || pane.agentKind === "pi";
+    const nativeTraex = pane.agentKind === "traex";
     const foregroundExecutables = nativeTraex ? pane.foregroundExecutables : await this.foregroundExecutables(paneId);
     const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
     const observed = { ...pane, foregroundExecutables };
@@ -265,7 +264,7 @@ export class HerdrCliAdapter implements HerdrPort {
     void input.idempotencyKey;
     const pane = await this.getAgentPane(input.paneId);
     if (!pane) return { status: "not-active", reason: "Herdr Agent is no longer active" };
-    if (!pane.agentSession || !sameAgentSession(pane.agentSession, input.agentSession)) return { status: "not-active", reason: "Agent session identity changed" };
+    if (!pane.agentSession || !sameNativeTraexSession(pane.agentSession, input.agentSession)) return { status: "not-active", reason: "Agent session identity changed" };
     if (pane.agentState === "blocked") return { status: "blocked", reason: "Agent is blocked on a local approval or question" };
     if (pane.agentState !== "working") return { status: "not-active", reason: "Agent turn is not active" };
     if (pane.activeTurnId !== input.runtimeTurnId) return { status: "not-active", reason: "Runtime turn identity changed" };
@@ -357,11 +356,7 @@ export class HerdrCliAdapter implements HerdrPort {
 
   private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
-    const displayAgent = agent?.display_agent ?? raw.display_agent ?? null;
-    const reportedSession = agent?.agent_session ?? raw.agent_session ?? null;
-    const agentSession = displayAgent === "traex" && reportedSession?.agent === "codex"
-      ? { ...reportedSession, agent: "traex" }
-      : reportedSession;
+    const agentSession = agent?.agent_session ?? raw.agent_session ?? null;
     const foregroundCwd = raw.foreground_cwd ?? agent?.foreground_cwd ?? null;
     const foregroundExecutables = kind ? [kind] : [];
     return {
@@ -380,7 +375,7 @@ export class HerdrCliAdapter implements HerdrPort {
       if (isReadyTraexAgent(await this.getPane(paneId))) return;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`Herdr did not detect a ready TraeX-compatible agent in pane ${paneId}`);
+    throw new Error(`Herdr did not detect a ready native TraeX agent in pane ${paneId}`);
   }
 
   private async waitForPaneChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
@@ -488,7 +483,7 @@ function normalizePaneTitle(title: string | undefined): string {
 
 function isReadyTraexAgent(pane: HerdrPane | null): boolean {
   return Boolean(pane
-    && (pane.agentKind === "codex" || pane.agentKind === "traex")
+    && pane.agentKind === "traex"
     && (pane.agentState === "idle" || pane.agentState === "done"));
 }
 

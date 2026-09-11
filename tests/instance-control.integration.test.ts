@@ -49,15 +49,15 @@ describe("InstanceControlWorkflow", () => {
     await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" })).resolves.toMatchObject({ status: "created", instance: { agentKind: "traex", observedState: "idle" } });
   });
 
-  it("creates a Worker for the task-di58 dual-identity Primary shape", async () => {
+  it("creates a Worker for a native TraeX Primary identity", async () => {
     const { workflow, paneHost } = setup();
     store!.updateBinding("binding-1", {
-      traexSessionId: "term_65aa3500203c441", agentSessionSource: "herdr:codex", agentSessionAgent: "traex",
+      traexSessionId: "term_65aa3500203c441", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
       agentSessionKind: "id", agentSessionValue: "01a06b58-1cfd-7c81-b11e-afb1cd7c2cee"
     });
     vi.mocked(paneHost.inspectPane).mockResolvedValueOnce({
       ...primaryPane, terminalId: "term_65aa3500203c441",
-      agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a06b58-1cfd-7c81-b11e-afb1cd7c2cee" }
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "01a06b58-1cfd-7c81-b11e-afb1cd7c2cee" }
     });
 
     await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: false, bindingId: "binding-1" }))

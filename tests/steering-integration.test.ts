@@ -85,8 +85,8 @@ describe("active-turn steering", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" } }]; },
-      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, activeTurnId: "runtime-1" }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }]; },
+      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, activeTurnId: "runtime-1" }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
         await onObservation?.({ state: "working", stateSource: "structured", output, turnId: "runtime-1", turnStartedAt: "2026-09-05T00:00:00.000Z" });
@@ -117,7 +117,7 @@ describe("active-turn steering", () => {
 
     await coordinator.handleMessage(message(1, "parent"));
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
-    store.updateBinding(bindingId, { agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding(bindingId, { agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     let activePrompt = store.getActiveOrdinaryPrompt(bindingId, 1)!;
     if (!activePrompt.dispatchedAt) { store.markPromptDispatched(activePrompt.id, new Date().toISOString()); activePrompt = store.getPrompt(activePrompt.id)!; }
     if (!activePrompt.transcriptTurnId) store.claimPromptTranscriptTurn({ promptId: activePrompt.id, bindingId, turnId: "runtime-1", startedAt: new Date(Date.parse(activePrompt.dispatchedAt!) + 250).toISOString() });

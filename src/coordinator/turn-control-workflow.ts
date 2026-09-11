@@ -4,7 +4,7 @@ import type { HerdrPort } from "../domain/ports/external.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { Binding, HerdrAgentSession, HerdrPane } from "../domain/types.js";
-import { sameAgentSession } from "../domain/traex-session-identity.js";
+import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { TurnControlOperation, TurnTarget } from "../domain/turn-control.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../domain/worker-turn-card-view.js";
@@ -179,7 +179,7 @@ export class TurnControlWorkflow {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane) throw new Error("Herdr pane is no longer active");
     if (!pane.agentSession) throw new Error("Herdr pane has no native Agent session");
-    if (expectedSession && !sameAgentSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
+    if (expectedSession && !sameNativeTraexSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
     if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
     if (pane.activeTurnId !== runtimeTurnId) throw new Error("Runtime turn identity changed");
     return pane;
@@ -188,7 +188,7 @@ export class TurnControlWorkflow {
   private async requireIdlePane(paneId: string, expectedSession: HerdrAgentSession | null): Promise<HerdrPane> {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane?.agentSession) throw new Error("Herdr pane has no native Agent session");
-    if (expectedSession && !sameAgentSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
+    if (expectedSession && !sameNativeTraexSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
     if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
     if (pane.agentState !== "idle" && pane.agentState !== "done") throw new Error("Agent runtime state is not safely idle");
     return pane;

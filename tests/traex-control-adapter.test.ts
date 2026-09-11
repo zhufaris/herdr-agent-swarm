@@ -5,14 +5,21 @@ const session = { source: "herdr:traex", agent: "traex", kind: "id" as const, va
 const peer = { threadId: session.value, socketPath: "/run/user/1/traex.sock", pid: 42, startedAtMs: 100 };
 
 describe("TraexControlAdapter", () => {
-  it.each(["herdr:traex", "herdr:codex", "herdr-traex-shim"])("lists models for TraeX source %s", async (source) => {
+  it("lists models for a native TraeX session", async () => {
     const listModels = vi.fn(async () => [{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
     const findPeer = vi.fn(async () => peer);
     const adapter = control({ findPeer, listModels });
 
-    await expect(adapter.listModels({ ...session, source })).resolves.toEqual([{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
+    await expect(adapter.listModels(session)).resolves.toEqual([{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
     expect(findPeer).toHaveBeenCalledWith("/peers", session.value);
     expect(listModels).toHaveBeenCalledWith(peer, { timeoutMs: 1_000 });
+  });
+
+  it.each(["herdr:codex", "herdr-traex-shim"])("rejects legacy TraeX source %s", async (source) => {
+    const findPeer = vi.fn(async () => peer);
+    const adapter = control({ findPeer });
+    await expect(adapter.listModels({ ...session, source })).rejects.toThrow("Session does not support TraeX control");
+    expect(findPeer).not.toHaveBeenCalled();
   });
 
   it("prepares, checkpoints, and commits before reporting acceptance", async () => {

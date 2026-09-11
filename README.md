@@ -350,12 +350,12 @@ the same read-only checks and never start or prompt an Agent. Use absolute paths
 for both `HERDR_BIN` and `TRAEX_BIN` so systemd does not depend on interactive
 `PATH`.
 
-Bindings created by the retired compatibility shim may retain `herdr:codex` or
-`herdr-traex-shim` as their persisted session source. The runtime treats those
-spellings as aliases of native `herdr:traex` only when the Agent, identity kind,
-and exact TraeX thread value also match. It does not rewrite live database rows
-or relax generation and prompt fences during cutover. The compatibility shim and
-its package commands have been removed; all new setups must use official Herdr.
+The runtime accepts only the native session tuple `herdr:traex` / `traex` /
+`id` / non-empty thread ID. Bindings created by the retired compatibility shim
+may retain `herdr:codex` or `herdr-traex-shim` as audit history, but those values
+are not aliases and cannot be reconciled, recovered, observed, or controlled.
+They fail closed through the normal orphan lifecycle; create or claim a native
+binding instead. The service does not rewrite or delete legacy database rows.
 
 ## Configure the service
 

@@ -724,13 +724,13 @@ describe("SQLite store", () => {
   it("atomically adopts the unique queued prompt matching an external Herdr turn", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 3, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 3, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const queued = createQueuedRunCard({ promptId: "queued", bindingId: "b1", bindingGeneration: 3, title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "line 1\r\nline 2", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "line 1\r\nline 2" }, view: queued, rootMessageId: "root", answerCard: {} });
     const startedAt = new Date(Date.now() + 1_000).toISOString();
 
     const result = store.adoptExternalTurn({
-      bindingId: "b1", expectedGeneration: 3, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      bindingId: "b1", expectedGeneration: 3, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       turnId: "turn-1", startedAt, requestText: "line 1\nline 2", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
       externalView: { ...queued, promptId: "external" }, answerCardFor: renderRequestAnswerCard
     });
@@ -742,7 +742,7 @@ describe("SQLite store", () => {
   it("updates an already delivered queued Answer Card after external adoption", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const queued = createQueuedRunCard({ promptId: "queued", bindingId: "b1", title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: queued, rootMessageId: "root", answerCard: {} });
     const create = store.listPendingOutboundReplies()[0]!;
@@ -750,7 +750,7 @@ describe("SQLite store", () => {
     const startedAt = new Date(Date.now() + 1_000).toISOString();
 
     const result = store.adoptExternalTurn({
-      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       turnId: "turn-1", startedAt, requestText: "work", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
       externalView: { ...queued, promptId: "external" }, answerCardFor: renderRequestAnswerCard
     });
@@ -762,11 +762,11 @@ describe("SQLite store", () => {
   it("creates an independently rendered Answer Card when no queued prompt uniquely matches", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 2, title: "Direct work", workspaceId: "w1", paneId: "w1:p1", requestText: "direct work", queuePosition: 0, occurredAt: "2026-08-31T10:00:01.000Z" });
 
     const result = store.adoptExternalTurn({
-      bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       turnId: "turn-2", startedAt: "2026-08-31T10:00:01.000Z", requestText: "direct work", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-2",
       externalView, answerCardFor: renderRequestAnswerCard
     });
@@ -779,7 +779,7 @@ describe("SQLite store", () => {
   it("atomically supersedes an exact-owned detached prompt with a later external turn", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const oldView = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "Old", workspaceId: "w1", paneId: "w1:p1", requestText: "old work", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "u1", body: "old work" }, view: oldView, rootMessageId: "root", answerCard: {} });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'old'").run();
@@ -790,7 +790,7 @@ describe("SQLite store", () => {
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "New", workspaceId: "w1", paneId: "w1:p1", requestText: "new work", queuePosition: 0, occurredAt: "2026-08-31T10:00:02.000Z" });
 
     const result = store.adoptExternalTurn({
-      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new work", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:new-turn",
       supersede: { promptId: "old", turnId: "old-turn", startedAt: "2026-08-31T10:00:01.250Z" }, externalView, answerCardFor: renderRequestAnswerCard
     });
@@ -804,10 +804,10 @@ describe("SQLite store", () => {
   it("rejects supersession when the detached prompt fence does not match", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     store.database.prepare("INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, state, observation_state, dispatched_at, transcript_turn_id, transcript_turn_started_at, attempt_count, created_at, updated_at) VALUES ('old','b1','m-old','u1','old','running','detached','2026-08-31T10:00:01.000Z','old-turn','2026-08-31T10:00:01.250Z',1,'2026-08-31T10:00:00.000Z','2026-08-31T10:00:01.250Z')").run();
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "New", workspaceId: "w1", paneId: "w1:p1", requestText: "new", queuePosition: 0, occurredAt: "2026-08-31T10:00:02.000Z" });
-    const result = store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new", externalPromptId: "external", externalMessageId: "external", supersede: { promptId: "old", turnId: "wrong-turn", startedAt: "2026-08-31T10:00:01.250Z" }, externalView, answerCardFor: renderRequestAnswerCard });
+    const result = store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new", externalPromptId: "external", externalMessageId: "external", supersede: { promptId: "old", turnId: "wrong-turn", startedAt: "2026-08-31T10:00:01.250Z" }, externalView, answerCardFor: renderRequestAnswerCard });
     expect(result.outcome).toBe("conflict");
     expect(store.getPrompt("old")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.getPrompt("external")).toBeNull();
@@ -816,7 +816,7 @@ describe("SQLite store", () => {
   it("does not reuse queued Feishu work when superseding an interrupted Herdr turn", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     for (const [id, body] of [["old", "old"], ["queued", "new"]] as const) {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: body, queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body }, view, rootMessageId: "root", answerCard: {} });
@@ -824,7 +824,7 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE prompt_jobs SET state='running', observation_state='detached', dispatched_at='2026-08-31T10:00:01.000Z', transcript_turn_id='old-turn', transcript_turn_started_at='2026-08-31T10:00:01.000Z' WHERE id='old'").run();
     store.database.prepare("UPDATE run_cards SET phase='running' WHERE prompt_id='old'").run();
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "new", workspaceId: "w1", paneId: "w1:p1", requestText: "new", queuePosition: 0, occurredAt: "2026-08-31T10:00:02.000Z" });
-    const result = store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new", externalPromptId: "external", externalMessageId: "external", supersede: { promptId: "old", turnId: "old-turn", startedAt: "2026-08-31T10:00:01.000Z" }, externalView, answerCardFor: renderRequestAnswerCard });
+    const result = store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new", externalPromptId: "external", externalMessageId: "external", supersede: { promptId: "old", turnId: "old-turn", startedAt: "2026-08-31T10:00:01.000Z" }, externalView, answerCardFor: renderRequestAnswerCard });
     expect(result).toMatchObject({ outcome: "created_external", prompt: { id: "external" } });
     expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started", executionOrigin: "bridge" });
   });
@@ -1263,11 +1263,11 @@ describe("SQLite store", () => {
   it("returns only the uniquely active external prompt for recovery", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 1, agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 1, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const view = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 1, title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1",
-      expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       turnId: "turn-1", startedAt: "2026-08-30T00:00:00.000Z", requestText: "direct", externalPromptId: "external",
       externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
     });
@@ -1524,7 +1524,7 @@ describe("SQLite store", () => {
     store.claimNextInstanceTurn(worker.id, worker.generation);
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     const input = { id: "control-1", idempotencyKey: "message-1:steer", kind: "steer" as const, target, actor: { kind: "human" as const, userId: "u1" }, payload: "change direction", sourceMessageId: "message-1" };
 
     expect(store.acceptTurnControlOperation(input)).toMatchObject({ inserted: true, operation: { state: "accepted", target } });
@@ -1547,7 +1547,7 @@ describe("SQLite store", () => {
     store.claimNextInstanceTurn(worker.id, worker.generation);
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor, payload: "continue safely" });
     store.claimTurnControlOperation("control-1");
     const priorityView = createQueuedWorkerTurnCard({ turnId: "priority-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "continue safely", queuePosition: 0, occurredAt: "2026-09-03T00:00:01.000Z" });
@@ -1575,7 +1575,7 @@ describe("SQLite store", () => {
     store.claimNextInstanceTurn(worker.id, worker.generation);
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor, payload: "continue safely" });
     store.claimTurnControlOperation("control-1");
 
@@ -1591,13 +1591,13 @@ describe("SQLite store", () => {
   it("atomically converts a dispatching Primary steer while preserving the active-turn claim fence", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, agentSessionSource: "herdr-traex-shim", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 3, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const activeView = createQueuedRunCard({ promptId: "logical-1", bindingId: "b1", bindingGeneration: 3, title: "active", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-03T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "logical-1", bindingId: "b1", larkMessageId: "message-1", actorOpenId: "u1", body: "work" }, view: activeView, rootMessageId: "root", answerCard: {} });
     store.updatePrompt("logical-1", "running");
     store.markPromptDispatched("logical-1", "2026-09-03T00:00:00.000Z");
     store.claimPromptTranscriptTurn({ promptId: "logical-1", bindingId: "b1", turnId: "runtime-1", startedAt: "2026-09-03T00:00:00.100Z" });
-    const target = { owner: { kind: "binding" as const, id: "b1" }, projectId: "project-a", paneId: "w1:p1", generation: 3, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "binding" as const, id: "b1" }, projectId: "project-a", paneId: "w1:p1", generation: 3, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "continue safely" });
     store.claimTurnControlOperation("control-1");
     const priorityView = createQueuedRunCard({ promptId: "priority-1", bindingId: "b1", bindingGeneration: 3, title: "Priority steer", workspaceId: "w1", paneId: "w1:p1", requestText: "continue safely", queuePosition: 0, occurredAt: "2026-09-03T00:00:01.000Z" });
@@ -1617,7 +1617,7 @@ describe("SQLite store", () => {
     store.claimNextInstanceTurn(worker.id, worker.generation);
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
 
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "secret steering text", result: { targetMessageId: "root", card: { state: "accepted" } } });
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result", targetRole: "operation_result", kind: "card_reply", payload: JSON.stringify({ state: "accepted" }) })]);
@@ -1640,7 +1640,7 @@ describe("SQLite store", () => {
     store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
     store.claimNextInstanceTurn(worker.id, worker.generation); store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "change", result: { targetMessageId: "root", card: { state: "accepted" } } });
     store.claimTurnControlOperation("control-1");
 
@@ -1657,7 +1657,7 @@ describe("SQLite store", () => {
     store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
     store.claimNextInstanceTurn(worker.id, worker.generation); store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
+    const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "change", result: { targetMessageId: "root", card: { state: "accepted" } } });
     store.claimTurnControlOperation("control-1");
     const circular: Record<string, unknown> = {}; circular.self = circular;
@@ -1675,7 +1675,7 @@ describe("SQLite store", () => {
     store.claimNextInstanceTurn(worker.id, worker.generation);
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
-    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target: { owner: { kind: "instance", id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" }, actor: { kind: "human", userId: "u1" }, payload: "change" });
+    store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target: { owner: { kind: "instance", id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" }, actor: { kind: "human", userId: "u1" }, payload: "change" });
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, expectedRuntimeTurnId: "runtime-1", state: "completed", eventKind: "turn.completed" });
 
     expect(store.claimTurnControlOperation("control-1")).toBeNull();
@@ -2237,13 +2237,13 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", {
-      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "traex", agentSessionAgent: "traex",
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
       agentSessionKind: "id", agentSessionValue: "session-1", state: "active", lifecycle: "active", attachment: "degraded", degradationCount: 1
     });
 
     const applied = store.applyRuntimeObservation({
       bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1,
-      pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" } }
+      pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
     });
 
     expect(applied).toMatchObject({ outcome: "applied", terminalIdentityRefreshed: true, nativeSessionMismatch: false });
@@ -2256,7 +2256,7 @@ describe("SQLite store", () => {
     expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
   });
 
-  it("treats native Herdr TraeX source as the same observed binding session", () => {
+  it("rejects native Herdr TraeX observation for a legacy binding session", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", {
@@ -2269,8 +2269,8 @@ describe("SQLite store", () => {
       pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
     });
 
-    expect(applied).toMatchObject({ outcome: "applied", terminalIdentityRefreshed: true, nativeSessionMismatch: false });
-    expect(store.getBinding("b1")).toMatchObject({ generation: 1, traexSessionId: "term-2", agentSessionSource: "herdr:codex", agentSessionValue: "session-1" });
+    expect(applied).toMatchObject({ outcome: "terminal_identity_changed" });
+    expect(store.getBinding("b1")).toMatchObject({ generation: 1, traexSessionId: "term-1", agentSessionSource: "herdr:codex", agentSessionValue: "session-1" });
   });
 
   it("atomically cancels queued turns with terminal delivery intents", () => {

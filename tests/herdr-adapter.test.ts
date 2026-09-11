@@ -63,19 +63,19 @@ describe("Herdr adapter structured control", () => {
       calls.push(args);
       if (args[0] === "agent" && args[1] === "get") return json({ agent: {
         pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "working", active_turn_id: "turn-1",
-        steering_capability: "native", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }
+        steering_capability: "native", agent_session: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }
       } });
       return { stdout: "", stderr: "" };
     } };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).interruptAgent({
-      paneId: "w1:p1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" },
+      paneId: "w1:p1", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       runtimeTurnId: "turn-1", idempotencyKey: "control-1"
     })).resolves.toEqual({ status: "interrupted" });
     expect(calls).toEqual([["agent", "get", "w1:p1"], ["agent", "send-keys", "w1:p1", "ctrl+c"]]);
   });
 
-  it("accepts a native Herdr TraeX source when interrupting a legacy-owned turn", async () => {
+  it("rejects a native Herdr TraeX source when interrupting a legacy-owned turn", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {
       calls.push(args);
@@ -89,8 +89,8 @@ describe("Herdr adapter structured control", () => {
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).interruptAgent({
       paneId: "w1:p1", agentSession: { source: "herdr:codex", agent: "traex", kind: "id", value: "session-1" },
       runtimeTurnId: "turn-1", idempotencyKey: "control-1"
-    })).resolves.toEqual({ status: "interrupted" });
-    expect(calls.at(-1)).toEqual(["agent", "send-keys", "w1:p1", "ctrl+c"]);
+    })).resolves.toEqual({ status: "not-active", reason: "Agent session identity changed" });
+    expect(calls).toEqual([["agent", "get", "w1:p1"]]);
   });
 
   it("does not interrupt when the native runtime turn changed", async () => {
@@ -99,12 +99,12 @@ describe("Herdr adapter structured control", () => {
       calls.push(args);
       return json({ agent: {
         pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "working", active_turn_id: "turn-2",
-        steering_capability: "native", agent_session: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" }
+        steering_capability: "native", agent_session: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }
       } });
     } };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).interruptAgent({
-      paneId: "w1:p1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" },
+      paneId: "w1:p1", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       runtimeTurnId: "turn-1", idempotencyKey: "control-1"
     })).resolves.toMatchObject({ status: "not-active", reason: expect.stringContaining("changed") });
     expect(calls).toEqual([["agent", "get", "w1:p1"]]);
@@ -225,7 +225,7 @@ describe("Herdr adapter structured control", () => {
     });
   });
 
-  it("normalizes a shim-marked native session to TraeX", async () => {
+  it("preserves a legacy shim snapshot without normalizing its identity", async () => {
     const native = { async request(method: string) {
       if (method === "session.snapshot") return { snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent_status: "idle", agent: "codex", display_agent: "traex", agent_session: { source: "herdr-traex-shim", agent: "codex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } }], agents: [] } };
       throw new Error(`unexpected method: ${method}`);
@@ -233,7 +233,7 @@ describe("Herdr adapter structured control", () => {
     const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).observeRuntime("w1:p1")).resolves.toMatchObject({
-      pane: { agentKind: "codex", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } }
+      traexProcess: false, pane: { agentKind: "codex", agentSession: { source: "herdr-traex-shim", agent: "codex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } }
     });
   });
 

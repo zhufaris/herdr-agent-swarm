@@ -87,7 +87,7 @@ async function setup() {
     async replyCard(_root, card) { cards.push(card); return { messageId: `card-${cards.length}` }; },
     async updateCard(messageId, card) { updates.push({ messageId, card }); }
   };
-  const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", foregroundExecutables: ["traex"], agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } };
+  const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } };
   const herdr: HerdrPort = {
     async assertWorkspace() { herdrCalls.push("assertWorkspace"); }, async listPanes() { return [pane]; }, async getPane() { return pane; },
     async observeRuntime() { herdrCalls.push("observeRuntime"); return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },

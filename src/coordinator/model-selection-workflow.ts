@@ -8,7 +8,7 @@ import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlO
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { resolveCatalogModel } from "../domain/model-selection.js";
-import { canonicalTraexSession } from "../domain/traex-session-identity.js";
+import { isNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
@@ -84,8 +84,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, messageId: string): Promise<boolean> {
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
-    const canonical = session ? canonicalTraexSession(session) : null;
-    if (!canonical || canonical.source !== "herdr:traex" || canonical.agent !== "traex" || canonical.kind !== "id") {
+    if (!isNativeTraexSession(session)) {
       await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:unavailable`, this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
       return false;
     }

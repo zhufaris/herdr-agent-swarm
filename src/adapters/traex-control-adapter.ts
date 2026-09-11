@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { TraexControlPort, TraexModelPromptDispatchOptions } from "../domain/ports/external.js";
 import type { HerdrAgentSession } from "../domain/types.js";
-import { canonicalTraexSession } from "../domain/traex-session-identity.js";
+import { isNativeTraexSession } from "../domain/traex-session-identity.js";
 import { abortTraexModelPrompt, commitTraexModelPrompt, prepareTraexModelPrompt } from "../runtime/traex-model-prompt.js";
 import { listTraexModels } from "../runtime/traex-model-protocol.js";
 import { findTraexSessionPeer } from "../runtime/traex-session-peer.js";
@@ -40,9 +40,8 @@ export class TraexControlAdapter implements TraexControlPort {
   }
 
   private async peer(session: HerdrAgentSession) {
-    const canonical = canonicalTraexSession(session);
-    if (canonical.source !== "herdr:traex" || canonical.agent !== "traex" || canonical.kind !== "id") throw new Error("Session does not support TraeX control");
-    const peer = await this.operations.findPeer(this.peersDir, canonical.value);
+    if (!isNativeTraexSession(session)) throw new Error("Session does not support TraeX control");
+    const peer = await this.operations.findPeer(this.peersDir, session.value);
     if (!peer) throw new Error("TraeX native session peer is unavailable");
     return peer;
   }

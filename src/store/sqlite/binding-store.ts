@@ -1,5 +1,5 @@
 import { transitionSession, type SessionTransition } from "../../domain/pane-thread-lifecycle.js";
-import { sameAgentSession } from "../../domain/traex-session-identity.js";
+import { isNativeTraexSession, sameNativeTraexSession } from "../../domain/traex-session-identity.js";
 import type { Binding, BindingMetadataPatch, BindingState, FailureSummary, HerdrPane, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../../domain/types.js";
 import { mapBinding, mapRetiredPaneCleanup, type BindingRow, type RetiredPaneCleanupRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
@@ -69,10 +69,12 @@ export class SqliteBindingLifecycleStore {
       if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || (binding.lifecycle !== "active" && binding.lifecycle !== "draining") || binding.attachment === "orphaned") return { outcome: "stale_binding" };
       const persisted = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
       const observed = input.pane.agentSession ?? null;
-      const sameSession = Boolean(persisted && observed && sameAgentSession(persisted, observed));
+      const sameSession = Boolean(persisted && observed && sameNativeTraexSession(persisted, observed));
+      if ((persisted && !isNativeTraexSession(persisted)) || (observed && !isNativeTraexSession(observed))) return { outcome: "terminal_identity_changed", binding };
       const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
       if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) return { outcome: "terminal_identity_changed", binding };
       const nativeSessionMismatch = Boolean(persisted && observed && !sameSession);
+      if (nativeSessionMismatch) return { outcome: "terminal_identity_changed", binding };
       if (terminalIdentityRefreshed || (!persisted && observed)) binding = this.persistBindingPatch(binding.id, { ...(terminalIdentityRefreshed ? { traexSessionId: input.pane.terminalId ?? null } : {}), ...(!persisted && observed ? { agentSessionSource: observed.source, agentSessionAgent: observed.agent, agentSessionKind: observed.kind, agentSessionValue: observed.value } : {}) });
       binding = this.transitionBinding(binding.id, { type: "pane_observed", runtime: input.pane.agentState });
       return { outcome: "applied", binding, terminalIdentityRefreshed, nativeSessionMismatch };

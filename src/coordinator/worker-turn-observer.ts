@@ -148,6 +148,6 @@ function observedProgress(observation: TraexTranscriptObservation, occurredAt: s
 }
 function sessionFor(instance: ReturnType<WorkerTurnObservationStore["getAgentInstance"]>, generation: number) {
   return instance?.runtimeRef?.nativeSessionId && instance.generation === generation && instance.agentKind === "traex"
-    ? { source: "traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId }
+    ? { source: "herdr:traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId }
     : null;
 }

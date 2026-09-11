@@ -135,7 +135,7 @@ describe("WorkerTurnObserver", () => {
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
+    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
     expect(submit).not.toHaveBeenCalled();
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "recovered" });
   });
@@ -163,7 +163,7 @@ describe("WorkerTurnObserver", () => {
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
+    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "full recovered answer" });
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "full recovered answer", resultCapture: "captured" });
   });

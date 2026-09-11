@@ -12,7 +12,7 @@ describe("ExternalTurnObserver", () => {
     const store = new SqliteBindingStore(":memory:");
     for (const [id, paneId] of [["b1", "w1:p1"], ["b2", "w1:p2"]]) {
       store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: `t-${id}`, rootMessageId: `root-${id}`, title: id });
-      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId, agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: `session-${id}` });
+      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: `session-${id}` });
     }
     const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }));
     const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
@@ -28,7 +28,7 @@ describe("ExternalTurnObserver", () => {
   it("keeps a pending turn start across reads and projects a direct Herdr turn to completion", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const observations: TraexTranscriptObservation[] = [
       { turnId: "turn-1", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
       { turnId: "turn-1", requestText: "direct task", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
@@ -58,12 +58,12 @@ describe("ExternalTurnObserver", () => {
   it("recovers a persisted external turn from a terminal transcript baseline while the binding is busy after restart", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const startedAt = "2026-08-31T10:00:00.000Z";
     const view = createQueuedRunCard({ promptId: "external-1", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct task", queuePosition: 0, occurredAt: startedAt });
     store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1",
-      expectedSession: { source: "traex", agent: "traex", kind: "id", value: "session-1" },
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
       turnId: "turn-1", startedAt, requestText: "direct task", externalPromptId: "external-1",
       externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
     });
@@ -95,7 +95,7 @@ describe("ExternalTurnObserver", () => {
   it("waits for an in-flight detached-turn recovery before stopping", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     let releaseOpen!: (value: { mode: "typed"; cursor: { readDelta(): Promise<string> } }) => void;
     const openAfterTurn = vi.fn(() => new Promise<{ mode: "typed"; cursor: { readDelta(): Promise<string> } }>((resolve) => { releaseOpen = resolve; }));
     const observer = new ExternalTurnObserver({
@@ -120,7 +120,7 @@ describe("ExternalTurnObserver", () => {
   it("fails an adopted external turn when TraeX records a human interruption and wakes the FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const turnId = "turn-aborted";
     const observations: TraexTranscriptObservation[] = [
       { turnId, freshTurnStart: true, requestText: "direct task", answerDelta: "", turnLifecycle: { turnId, state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
@@ -155,7 +155,7 @@ describe("ExternalTurnObserver", () => {
     let active = false;
     const store = { getBinding: () => binding, getActiveExternalPrompt: () => null } as never;
     const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => active, wakePrompt() {} });
-    const binding = { id: "b1", generation: 1, paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" } as never;
+    const binding = { id: "b1", generation: 1, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" } as never;
     await observer.observe(binding);
     active = true;
     await observer.observe(binding);
@@ -168,7 +168,7 @@ describe("ExternalTurnObserver", () => {
   it("polls active bindings without requiring a Herdr runtime reconciliation", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const observations: TraexTranscriptObservation[] = [
       { turnId: "turn-1", freshTurnStart: true, requestText: "direct task", answerDelta: "answer", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-08-31T10:00:00.000Z", finalAnswer: "answer" } },
       { answerDelta: "" }
@@ -189,7 +189,7 @@ describe("ExternalTurnObserver", () => {
   it("does not reproject a superseding turn after its handed-off cursor completed it", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const existing = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "Old", workspaceId: "w1", paneId: "w1:p1", requestText: "old", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "u1", body: "old" }, view: existing, rootMessageId: "root", answerCard: {} });
     store.database.prepare("UPDATE prompt_jobs SET state='running', observation_state='detached', dispatched_at='2026-08-31T10:00:01.000Z', transcript_turn_id='old-turn', transcript_turn_started_at='2026-08-31T10:00:01.000Z' WHERE id='old'").run();

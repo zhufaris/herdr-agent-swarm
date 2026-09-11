@@ -5,7 +5,7 @@ import type { BridgeCommand } from "../src/domain/types.js";
 
 const project = { id: "project", displayName: "Project", spaceName: "space", description: "project", workspaceId: "w1", cwd: "/repo", maxInstances: 4 };
 const message = { eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "", mentionsBot: true, isRootMessage: false };
-const binding = { id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal", agentSessionSource: "herdr:codex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native", generation: 3 } as never;
+const binding = { id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native", generation: 3 } as never;
 const commandByKind = {
   help: { kind: "help" }, projects: { kind: "projects" }, spaces: { kind: "spaces" }, sessions: { kind: "sessions" }, failures: { kind: "failures" }, status: { kind: "status" },
   new: { kind: "new", title: null }, reset: { kind: "reset", title: null }, attach: { kind: "attach", spaceName: "space", paneId: "w1:p2" }, rename: { kind: "rename", title: "name" },
@@ -21,7 +21,7 @@ function resolver(current: typeof binding | null = binding) {
 describe("SwarmCommandContextResolver", () => {
   it("freezes Primary generation and both runtime identity dimensions", () => {
     expect(resolver().resolve(message, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false })).toEqual({
-      outcome: "resolved", laneKey: "binding:binding", context: expect.objectContaining({ projectId: "project", workspaceId: "w1", primary: { bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:codex", agent: "traex", kind: "id", value: "native" }, activePromptId: null } })
+      outcome: "resolved", laneKey: "binding:binding", context: expect.objectContaining({ projectId: "project", workspaceId: "w1", primary: { bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native" }, activePromptId: null } })
     });
   });
 

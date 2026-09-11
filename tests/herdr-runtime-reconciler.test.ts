@@ -251,7 +251,7 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
-  it("recovers a migration-orphaned legacy binding only from its unchanged live runtime identity", async () => {
+  it("keeps a migration-orphaned legacy binding orphaned despite an unchanged live tuple", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "legacy", projectId: "repo", workspaceId: "w-old", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / legacy" });
     store.updateBinding("legacy", {
@@ -277,9 +277,9 @@ describe("HerdrRuntimeReconciler", () => {
 
     await reconciler.reconcile();
 
-    expect(store.getBinding("legacy")).toMatchObject({ state: "active", lifecycle: "active", attachment: "attached", degradationCount: 0, lastAgentState: "idle" });
-    expect(store.loadTopicView("legacy")).toMatchObject({ phase: "ready", notice: null, workspaceId: "w-old", paneId: "w-old:p1" });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "legacy", targetRole: "session_status" })]);
+    expect(store.getBinding("legacy")).toMatchObject({ state: "orphaned", lifecycle: "active", attachment: "orphaned", degradationCount: 2, lastAgentState: "unknown" });
+    expect(store.loadTopicView("legacy")).toMatchObject({ phase: "orphaned", notice: "workspace unavailable", workspaceId: "w-old", paneId: "w-old:p1" });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
     expect(wake).not.toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: "legacy" });
     store.close();
   });
@@ -492,12 +492,12 @@ describe("HerdrRuntimeReconciler", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", {
-      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "codex-hook", agentSessionAgent: "codex", agentSessionKind: "id", agentSessionValue: "conversation-1",
+      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "conversation-1",
       state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
     });
     let pane = {
       paneId: "w1:p1", terminalId: "old-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working" as const,
-      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 10, foregroundExecutables: ["traex"]
+      agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 10, foregroundExecutables: ["traex"]
     };
     const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
@@ -513,12 +513,12 @@ describe("HerdrRuntimeReconciler", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", {
-      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
       agentSessionKind: "id", agentSessionValue: "conversation-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
     });
     const pane = {
       paneId: "w1:p1", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
-      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+      agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
     const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
@@ -536,29 +536,29 @@ describe("HerdrRuntimeReconciler", () => {
     });
     const pane = {
       paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
-      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+      agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "conversation-1" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
     const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 
     await reconciler.reconcile();
 
     expect(store.getBinding("b1")).toMatchObject({
-      traexSessionId: "term-1", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      traexSessionId: "term-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
       agentSessionKind: "id", agentSessionValue: "conversation-1", attachment: "attached"
     });
     store.close();
   });
 
-  it("preserves a persisted native Agent session when the same terminal reports a different one", async () => {
+  it("orphans a persisted native Agent session when the same terminal reports a different one", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", {
-      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
       agentSessionKind: "id", agentSessionValue: "conversation-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
     });
     const pane = {
       paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
-      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "conversation-2" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+      agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "conversation-2" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
     const logger = pino({ enabled: false });
     const warning = vi.spyOn(logger, "warn");
@@ -566,8 +566,8 @@ describe("HerdrRuntimeReconciler", () => {
 
     await reconciler.reconcile();
 
-    expect(store.getBinding("b1")).toMatchObject({ agentSessionValue: "conversation-1", attachment: "attached" });
-    expect(warning).toHaveBeenCalledWith(expect.objectContaining({ event: "binding-agent-session-mismatch" }), expect.any(String));
+    expect(store.getBinding("b1")).toMatchObject({ agentSessionValue: "conversation-1", attachment: "orphaned" });
+    expect(warning).not.toHaveBeenCalledWith(expect.objectContaining({ event: "binding-agent-session-mismatch" }), expect.any(String));
     store.close();
   });
 
@@ -575,12 +575,12 @@ describe("HerdrRuntimeReconciler", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", {
-      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "codex-hook", agentSessionAgent: "codex",
+      paneId: "w1:p1", traexSessionId: "old-terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
       agentSessionKind: "id", agentSessionValue: "conversation-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated"
     });
     const pane = {
       paneId: "w1:p1", terminalId: "new-terminal", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
-      agentKind: "codex", agentSession: { source: "codex-hook", agent: "codex", kind: "id" as const, value: "another-conversation" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
+      agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "another-conversation" }, outputRevision: 7, stateChangeSeq: 1, foregroundExecutables: ["traex"]
     };
     const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort);
 

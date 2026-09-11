@@ -75,7 +75,7 @@ describe("pane/thread lifecycle integration", () => {
       terminalId: "new-terminal",
       agentState: "idle" as const,
       foregroundExecutables: ["traex"],
-      agentSession: { source: "traex", agent: "traex", kind: "id" as const, value: "native-session-1" }
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "native-session-1" }
     };
     let started = false;
     let createdOptions: Parameters<HerdrPort["createPane"]>[2];
@@ -100,7 +100,7 @@ describe("pane/thread lifecycle integration", () => {
 
     expect(store.getBinding("orphaned")).toMatchObject({
       paneId: "w1:new", traexSessionId: "new-terminal", generation: 2, attachment: "attached",
-      agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native-session-1"
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native-session-1"
     });
     expect(createdOptions).toMatchObject({ bindingId: "orphaned", generation: 2, projectId: "repo", title: expect.stringMatching(/^[a-z0-9]{4}$/), environment: { SWARM_PRIMARY_CAPABILITY: "test-orphaned-2" } });
     expect(startedArgs).toEqual(primaryToolArgs("orphaned", 2));
@@ -542,7 +542,7 @@ describe("pane/thread lifecycle integration", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {} };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
     const oldView = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "old", workspaceId: "w1", paneId: "w1:p1", requestText: "old request", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "user", body: "old request" }, view: oldView, rootMessageId: "root", answerCard: {} });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', attempt_count = 1 WHERE id = 'old'").run();
@@ -581,7 +581,7 @@ describe("pane/thread lifecycle integration", () => {
     const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, async createTopic() { return { topicId: "unused", rootMessageId: "unused" }; }, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: `card-${Math.random()}` }; }, async updateCard() {} };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", creatorOpenId: "user", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
     for (const [id, body] of [["old", "old request"], ["queued", "queued Feishu work"]] as const) {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: body, queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "user", body }, view, rootMessageId: "root", answerCard: {} });

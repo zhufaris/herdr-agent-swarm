@@ -1,6 +1,6 @@
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { Binding, HerdrPane } from "../domain/types.js";
-import { sameAgentSession } from "../domain/traex-session-identity.js";
+import { isNativeTraexSession, sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { ProjectCatalog } from "./project-catalog.js";
 
 export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime">, projects: ProjectCatalog, binding: Binding, paneId: string): Promise<HerdrPane> {
@@ -15,15 +15,18 @@ export async function requireMatchingPane(herdr: Pick<HerdrPort, "observeRuntime
   return pane;
 }
 
-export function hasNativeAgentSession(binding: Binding): boolean { return Boolean(binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue); }
+export function hasNativeAgentSession(binding: Binding): boolean { return isNativeTraexSession(persistedAgentSession(binding)); }
 export function sameNativeAgentSession(binding: Binding, pane: HerdrPane): boolean {
-  return Boolean(pane.agentSession && sameAgentSession(persistedAgentSession(binding), pane.agentSession));
+  const persisted = persistedAgentSession(binding);
+  return Boolean(persisted && pane.agentSession && sameNativeTraexSession(persisted, pane.agentSession));
 }
 
 export function requireMatchingRuntimeIdentity(binding: Binding, pane: HerdrPane): void {
   if (binding.paneId && binding.paneId !== pane.paneId) throw new Error(`Herdr pane identity changed for ${pane.paneId}`);
   if (binding.traexSessionId && binding.traexSessionId !== pane.terminalId) throw new Error(`Herdr pane identity changed for ${pane.paneId}`);
-  if (hasNativeAgentSession(binding) && pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${pane.paneId}`);
+  const persisted = persistedAgentSession(binding);
+  if ((persisted && !isNativeTraexSession(persisted)) || (pane.agentSession && !isNativeTraexSession(pane.agentSession))) throw new Error(`Herdr Agent session identity changed for ${pane.paneId}`);
+  if (persisted && pane.agentSession && !sameNativeAgentSession(binding, pane)) throw new Error(`Herdr Agent session identity changed for ${pane.paneId}`);
 }
 
 export function preferredRuntimeSessionId(binding: Binding, pane: HerdrPane): string | null {
@@ -31,6 +34,8 @@ export function preferredRuntimeSessionId(binding: Binding, pane: HerdrPane): st
   return pane.agentSession?.value ?? (hasNativeAgentSession(binding) ? binding.agentSessionValue! : pane.terminalId ?? null);
 }
 
-function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSession"]> {
-  return { source: binding.agentSessionSource!, agent: binding.agentSessionAgent!, kind: binding.agentSessionKind!, value: binding.agentSessionValue! };
+function persistedAgentSession(binding: Binding): NonNullable<HerdrPane["agentSession"]> | null {
+  return binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+    ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
+    : null;
 }

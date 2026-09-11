@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ExactTurnObserver } from "../src/runtime/exact-turn-observer.js";
 import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../src/domain/ports.js";
 
-const session = { source: "traex", agent: "traex", kind: "id" as const, value: "session-1" };
+const session = { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" };
 const exact = { turnId: "turn-1", startedAt: "2026-09-07T00:00:00.000Z" };
 
 function reader(observations: TraexTranscriptObservation[]): TraexTranscriptReaderPort {

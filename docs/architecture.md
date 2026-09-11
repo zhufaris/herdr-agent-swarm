@@ -765,11 +765,11 @@ Herdr 0.9 contract dedicates an event connection after `events.subscribe` and
 closes an RPC connection after one response. Read-only snapshots, structured Agent lookups, and process-info
 prefer Socket RPC and fall back to the matching CLI operation when unavailable.
 The bridge starts TraeX through Herdr 0.9's native `agent start --kind traex`
-surface and never substitutes the separate Codex executable. Native Herdr reports
-the canonical `herdr:traex` session. Legacy persisted `herdr:codex` and
-`herdr-traex-shim` sources are semantic aliases only when Agent, kind, and exact
-session value match; durable prompt and turn-control rows retain their exact
-stored tuples until a separate transactional migration is safe.
+surface and never substitutes the separate Codex executable. A live TraeX
+session must have the exact tuple `herdr:traex` / `traex` / `id` / non-empty
+thread ID. Legacy persisted `herdr:codex` and `herdr-traex-shim` tuples remain
+unaltered audit history, but are never treated as aliases and cannot pass
+reconciliation, recovery, transcript, model-control, or exact-turn fences.
 Ordinary prompt submission uses the Agent CLI surface exclusively so its
 uncertain-dispatch/no-replay boundary is explicit.
 Active Herdr calls pass through a global transport circuit breaker inside the

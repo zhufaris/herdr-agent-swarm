@@ -11,6 +11,7 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ProjectCatalog } from "./project-catalog.js";
+import { isNativeTraexSession } from "../domain/traex-session-identity.js";
 
 export class BindingRuntimeConverger {
   private readonly observedAgentStates = new Map<string, ObservedAgentState>();
@@ -40,6 +41,7 @@ export class BindingRuntimeConverger {
 
   async converge(initial: Binding, initialPane: HerdrPane): Promise<void> {
     let existing = initial; let pane = initialPane;
+    if (hasLegacySessionIdentity(existing)) { await this.orphan(existing, `Herdr pane ${pane.paneId} has a retired Agent session identity`); return; }
     if (!isTraexCompatiblePane(pane)) return;
     if (!existing.projectId) { const project = this.projects.projectForWorkspaceAndCwd(pane.workspaceId, pane.cwd); if (project) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: project.id }); }
     if (existing.lifecycle === "provisioning") return;
@@ -95,3 +97,7 @@ export class BindingRuntimeConverger {
 }
 
 function pruneMissingPaneObservations<Value>(observations: Map<string, Value>, livePaneIds: ReadonlySet<string>): void { for (const paneId of observations.keys()) if (!livePaneIds.has(paneId)) observations.delete(paneId); }
+function hasLegacySessionIdentity(binding: Binding): boolean {
+  if (!binding.agentSessionSource || !binding.agentSessionAgent || !binding.agentSessionKind || !binding.agentSessionValue) return false;
+  return !isNativeTraexSession({ source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue });
+}

@@ -12,5 +12,5 @@ export function applyMonotonicAgentState(pane: HerdrPane, previous: ObservedAgen
 
 export function isConfirmedUnregisteredTraexAgent(pane: HerdrPane): boolean { return pane.agentKind === null && pane.foregroundExecutables.includes("traex"); }
 export function isTraexCompatiblePane(pane: HerdrPane): boolean {
-  return pane.foregroundExecutables.includes("traex") || pane.agentKind === "traex" || pane.agentKind === "codex" || pane.agentKind === "claude" || pane.agentKind === "pi";
+  return pane.foregroundExecutables.includes("traex") || pane.agentKind === "traex";
 }
