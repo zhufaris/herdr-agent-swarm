@@ -134,11 +134,7 @@ describe("service lifecycle", () => {
     expect(packageJson.scripts["swarm:setup"]).toBe("node dist/cli/setup.js");
     expect(packageJson.scripts["swarm:doctor"]).toBe("node dist/cli/doctor.js");
     expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:setup", "swarm:doctor", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
-    expect(packageJson.scripts).toMatchObject({
-      "herdr:traex:install": "bash scripts/install-herdr-traex-shim.sh install",
-      "herdr:traex:status": "bash scripts/install-herdr-traex-shim.sh status",
-      "herdr:traex:uninstall": "bash scripts/install-herdr-traex-shim.sh uninstall"
-    });
+    expect(Object.keys(packageJson.scripts).some((name) => name.startsWith("herdr:traex:"))).toBe(false);
     const script = readFileSync(join(process.cwd(), "scripts/swarm-service.sh"), "utf8");
     expect(script).not.toContain("migrate)");
     expect(script).not.toContain("swarm-service-cutover");

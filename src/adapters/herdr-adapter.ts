@@ -1,13 +1,11 @@
 import { z } from "zod";
 import { classifyPromptSubmissionFailure } from "../domain/prompt-submission.js";
-import type { HerdrPort, ModelPromptDispatchOptions } from "../domain/ports/external.js";
-import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { InterruptReceipt } from "../domain/agent-runtime.js";
 import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
-import type { TraexModelSummary } from "../domain/model-selection.js";
 import { sameAgentSession } from "../domain/traex-session-identity.js";
-import { createHash } from "node:crypto";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -34,15 +32,6 @@ const snapshotPaneSchema = paneSchema.extend({
 const snapshotSchema = z.object({
   snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
 });
-const steerResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("delivered"), operationId: z.string(), turnId: z.string() }),
-  z.object({ status: z.literal("not-active"), reason: z.string() }),
-  z.object({ status: z.literal("blocked"), reason: z.string() }),
-  z.object({ status: z.literal("unsupported"), reason: z.string() }),
-  z.object({ status: z.literal("delivery-uncertain"), operationId: z.string(), reason: z.string() })
-]);
-const modelSummarySchema = z.object({ id: z.string(), name: z.string(), displayName: z.string() });
-const modelPromptResultSchema = z.object({ type: z.literal("agent_model_prompt"), operationId: z.string(), state: z.enum(["prepared", "dispatching", "accepted", "rejected", "uncertain"]), turnId: z.string().nullable(), detail: z.string().nullable() });
 const PROCESS_INFO_CONCURRENCY = 4;
 
 interface HerdrNativeRequestClient {
@@ -223,10 +212,8 @@ export class HerdrCliAdapter implements HerdrPort {
     timeoutMs: number,
     onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>,
     signal?: AbortSignal,
-    onDispatched?: () => void | Promise<void>,
-    options?: ModelPromptDispatchOptions
+    onDispatched?: () => void | Promise<void>
   ): Promise<AgentState> {
-    if (options) return this.runModelPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched, options);
     throwIfAborted(signal);
     let commandStarted = false;
     let dispatchReported = false;
@@ -255,31 +242,9 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  private async runModelPrompt(paneId: string, text: string, timeoutMs: number, onObservation: ((observation: RuntimeTurnObservation) => void | Promise<void>) | undefined, signal: AbortSignal | undefined, onDispatched: (() => void | Promise<void>) | undefined, options: ModelPromptDispatchOptions): Promise<AgentState> {
+  async waitForAgent(paneId: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal): Promise<AgentState> {
     throwIfAborted(signal);
-    const digest = createHash("sha256").update(text).digest("hex");
-    const common = ["--prompt-sha256", digest, "--timeout", String(timeoutMs)];
-    const prepared = await this.modelPromptCommand([
-      "agent", "model-prompt", "prepare", paneId, "--model", options.modelDispatch.name, "--model-revision", String(options.modelDispatch.revision),
-      "--prompt-sha256", digest, "--agent-session", JSON.stringify(options.agentSession), "--timeout", String(timeoutMs)
-    ], timeoutMs);
-    if (prepared.state !== "prepared") throw new Error(`Model prompt prepare returned ${prepared.state}`);
-    await options.onPrepared(prepared.operationId);
-    let committed: z.infer<typeof modelPromptResultSchema>;
-    try {
-      await onDispatched?.();
-      throwIfAborted(signal);
-      committed = await this.modelPromptCommand(["agent", "model-prompt", "commit", prepared.operationId, text, ...common], timeoutMs);
-    } catch (error) {
-      const aborted = await this.modelPromptCommand(["agent", "model-prompt", "abort", prepared.operationId, "--timeout", String(timeoutMs)], timeoutMs).catch(() => null);
-      if (aborted?.state === "rejected") await options.onPrepareAborted?.(prepared.operationId);
-      throw error;
-    }
-    if (committed.state === "rejected") await options.onPrepareAborted?.(prepared.operationId);
-    if (committed.state !== "accepted" || !committed.turnId) throw new Error(committed.detail ?? `Model prompt commit returned ${committed.state}`);
-    await options.onAccepted?.({ operationId: committed.operationId, turnId: committed.turnId });
     await onObservation?.({ state: "working", stateSource: "structured" });
-    throwIfAborted(signal);
     const { stdout } = await this.runner.run(
       this.executable,
       ["agent", "wait", paneId, "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", String(timeoutMs)],
@@ -291,33 +256,10 @@ export class HerdrCliAdapter implements HerdrPort {
     return settled;
   }
 
-  private async modelPromptCommand(args: string[], timeoutMs: number): Promise<z.infer<typeof modelPromptResultSchema>> {
-    const { stdout } = await this.runner.run(this.executable, args, timeoutMs + this.commandTimeoutMs);
-    return modelPromptResultSchema.parse(envelopeSchema.parse(JSON.parse(stdout)).result);
-  }
-
-  async listModels(paneId: string, agentSession: HerdrAgentSession): Promise<TraexModelSummary[]> {
-    const { stdout } = await this.runner.run(this.executable, [
-      "agent", "model-list", paneId, "--agent-session", JSON.stringify(agentSession), "--timeout", String(this.commandTimeoutMs)
-    ], this.commandTimeoutMs + 1_000);
-    const result = z.object({ type: z.literal("agent_models"), models: z.array(modelSummarySchema).max(5_000) }).parse(envelopeSchema.parse(JSON.parse(stdout)).result);
-    return result.models;
-  }
-
   async sendEscape(paneId: string): Promise<void> {
     await this.runner.run(this.executable, ["agent", "send-keys", paneId, "esc"], this.commandTimeoutMs);
   }
 
-  async steerAgent(input: { paneId: string; agentSession: import("../domain/types.js").HerdrAgentSession; runtimeTurnId: string; text: string; idempotencyKey: string }): Promise<SteerReceipt> {
-    const { stdout } = await this.runner.run(this.executable, [
-      "agent", "steer", input.paneId, input.text,
-      "--turn-id", input.runtimeTurnId, "--idempotency-key", input.idempotencyKey,
-      "--agent-session", JSON.stringify(input.agentSession),
-      "--timeout", String(this.commandTimeoutMs)
-    ], this.commandTimeoutMs + 1_000);
-    const { type: _type, ...result } = z.object({ type: z.literal("agent_steered") }).and(steerResultSchema).parse(envelopeSchema.parse(JSON.parse(stdout)).result);
-    return result;
-  }
 
   async interruptAgent(input: { paneId: string; agentSession: HerdrAgentSession; runtimeTurnId: string; idempotencyKey: string }): Promise<InterruptReceipt> {
     void input.idempotencyKey;
@@ -426,7 +368,7 @@ export class HerdrCliAdapter implements HerdrPort {
       paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
       ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,
       agentKind: kind, agentSession, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
-      steeringCapability: agent?.steering_capability ?? raw.steering_capability ?? (agentSession?.source === "herdr-traex-shim" ? "native" : "unsupported"),
+      steeringCapability: agent?.steering_capability ?? raw.steering_capability ?? "unsupported",
       activeTurnId: agent?.active_turn_id ?? raw.active_turn_id ?? null,
       agentState: agent?.agent_status ?? raw.agent_status ?? "unknown", foregroundExecutables
     };

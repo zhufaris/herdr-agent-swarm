@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
-import type { HerdrPort } from "../domain/ports/external.js";
+import type { TraexControlPort } from "../domain/ports/external.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ModelSelectionStore } from "../domain/ports/workflow.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
@@ -8,10 +8,11 @@ import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlO
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { resolveCatalogModel } from "../domain/model-selection.js";
+import { canonicalTraexSession } from "../domain/traex-session-identity.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
-interface Options { config: BridgeConfig; store: ModelSelectionStore; herdr: HerdrPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
+interface Options { config: BridgeConfig; store: ModelSelectionStore; traexControl: TraexControlPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
 const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。";
 
@@ -83,12 +84,13 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, messageId: string): Promise<boolean> {
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
-    if (!session || session.source !== "herdr-traex-shim" || session.agent !== "traex" || session.kind !== "id" || !this.options.herdr.listModels) {
+    const canonical = session ? canonicalTraexSession(session) : null;
+    if (!canonical || canonical.source !== "herdr:traex" || canonical.agent !== "traex" || canonical.kind !== "id") {
       await this.options.outbound.enqueueCardUpdate(binding.id, messageId, `model:${messageId}:unavailable`, this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
       return false;
     }
     try {
-      const models = await this.options.herdr.listModels(binding.paneId!, session);
+      const models = await this.options.traexControl.listModels(session!);
       let notice: string | undefined;
       let selected = !requested;
       if (requested) {

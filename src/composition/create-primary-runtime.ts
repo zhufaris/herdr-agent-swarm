@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
-import type { HerdrPort, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexControlPort, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { cardKitPrimaryPresentation } from "../cards/cardkit-primary-presentation.js";
 import { ExternalTurnObserver } from "../coordinator/external-turn-observer.js";
 import type { MainCardWorkflowPort } from "../coordinator/main-card-workflow.js";
@@ -15,12 +15,12 @@ import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 export type PrimaryRuntimeStores = Pick<SqliteStoreBundle, "externalTurns" | "promptRun">;
 
 export function createPrimaryRuntime(options: {
-  config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; bus: LifecycleEventPublisher;
+  config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: TraexTranscriptReaderPort;
   mainCards: Pick<MainCardWorkflowPort, "converge">;
   presentation?: PrimaryPresentation;
 }) {
-  const { config, stores, logger, herdr, bus, scheduler, outboundWork, transcriptReader, mainCards } = options;
+  const { config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards } = options;
   const presentation = options.presentation ?? cardKitPrimaryPresentation;
   const promptRunLink = new RuntimeLink<PromptRunWorkflow>("Primary prompt runtime");
   const externalTurns = new ExternalTurnObserver({
@@ -30,7 +30,7 @@ export function createPrimaryRuntime(options: {
     pollIntervalMs: config.runtimeTuning.polling.externalTurnMs
   });
   const promptRun = new PromptRunWorkflow({
-    store: stores.promptRun, herdr, bus, scheduler, outboundWork, logger, presentation, turnTimeoutMs: config.turnTimeoutMs,
+    store: stores.promptRun, herdr, traexControl, bus, scheduler, outboundWork, logger, presentation, turnTimeoutMs: config.turnTimeoutMs,
     transcriptReader, mainCards, transcriptPolling: { identityMs: config.runtimeTuning.polling.transcriptIdentityMs, attachedMs: config.runtimeTuning.polling.attachedTranscriptMs }, handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId),
     observeSupersedingExternalTurn: (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation),
     recoverExternalTurns: (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt)

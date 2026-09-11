@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import type { BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexControlPort } from "../domain/ports/external.js";
 import type { ClaimedPrompt } from "../domain/ports/prompt-acceptance.js";
 import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { EventOrigin, PromptJob } from "../domain/types.js";
@@ -14,7 +14,8 @@ const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX �
 
 interface PromptTurnExecutorOptions {
   store: PromptRunStore;
-  herdr: Pick<HerdrPort, "runPrompt">;
+  herdr: Pick<HerdrPort, "runPrompt" | "waitForAgent">;
+  traexControl?: TraexControlPort;
   transcript: TranscriptObserver;
   logger: Logger;
   turnTimeoutMs: number;
@@ -74,7 +75,8 @@ export class PromptTurnExecutor {
         }
       } : undefined;
       if (model && !modelOptions) throw new Error("Model-aware prompt requires an exact TraeX session identity");
-      const promptWaiter = this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, async ({ state: observedState, stateSource }) => {
+      if (modelOptions && !this.options.traexControl) throw new Error("TraeX model control is unavailable");
+      const observeState = async ({ state: observedState, stateSource }: import("../domain/types.js").RuntimeTurnObservation) => {
         if (!this.options.isBindingActive(bindingId)) return;
         const previousState = binding.lastAgentState;
         if (observedState !== "unknown") this.options.updateTurnState(bindingId, prompt.id, observedState);
@@ -84,7 +86,14 @@ export class PromptTurnExecutor {
           await this.options.publish(bindingId, "AgentStateChanged", "herdr", { state: observedState, queueDepth: observedQueueDepth, promptId: prompt.id });
           if (observedState === "blocked") this.options.logger.warn({ event: "turn-blocked", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, agentState: observedState, queueDepth: observedQueueDepth, outcome: "waiting_for_user" }, "TraeX turn requires user action");
         }
-      }, abortController.signal, confirmDispatched, modelOptions);
+      };
+      const promptWaiter = modelOptions
+        ? this.options.traexControl!.runModelPrompt(paneId, prompt.body, modelOptions, abortController.signal, confirmDispatched).then(async () => {
+          await observeState({ state: "working", stateSource: "structured" });
+          if (!this.options.herdr.waitForAgent) throw new Error("Herdr adapter does not support native Agent wait");
+          return this.options.herdr.waitForAgent(paneId, this.options.turnTimeoutMs, observeState, abortController.signal);
+        })
+        : this.options.herdr.runPrompt(paneId, prompt.body, this.options.turnTimeoutMs, observeState, abortController.signal, confirmDispatched);
       stopAttachedTranscript = new AbortController();
       attachedTranscriptObserver = this.options.transcript.observeAttached({ source: outputSource, binding, prompt, startedAt, signal: stopAttachedTranscript.signal, confirmDispatched, updateSource: (source) => { outputSource = source; } });
       const state = await promptWaiter;

@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
+import type { HerdrPort, LarkPort, TraexControlPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
@@ -91,10 +91,13 @@ async function setup() {
   const herdr: HerdrPort = {
     async assertWorkspace() { herdrCalls.push("assertWorkspace"); }, async listPanes() { return [pane]; }, async getPane() { return pane; },
     async observeRuntime() { herdrCalls.push("observeRuntime"); return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
-    async listModels() { herdrCalls.push("listModels"); return ["GPT-5.5", "GPT-5.6-Terra"].map((name) => ({ id: name, name, displayName: name })); },
     async createPane() { throw new Error("unused"); }, async startTraex() { herdrCalls.push("startTraex"); },
     async runPrompt() { herdrCalls.push("runPrompt"); return "done"; }, async sendEscape() { herdrCalls.push("sendEscape"); },
     async renamePane() { herdrCalls.push("renamePane"); }
+  };
+  const traexControl: TraexControlPort = {
+    async listModels() { herdrCalls.push("listModels"); return ["GPT-5.5", "GPT-5.6-Terra"].map((name) => ({ id: name, name, displayName: name })); },
+    async runModelPrompt() { throw new Error("unused"); }
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
@@ -102,7 +105,7 @@ async function setup() {
   publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
   projector.start();
-  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, undefined, false, traexControl);
   await coordinator.start();
   const bindingId = store.findBindingByPane("w1:p1")!.id;
   herdrCalls.length = 0;

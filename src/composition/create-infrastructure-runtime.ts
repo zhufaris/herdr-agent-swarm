@@ -1,6 +1,8 @@
 import type { Logger } from "pino";
+import { dirname, resolve } from "node:path";
 import type { BridgeConfig } from "../config.js";
 import { HerdrCliAdapter } from "../adapters/herdr-adapter.js";
+import { TraexControlAdapter } from "../adapters/traex-control-adapter.js";
 import { LarkSdkAdapter } from "../adapters/lark-adapter.js";
 import { ExecFileCommandRunner } from "../infra/command-runner.js";
 import { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
@@ -36,6 +38,7 @@ export function createInfrastructureRuntime(
     }, onHerdrEvent, logger)
     : null;
   const rawHerdr = new HerdrCliAdapter(runner, config.herdr.executable, config.commandTimeoutMs, config.traex.permissionMode, herdrSocketSubscriber ?? undefined);
+  const traexControl = new TraexControlAdapter(resolve(dirname(config.traex.sessionsRoot), "session-peers"), resolve(dirname(config.databasePath), "traex-model-prompt-operations"), config.commandTimeoutMs);
   const herdrCircuitBreaker = new HerdrCircuitBreaker(rawHerdr, config.herdrCircuitBreaker, logger);
   const herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, config.runtimeTuning.cache.herdrSnapshotTtlMs, logger);
   herdrLink.connect(herdr);
@@ -47,7 +50,7 @@ export function createInfrastructureRuntime(
     new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, availability.pi)
   ]);
   return {
-    runner, worktreeNameResolver, herdrSocketSubscriber, herdrCircuitBreaker, herdr, paneHost, agentDrivers,
+    runner, worktreeNameResolver, herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers,
     worktrees: new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs }),
     lark: new LarkSdkAdapter(config.lark, logger),
     transcriptReader: new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot })

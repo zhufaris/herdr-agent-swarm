@@ -66,13 +66,13 @@ export class HerdrCircuitBreaker implements HerdrPort {
   async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<AgentState> {
     return this.call("command", () => this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched));
   }
+  async waitForAgent(paneId: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal): Promise<AgentState> {
+    if (!this.delegate.waitForAgent) throw new Error("Herdr adapter does not support native Agent wait");
+    return this.call("command", () => this.delegate.waitForAgent!(paneId, timeoutMs, onObservation, signal));
+  }
   async sendEscape(paneId: string): Promise<void> {
     if (!this.delegate.sendEscape) throw new Error("Herdr adapter does not support Escape control");
     await this.call("command", () => this.delegate.sendEscape!(paneId));
-  }
-  async steerAgent(input: Parameters<NonNullable<HerdrPort["steerAgent"]>>[0]): Promise<import("../domain/agent-runtime.js").SteerReceipt> {
-    if (!this.delegate.steerAgent) return { status: "unsupported", reason: "Herdr adapter does not support native steering" };
-    return this.call("command", () => this.delegate.steerAgent!(input));
   }
   async interruptAgent(input: Parameters<NonNullable<HerdrPort["interruptAgent"]>>[0]): Promise<import("../domain/agent-runtime.js").InterruptReceipt> {
     if (!this.delegate.interruptAgent) return { status: "unsupported", reason: "Herdr adapter does not support native interruption" };

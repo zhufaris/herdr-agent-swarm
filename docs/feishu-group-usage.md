@@ -187,18 +187,17 @@ unknown，或 exact identity 已变化时会拒绝远程 stop。
 /swarm steer 先不要修改代码，只定位根因
 ```
 
-Primary 正在 `working` 且存在 exact runtime turn 时，Bridge 使用 native steering 注入当前
-turn；Primary 为 `idle` 时，Bridge 持久化一个 priority turn 并立即唤醒调度，它会先于普通
-FIFO 执行，但不会取消或重排普通队列。所有路径都会校验 binding generation、pane 和 Agent
-session。`blocked`、unknown、session 缺失或身份变化时会明确拒绝；结果不确定的 native steer
-不会自动重放。
+Primary 为 `idle` 时，Bridge 持久化一个 priority turn 并立即唤醒调度，它会先于普通 FIFO
+执行，但不会取消或重排普通队列。Primary 正在 `working` 时，当前 Herdr/TraeX runtime
+不提供安全的 native steering，命令会直接失败，不会注入 terminal，也不会偷偷变成普通任务。
+所有路径都会校验 binding generation、pane 和 Agent session；`blocked`、unknown、session 缺失
+或身份变化时会明确拒绝。
 
-如果当前 Herdr/TraeX 运行时不支持 native steering，命令会直接失败，不会偷偷变成普通任务。
 可先用 `/swarm awake` 观察恢复已完成的 transcript；若当前任务已经 detached 且无法恢复，
 由话题创建者明确使用 `/swarm skip` 释放 blocker。
 
 该命令只作用于当前话题的 Primary。Worker 的 `/steer <worker> <文本>` 使用相同语义：
-working 时注入当前 turn，idle 时创建 priority turn。普通排队任务仍使用 `/to <worker> <任务>`。
+working 时明确拒绝，idle 时创建 priority turn。普通排队任务仍使用 `/to <worker> <任务>`。
 `blocked` 通常表示本地审批或提问界面，Bridge 会拒绝远程 steering，必须回到 Herdr 处理。
 
 ### `/swarm new [说明]`
@@ -416,8 +415,8 @@ FIFO 调度。此前 TraeX 执行结果仍然不确定，Bridge 不会重放该�
 
 旧版本留下的 queued legacy steering 记录在升级时会标记为 rejected；可能已发送的 running
 记录会标记为 uncertain。迁移完成后旧 prompt-steering 字段会被删除，两者都不会自动重放。
-当前 native steering 操作在外部发送前持久化；若发送结果不确定，则标记为 uncertain，
-不会自动重试。`/swarm stop` 使用相同的 durable exact-turn effect fence。
+当前 active-turn steering 会持久化为 unsupported 结果且不触发外部发送。`/swarm stop` 仍使用
+durable exact-turn effect fence。
 
 ## 权限与审批
 

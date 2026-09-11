@@ -78,7 +78,7 @@ async function callModelListPage(peer: TraexSessionPeer, params: ModelListParams
         }
       }
     });
-    socket.once("connect", () => socket.write(`${JSON.stringify({ method: "initialize", id: initId, params: { clientInfo: { name: "herdr-traex-shim", title: "Herdr TraeX shim", version: "1" }, capabilities: { experimentalApi: true, requestAttestation: false } } })}\n`));
+    socket.once("connect", () => socket.write(`${JSON.stringify({ method: "initialize", id: initId, params: { clientInfo: { name: "herdr-agent-swarm", title: "Herdr Agent Swarm", version: "1" }, capabilities: { experimentalApi: true, requestAttestation: false } } })}\n`));
   });
 }
 

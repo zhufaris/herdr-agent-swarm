@@ -1,14 +1,18 @@
 import type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, RuntimeObservation, RuntimeTurnObservation } from "../types.js";
-import type { SteerReceipt } from "../agent-runtime.js";
 import type { RunProgressEvent } from "../run-card-view.js";
 import type { ModelDispatch, TraexModelSummary } from "../model-selection.js";
 
-export interface ModelPromptDispatchOptions {
+export interface TraexModelPromptDispatchOptions {
   modelDispatch: ModelDispatch;
   agentSession: HerdrAgentSession;
   onPrepared(operationId: string): void | Promise<void>;
   onPrepareAborted?(operationId: string): void | Promise<void>;
   onAccepted?(receipt: { operationId: string; turnId: string }): void | Promise<void>;
+}
+
+export interface TraexControlPort {
+  listModels(agentSession: HerdrAgentSession): Promise<TraexModelSummary[]>;
+  runModelPrompt(target: string, text: string, options: TraexModelPromptDispatchOptions, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<{ operationId: string; turnId: string }>;
 }
 
 export interface LarkPort {
@@ -38,9 +42,8 @@ export interface HerdrPort {
   createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string, args?: string[]): Promise<void>;
   startAgent?(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void>;
-  runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>, options?: ModelPromptDispatchOptions): Promise<AgentState>;
-  listModels?(paneId: string, agentSession: HerdrAgentSession): Promise<TraexModelSummary[]>;
-  steerAgent?(input: { paneId: string; agentSession: HerdrAgentSession; runtimeTurnId: string; text: string; idempotencyKey: string }): Promise<SteerReceipt>;
+  runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<AgentState>;
+  waitForAgent?(paneId: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal): Promise<AgentState>;
   interruptAgent?(input: { paneId: string; agentSession: HerdrAgentSession; runtimeTurnId: string; idempotencyKey: string }): Promise<import("../agent-runtime.js").InterruptReceipt>;
   sendEscape?(paneId: string): Promise<void>;
   renamePane(paneId: string, title: string, options?: { tabTitle?: string }): Promise<void>;

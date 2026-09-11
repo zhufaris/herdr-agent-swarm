@@ -26,9 +26,9 @@ export function createCommandControlRuntime(options: {
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; presentation: { application: ApplicationPresentation; pane: PanePresentation };
 }) {
   const { config, stores, logger, turnControl, scheduler, infrastructure, delivery, primary, worker, bindingSession, presentation } = options;
-  const { herdr, lark, agentDrivers } = infrastructure; const { outbound, outboundWork, mainCards } = delivery; const { promptRun } = primary;
+  const { traexControl, lark, agentDrivers } = infrastructure; const { outbound, outboundWork, mainCards } = delivery; const { promptRun } = primary;
   const { provisioning, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure } = bindingSession;
-  const modelSelection = new ModelSelectionWorkflow({ config, store: stores.modelSelection, herdr, outbound, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: presentation.application, logger });
+  const modelSelection = new ModelSelectionWorkflow({ config, store: stores.modelSelection, traexControl, outbound, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: presentation.application, logger });
   const paneControl = new PaneControlWorkflow({ store: stores.paneControl, outbound, presentation: presentation.pane, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const sessionOperations = new SessionOperationWorkflow({ store: stores.sessionOperations, sessionAdministration, provisioning, paneControl, paneClosure, logger });
   const cardInteractions = new CardInteractionWorkflow({ store: stores.cardInteraction, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: presentation.application, logger });

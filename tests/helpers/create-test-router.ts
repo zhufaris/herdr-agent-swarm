@@ -24,7 +24,7 @@ import { TurnControlWorkflow } from "../../src/coordinator/turn-control-workflow
 import { SwarmCommandContextResolver } from "../../src/coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway.js";
 import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
-import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
+import type { HerdrPort, LarkPort, TraexControlPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import { cardKitPanePresentation } from "../../src/cards/cardkit-pane-presentation.js";
 import { cardKitPrimaryPresentation } from "../../src/cards/cardkit-primary-presentation.js";
 import { cardKitApplicationPresentation } from "../../src/cards/cardkit-application-presentation.js";
@@ -48,7 +48,8 @@ export function createTestRouter(
   scheduler: PromptWorkScheduler = new InProcessPromptWorkScheduler(logger),
   inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier(),
   transcriptReader?: TraexTranscriptReaderPort,
-  observeExternalTurns = false
+  observeExternalTurns = false,
+  traexControl: TraexControlPort = { async listModels() { throw new Error("TraeX model control is not configured"); }, async runModelPrompt() { throw new Error("TraeX model control is not configured"); } }
 ): InboundRouter {
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   outboundWork.subscribe(() => outbound.requestScan());
@@ -62,7 +63,7 @@ export function createTestRouter(
     wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
   }) : undefined;
   promptRun = new PromptRunWorkflow({
-    store, herdr, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
+    store, herdr, traexControl, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
     handoffExternalTurns: externalTurns ? (bindingId) => externalTurns.handoff(bindingId) : undefined,
     observeSupersedingExternalTurn: externalTurns ? (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation) : undefined,
     recoverExternalTurns: externalTurns ? (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt) : undefined
@@ -77,7 +78,7 @@ export function createTestRouter(
     configurationForBinding: (bindingId: string, generation: number) => ({ environment: {}, command: "node", args: ["primary-tools", "--binding", bindingId, "--generation", String(generation)] })
   };
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
-  const modelSelection = new ModelSelectionWorkflow({ config, store, herdr, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: cardKitApplicationPresentation, logger });
+  const modelSelection = new ModelSelectionWorkflow({ config, store, traexControl, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: cardKitApplicationPresentation, logger });
   const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation });
   const paneControl = new PaneControlWorkflow({ store, outbound: writer, presentation: cardKitPanePresentation, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, presentation: cardKitApplicationPresentation, logger });

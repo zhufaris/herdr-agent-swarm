@@ -28,7 +28,7 @@ describe("Herdr adapter structured control", () => {
       return { stdout: "", stderr: "" };
     } };
 
-    await new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex", args: ["--model", "x"] });
+    await new HerdrCliAdapter(runner, "/opt/herdr/bin/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex", args: ["--model", "x"] });
 
     expect(calls[0]).toEqual(["agent", "start", "demo-primary", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto", "--model", "x"]);
     expect(calls[0]?.at(-2)).toBe("--model");
@@ -49,28 +49,12 @@ describe("Herdr adapter structured control", () => {
       return { stdout: "", stderr: "" };
     } };
 
-    await new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startTraex("w1:p1", "/opt/traex");
+    await new HerdrCliAdapter(runner, "/opt/herdr/bin/herdr", 1000).startTraex("w1:p1", "/opt/traex");
 
     const start = calls.find((args) => args[0] === "agent" && args[1] === "start");
     expect(start).toEqual(["agent", "start", "traex-w1-p1", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--permission-mode", "auto"]);
     expect(start).not.toContainEqual(expect.stringContaining("hooks."));
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
-  });
-
-  it.each([
-    [{ status: "delivered", operationId: "op-1", turnId: "turn-1" }],
-    [{ status: "not-active", reason: "turn changed" }],
-    [{ status: "blocked", reason: "approval is active" }],
-    [{ status: "unsupported", reason: "native steering unavailable" }],
-    [{ status: "delivery-uncertain", operationId: "op-1", reason: "connection lost" }]
-  ])("preserves native steering result %j", async (result) => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = { async run(_executable, args) { calls.push(args); return json({ type: "agent_steered", ...result }); } };
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).steerAgent({
-      paneId: "w1:p1", agentSession: { source: "herdr-traex-shim", agent: "traex", kind: "id", value: "session-1" },
-      runtimeTurnId: "turn-1", text: "private steer", idempotencyKey: "message:1"
-    })).resolves.toEqual(result);
-    expect(calls).toEqual([["agent", "steer", "w1:p1", "private steer", "--turn-id", "turn-1", "--idempotency-key", "message:1", "--agent-session", '{"source":"herdr-traex-shim","agent":"traex","kind":"id","value":"session-1"}', "--timeout", "1000"]]);
   });
 
   it("revalidates the exact native turn before sending ctrl+c", async () => {
@@ -135,7 +119,7 @@ describe("Herdr adapter structured control", () => {
       return { stdout: "", stderr: "" };
     } };
 
-    await expect(new HerdrCliAdapter(runner, "/opt/shim/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex" })).resolves.toBeUndefined();
+    await expect(new HerdrCliAdapter(runner, "/opt/herdr/bin/herdr", 1000).startAgent("w1:p1", { name: "demo-primary", kind: "traex", executable: "/opt/traex" })).resolves.toBeUndefined();
     expect(calls).toContainEqual(["agent", "get", "w1:p1"]);
   });
 
@@ -270,7 +254,7 @@ describe("Herdr adapter structured control", () => {
     expect(dispatched).toBe(1);
   });
 
-  it("does not report dispatch when the shim proves no matching TraeX turn started", async () => {
+  it("does not report dispatch when Herdr proves no matching TraeX turn started", async () => {
     const onDispatched = vi.fn();
     const runner = { run: vi.fn(async (_command, _args, _timeout, onSpawn) => {
       onSpawn?.();
@@ -292,47 +276,6 @@ describe("Herdr adapter structured control", () => {
 
     await expect(adapter.runPrompt("w1:p1", "hello", 2_000, undefined, undefined, onDispatched)).rejects.toThrow("agent_prompt_rejected");
     expect(onDispatched).not.toHaveBeenCalled();
-  });
-
-  it("queries the model catalog with the exact session fence", async () => {
-    const calls: string[][] = [];
-    const runner: CommandRunner = { async run(_executable, args) {
-      calls.push(args);
-      return { stdout: JSON.stringify({ id: "cli:agent:model-list", result: { type: "agent_models", models: [{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }] } }), stderr: "" };
-    } };
-    const session = { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).listModels("w1:p1", session)).resolves.toEqual([{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
-    expect(calls).toEqual([["agent", "model-list", "w1:p1", "--agent-session", JSON.stringify(session), "--timeout", "1000"]]);
-  });
-
-  it("prepares, checkpoints, and only then commits a model-aware prompt", async () => {
-    const events: string[] = [];
-    const runner: CommandRunner = { async run(_executable, args) {
-      events.push(args[1] === "wait" ? "wait" : String(args[2]));
-      if (args[1] === "wait") return { stdout: JSON.stringify({ result: { agent: { agent_status: "done" } } }), stderr: "" };
-      const state = args[2] === "prepare" ? "prepared" : "accepted";
-      return { stdout: JSON.stringify({ id: "model-prompt", result: { type: "agent_model_prompt", operationId: "a".repeat(64), state, turnId: state === "accepted" ? "turn-1" : null, detail: null } }), stderr: "" };
-    } };
-    const session = { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { events.push("dispatched"); }, { modelDispatch: { name: "GPT-5.4", revision: 3 }, agentSession: session, onPrepared: () => { events.push("prepared-fence"); }, onAccepted: ({ turnId }) => { events.push(`accepted:${turnId}`); } })).resolves.toBe("done");
-    expect(events).toEqual(["prepare", "prepared-fence", "dispatched", "commit", "accepted:turn-1", "wait"]);
-  });
-
-  it("aborts the prepared operation when the durable dispatch checkpoint fails", async () => {
-    const events: string[] = [];
-    const runner: CommandRunner = { async run(_executable, args) {
-      events.push(String(args[2]));
-      const state = args[2] === "prepare" ? "prepared" : "rejected";
-      return { stdout: JSON.stringify({ id: "model-prompt", result: { type: "agent_model_prompt", operationId: "a".repeat(64), state, turnId: null, detail: null } }), stderr: "" };
-    } };
-    const session = { source: "herdr-traex-shim", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
-    const onAborted = vi.fn();
-
-    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { throw new Error("dispatch checkpoint failed"); }, {
-      modelDispatch: { name: "GPT-5.4", revision: 3 }, agentSession: session, onPrepared() {}, onPrepareAborted: onAborted
-    })).rejects.toThrow("dispatch checkpoint failed");
-    expect(events).toEqual(["prepare", "abort"]);
-    expect(onAborted).toHaveBeenCalledWith("a".repeat(64));
   });
 
   it("reports dispatch only after successful prompt completion", async () => {

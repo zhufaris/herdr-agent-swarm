@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexControlPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { DetachedPromptSkipResult } from "../domain/ports/prompt-acceptance.js";
 import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
@@ -41,6 +41,7 @@ export interface PromptRunWorkflowPort {
 interface PromptRunWorkflowOptions {
   store: PromptRunStore;
   herdr: HerdrPort;
+  traexControl?: TraexControlPort;
   bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler;
   outboundWork: OutboundWorkNotifier;
@@ -87,7 +88,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       }
     });
     this.turnExecutor = new PromptTurnExecutor({
-      store: options.store, herdr: options.herdr, transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
+      store: options.store, herdr: options.herdr, ...(options.traexControl ? { traexControl: options.traexControl } : {}), transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       updateTurnState: (bindingId, promptId, state) => this.registry.updateTurnState(bindingId, promptId, state),
       convergeMainCard: (bindingId) => this.convergeMainCard(bindingId),

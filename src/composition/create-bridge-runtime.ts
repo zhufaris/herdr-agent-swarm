@@ -21,7 +21,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: cardKitPanePresentation };
   const events = new RuntimeEventIntegration(logger);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => events.handleHerdrHint(hint));
-  const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, paneHost, agentDrivers, worktrees, lark, transcriptReader } = infrastructure;
+  const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, lark, transcriptReader } = infrastructure;
   const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), wakePrimary: (bindingId) => events.wakePrimary(bindingId), wakeInstance: (instanceId) => events.wakeInstance(instanceId), maxQueueDepth: config.maxQueueDepth });
   const bus = events.lifecycle; const scheduler = events.promptWork; const inboundWork = events.inboundWork;
   const delivery = createOutboundRuntime(config, stores, lark, bus, events.outboundWork, logger, presentation);
@@ -31,7 +31,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   events.registerInstanceWakeup((instanceId) => instanceWork.wake(instanceId));
   const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
   channelPublisher.connectPromptScheduler(scheduler);
-  const primary = createPrimaryRuntime({ config, stores, logger, herdr, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
+  const primary = createPrimaryRuntime({ config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
   const { externalTurns, promptRun } = primary;
   const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation });
   events.connectHerdrHints(herdrEventRouter);

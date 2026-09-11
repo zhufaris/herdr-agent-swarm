@@ -287,14 +287,14 @@ The production implementation uses the following modules and seams.
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
-| `PromptRunWorkflow` | FIFO turn execution and detached recovery | `PromptRunStore`, `HerdrPort`, and `PromptWorkScheduler` |
+| `PromptRunWorkflow` | FIFO turn execution and detached recovery | `PromptRunStore`, `HerdrPort`, `TraexControlPort`, and `PromptWorkScheduler` |
 | `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
-| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Session-scoped model catalog/preferences plus Primary command adaptation and legacy control-row recovery | Model protocol plus shared exact-turn `TurnControlWorkflow`; no raw terminal-input seam |
-| `TurnControlWorkflow` | Durable Primary/Worker steer and stop against one exact active turn | Generation, pane, native-session, logical-turn, and runtime-turn fences before Herdr effects |
+| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Session-scoped model catalog/preferences plus Primary command adaptation and legacy control-row recovery | `TraexControlPort` plus shared exact-turn `TurnControlWorkflow`; no raw terminal-input seam |
+| `TurnControlWorkflow` | Durable Primary/Worker priority follow-up and exact-turn stop | Generation, pane, native-session, logical-turn, and runtime-turn fences before Herdr effects |
 | `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
@@ -611,7 +611,8 @@ revisions, so a lost wake-up cannot lose a refresh. Replaceable snapshots use
 the delivery and quarantine authority; retrying a card can never repeat Agent work.
 
 Direct replies use the normalized Lark `parent_id`, not the topic root or selected
-Worker. A reply to the exact active card is generation-fenced steering. A reply
+Worker. A reply to the exact active card is rejected while runtime steering is
+unsupported. A reply
 to a settled card atomically creates a follow-up with the original turn as parent.
 Queued and `dispatch-uncertain` cards reject contextual replies. Explicit `/to`
 and `/steer` commands remain authoritative and do not inherit reply context.
@@ -647,11 +648,10 @@ change during the target decomposition without changing these steps.
    Exact, case-insensitive `/swarm stop` uses a freshly identity-checked,
    best-effort local interruption
    while the bridge has a supervised active turn; it bypasses queued ordinary
-   prompts and creates no prompt job. Explicit `/swarm steer <text>` durably
-   targets the exact active Primary turn, or persists a priority turn when the
-   Primary is idle. Both modes fence binding generation, pane, and native Agent
-   session. Blocked and unknown states reject; ordinary FIFO order is preserved,
-   and an uncertain external result is never replayed.
+   prompts and creates no prompt job. Explicit `/swarm steer <text>` persists a
+   priority turn when the Primary is idle. An active turn is rejected as
+   unsupported without transport delivery or queue conversion. Both outcomes
+   fence binding generation, pane, and native Agent session.
    `/swarm awake` observes detached transcript state without terminalizing an
    unrecoverable prompt. `/swarm skip` is the separate creator-authorized,
    generation-fenced action that atomically fails one oldest detached ordinary
@@ -689,14 +689,11 @@ change during the target decomposition without changing these steps.
    that pane for operator inspection, creates a lifecycle-aware replacement, and
    atomically advances the binding generation only after it owns the replacement
    pane identity. No prompt is replayed as part of this replacement.
-   Ordinary managed TraeX submission is a fenced composer operation shared by
-   Primary and Worker dispatch. The installed shim opens the exact-session
-   transcript cursor, requires an `idle` or `done` target, sends logical
-   `ctrl+u`, rechecks the session, and submits the prompt once. If the native
-   command stalls and the bounded transcript window proves that no turn began,
-   it sends a second fenced `ctrl+u` and returns `agent_prompt_not_started`.
-   That proven non-delivery fails the durable head and releases FIFO; changed or
-   incomplete evidence remains uncertain and is never replayed.
+   Ordinary managed TraeX submission uses Herdr's native `agent prompt --wait`
+   operation for both Primary and Worker dispatch. The bridge records dispatch
+   as potentially delivered once the command starts unless Herdr returns a
+   structured pre-dispatch rejection. Changed or incomplete evidence remains
+   uncertain and is never replayed.
 6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
    process-local lifecycle events. For structured tab/worktree changes, the
    sanitized desired TopicView and Main Card delivery intent are one transaction.
@@ -747,15 +744,14 @@ persisted.
 Jobs that never started remain queued.
 
 Runtime Primary model selection is scoped to the exact binding generation and
-TraeX session. During native migration, the legacy model-control transport
-remains available only to shim-owned sessions; native model control moves to a
-separate TraeX adapter rather than becoming a fictional Herdr command.
+TraeX session. Model control uses a separate TraeX adapter rather than becoming
+a fictional Herdr command.
 `model/list` supplies the canonical selectable catalog; a selection remains
-pending until the next ordinary FIFO prompt claims it atomically. The shim then
-prepares an owner-only operation record, SQLite
+pending until the next ordinary FIFO prompt claims it atomically. The TraeX
+adapter then prepares an owner-only operation record, SQLite
 records that operation and the no-replay dispatch fence, and one `turn/start`
 sends both prompt text and model. A failure before prepare returns the preference
-to pending. After prepare, an explicit shim compare-and-swap abort can still prove
+to pending. After prepare, an explicit compare-and-swap abort can still prove
 that commit never acquired the dispatch claim and safely roll back the SQLite
 fence. Once commit owns that claim, restart or response loss detaches the prompt
 and marks the preference uncertain unless exact turn acceptance is known. No
@@ -849,31 +845,10 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-For shim-started TraeX processes, the shim generates a correlation UUID before
-launch and passes it to TraeX's legacy `--session-id` naming option. The
-process-fenced reporter resolves the canonical thread ID from TraeX's bounded
-`session-peers` registry using both that name and the exact PID, then passes the
-canonical ID to Herdr's official
-`pane report-agent-session --source herdr:codex --agent-session-id` surface.
-State and display metadata remain owned by the separate `herdr-traex-shim`
-source. A new managed session uses
-`/swarm reset` rather than local `/clear`.
-
-Managed TraeX startup uses the optional local `herdr` compatibility shim. The
-bridge invokes the formal `agent start --kind traex` surface without hooks or
-hook-trust overrides. The shim launches
-the configured real TraeX executable through a private request file and fixed
-opaque launcher, and owns a separate fenced reporter.
-The reporter keeps Herdr's internal known-agent protocol as Codex, establishes
-the initial process-fenced `idle` authority, and publishes
-`display_agent=traex`. It does not attempt to override Herdr's detected
-working/idle lifecycle; detached settlement comes from the canonical transcript.
-The reporter releases only its own source and metadata when the exact TraeX
-process exits.
-The shim projects only those marked JSON entries to `agent=traex`; native Codex
-entries and legacy Codex-observed panes remain unchanged.
-The adapter normalizes the session agent to `traex` only for shim-marked records.
-Normal Herdr reconciliation then persists `agent_session_source`,
+Managed TraeX startup uses Herdr 0.9's native `agent start --kind traex`
+surface. Herdr publishes the canonical TraeX thread UUID through the
+`herdr:traex` integration source and owns Agent lifecycle state. Normal Herdr
+reconciliation persists `agent_session_source`,
 `agent_session_agent`, `agent_session_kind`, and `agent_session_value` in SQLite.
 This canonical Herdr tuple is the only transcript identity; the bridge has no
 session-report socket or fallback identity.
@@ -974,9 +949,8 @@ cannot race.
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;
 ordinary prompts use `agent prompt --wait`, and
-interrupts use `agent send-keys`. Runtime steering is enabled only when Herdr
-exposes an exact-turn structured operation; otherwise it fails fast as
-unsupported. Terminal text
+interrupts use `agent send-keys`. Runtime text steering is unsupported and fails
+fast without invoking a transport or converting active work into another prompt. Terminal text
 never becomes Answer content, either live or during detached restart recovery.
 Because persisted RunCard text does not carry durable source provenance,
 detached recovery replaces it with the bounded, redacted transcript completion
@@ -985,9 +959,8 @@ answer, or the fixed safe notice when that completion carries no answer.
 Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A
 fresh bridge-created pane, or a pane explicitly reset through the bridge,
-becomes eligible for typed mode only after its process-fenced shim reporter has
-registered the assigned TraeX UUID in Herdr and reconciliation has persisted it in
-SQLite. The bridge never matches a transcript
+becomes eligible for typed mode only after Herdr has published the native TraeX
+UUID and reconciliation has persisted it in SQLite. The bridge never matches a transcript
 from cwd, timestamps, titles, or newest-file order, and it does not automatically
 restart or replace existing panes to enable typed output.
 
@@ -1204,9 +1177,9 @@ prompt bodies, raw terminal output, card payloads, and credentials.
 - Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
 - `/swarm stop` is a freshly identity-checked, best-effort Herdr-local `Ctrl+C`
   control, not an atomic exact-turn CAS or a remote process or pane kill.
-  `/swarm steer <text>` and Worker `/steer <name> <text>` use identity-fenced
-  native steering against an exact active turn, or a durable priority turn when
-  idle. They reject blocked approval or question states and cannot approve,
+  `/swarm steer <text>` and Worker `/steer <name> <text>` create a durable
+  priority turn only when the target is idle. Active-turn steering is rejected
+  as unsupported. They reject blocked approval or question states and cannot approve,
   reject, or bypass a high-risk operation.
 - A prompt is never automatically replayed after uncertain dispatch or restart.
 - Pane attachment and replacement validate workspace, project directory, and

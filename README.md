@@ -354,9 +354,8 @@ Bindings created by the retired compatibility shim may retain `herdr:codex` or
 `herdr-traex-shim` as their persisted session source. The runtime treats those
 spellings as aliases of native `herdr:traex` only when the Agent, identity kind,
 and exact TraeX thread value also match. It does not rewrite live database rows
-or relax generation and prompt fences during cutover. The legacy shim package
-commands remain temporarily available only for rollback of an installation that
-has not completed the native cutover; do not install the shim on new setups.
+or relax generation and prompt fences during cutover. The compatibility shim and
+its package commands have been removed; all new setups must use official Herdr.
 
 ## Configure the service
 
@@ -594,7 +593,7 @@ Available commands:
 /swarm spaces
 /swarm attach <space> <pane>
 /swarm model [name]  # list or select the current Primary session model
-/swarm steer <text>  # steer the active Primary turn, or run first when idle
+/swarm steer <text>  # enqueue a priority turn when idle; active-turn steering is unsupported
 /swarm status
 /swarm rename <title>
 /swarm close
@@ -657,10 +656,10 @@ Only `/swarm …` is reserved for the bridge. Other slash commands, including
 `/herdr` and TraeX skill commands, are passed to the bound pane as ordinary prompts.
 An `@Bot` root message creates a topic in the default project and uses the
 message body as its first prompt. Replies normally enter the binding's FIFO
-queue. A small allowlist of short, plain-text continuations may automatically
-steer a recently active supervised turn in `working` or `blocked` state; the
-Answer card reports when this happens. Commands, code blocks, rich content,
-long messages, and ambiguous requests remain FIFO. Queued cards show the exact
+queue. Active-turn steering requests fail closed as unsupported; they are not
+injected into the terminal and are not silently converted into ordinary prompts.
+Commands, code blocks, rich content, long messages, and ambiguous requests remain
+FIFO. Queued cards show the exact
 number of waiting turns ahead and, after three valid historical samples, a
 coarse wait range rather than a deadline. Every message has an independent live
 card, so queued requests and earlier results remain visible.
