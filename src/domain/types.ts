@@ -99,7 +99,7 @@ export interface ProjectConfig {
   paneRetention?: { mode: "persistent" | "ephemeral"; idleAfterMs?: number | undefined; graceMs?: number | undefined } | undefined;
 }
 
-export type CardInteractionActionKind = "supplement" | "more_actions" | "session_control";
+export type CardInteractionActionKind = "supplement" | "more_actions" | "session_control" | "continuation";
 export type CardInteractionState = "active" | "claimed" | "consumed" | "expired";
 export interface CardInteraction {
   id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind;

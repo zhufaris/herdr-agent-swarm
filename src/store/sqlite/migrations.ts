@@ -61,6 +61,7 @@ export class SqliteMigrations {
     this.prompt.ensurePromptExecutionOriginColumn();
     this.cards.ensureRunCardActivityColumn();
     this.retired.convergeRetiredPromptSteering();
+    this.prompt.ensurePrimaryContinuationLineage();
     this.cards.ensureOutboundDeliveryOrder();
     this.cards.ensureOutboundDismissedState();
     this.cards.ensureOutboundDeliveryOrder();

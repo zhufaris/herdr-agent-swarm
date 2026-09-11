@@ -4,7 +4,7 @@ import { cardKitWorkerPresentation } from "./cardkit-worker-presentation.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard, renderWorkerNewTaskCard, renderWorkerTaskInstructionCard } from "./instance-control-card.js";
 import { renderInstanceDetailCard } from "./instance-detail-card.js";
 import { renderInstanceDirectoryCard } from "./instance-directory-card.js";
-import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard } from "./interaction-card.js";
+import { interactionToast, renderInteractionGuidanceCard, renderMoreActionsCard, renderPrimaryContinuationInputCard, renderQueueSummaryCard, renderReattachInputCard, renderRenameInputCard } from "./interaction-card.js";
 import { renderModelResultCard, renderModelSelectionCard } from "./model-card.js";
 import { renderFailureCards, renderSessionCards } from "./operations-card.js";
 import { renderAttachStatusCard, renderAwakeStatusCard, renderHelpCard, renderProjectSelectionStatusCard, renderProjectSelectorCard, renderSkipStatusCard } from "./run-card.js";
@@ -18,7 +18,7 @@ export function createCardKitApplicationPresentation(limits: CardKitPresentation
   projectSelector: (input) => renderProjectSelectorCard(input, limits.payloadLimitChars), projectSelectionStatus: renderProjectSelectionStatusCard, attachStatus: renderAttachStatusCard,
   help: renderHelpCard, awakeStatus: renderAwakeStatusCard, skipStatus: renderSkipStatusCard,
   modelSelection: renderModelSelectionCard, modelResult: renderModelResultCard, sessions: (input) => renderSessionCards(input, limits.payloadLimitChars), failures: (input, notice) => renderFailureCards(input, notice, limits.payloadLimitChars), spaces: (input) => renderSpaceDirectoryCards(input, limits.payloadLimitChars),
-  interactionToast, interactionGuidance: renderInteractionGuidanceCard, moreActions: renderMoreActionsCard, renameInput: renderRenameInputCard, reattachInput: renderReattachInputCard, queueSummary: renderQueueSummaryCard,
+  interactionToast, interactionGuidance: renderInteractionGuidanceCard, moreActions: renderMoreActionsCard, renameInput: renderRenameInputCard, reattachInput: renderReattachInputCard, primaryContinuationInput: renderPrimaryContinuationInputCard, queueSummary: renderQueueSummaryCard,
   instanceDirectory: (input) => renderInstanceDirectoryCard(input, limits.payloadLimitChars), instanceDetail: renderInstanceDetailCard, instanceCreate: renderInstanceCreateCard, instanceSteer: renderInstanceSteerCard, instanceRemovalPlan: renderInstanceRemovalPlanCard,
   workerTaskInstruction: renderWorkerTaskInstructionCard, workerNewTask: renderWorkerNewTaskCard, workerMain: renderWorkerMainCard
   };

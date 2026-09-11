@@ -36,6 +36,7 @@ const MAIN_CARD_PREVIEW_LIMIT = 2_000;
 const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 12;
 const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 6_000;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
+const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";
 
 export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }, payloadLimit = 12_000): object {
   const elements: object[] = [];
@@ -197,6 +198,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   elements.push(...workerActivityElements(input));
+  if (isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {
@@ -210,6 +212,10 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     },
     body: { elements }
   };
+}
+
+function isHumanInterruptedPrimaryAnswer(input: RunCardView): boolean {
+  return input.phase === "failed" && input.notice === HUMAN_INTERRUPTION_NOTICE && input.answerMessageId !== null;
 }
 
 function defaultAnswerContent(input: RunCardView, stepProgress: { done: number; total: number }): string {

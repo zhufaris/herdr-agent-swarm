@@ -95,6 +95,12 @@ export class PromptTurnMigrations {
     this.context.database.exec("CREATE INDEX IF NOT EXISTS prompt_jobs_transcript_turn ON prompt_jobs(transcript_turn_id) WHERE transcript_turn_id IS NOT NULL");
   }
 
+  ensurePrimaryContinuationLineage(): void {
+    const names = new Set((this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!names.has("parent_prompt_id")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN parent_prompt_id TEXT REFERENCES prompt_jobs(id)");
+    this.context.database.exec("CREATE INDEX IF NOT EXISTS prompt_jobs_parent_prompt ON prompt_jobs(parent_prompt_id) WHERE parent_prompt_id IS NOT NULL");
+  }
+
   ensurePaneCloseOperationState(): void {
     const columns = this.context.database.prepare("PRAGMA table_info(pane_close_requests)").all() as Array<{ name: string }>;
     const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pane_close_requests'").get() as { sql: string } | undefined;

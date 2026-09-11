@@ -41,6 +41,13 @@ export function renderReattachInputCard(input: { interactionId: string; bindingI
   ] }] } };
 }
 
+export function renderPrimaryContinuationInputCard(input: { interactionId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceAnswerMessageId: string; requestedBy: string }): object {
+  return { schema: "2.0", config: { update_multi: true, summary: { content: "继续中断任务" } }, header: { title: { tag: "plain_text", content: "继续中断任务" }, template: "orange" }, body: { elements: [{ tag: "markdown", content: "请说明从哪里继续，以及已经完成或绝不能重复的部分。系统会创建一条新的任务，不会重放原任务。" }, { tag: "form", name: "primary_continue_form", elements: [
+    { tag: "input", name: "continuation_text", input_type: "multiline_text", placeholder: { tag: "plain_text", content: "例如：从测试失败处继续；不要重复已完成的迁移" } },
+    formSubmitButton("创建续做任务", "primary_continue_submit", { action: "primary_continue_submit", interactionId: input.interactionId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.parentPromptId, sourceAnswerMessageId: input.sourceAnswerMessageId, requestedBy: input.requestedBy }, "primary")
+  ] }] } };
+}
+
 function button(content: string, action: string, input: { bindingId: string; bindingGeneration: number; interactionId?: string }): object {
   return callbackButton(content, { action, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, ...(input.interactionId ? { interactionId: input.interactionId } : {}) });
 }

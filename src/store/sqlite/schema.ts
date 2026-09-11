@@ -93,7 +93,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE TABLE IF NOT EXISTS bridge_messages(message_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS card_interactions(
     id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
-    action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','more_actions','session_control')),
+    action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','more_actions','session_control','continuation')),
     parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
     expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
   );
@@ -108,7 +108,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE INDEX IF NOT EXISTS swarm_command_intents_recovery ON swarm_command_intents(state, updated_at);
   CREATE TABLE IF NOT EXISTS prompt_jobs(
     id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
-    actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
+    actor_open_id TEXT NOT NULL, body TEXT NOT NULL, parent_prompt_id TEXT REFERENCES prompt_jobs(id), execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),
     dispatched_at TEXT, transcript_turn_id TEXT, transcript_turn_started_at TEXT, model_name TEXT, model_revision INTEGER CHECK(model_revision IS NULL OR model_revision >= 0),
     state TEXT NOT NULL CHECK(state IN ('queued','running','delivered','failed','cancelled')), observation_state TEXT NOT NULL DEFAULT 'not_started' CHECK(observation_state IN ('not_started','attached','detached','completed')),
     attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL

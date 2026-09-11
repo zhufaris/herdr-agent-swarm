@@ -17,6 +17,7 @@ export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, Promp
 
   acceptPrompt(input: Parameters<PromptAcceptanceStore["acceptPrompt"]>[0]): ReturnType<PromptAcceptanceStore["acceptPrompt"]> { return this.prompts.acceptPrompt(input); }
   acceptPromptWithEffects(input: Parameters<PromptAcceptanceStore["acceptPromptWithEffects"]>[0]): ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]> { return this.prompts.acceptPromptWithEffects(input); }
+  acceptInterruptedContinuation(input: Parameters<PromptAcceptanceStore["acceptInterruptedContinuation"]>[0]): ReturnType<PromptAcceptanceStore["acceptInterruptedContinuation"]> { return this.prompts.acceptInterruptedContinuation(input); }
   audit(input: Parameters<PromptAcceptanceStore["audit"]>[0]): void { this.operations.audit(input); }
   countPendingPrompts(bindingId: string): number { return this.prompts.countPendingPrompts(bindingId); }
 

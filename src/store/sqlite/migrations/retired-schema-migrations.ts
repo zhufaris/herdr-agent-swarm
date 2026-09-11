@@ -24,7 +24,7 @@ export class RetiredSchemaMigrations {
     const runCardColumns = new Set((this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
     if (!runCardColumns.has("steering_origin")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_origin TEXT CHECK(steering_origin IN ('explicit','automatic','converted'))");
     if (!runCardColumns.has("steering_failure_kind")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))");
-    const retiredPromptColumns = ["source_prompt_id", "steering_origin", "parent_prompt_id", "dispatch_kind"].filter((column) => promptColumns.has(column));
+    const retiredPromptColumns = ["source_prompt_id", "steering_origin", "dispatch_kind"].filter((column) => promptColumns.has(column));
     const timestamp = now();
     this.context.database.exec("BEGIN IMMEDIATE");
     try {

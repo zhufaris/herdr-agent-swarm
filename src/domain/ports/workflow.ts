@@ -5,6 +5,7 @@ import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
 import type { BridgeEvent } from "../events.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { ModelPreference } from "../model-selection.js";
+import type { AcceptPromptInput } from "./prompt.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
@@ -59,6 +60,7 @@ export interface CardInteractionStore {
   createCardInteraction(input: { id: string; bindingId: string; bindingGeneration: number; actorOpenId: string; actionKind: CardInteractionActionKind; parentPromptId: string | null; targetPromptId: string | null; expiresAt: string }): CardInteraction;
   getBinding(id: string): Binding | null;
   getCardInteraction(id: string): CardInteraction | null;
+  acceptInterruptedContinuation(input: { interactionId: string; parentPromptId: string; sourceAnswerMessageId: string; expectedBindingGeneration: number; actorOpenId: string; accepted: AcceptPromptInput }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   getPrompt(id: string): PromptJob | null;
   loadRunCard(promptId: string): RunCardView | null;
   loadTopicView(bindingId: string): TopicViewState | null;

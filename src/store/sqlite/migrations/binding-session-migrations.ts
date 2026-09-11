@@ -71,7 +71,7 @@ export class BindingSessionMigrations {
     this.context.database.exec(`
       CREATE TABLE IF NOT EXISTS card_interactions(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
-        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control')),
+        action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control','continuation')),
         parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
         expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
       );
@@ -80,6 +80,25 @@ export class BindingSessionMigrations {
   }
 
   ensureSessionOperations(): void {
+    const interactionSchema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'card_interactions'").get() as { sql: string } | undefined;
+    if (interactionSchema && !interactionSchema.sql.includes("'continuation'")) {
+      this.context.database.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        CREATE TABLE card_interactions_next(
+          id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, actor_open_id TEXT NOT NULL,
+          action_kind TEXT NOT NULL CHECK(action_kind IN ('supplement','convert_queued_prompt','more_actions','session_control','continuation')),
+          parent_prompt_id TEXT, target_prompt_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','claimed','consumed','expired')),
+          expires_at TEXT NOT NULL, result_code TEXT, created_at TEXT NOT NULL, claimed_at TEXT, consumed_at TEXT
+        );
+        INSERT INTO card_interactions_next SELECT * FROM card_interactions;
+        DROP TABLE card_interactions;
+        ALTER TABLE card_interactions_next RENAME TO card_interactions;
+        CREATE INDEX card_interactions_expiry ON card_interactions(state, expires_at);
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+      `);
+    }
     this.context.database.exec(`
       CREATE TABLE IF NOT EXISTS session_operations(
         id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, interaction_id TEXT NOT NULL UNIQUE REFERENCES card_interactions(id),

@@ -504,6 +504,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.acceptPromptWithEffects(input);
   }
 
+  acceptInterruptedContinuation(input: Parameters<SqlitePromptStore["acceptInterruptedContinuation"]>[0]): ReturnType<SqlitePromptStore["acceptInterruptedContinuation"]> {
+    return this.prompts.acceptInterruptedContinuation(input);
+  }
+
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
     this.prompts.ensureAnswerCard(promptId, rootMessageId, card);
   }

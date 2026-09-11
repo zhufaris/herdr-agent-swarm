@@ -7,7 +7,7 @@ import type { BridgeEvent } from "../events.js";
 export interface ClaimedPrompt { binding: Binding; prompt: PromptJob; model: ModelDispatch | null }
 export type DetachedPromptSkipResult = { outcome: "skipped"; promptId: string; outboxReserved: boolean } | { outcome: "none" | "stale" };
 export interface AcceptPromptInput {
-  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "priority" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "priority" | "wasDetached" | "executionOrigin">>;
+  prompt: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "priority" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin" | "parentPromptId"> & Partial<Pick<PromptJob, "priority" | "wasDetached" | "executionOrigin" | "parentPromptId">>;
   view: RunCardView; rootMessageId: string; taskCard?: object; answerCard: object; maxQueueDepth?: number; expectedBindingGeneration?: number;
 }
 export type PromptAcceptanceEffect =
@@ -22,6 +22,7 @@ export interface PromptAcceptanceReceipt {
 export interface PromptAcceptanceStore {
   acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   acceptPromptWithEffects(input: AcceptPromptInput): PromptAcceptanceReceipt;
+  acceptInterruptedContinuation(input: { interactionId: string; parentPromptId: string; sourceAnswerMessageId: string; expectedBindingGeneration: number; actorOpenId: string; accepted: AcceptPromptInput }): { prompt: PromptJob; view: RunCardView; inserted: boolean };
   audit(input: { actorOpenId: string; action: string; target: string; outcome: string }): void;
   countPendingPrompts(bindingId: string): number;
 }

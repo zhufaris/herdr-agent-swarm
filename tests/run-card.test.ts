@@ -760,6 +760,19 @@ describe("run card", () => {
     expect(JSON.stringify(card)).not.toContain("改为立即补充");
   });
 
+  it("offers Primary continuation only for an exact human-interruption Answer Card", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 0, occurredAt: "now" });
+    const eligible = JSON.stringify(renderRequestAnswerCard({ ...view, phase: "failed", notice: "TraeX turn was interrupted by a human operator", answerMessageId: "answer-1" }));
+    expect(eligible).toContain("继续这个任务");
+    expect(eligible).toContain(JSON.stringify({ action: "primary_continue_form", bindingId: "b1", bindingGeneration: 3, parentPromptId: "p1", sourceAnswerMessageId: "answer-1" }));
+
+    for (const candidate of [
+      { ...view, phase: "failed" as const, notice: "command failed", answerMessageId: "answer-1" },
+      { ...view, phase: "completed" as const, notice: "TraeX turn was interrupted by a human operator", answerMessageId: "answer-1" },
+      { ...view, phase: "failed" as const, notice: "TraeX turn was interrupted by a human operator", answerMessageId: null }
+    ]) expect(JSON.stringify(renderRequestAnswerCard(candidate))).not.toContain("继续这个任务");
+  });
+
   it("omits only unavailable queue feedback lines", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 1, occurredAt: "now" });
     const insufficient = renderRequestAnswerCard({ ...view, queueFeedback: { aheadCount: 0, activeElapsedSeconds: 48, estimateLowerSeconds: null, estimateUpperSeconds: null, sampleCount: 2, elapsedBucket: 1 } });

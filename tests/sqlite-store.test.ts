@@ -22,6 +22,24 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  it("atomically accepts an exact human-interruption continuation and consumes its interaction", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const parentView = createQueuedRunCard({ promptId: "parent", bindingId: "b1", bindingGeneration: 1, title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "original request", queuePosition: 0, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "b1", larkMessageId: "message-parent", actorOpenId: "creator", body: "original request" }, view: parentView, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ? WHERE id = 'parent'").run("TraeX turn was interrupted by a human operator");
+    store.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, answer_message_id = 'answer-parent' WHERE prompt_id = 'parent'").run("TraeX turn was interrupted by a human operator");
+    store.createCardInteraction({ id: "continue-1", bindingId: "b1", bindingGeneration: 1, actorOpenId: "creator", actionKind: "continuation", parentPromptId: "parent", targetPromptId: null, expiresAt: "2099-01-01T00:00:00.000Z" });
+    const childView = createQueuedRunCard({ promptId: "child", bindingId: "b1", bindingGeneration: 1, conversionParentPromptId: "parent", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "continue from tests", queuePosition: 1, occurredAt: "now" });
+    const input = { interactionId: "continue-1", parentPromptId: "parent", sourceAnswerMessageId: "answer-parent", expectedBindingGeneration: 1, actorOpenId: "creator", accepted: { prompt: { id: "child", bindingId: "b1", larkMessageId: "card:continue-1", actorOpenId: "creator", body: "continue from tests", parentPromptId: "parent" }, view: childView, rootMessageId: "root", answerCard: {}, expectedBindingGeneration: 1 } };
+
+    expect(store.acceptInterruptedContinuation(input)).toMatchObject({ inserted: true, prompt: { id: "child", parentPromptId: "parent" } });
+    expect(store.getCardInteraction("continue-1")).toMatchObject({ state: "consumed", resultCode: "continuation" });
+    expect(store.acceptInterruptedContinuation(input)).toMatchObject({ inserted: false, prompt: { id: "child" } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE lark_message_id = 'card:continue-1'").get()).toEqual({ count: 1 });
+  });
+
   it("migrates durable Worker session identity and context projection tables", () => {
     store = new SqliteBindingStore(":memory:");
 
@@ -72,7 +90,6 @@ describe("SQLite store", () => {
     store.database.exec(`
       DROP VIEW run_cards_view;
       ALTER TABLE prompt_jobs ADD COLUMN dispatch_kind TEXT NOT NULL DEFAULT 'turn';
-      ALTER TABLE prompt_jobs ADD COLUMN parent_prompt_id TEXT;
       ALTER TABLE prompt_jobs ADD COLUMN steering_origin TEXT;
       ALTER TABLE prompt_jobs ADD COLUMN source_prompt_id TEXT;
       ALTER TABLE run_cards ADD COLUMN steering_origin TEXT;
@@ -92,7 +109,8 @@ describe("SQLite store", () => {
     expect(store.getPrompt("steer-running")).toMatchObject({ state: "failed", observationState: "completed", wasDetached: true });
     expect(store.loadRunCard("steer-running")).toMatchObject({ phase: "failed" });
     expect(store.getPrompt("steer-done")).toMatchObject({ state: "delivered" });
-    expect((store.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name)).not.toEqual(expect.arrayContaining(["dispatch_kind", "parent_prompt_id", "steering_origin", "source_prompt_id"]));
+    expect((store.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name)).not.toEqual(expect.arrayContaining(["dispatch_kind", "steering_origin", "source_prompt_id"]));
+    expect((store.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name)).toContain("parent_prompt_id");
     expect((store.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => name)).not.toEqual(expect.arrayContaining(["steering_origin", "steering_failure_kind"]));
     const snapshot = store.database.prepare("SELECT prompt_id, phase, notice, view_version FROM run_cards WHERE prompt_id LIKE 'steer-%' ORDER BY prompt_id").all();
     store.close(); store = undefined;

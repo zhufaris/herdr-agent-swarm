@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { CardInteractionStore } from "../domain/ports/workflow.js";
+import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { IncomingLarkCardAction, LarkCardActionResult } from "../domain/types.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
@@ -15,7 +16,7 @@ interface Options {
   sessionOperations: Pick<SessionOperationWorkflowPort, "accept">;
   wakePrompt(bindingId: string): void;
   logger: Pick<Logger, "info" | "warn">;
-  presentation: Pick<ApplicationPresentation, "answerCard" | "interactionToast" | "interactionGuidance" | "moreActions" | "queueSummary" | "reattachInput" | "renameInput">;
+  presentation: Pick<ApplicationPresentation, "answerCard" | "interactionToast" | "interactionGuidance" | "moreActions" | "queueSummary" | "reattachInput" | "renameInput" | "primaryContinuationInput">;
 }
 
 export interface CardInteractionWorkflowPort {
@@ -33,6 +34,8 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
       case "create_new_task": return { card: this.options.presentation.interactionGuidance({ kind: "new_task" }) };
       case "open_rename": return this.openRename(action, command);
       case "open_reattach": return this.openReattach(action, command);
+      case "primary_continue_form": return this.openPrimaryContinuation(action, command);
+      case "primary_continue_submit": return this.submitPrimaryContinuation(action, command);
       default: return this.sessionControl(action, command);
     }
   }
@@ -67,7 +70,32 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     return binding ? { card: this.options.presentation.reattachInput({ interactionId: command.interactionId, bindingId: binding.id, bindingGeneration: binding.generation }) } : this.options.presentation.interactionToast("error", "只有会话创建者可以执行此操作。");
   }
 
-  private async sessionControl(action: IncomingLarkCardAction, command: Exclude<SessionCardActionCommand, { action: "open_more_actions" | "view_queue" | "view_recovery" | "create_new_task" | "open_rename" | "open_reattach" }>): Promise<LarkCardActionResult> {
+  private openPrimaryContinuation(action: IncomingLarkCardAction, command: Extract<SessionCardActionCommand, { action: "primary_continue_form" }>): LarkCardActionResult {
+    const binding = this.freshBinding(action, command, true);
+    const parent = binding ? this.options.store.getPrompt(command.parentPromptId) : null;
+    const view = parent ? this.options.store.loadRunCard(parent.id) : null;
+    if (!binding || !parent || !view || parent.bindingId !== binding.id || parent.state !== "failed" || parent.error !== HUMAN_INTERRUPTION_NOTICE || view.answerMessageId !== command.sourceAnswerMessageId) return this.options.presentation.interactionToast("warning", "该中断任务已不可继续，请刷新卡片后重试。");
+    const interaction = this.options.store.createCardInteraction({ id: randomUUID(), bindingId: binding.id, bindingGeneration: binding.generation, actorOpenId: action.operatorOpenId, actionKind: "continuation", parentPromptId: parent.id, targetPromptId: null, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() });
+    return { card: this.options.presentation.primaryContinuationInput({ interactionId: interaction.id, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: parent.id, sourceAnswerMessageId: command.sourceAnswerMessageId, requestedBy: action.operatorOpenId }) };
+  }
+
+  private submitPrimaryContinuation(action: IncomingLarkCardAction, command: Extract<SessionCardActionCommand, { action: "primary_continue_submit" }>): LarkCardActionResult {
+    if (command.requestedBy !== action.operatorOpenId) return this.options.presentation.interactionToast("error", "只有发起此操作的用户可以提交。");
+    const text = action.formValues?.continuation_text?.trim() ?? "";
+    if (!text) return this.options.presentation.interactionToast("warning", "请说明从哪里继续，以及不要重复哪些内容。");
+    if (text.length > 12_000) return this.options.presentation.interactionToast("warning", "续做说明过长，请控制在 12000 个字符以内。");
+    const binding = this.freshBinding(action, command, true);
+    if (!binding) return this.options.presentation.interactionToast("warning", "会话状态已变化，未创建续做任务。");
+    const id = randomUUID();
+    const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: command.parentPromptId, title: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: text, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1, occurredAt: new Date().toISOString() });
+    try {
+      const result = this.options.store.acceptInterruptedContinuation({ interactionId: command.interactionId, parentPromptId: command.parentPromptId, sourceAnswerMessageId: command.sourceAnswerMessageId, expectedBindingGeneration: binding.generation, actorOpenId: action.operatorOpenId, accepted: { prompt: { id, bindingId: binding.id, larkMessageId: `card:${command.interactionId}`, actorOpenId: action.operatorOpenId, body: text, parentPromptId: command.parentPromptId }, view, rootMessageId: binding.rootMessageId ?? action.messageId, answerCard: this.options.presentation.answerCard(view), expectedBindingGeneration: binding.generation } });
+      if (result.inserted) this.options.wakePrompt(binding.id);
+      return this.options.presentation.interactionToast("success", result.inserted ? `续做任务已创建，当前队列第 ${result.view.queuePosition} 位。` : "这条续做任务已创建。");
+    } catch { return this.options.presentation.interactionToast("warning", "该中断任务已不可继续，未创建新任务。"); }
+  }
+
+  private async sessionControl(action: IncomingLarkCardAction, command: Exclude<SessionCardActionCommand, { action: "open_more_actions" | "view_queue" | "view_recovery" | "create_new_task" | "open_rename" | "open_reattach" | "primary_continue_form" | "primary_continue_submit" }>): Promise<LarkCardActionResult> {
     if (command.action !== "session_status" && !(this.options.adminOpenIds ?? []).includes(action.operatorOpenId)) return this.options.presentation.interactionToast("error", "你没有管理权限。");
     const binding = this.freshBinding(action, command, command.action !== "session_status");
     if (!binding) return this.options.presentation.interactionToast("error", "操作无权限，或会话状态已变化。");
@@ -93,3 +121,5 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     return binding;
   }
 }
+
+const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";

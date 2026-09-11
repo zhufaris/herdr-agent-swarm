@@ -11,7 +11,7 @@ export const instanceCardActionNames = [
 export const sessionCardActionNames = [
   "open_more_actions", "view_queue", "view_recovery", "create_new_task", "open_rename", "open_reattach",
   "submit_rename", "submit_reattach", "session_status", "session_stop", "session_model", "session_reset",
-  "session_archive", "session_replace", "session_resume", "session_pane_close",
+  "session_archive", "session_replace", "session_resume", "session_pane_close", "primary_continue_form", "primary_continue_submit",
 ] as const;
 
 export const retiredCardActionNames = ["open_supplement", "submit_supplement", "convert_queued_prompt", "enqueue_failed_steering"] as const;
@@ -33,7 +33,9 @@ export type SessionCardActionCommand =
   | ({ kind: "session"; action: "session_model"; interactionId: string } & SessionBindingContext)
   | ActionVariants<"session_stop" | "session_reset" | "session_archive" | "session_replace" | "session_resume" | "session_pane_close", SessionBindingContext & { interactionId: string; operation: Exclude<SessionOperationKind, "model" | "rename" | "reattach"> }>
   | ({ kind: "session"; action: "submit_rename"; interactionId: string; operation: "rename" } & SessionBindingContext)
-  | ({ kind: "session"; action: "submit_reattach"; interactionId: string; operation: "reattach" } & SessionBindingContext);
+  | ({ kind: "session"; action: "submit_reattach"; interactionId: string; operation: "reattach" } & SessionBindingContext)
+  | ({ kind: "session"; action: "primary_continue_form"; parentPromptId: string; sourceAnswerMessageId: string } & SessionBindingContext)
+  | ({ kind: "session"; action: "primary_continue_submit"; interactionId: string; parentPromptId: string; sourceAnswerMessageId: string; requestedBy: string } & SessionBindingContext);
 
 export type InstanceCardActionCommand =
   | ({ kind: "instance"; action: "card_target_open"; aggregateKind: CardAggregateKind; aggregateId: string; generation: number; messageId: string } & BindingCardContext)
@@ -86,6 +88,8 @@ function parseSession(action: string, item: Record<string, unknown>): SessionCar
   if (!(sessionCardActionNames as readonly string[]).includes(action)) return null;
   const context = sessionContext(item);
   if (!context) return null;
+  if (action === "primary_continue_form") { const parentPromptId = string(item.parentPromptId); const sourceAnswerMessageId = string(item.sourceAnswerMessageId); return parentPromptId && sourceAnswerMessageId ? { kind: "session", action, parentPromptId, sourceAnswerMessageId, ...context } : null; }
+  if (action === "primary_continue_submit") { const interactionId = interaction(item.interactionId); const parentPromptId = string(item.parentPromptId); const sourceAnswerMessageId = string(item.sourceAnswerMessageId); const requestedBy = string(item.requestedBy); return interactionId && parentPromptId && sourceAnswerMessageId && requestedBy ? { kind: "session", action, interactionId, parentPromptId, sourceAnswerMessageId, requestedBy, ...context } : null; }
   if (action === "open_more_actions" || action === "view_queue" || action === "view_recovery" || action === "session_status") return { kind: "session", action, ...context };
   const interactionId = interaction(item.interactionId);
   if (!interactionId) return null;

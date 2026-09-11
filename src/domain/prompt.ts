@@ -10,6 +10,7 @@ export interface DurablePromptWorkScan { cancelled: number; failedDetached: numb
 export interface StalePromptClaim { promptId: string; bindingId: string; updatedAt: string }
 export interface PromptJob {
   id: string; bindingId: string; larkMessageId: string; actorOpenId: string; body: string; executionOrigin: "bridge" | "herdr";
+  parentPromptId: string | null;
   priority: TurnPriority; wasDetached: boolean; dispatchedAt: string | null; transcriptTurnId: string | null; transcriptTurnStartedAt: string | null;
   modelName?: string | null; modelRevision?: number | null; observationState: PromptObservationState; state: PromptState; attemptCount: number;
   error: string | null; createdAt: string; updatedAt: string;

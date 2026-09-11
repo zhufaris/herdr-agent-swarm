@@ -75,6 +75,7 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
   rejectAppliedPaneControlOperation: ModelSelectionStore["rejectAppliedPaneControlOperation"] = (id, detail) => this.paneOperations.rejectAppliedPaneControlOperation(id, detail);
   createCardInteraction: CardInteractionStore["createCardInteraction"] = (input) => this.sessionOperations.createInteraction(input);
   getCardInteraction: CardInteractionStore["getCardInteraction"] = (id) => this.sessionOperations.getInteraction(id);
+  acceptInterruptedContinuation: CardInteractionStore["acceptInterruptedContinuation"] = (input) => this.prompts.acceptInterruptedContinuation(input);
   getPrompt: CardInteractionStore["getPrompt"] = (id) => this.prompts.getPrompt(id);
   loadRunCard: CardInteractionStore["loadRunCard"] = (id) => this.projections.loadRunCard(id);
   loadTopicView: CardInteractionStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);

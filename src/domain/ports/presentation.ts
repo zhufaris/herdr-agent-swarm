@@ -60,6 +60,7 @@ export interface ApplicationPresentation extends PrimaryPresentation, WorkerPres
   moreActions(input: { bindingId: string; bindingGeneration: number; interactionId?: string; creator: boolean; lifecycle: string; attachment: string }): object;
   renameInput(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object;
   reattachInput(input: { interactionId: string; bindingId: string; bindingGeneration: number }): object;
+  primaryContinuationInput(input: { interactionId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceAnswerMessageId: string; requestedBy: string }): object;
   queueSummary(input: { queued: number }): object;
   instanceDirectory(input: { project: ProjectConfig; entries: InstanceDirectoryEntry[]; target: InstanceTarget; primary: ThreadPrimaryView | null; conversationKey?: string }): object;
   instanceDetail(input: { instance: AgentInstance; workspace: WorkspaceLease; capabilities: AgentCapabilities; turns: InstanceTurnSummary[]; activeTurnId?: string | null; queueDepth: number; conversationKey?: string; bindingId?: string; bindingGeneration?: number }): object;
