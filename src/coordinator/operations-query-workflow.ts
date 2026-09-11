@@ -11,7 +11,7 @@ interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQue
 
 export interface OperationsQueryWorkflowPort {
   listSpaces(message: IncomingLarkMessage): Promise<void>;
-  listTopicPanes(message: IncomingLarkMessage): Promise<void>;
+  listTopicPanes(message: IncomingLarkMessage, scopeBinding?: Binding | null): Promise<void>;
   listSessions(message: IncomingLarkMessage): Promise<void>;
   listFailures(message: IncomingLarkMessage): Promise<void>;
 }
@@ -40,9 +40,10 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
     await this.publishCards(message, "spaces", this.options.presentation.spaces(groups));
   }
 
-  async listTopicPanes(message: IncomingLarkMessage): Promise<void> {
+  async listTopicPanes(message: IncomingLarkMessage, scopeBinding: Binding | null = null): Promise<void> {
+    const scope = scopeBinding ? topicPaneScope(this.options.config.projects, scopeBinding) : null;
     const entries = this.options.store.listBindings()
-      .filter((binding) => binding.chatId === message.chatId && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.paneId !== null && binding.statusMessageId !== null)
+      .filter((binding) => binding.chatId === message.chatId && (!scope || isInTopicPaneScope(this.options.config.projects, binding, scope)) && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.paneId !== null && binding.statusMessageId !== null)
       .flatMap((binding): TopicPaneDirectoryEntry[] => {
         const view = this.options.store.loadTopicView(binding.id);
         return view && binding.statusMessageId ? [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState }] : [];
@@ -58,6 +59,16 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
     for (const [index, card] of cards.entries()) await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `${kind}:${message.messageId}:${index}`, card);
     this.options.logger.info({ event: `operation-${kind}-listed`, chatId: message.chatId, pageCount: cards.length, outcome: "listed" }, `listed Herdr ${kind}`);
   }
+}
+
+interface TopicPaneScope { workspaceId: string; spaceName: string; }
+function topicPaneScope(projects: readonly ProjectConfig[], binding: Binding): TopicPaneScope | null {
+  const project = binding.projectId ? projects.find((candidate) => candidate.id === binding.projectId) : null;
+  return project ? { workspaceId: project.workspaceId, spaceName: projectSpaceName(project) } : null;
+}
+function isInTopicPaneScope(projects: readonly ProjectConfig[], binding: Binding, scope: TopicPaneScope): boolean {
+  const project = binding.projectId ? projects.find((candidate) => candidate.id === binding.projectId) : null;
+  return Boolean(project && project.workspaceId === scope.workspaceId && projectSpaceName(project) === scope.spaceName);
 }
 
 export function buildSpaceDirectoryGroups(projects: readonly ProjectConfig[], panesByWorkspace: ReadonlyMap<string, HerdrPane[]>, errors: ReadonlyMap<string, string>): SpaceDirectoryGroup[] {

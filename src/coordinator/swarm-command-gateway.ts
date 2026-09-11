@@ -44,7 +44,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     if (resolved.outcome === "rejected") return this.reject(message, resolved.message, command.kind, resolved.code);
     const policy = swarmCommandPolicy(command);
     if (policy.mode === "query") {
-      await this.executeQuery(message, command, resolved.context.primary ? this.options.store.getBinding(resolved.context.primary.bindingId) : null);
+      await this.executeQuery(message, command, resolved.binding);
       this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${command.kind}`, target: resolved.laneKey, outcome: "success" });
       return;
     }
@@ -167,7 +167,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     if (command.kind === "help") return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-query:${message.messageId}:help`, this.options.presentation.help());
     if (command.kind === "projects") return this.options.provisioning.selectProject(message, null);
     if (command.kind === "spaces") return this.options.operationsQuery.listSpaces(message);
-    if (command.kind === "panes") return this.options.operationsQuery.listTopicPanes(message);
+    if (command.kind === "panes") return this.options.operationsQuery.listTopicPanes(message, binding);
     if (command.kind === "sessions") return this.options.operationsQuery.listSessions(message);
     if (command.kind === "failures") return this.options.operationsQuery.listFailures(message);
     if (command.kind === "status" && binding) return this.options.sessionAdministration.emitStatus(binding);

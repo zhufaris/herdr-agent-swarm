@@ -14,7 +14,7 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
   store.createPendingBinding({ id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
   store.updateBinding("binding", { paneId: "w1:p1", traexSessionId: "terminal", state: "active", lifecycle: "active", attachment: "attached" });
   const provisioning = { selectProject: vi.fn(async () => undefined), reset: vi.fn(async () => true), attach: vi.fn(async () => true), reattach: vi.fn(async () => undefined), replace: vi.fn(async () => undefined) };
-  const operationsQuery = { listSpaces: vi.fn(async () => undefined), listSessions: vi.fn(async () => undefined), listFailures: vi.fn(async () => undefined) };
+  const operationsQuery = { listSpaces: vi.fn(async () => undefined), listTopicPanes: vi.fn(async () => undefined), listSessions: vi.fn(async () => undefined), listFailures: vi.fn(async () => undefined) };
   const sessionAdministration = { emitStatus: vi.fn(async () => undefined), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) };
   const modelSelection = { runModel: vi.fn(async () => true) }; const paneControl = { stop: vi.fn(async () => true), steer: vi.fn(async () => true) };
   const paneClosure = { requestPaneClose: vi.fn(async () => true), confirmPaneClose: vi.fn(async () => true) }; const promptRun = {
@@ -29,7 +29,7 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
 
 describe("SwarmCommandGateway", () => {
   it.each([
-    [{ kind: "help" }, "outbound", "enqueueCard"], [{ kind: "projects" }, "provisioning", "selectProject"], [{ kind: "spaces" }, "operationsQuery", "listSpaces"],
+    [{ kind: "help" }, "outbound", "enqueueCard"], [{ kind: "projects" }, "provisioning", "selectProject"], [{ kind: "spaces" }, "operationsQuery", "listSpaces"], [{ kind: "panes" }, "operationsQuery", "listTopicPanes"],
     [{ kind: "sessions" }, "operationsQuery", "listSessions"], [{ kind: "failures" }, "operationsQuery", "listFailures"], [{ kind: "status" }, "sessionAdministration", "emitStatus"],
     [{ kind: "model", name: null }, "modelSelection", "runModel"]
   ] as const)("runs query %j without a durable intent", async (command, owner, method) => {

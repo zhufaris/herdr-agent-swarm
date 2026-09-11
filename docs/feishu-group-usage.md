@@ -231,7 +231,8 @@ TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执�
 
 ### `/swarm panes`
 
-在当前群的任意话题中列出已连接且仍为 active 的 Primary Pane。每一项显示
+在已绑定话题中，只列出当前 Space 内已连接且仍为 active 的 Primary Pane；未绑定的
+群入口仍列出当前群全部符合条件的 Pane。每一项显示
 任务标题、Space、Pane ID 和观测到的 Agent 状态；点击“发送卡片”会把该 Pane **当前**
 Primary Main Card 作为一张新卡片发送到点击按钮所在的话题。
 

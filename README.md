@@ -479,7 +479,7 @@ long-connection startup logs `bridge started`.
 Use `/swarm spaces` to list every configured space and all of its live Herdr
 panes, including panes that are not running TraeX. Eligible unbound TraeX panes
 can be claimed from the card, while a same-group bound pane can open its topic.
-Use `/swarm panes` in any topic to list the current group's active attached
+Use `/swarm panes` in a bound topic to list that Space's active attached
 Primary panes and send a selected pane's latest Main Card into that topic.
 Use `/swarm sessions` for the current group's session inventory and `/swarm
 failures` for actionable failures. Only failed Lark delivery can be retried; an
@@ -639,8 +639,10 @@ If `/swarm new` has no title, the bridge uses a short random pane name such as
 The read-only `spaces` command lists every configured Space and its current
 panes, including empty Spaces and unregistered panes, without creating a
 binding or starting TraeX.
-The read-only `panes` command is chat-scoped: it lists only active, attached
-Primary bindings with a current Main Card. A selected card is revalidated against
+The read-only `panes` command is Space-scoped when invoked in a bound topic: it
+lists only active, attached Primary bindings in that topic's workspace and
+configured Space with a current Main Card. An unbound group entry remains
+chat-scoped. A selected card is revalidated against
 the binding generation, pane, and Main Card identity before a durable outbox
 reply sends a fresh Main Card into the current topic; it never forwards or
 mutates the source topic and never sends TraeX input.

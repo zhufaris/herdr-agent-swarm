@@ -10,7 +10,9 @@ topic.
 
 - Add the read-only `/swarm panes` command.
 - List only bindings in the current chat that are `active`, `attached`, have a
-  pane ID, and retain a current Main Card projection.
+  pane ID, and retain a current Main Card projection. In a bound topic, limit
+  the list to that topic's configured Herdr Space (same workspace and
+  `spaceName`); an unbound group entry remains chat-wide.
 - Render title, space, pane, and observed agent state, with a `发送卡片` button.
 - On button callback, reload the binding and its topic view, re-check chat,
   generation, active/attached lifecycle, pane identity, and source Main Card

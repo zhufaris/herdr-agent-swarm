@@ -11,7 +11,7 @@ interface Options {
 }
 
 export type SwarmCommandContextResolution =
-  | { outcome: "resolved"; context: SwarmCommandContext; laneKey: string }
+  | { outcome: "resolved"; context: SwarmCommandContext; laneKey: string; binding: Binding | null }
   | { outcome: "rejected"; code: "administrator_required" | "creator_required" | "binding_required" | "project_required"; message: string };
 
 export class SwarmCommandContextResolver {
@@ -55,7 +55,7 @@ export class SwarmCommandContextResolver {
         activePromptId: policy.scope === "active-turn" ? active?.promptId ?? null : null
       } : null
     };
-    return { outcome: "resolved", context, laneKey: laneKey(policy.scope, context) };
+    return { outcome: "resolved", context, laneKey: laneKey(policy.scope, context), binding };
   }
 
   private bindingById(id: string): Binding | null {

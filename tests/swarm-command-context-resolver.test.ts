@@ -21,7 +21,7 @@ function resolver(current: typeof binding | null = binding) {
 describe("SwarmCommandContextResolver", () => {
   it("freezes Primary generation and both runtime identity dimensions", () => {
     expect(resolver().resolve(message, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false })).toEqual({
-      outcome: "resolved", laneKey: "binding:binding", context: expect.objectContaining({ projectId: "project", workspaceId: "w1", primary: { bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native" }, activePromptId: null } })
+      outcome: "resolved", laneKey: "binding:binding", binding, context: expect.objectContaining({ projectId: "project", workspaceId: "w1", primary: { bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native" }, activePromptId: null } })
     });
   });
 

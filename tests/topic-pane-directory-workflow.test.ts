@@ -24,6 +24,25 @@ describe("topic pane directory workflow", () => {
     expect(outbound.enqueueCard).toHaveBeenCalledWith("root", "panes:message-1:0", { card: "directory" });
   });
 
+  it("limits a bound thread to its current project Space while preserving an unbound chat directory", async () => {
+    const scoped = activeBinding("scoped");
+    const sameSpace = { ...activeBinding("same-space"), projectId: "same-space-project", paneId: "work:p2", statusMessageId: "om-same" };
+    const otherProject = { ...activeBinding("other-project"), projectId: "other-project", paneId: "work:p3", statusMessageId: "om-other" };
+    const presentation = { topicPanes: vi.fn(() => ({ card: "directory" })), spaces: vi.fn(), sessions: vi.fn(), failures: vi.fn() };
+    const outbound = { enqueueCard: vi.fn(async () => {}) };
+    const workflow = new OperationsQueryWorkflow({
+      config: { projects: [{ id: "project", displayName: "Project", spaceName: "core", description: "", workspaceId: "workspace", cwd: "/project" }, { id: "same-space-project", displayName: "Same Space", spaceName: "core", description: "", workspaceId: "workspace", cwd: "/same" }, { id: "other-project", displayName: "Other", spaceName: "other", description: "", workspaceId: "workspace", cwd: "/other" }] }, herdr: { listPanes: vi.fn() }, outbound, presentation, logger: pino({ enabled: false }),
+      store: { listBindings: () => [scoped, sameSpace, otherProject], loadTopicView: (id) => topic(id), listFailures: () => [], listSessions: () => [] }
+    });
+
+    await workflow.listTopicPanes(message, scoped);
+    expect(presentation.topicPanes).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ bindingId: "scoped" }), expect.objectContaining({ bindingId: "same-space" })]));
+    expect(presentation.topicPanes).toHaveBeenLastCalledWith(expect.not.arrayContaining([expect.objectContaining({ bindingId: "other-project" })]));
+
+    await workflow.listTopicPanes({ ...message, messageId: "unbound", topicId: null, rootMessageId: "unbound" });
+    expect(presentation.topicPanes).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ bindingId: "scoped" }), expect.objectContaining({ bindingId: "same-space" }), expect.objectContaining({ bindingId: "other-project" })]));
+  });
+
   it("revalidates the callback identity and enqueues the main card through the durable outbox", async () => {
     const binding = activeBinding("selected");
     const outbound = { enqueueCard: vi.fn(async () => {}), enqueueCardUpdate: vi.fn(async () => {}) };
