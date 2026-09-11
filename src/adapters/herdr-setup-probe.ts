@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { z } from "zod";
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { SetupCheck, SetupContext, SetupDraft, SetupHerdrProbe, SetupWorkspace } from "../setup/setup-types.js";
@@ -7,7 +6,13 @@ const workspaceSchema = z.object({ workspace_id: z.string().min(1), label: z.str
 const workspaceListSchema = z.object({ result: z.object({ type: z.literal("workspace_list"), workspaces: z.array(workspaceSchema) }) });
 const workspaceGetSchema = z.object({ result: z.object({ type: z.literal("workspace_info"), workspace: workspaceSchema }) });
 
-const shimStatusSchema = z.string().refine((value) => /^status: ready$/m.test(value));
+const herdrVersionSchema = z.string().transform((value, context) => {
+  const match = /^herdr (\d+)\.(\d+)\.(\d+)$/m.exec(value.trim());
+  if (!match) { context.addIssue({ code: "custom", message: "invalid Herdr version" }); return z.NEVER; }
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
+});
+const agentStartHelpSchema = z.string().refine((value) => /\bpossible values:\s*[^\n]*\btraex\b/i.test(value), "TraeX Agent kind is unavailable");
+const integrationStatusSchema = z.string().refine((value) => /^traex:\s+current\s+\(v\d+\)\s+\(.+\)$/m.test(value), "TraeX integration is not current");
 
 export class HerdrSetupProbe implements SetupHerdrProbe {
   constructor(
@@ -27,7 +32,7 @@ export class HerdrSetupProbe implements SetupHerdrProbe {
     }
   }
 
-  async check(draft: SetupDraft, context: SetupContext): Promise<SetupCheck[]> {
+  async check(draft: SetupDraft, _context: SetupContext): Promise<SetupCheck[]> {
     let workspaces: SetupWorkspace[];
     try {
       workspaces = await this.listWorkspaces();
@@ -53,21 +58,27 @@ export class HerdrSetupProbe implements SetupHerdrProbe {
       }
     }
 
-    checks.push(await this.checkTraexShim(context));
+    checks.push(...await this.checkNativeTraex());
     return checks;
   }
 
-  private async checkTraexShim(context: SetupContext): Promise<SetupCheck> {
-    const script = join(context.root, "scripts/install-herdr-traex-shim.sh");
-    try {
-      const result = await this.runner.run("bash", [script, "status"], this.timeoutMs);
-      shimStatusSchema.parse(result.stdout);
-      return { id: "herdr.agent.traex", status: "pass", summary: "The Herdr TraeX shim is ready" };
-    } catch {
-      return {
-        id: "herdr.agent.traex", status: "fail", summary: "The Herdr TraeX shim is not ready",
-        remediation: `Run bash ${script} install with the required --bin-dir after reviewing the installer options.`
-      };
-    }
+  private async checkNativeTraex(): Promise<SetupCheck[]> {
+    return Promise.all([
+      this.capabilityCheck("herdr.version", "Herdr 0.9.0 or newer is available", `Update the configured Herdr executable ${this.executable} to version 0.9.0 or newer.`, async () => {
+        const version = herdrVersionSchema.parse((await this.runner.run(this.executable, ["--version"], this.timeoutMs)).stdout);
+        if (version.major < 1 && version.minor < 9) throw new Error("unsupported Herdr version");
+      }),
+      this.capabilityCheck("herdr.agent.traex", "Herdr exposes the native TraeX Agent kind", `Verify ${this.executable} agent start --help lists traex as a supported kind.`, async () => {
+        agentStartHelpSchema.parse((await this.runner.run(this.executable, ["agent", "start", "--help"], this.timeoutMs)).stdout);
+      }),
+      this.capabilityCheck("herdr.integration.traex", "The Herdr TraeX integration is current", `Update the TraeX integration reported by ${this.executable} integration status.`, async () => {
+        integrationStatusSchema.parse((await this.runner.run(this.executable, ["integration", "status"], this.timeoutMs)).stdout);
+      })
+    ]);
+  }
+
+  private async capabilityCheck(id: string, summary: string, remediation: string, inspect: () => Promise<void>): Promise<SetupCheck> {
+    try { await inspect(); return { id, status: "pass", summary }; }
+    catch { return { id, status: "fail", summary: `${summary} check failed`, remediation }; }
   }
 }

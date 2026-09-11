@@ -328,67 +328,35 @@ possible. For an intentional observer handoff,
 recovery behavior. `/status` exposes bounded `operational.promptLatency`
 aggregates for queue, execution, and final Lark delivery time.
 
-### Install the local TraeX agent kind
+### Use the native TraeX Agent kind
 
-Herdr 0.7.5 does not compile `traex` into its native kind list. This repository
-provides a reversible local compatibility shim so the exact command below is a
-managed start while every other Herdr command delegates to the official binary:
+Herdr 0.9.0 or newer provides the native `traex` Agent kind. Configure the
+service with the official Herdr binary and verify the native integration before
+installation:
 
 ```bash
 herdr agent start reviewer --kind traex --pane w1:p1 -- --model GPT-5.6-Terra
 ```
 
-Choose a dedicated user-owned bin directory that is already before the official
-Herdr directory in `PATH`; do not use the directory containing the official
-binary itself. Then install and inspect the shim:
-
 ```bash
-export HERDR_TRAEX_SHIM_BIN_DIR="$HOME/.npm-global/bin"
-export HERDR_TRAEX_REAL_HERDR="$HOME/.local/bin/herdr"
-export HERDR_TRAEX_BIN="$HOME/.local/bin/traex"
-npm run herdr:traex:install
-command -v herdr
-npm run herdr:traex:status
+"$HERDR_BIN" --version
+"$HERDR_BIN" agent start --help
+"$HERDR_BIN" integration status
 ```
 
-Set `HERDR_BIN` to the absolute shim symlink and `TRAEX_BIN` to the same absolute
-TraeX binary reported by status. The shim does not modify the official Herdr
-binary, native Codex behavior, session database, or detection manifests. Internally
-it uses Herdr's Codex-compatible reservation and prompt protocol while executing
-the real TraeX binary; only shim-marked JSON results are projected as
-`agent: "traex"`. The shim generates a correlation UUID and passes it to
-TraeX's legacy `--session-id` naming option. Its process-fenced reporter uses
-that name plus the TraeX PID to resolve the canonical thread ID from TraeX's
-bounded `session-peers` registry. The reporter establishes initial idle
-authority under `herdr-traex-shim` and publishes the canonical Herdr
-`agent_session` separately through the trusted `herdr:codex` integration source;
-`UserPromptSubmit` and `Stop` hooks report working/idle
-transitions without reading terminal content. The bridge persists that canonical
-Herdr identity and uses it to open the one matching JSONL. There is no separate
-bridge session socket or compatibility identity. Forms
-with leading global routing options such as `herdr --session ...` are delegated
-unchanged; select a session through inherited `HERDR_SESSION` and
-`HERDR_SOCKET_PATH` when the exact TraeX start form must be intercepted.
+The output must report Herdr 0.9.0 or newer, list `traex` among the Agent start
+kinds, and report `traex: current` for the integration. Setup and doctor perform
+the same read-only checks and never start or prompt an Agent. Use absolute paths
+for both `HERDR_BIN` and `TRAEX_BIN` so systemd does not depend on interactive
+`PATH`.
 
-After `herdr update`, delegated commands continue with a version-mismatch
-warning, but `--kind traex` starts are refused until the reporter contract has
-been checked and accepted:
-
-```bash
-npm run herdr:traex:status -- --accept-version
-```
-
-Rollback removes only the shim-owned symlink and active config. Versioned
-releases are retained so the official binary and existing Herdr sessions remain
-untouched:
-
-```bash
-npm run herdr:traex:uninstall
-```
-
-This is local compatibility, not upstream Herdr support. Interactive start,
-prompt, wait, read, focus, send-keys, rename, and attach are supported; native
-automatic restore across a Herdr server restart is not claimed.
+Bindings created by the retired compatibility shim may retain `herdr:codex` or
+`herdr-traex-shim` as their persisted session source. The runtime treats those
+spellings as aliases of native `herdr:traex` only when the Agent, identity kind,
+and exact TraeX thread value also match. It does not rewrite live database rows
+or relax generation and prompt fences during cutover. The legacy shim package
+commands remain temporarily available only for rollback of an installation that
+has not completed the native cutover; do not install the shim on new setups.
 
 ## Configure the service
 
@@ -479,10 +447,9 @@ write templates into the standalone config directory for non-interactive setup.
 The service defaults `PROJECTS_CONFIG_PATH` and `RUNTIME_CONFIG_PATH` to its config directory and
 `BRIDGE_DATABASE_PATH` to the `bridge.db` file under
 `${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}`.
-Explicit absolute values still override those locations. When managed TraeX starts are enabled,
-use the absolute shim symlink for `HERDR_BIN` and the installer's recorded real
-TraeX path for `TRAEX_BIN`; otherwise use the official Herdr path. Absolute paths
-paths ensure the user service does not depend on an interactive shell's `PATH`.
+Explicit absolute values still override those locations. Use the official
+absolute Herdr path for `HERDR_BIN` and the real TraeX path for `TRAEX_BIN`.
+Absolute paths ensure the user service does not depend on an interactive shell's `PATH`.
 Every project `cwd` must be absolute and accessible. Keep `.env` private because
 it contains the Lark app secret. Setup parses it as data and never evaluates
 it as shell code.

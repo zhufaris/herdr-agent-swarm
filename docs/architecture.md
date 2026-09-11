@@ -747,9 +747,12 @@ persisted.
 Jobs that never started remain queued.
 
 Runtime Primary model selection is scoped to the exact binding generation and
-shim-reported TraeX session. `model/list` supplies the canonical selectable
-catalog; a selection remains pending until the next ordinary FIFO prompt claims
-it atomically. The shim then prepares an owner-only operation record, SQLite
+TraeX session. During native migration, the legacy model-control transport
+remains available only to shim-owned sessions; native model control moves to a
+separate TraeX adapter rather than becoming a fictional Herdr command.
+`model/list` supplies the canonical selectable catalog; a selection remains
+pending until the next ordinary FIFO prompt claims it atomically. The shim then
+prepares an owner-only operation record, SQLite
 records that operation and the no-replay dispatch fence, and one `turn/start`
 sends both prompt text and model. A failure before prepare returns the preference
 to pending. After prepare, an explicit shim compare-and-swap abort can still prove
@@ -761,14 +764,16 @@ terminal `/model` interaction or prompt replay is used.
 ## Reconciliation and events
 
 The process uses one Herdr Unix Socket client with a persistent event-stream
-connection and one short-lived connection per RPC because Herdr 0.7.5 dedicates
-an event connection after `events.subscribe` and closes an RPC connection after
-one response. Read-only snapshots, structured Agent lookups, and process-info
+connection and one short-lived connection per RPC. The currently supported
+Herdr 0.9 contract dedicates an event connection after `events.subscribe` and
+closes an RPC connection after one response. Read-only snapshots, structured Agent lookups, and process-info
 prefer Socket RPC and fall back to the matching CLI operation when unavailable.
-The bridge starts TraeX through the formal `agent start --kind traex` surface.
-On Herdr 0.7.5, the reversible command shim implements that one start operation
-with a fixed launcher plus opaque request ID; no prompt or TraeX argument appears
-in the Pane command. The bridge never substitutes the separate Codex executable.
+The bridge starts TraeX through Herdr 0.9's native `agent start --kind traex`
+surface and never substitutes the separate Codex executable. Native Herdr reports
+the canonical `herdr:traex` session. Legacy persisted `herdr:codex` and
+`herdr-traex-shim` sources are semantic aliases only when Agent, kind, and exact
+session value match; durable prompt and turn-control rows retain their exact
+stored tuples until a separate transactional migration is safe.
 Ordinary prompt submission uses the Agent CLI surface exclusively so its
 uncertain-dispatch/no-replay boundary is explicit.
 Active Herdr calls pass through a global transport circuit breaker inside the
@@ -777,8 +782,8 @@ after the cooldown one read-only call is admitted as a half-open probe. Commands
 including prompt submission, never act as probes and the breaker never retries
 them. Domain errors do not count as transport failures.
 
-Herdr 0.7.5 requires `pane.agent_status_changed` subscriptions to name
-each Pane, so the subscriber reconnects and refreshes that set after Pane create
+The subscriber currently names each Pane for `pane.agent_status_changed`, so it
+reconnects and refreshes that set after Pane create
 or move events. It validates newline-delimited frames, reconnects with bounded
 backoff, and reports the event stream connected only after Herdr acknowledges
 the `events.subscribe` request. A rejected or timed-out subscription reconnects

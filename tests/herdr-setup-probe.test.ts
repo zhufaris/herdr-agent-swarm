@@ -16,13 +16,15 @@ const draft: SetupDraft = {
 function json(value: unknown) { return { stdout: JSON.stringify(value), stderr: "" }; }
 
 describe("Herdr setup probe", () => {
-  it("discovers the workspace and validates TraeX through the ready shim without requiring a native kind", async () => {
+  it("discovers the workspace and validates native Herdr TraeX capabilities", async () => {
     const calls: Array<[string, string[]]> = [];
     const runner: CommandRunner = { async run(executable, args) {
       calls.push([executable, args]);
       if (args.join(" ") === "workspace list") return json({ id: "list", result: { type: "workspace_list", workspaces: [{ workspace_id: "w1", label: "Demo Space", focused: true }] } });
       if (args.join(" ") === "workspace get w1") return json({ id: "get", result: { type: "workspace_info", workspace: { workspace_id: "w1", label: "Demo Space" } } });
-      if (executable === "bash") return { stdout: "status: ready\nrelease: abc123\nherdr: 0.7.5\ntraex: 0.201.6(internal edition)\n", stderr: "" };
+      if (args.join(" ") === "--version") return { stdout: "herdr 0.9.0\n", stderr: "" };
+      if (args.join(" ") === "agent start --help") return { stdout: "[possible values: pi, codex, traex]\n", stderr: "" };
+      if (args.join(" ") === "integration status") return { stdout: "codex: current (v8) (/hooks/codex)\ntraex: current (v1) (/hooks/traex)\n", stderr: "" };
       throw new Error("unexpected command");
     } };
     const probe = new HerdrSetupProbe(runner, "herdr", 500, { PATH: process.env.PATH });
@@ -30,25 +32,37 @@ describe("Herdr setup probe", () => {
     expect(await probe.check(draft, context)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "herdr.available", status: "pass" }),
       expect.objectContaining({ id: "herdr.workspace.demo", status: "pass" }),
-      expect.objectContaining({ id: "herdr.agent.traex", status: "pass" })
+      expect.objectContaining({ id: "herdr.version", status: "pass" }),
+      expect.objectContaining({ id: "herdr.agent.traex", status: "pass" }),
+      expect.objectContaining({ id: "herdr.integration.traex", status: "pass" })
     ]));
-    expect(calls).toEqual([
-      ["herdr", ["workspace", "list"]], ["herdr", ["workspace", "get", "w1"]],
-      ["bash", ["/app/scripts/install-herdr-traex-shim.sh", "status"]]
-    ]);
-    expect(calls.flatMap(([, args]) => args)).not.toContain("start");
+    expect(calls).toEqual(expect.arrayContaining([
+      ["herdr", ["workspace", "list"]], ["herdr", ["workspace", "get", "w1"]], ["herdr", ["--version"]],
+      ["herdr", ["agent", "start", "--help"]], ["herdr", ["integration", "status"]]
+    ]));
     expect(calls.flatMap(([, args]) => args)).not.toContain("prompt");
+    expect(calls.filter(([, args]) => args.includes("start"))).toEqual([["herdr", ["agent", "start", "--help"]]]);
   });
 
-  it("fails TraeX when the shim is not ready", async () => {
-    const runner: CommandRunner = { async run(executable, args) {
+  it.each([
+    ["old version", "--version", "herdr 0.8.2\n", "herdr.version"],
+    ["malformed version", "--version", "version unknown\n", "herdr.version"],
+    ["missing native kind", "agent start --help", "[possible values: pi, codex]\n", "herdr.agent.traex"],
+    ["stale integration", "integration status", "traex: outdated (v0) (/hooks/traex)\n", "herdr.integration.traex"],
+    ["missing integration", "integration status", "codex: current (v8) (/hooks/codex)\n", "herdr.integration.traex"]
+  ])("fails the %s capability independently", async (_name, failingCommand, output, expectedId) => {
+    const runner: CommandRunner = { async run(_executable, args) {
       if (args[1] === "list") return json({ id: "list", result: { type: "workspace_list", workspaces: [{ workspace_id: "w1", label: "Demo Space" }] } });
       if (args[1] === "get") return json({ id: "get", result: { type: "workspace_info", workspace: { workspace_id: "w1", label: "Demo Space" } } });
-      if (executable === "bash") return { stdout: "status: not installed\n", stderr: "" };
-      throw new Error("unexpected command");
+      const command = args.join(" ");
+      if (command === failingCommand) return { stdout: output, stderr: "" };
+      if (command === "--version") return { stdout: "herdr 0.9.0\n", stderr: "" };
+      if (command === "agent start --help") return { stdout: "[possible values: pi, codex, traex]\n", stderr: "" };
+      if (command === "integration status") return { stdout: "traex: current (v1) (/hooks/traex)\n", stderr: "" };
+      throw new Error(`unexpected command ${command}`);
     } };
     const checks = await new HerdrSetupProbe(runner, "herdr", 500, {}).check(draft, context);
-    expect(checks).toContainEqual(expect.objectContaining({ id: "herdr.agent.traex", status: "fail", remediation: expect.stringContaining("install-herdr-traex-shim.sh install") }));
+    expect(checks).toContainEqual(expect.objectContaining({ id: expectedId, status: "fail", remediation: expect.any(String) }));
   });
 
   it("marks only a live HERDR_WORKSPACE_ID as current", async () => {
