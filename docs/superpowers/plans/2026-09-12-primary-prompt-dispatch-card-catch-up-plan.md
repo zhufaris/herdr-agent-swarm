@@ -49,7 +49,8 @@ transaction.
 
 - Add a failing SQLite/outbox test that advances a queued Run Card while its
   `stream_card_create` delivery is in flight.
-- Settle create successfully and assert one latest-version update is reserved.
+- Settle create successfully and assert a durable Primary-turn invalidation is
+  recorded, survives reopen, and reserves one latest-version update.
 - Assert duplicate settlement is idempotent.
 - Assert frozen or superseded Answer pages are not patched.
 - Implement catch-up inside the same transaction as create settlement using the

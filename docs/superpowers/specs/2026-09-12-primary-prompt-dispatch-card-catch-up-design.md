@@ -81,10 +81,10 @@ recovered claims without logging prompt content.
 ### 4. Answer Card create catch-up
 
 When a `stream_card_create` delivery succeeds, the delivery transaction writes
-the returned message/card identifiers and advances `answer_delivered_version` to
-the create intent's version. In the same transaction it reloads the latest Run
-Card. If the latest `view_version` is newer and the current page is mutable, it
-reserves one normal card update for that latest version.
+the returned message/card identifiers, advances `answer_delivered_version` to
+the create intent's version, and records a durable `primary-turn` invalidation
+when the latest Run Card is newer. The existing card-context rebuilder consumes
+that invalidation and reserves one normal card update for the latest version.
 
 The update uses the existing Answer lane and idempotency scheme. Repeated create
 callbacks or dispatcher retries therefore cannot enqueue duplicates. If the
@@ -97,7 +97,8 @@ This closes the observed race:
 1. queued Run Card version 1 reserves card creation;
 2. queue feedback produces version 2 while creation is in flight;
 3. version 2 cannot update because no message/card ID exists yet;
-4. creation settles at version 1 and atomically reserves a version 2 update.
+4. creation settles at version 1 and atomically records durable catch-up work;
+5. the rebuilder reserves and delivers the version 2 update.
 
 ## Failure handling
 
