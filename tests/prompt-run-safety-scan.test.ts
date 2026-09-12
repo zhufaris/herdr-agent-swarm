@@ -241,6 +241,39 @@ describe("PromptRunWorkflow durable safety scan", () => {
     await workflow.stop();
   });
 
+  it("requeues a prompt rejected by a concurrent Herdr turn before acceptance", async () => {
+    const release = vi.fn(() => true);
+    const failPrompt = vi.fn();
+    let claimCount = 0;
+    const handoff = vi.fn(async () => undefined);
+    const workflow = new PromptRunWorkflow({
+      store: {
+        scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
+        claimNextDispatchablePrompt: vi.fn(() => claimCount++ === 0 ? {
+          binding: { id: "b1", generation: 2, workspaceId: "w1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" },
+          prompt: { id: "p1", bindingId: "b1", body: "queued work", state: "running", observationState: "not_started", updatedAt: "claim-version" },
+          model: null
+        } : null),
+        releaseUndispatchedPromptClaim: release, failPrompt, countPendingPrompts: () => 1, getBinding: () => null
+      } as never,
+      scheduler: new InProcessPromptWorkScheduler(), turnTimeoutMs: 1_000,
+      herdr: {
+        async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] }; },
+        async runPrompt() { throw new Error('{"error":{"code":"agent_not_ready","message":"another turn won"}}'); }
+      } as never,
+      bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
+      presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never, handoffExternalTurns: handoff
+    });
+
+    workflow.wake({ kind: "prompt-ready", bindingId: "b1" });
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+
+    expect(release).toHaveBeenCalledWith({ promptId: "p1", bindingId: "b1", updatedAt: "claim-version", bindingGeneration: 2, paneId: "w1:p1" });
+    expect(failPrompt).not.toHaveBeenCalled();
+    expect(handoff).toHaveBeenCalledTimes(2);
+    await workflow.stop();
+  });
+
   it("keeps one timer across repeated starts and wakes and never rearms after stop", async () => {
     vi.useFakeTimers();
     const scan = vi.fn(() => ({ cancelled: 0, failedDetached: 0, hints: [] }));
