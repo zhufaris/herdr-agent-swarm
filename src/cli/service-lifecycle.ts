@@ -3,6 +3,7 @@ import { request } from "node:http";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { loadConfig, validateProjectDirectories } from "../config.js";
 import { readEnvironmentFile } from "../runtime/environment-file.js";
 import { AGENT_SWARM_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
@@ -719,7 +720,12 @@ function safeMessage(error: unknown): string { return (error instanceof Error ? 
 
 const action = process.argv[2] as Action | undefined;
 const flags = process.argv.slice(3);
-if (import.meta.url === `file://${process.argv[1]}`) {
+export function isServiceLifecycleEntrypoint(moduleUrl: string, argvPath: string | undefined): boolean {
+  if (!argvPath) return false;
+  try { return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argvPath); } catch { return false; }
+}
+
+if (isServiceLifecycleEntrypoint(import.meta.url, process.argv[1])) {
   if (!action || !["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action) || flags.some((flag) => flag !== "--force") || flags.length > 1 || flags.includes("--force") && action !== "restart") {
     process.stderr.write("usage: service-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart]\n"); process.exitCode = 2;
   } else {

@@ -6,9 +6,19 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createSetupLifecycleAdapter, inspectServiceLifecycle, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
+import { createSetupLifecycleAdapter, inspectServiceLifecycle, isServiceLifecycleEntrypoint, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
 
 describe("service lifecycle", () => {
+  it("recognizes a CLI entrypoint reached through a symlinked home path", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "service-entrypoint-"));
+    const real = join(fixture, "real.js");
+    const alias = join(fixture, "alias.js");
+    writeFileSync(real, "// entrypoint\n");
+    symlinkSync(real, alias);
+    expect(isServiceLifecycleEntrypoint(new URL(`file://${real}`).href, alias)).toBe(true);
+    expect(isServiceLifecycleEntrypoint(new URL(`file://${real}`).href, join(fixture, "missing.js"))).toBe(false);
+  });
+
   it("activates a release only after installing and enabling its unit", async () => {
     const fixture = createActivationFixture();
 
