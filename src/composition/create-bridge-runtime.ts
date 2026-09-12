@@ -21,7 +21,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: cardKitPanePresentation };
   const events = new RuntimeEventIntegration(logger);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => events.handleHerdrHint(hint));
-  const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, lark, transcriptReader } = infrastructure;
+  const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, transcriptReader } = infrastructure;
   const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), wakePrimary: (bindingId) => events.wakePrimary(bindingId), wakeInstance: (instanceId) => events.wakeInstance(instanceId), maxQueueDepth: config.maxQueueDepth });
   const bus = events.lifecycle; const scheduler = events.promptWork; const inboundWork = events.inboundWork;
   const delivery = createOutboundRuntime(config, stores, infrastructure.gateway, bus, events.outboundWork, logger, presentation);
@@ -37,5 +37,5 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   events.connectHerdrHints(herdrEventRouter);
   events.seal();
   const instanceWorker = { snapshot() { const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot(); return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure }; } };
-  return { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, gateway: infrastructure.gateway, lark, bus, sessionOperations, reconciler, promptRun };
+  return { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, gateway: infrastructure.gateway, bus, sessionOperations, reconciler, promptRun };
 }

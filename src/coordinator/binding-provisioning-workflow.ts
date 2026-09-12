@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
-import type { HerdrPort, LarkPort } from "../domain/ports/external.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { GatewayEffectPort } from "../gateways/effect-client.js";
 import type { ImmediateOutboundDispatcher, OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { BindingProvisioningStore } from "../domain/ports/binding.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
@@ -36,7 +37,7 @@ interface Options {
   config: BridgeConfig;
   store: BindingProvisioningStore;
   herdr: HerdrPort;
-  lark: LarkPort;
+  gatewayEffects: GatewayEffectPort;
   lifecycleEvents: LifecycleEventPublisher;
   outbound: OutboundIntentPort;
   outboundWork: OutboundWorkNotifier;
@@ -76,7 +77,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       publishAttachSuccess: (message, binding, spaceName, alreadyAttached, resumeRequired, toolsUnavailable) => this.publishAttachSuccess(message, binding, spaceName, alreadyAttached, resumeRequired, toolsUnavailable),
       reject: (message, reason) => this.reject(message, reason)
     });
-    this.startupRecovery = new BindingStartupRecovery({ store: options.store, herdr: options.herdr, lark: options.lark, logger: options.logger, projects: this.projects, lifecycleEvents: options.lifecycleEvents, presentation: options.presentation, recoverSelection: (selection) => this.projectSelection.recover(selection), publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3]) });
+    this.startupRecovery = new BindingStartupRecovery({ store: options.store, herdr: options.herdr, gatewayEffects: options.gatewayEffects, logger: options.logger, projects: this.projects, lifecycleEvents: options.lifecycleEvents, presentation: options.presentation, recoverSelection: (selection) => this.projectSelection.recover(selection), publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload as Parameters<typeof createBridgeEvent>[3]) });
   }
 
   async selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null = null): Promise<void> {
@@ -92,7 +93,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   async discover(pane: HerdrPane, project: ProjectConfig): Promise<Binding> {
-    const { store, lark, lifecycleEvents, config } = this.options;
+    const { store, gatewayEffects, lifecycleEvents, config } = this.options;
     const id = randomUUID();
     const title = formatProjectPaneTitle(projectSpaceName(project), pane.cwd, pane.label, pane.paneId);
     let binding = store.createPendingBinding({ id, projectId: project.id, workspaceId: pane.workspaceId, chatId: config.lark.chatId, topicId: null, rootMessageId: null, title });
@@ -104,15 +105,15 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     const availabilityEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
     const initialView = reduceTopicView(reduceTopicView(initialTopicView(binding.id), createdEvent), availabilityEvent);
     store.saveTopicView(initialView);
-    const topic = await lark.createTopic(this.options.presentation.mainCard(initialView), binding.id);
+    const topic = await gatewayEffects.createConversation({ conversationId: config.lark.chatId, view: this.options.presentation.mainCard(initialView), idempotencyKey: binding.id, purpose: "primary-main" });
     store.recordBridgeMessage(topic.rootMessageId);
     store.saveTopicView({ ...initialView, deliveredVersion: initialView.viewVersion });
-    binding = store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId });
+    binding = store.updateBindingMetadata(binding.id, { topicId: topic.threadId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId });
     binding = store.transitionBinding(binding.id, { type: "thread_created" });
     binding = store.transitionBinding(binding.id, { type: "activate" });
     await lifecycleEvents.publish(createdEvent);
     await lifecycleEvents.publish(availabilityEvent);
-    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId });
+    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.threadId });
     return binding;
   }
 
@@ -182,7 +183,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   }
 
   private async createSelectedProject(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> {
-    const { store, herdr, lark, config, logger } = this.options;
+    const { store, herdr, config, logger } = this.options;
     const bindingId = selection.bindingId ?? randomUUID();
     const paneTitle = createPrimaryPaneToken();
     const title = formatProjectPaneTitle(projectSpaceName(project), project.cwd, paneTitle, "TraeX pane");
@@ -233,7 +234,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       }
       const activatedEvent = createBridgeEvent(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: "pending" });
       const activeView = reduceTopicView(store.loadTopicView(current.id) ?? initialTopicView(current.id), activatedEvent);
-      if (current.provisioningCheckpoint === "runtime_started") { const topic = await lark.createTopic(this.options.presentation.mainCard(activeView), current.id); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); current = store.updateBindingMetadata(current.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); current = store.transitionBinding(current.id, { type: "thread_created" }); }
+      if (current.provisioningCheckpoint === "runtime_started") { const topic = await this.options.gatewayEffects.createConversation({ conversationId: config.lark.chatId, view: this.options.presentation.mainCard(activeView), idempotencyKey: current.id, purpose: "primary-main" }); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); current = store.updateBindingMetadata(current.id, { topicId: topic.threadId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); current = store.transitionBinding(current.id, { type: "thread_created" }); }
       if (current.provisioningCheckpoint === "thread_created") current = store.transitionBinding(current.id, { type: "activate" });
       await this.publish(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: current.topicId! });
       await this.publish(current.id, "PrimaryToolAvailabilityChanged", "bridge", { available: true, reason: null }); return current;

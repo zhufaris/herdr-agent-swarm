@@ -173,6 +173,9 @@ describe("application composition boundaries", () => {
     expect(contract).not.toMatch(/from .*coordinator|from .*runtime|from .*adapters|Herdr|Traex|PromptRun/);
     expect(readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8")).not.toContain("LarkPort");
     expect(readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8")).not.toContain("LarkPort");
+    for (const file of ["binding-provisioning-workflow.ts", "delivery-recovery-workflow.ts", "binding-provisioning/binding-startup-recovery.ts"]) {
+      expect(readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8")).not.toContain("LarkPort");
+    }
   });
 
   it("owns process-local event integration in one composition module", () => {

@@ -49,7 +49,7 @@ describe("topic pane directory workflow", () => {
     const audit = vi.fn();
     const workflow = new DeliveryRecoveryWorkflow({
       store: { getBinding: () => binding, loadTopicView: () => topic("selected"), reservePaneThreadAlias, audit, dismissDeadLetter: vi.fn(), listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
-      lark: { replyText: vi.fn(), shareThread: vi.fn() }, outbound: { enqueueCardUpdate: vi.fn(async () => {}) }, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
+      gatewayEffects: { createConversation: vi.fn(), replyText: vi.fn(), shareConversation: vi.fn() }, outbound: { enqueueCardUpdate: vi.fn(async () => {}) }, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
       presentation: { paneEntryCard: vi.fn(() => ({ card: "main-entry" })), failures: vi.fn(() => []) }, logger: pino({ enabled: false })
     });
 

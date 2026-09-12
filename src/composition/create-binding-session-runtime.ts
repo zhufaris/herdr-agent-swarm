@@ -27,15 +27,15 @@ export function createBindingSessionRuntime(options: {
   presentation: { application: ApplicationPresentation; pane: PanePresentation };
 }) {
   const { config, stores, logger, bus, scheduler, infrastructure, delivery, primary, worker, presentation } = options;
-  const { herdr, lark, worktreeNameResolver } = infrastructure;
+  const { herdr, gatewayEffects, worktreeNameResolver } = infrastructure;
   const { outbound, outboundWork, channelPublisher, answerPages } = delivery;
   const { promptRun, externalTurns } = primary;
   const { instanceRuntime, instanceTurns } = worker;
   const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store: stores.retiredPaneCleanup, herdr, logger });
-  const provisioning = new BindingProvisioningWorkflow({ config, store: stores.bindingProvisioning, herdr, lark, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: worker.primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: presentation.application, logger });
+  const provisioning = new BindingProvisioningWorkflow({ config, store: stores.bindingProvisioning, herdr, gatewayEffects, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: worker.primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: presentation.application, logger });
   const operationsQuery = new OperationsQueryWorkflow({ config, store: stores.operationsQuery, herdr, outbound, presentation: presentation.application, logger });
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store: stores.sessionAdministration, herdr, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), presentation: presentation.application });
-  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store: stores.deliveryRecovery, lark, outbound, outboundWork, presentation: presentation.application, logger });
+  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store: stores.deliveryRecovery, gatewayEffects, outbound, outboundWork, presentation: presentation.application, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store: stores.paneClose, herdr, lifecycleEvents: bus, outbound, presentation: presentation.pane, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), confirmationTtlMs: config.runtimeTuning.paneClosure.confirmationTtlMs });
   const paneRetention = new PaneRetentionWorkflow({ projects: config.projects, store: stores.paneRetention, herdr, outbound, presentation: presentation.pane, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), logger });
   const reconciler = new HerdrRuntimeReconciler({ projects: config.projects, store: stores.runtimeReconciliation, herdr, lifecycleEvents: bus, channelPublisher: outbound, logger, wakeOutbound: () => outboundWork.wake(), convergeAnswer: (promptId) => answerPages.converge(promptId), discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns, worktreeNameFor: (cwd) => worktreeNameResolver.resolve(cwd), presentation: presentation.application });

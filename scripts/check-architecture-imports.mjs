@@ -24,7 +24,13 @@ for (const file of files) {
     if (!importer.startsWith("src/composition/") && importer !== "src/main.ts" && target.startsWith("src/composition/")) {
       violations.push(`${importer} may not depend on the composition layer ${target}`);
     }
+    if (importer.startsWith("src/gateways/") && /^(src\/(?:composition|coordinator)\/|src\/runtime\/(?:herdr|traex)|src\/(?:domain|events)\/.*prompt)/.test(target)) {
+      violations.push(`${importer} may not depend on workflow or Agent runtime module ${target}`);
+    }
   }
+  const text = readFileSync(file, "utf8");
+  if (importer !== "src/adapters/lark-adapter.ts" && text.includes("@larksuiteoapi")) violations.push(`${importer} may not import the Feishu SDK`);
+  if (/^src\/(?:coordinator|events)\//.test(importer) && /\bLarkPort\b/.test(text)) violations.push(`${importer} may not depend on LarkPort`);
 }
 
 if (violations.length > 0) {

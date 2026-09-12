@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
-import type { LarkPort } from "../domain/ports/external.js";
+import type { GatewayEffectPort } from "../gateways/effect-client.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { DeliveryRecoveryStore } from "../domain/ports/workflow.js";
 import type { IncomingLarkCardAction } from "../domain/types.js";
@@ -10,7 +10,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 
 interface Options {
   store: DeliveryRecoveryStore;
-  lark: Pick<LarkPort, "replyText" | "shareThread">;
+  gatewayEffects: GatewayEffectPort;
   outbound: Pick<OutboundIntentPort, "enqueueCardUpdate">;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
@@ -27,17 +27,17 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
   constructor(private readonly options: Options) {}
 
   async openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void> {
-    const { store, lark, logger } = this.options;
+    const { store, gatewayEffects, logger } = this.options;
     const binding = store.getBinding(bindingId);
     if (!binding || binding.chatId !== action.chatId) return;
     const target = binding.topicId ?? binding.rootMessageId;
     if (!target) return;
     try {
-      await lark.shareThread(target, { messageId: action.messageId, chatId: action.chatId });
+      await gatewayEffects.shareConversation({ conversationId: target, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
       store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
     } catch (error) {
       logger.error({ event: "thread-entry-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share project thread entry");
-      await lark.replyText(action.messageId, "话题入口发送失败，请重新执行 `/swarm spaces` 后重试。");
+      await gatewayEffects.replyText({ rootMessageId: action.messageId, text: "话题入口发送失败，请重新执行 `/swarm spaces` 后重试。", idempotencyKey: `thread-open-failed:${action.messageId}:${binding.id}`, purpose: "operation-result" });
       store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "failed" });
     }
   }

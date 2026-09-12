@@ -73,7 +73,7 @@ export async function createManagedBridgeRuntime(options: {
     stores = completedStores;
     if (!lease.renewNow()) throw new Error("Bridge database lease expired during schema migration");
     const runtime = createBridgeRuntime(config, completedStores, logger, { codex, claude, pi });
-    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, lark, bus, sessionOperations, reconciler, promptRun } = runtime;
+    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, bus, sessionOperations, reconciler, promptRun } = runtime;
     return new ManagedBridgeRuntime({
       reconcileIntervalMs: config.reconcileIntervalMs,
       store: completedStores.lifecycle,

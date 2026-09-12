@@ -36,6 +36,8 @@ import { InProcessOutboundWorkNotifier } from "../../src/events/outbound-work-no
 import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../../src/events/prompt-work-scheduler.js";
 import type { SqliteBindingStore } from "./sqlite-binding-store.js";
 import { createFeishuGatewayPlugin } from "../../src/gateways/feishu/plugin.js";
+import { GatewayEffectClient } from "../../src/gateways/effect-client.js";
+import { createFeishuCompatibilityDelivery } from "../../src/gateways/feishu/plugin.js";
 import { createCompatibilityGatewayIngressSink } from "../../src/gateways/compatibility-ingress.js";
 
 export function createTestRouter(
@@ -54,6 +56,7 @@ export function createTestRouter(
   traexControl: TraexControlPort = { async listModels() { throw new Error("TraeX model control is not configured"); }, async runModelPrompt() { throw new Error("TraeX model control is not configured"); } }
 ): InboundRouter {
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
+  const gatewayEffects = new GatewayEffectClient(createFeishuCompatibilityDelivery(lark, config.gateway?.id ?? "feishu:primary"));
   outboundWork.subscribe(() => outbound.requestScan());
   const writer = new OutboundIntentWriter(store, outboundWork);
   const mainCards = new MainCardWorkflow(store, () => outboundWork.wake(), cardKitPrimaryPresentation, logger);
@@ -80,13 +83,13 @@ export function createTestRouter(
     },
     configurationForBinding: (bindingId: string, generation: number) => ({ environment: {}, command: "node", args: ["primary-tools", "--binding", bindingId, "--generation", String(generation)] })
   };
-  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, lark, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
+  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, gatewayEffects, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, traexControl, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: cardKitApplicationPresentation, logger });
   const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation });
   const paneControl = new PaneControlWorkflow({ store, outbound: writer, presentation: cardKitPanePresentation, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, presentation: cardKitApplicationPresentation, logger });
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), presentation: cardKitApplicationPresentation });
-  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, lark, outbound: writer, outboundWork, presentation: cardKitApplicationPresentation, logger });
+  const deliveryRecovery = new DeliveryRecoveryWorkflow({ store, gatewayEffects, outbound: writer, outboundWork, presentation: cardKitApplicationPresentation, logger });
   const paneClosure = new PaneClosureWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, presentation: cardKitPanePresentation, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId) });
   const sessionOperations = new SessionOperationWorkflow({ store, sessionAdministration, provisioning, paneControl, paneClosure, logger });
   const cardInteractions = new CardInteractionWorkflow({ store, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation, logger });

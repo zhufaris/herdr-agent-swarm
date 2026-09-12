@@ -1,7 +1,8 @@
 import { projectSpaceName } from "../../config.js";
 import { createBridgeEvent } from "../../domain/create-bridge-event.js";
 import type { BindingProvisioningStore } from "../../domain/ports/binding.js";
-import type { HerdrPort, LarkPort } from "../../domain/ports/external.js";
+import type { HerdrPort } from "../../domain/ports/external.js";
+import type { GatewayEffectPort } from "../../gateways/effect-client.js";
 import type { PrimaryPresentation } from "../../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../../domain/topic-view.js";
 import type { Binding, ProjectSelection } from "../../domain/types.js";
@@ -14,7 +15,7 @@ import type { ProjectCatalog } from "../project-catalog.js";
 
 export class BindingStartupRecovery {
   constructor(private readonly options: {
-    store: BindingProvisioningStore; herdr: HerdrPort; lark: LarkPort; logger: Logger; projects: ProjectCatalog; lifecycleEvents: LifecycleEventPublisher; presentation: Pick<PrimaryPresentation, "mainCard">;
+    store: BindingProvisioningStore; herdr: HerdrPort; gatewayEffects: GatewayEffectPort; logger: Logger; projects: ProjectCatalog; lifecycleEvents: LifecycleEventPublisher; presentation: Pick<PrimaryPresentation, "mainCard">;
     recoverSelection(selection: ProjectSelection): Promise<void>;
     publish(bindingId: string, type: "BindingActivated" | "PrimaryToolAvailabilityChanged", origin: "bridge", payload: Record<string, unknown>): Promise<void>;
   }) {}
@@ -35,9 +36,9 @@ export class BindingStartupRecovery {
     try {
       this.options.store.revokeBindingPrimaryToolCapability(binding.id, binding.generation); const pane = await requireMatchingPane(this.options.herdr, this.options.projects, binding, binding.paneId);
       const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title: binding.title, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId }); const unavailableEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
-      const view = reduceTopicView(reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent), unavailableEvent); const topic = await this.options.lark.createTopic(this.options.presentation.mainCard(view), binding.id); this.options.store.recordBridgeMessage(topic.rootMessageId); this.options.store.saveTopicView({ ...view, deliveredVersion: view.viewVersion });
-      let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.topicId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" });
-      await this.options.lifecycleEvents.publish(createdEvent); await this.options.lifecycleEvents.publish(unavailableEvent); await this.options.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.topicId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning");
+      const view = reduceTopicView(reduceTopicView(this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id), createdEvent), unavailableEvent); const topic = await this.options.gatewayEffects.createConversation({ conversationId: binding.chatId, view: this.options.presentation.mainCard(view), idempotencyKey: binding.id, purpose: "primary-main" }); this.options.store.recordBridgeMessage(topic.rootMessageId); this.options.store.saveTopicView({ ...view, deliveredVersion: view.viewVersion });
+      let next = this.options.store.updateBindingMetadata(binding.id, { topicId: topic.threadId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); next = this.options.store.transitionBinding(next.id, { type: "thread_created" }); next = this.options.store.transitionBinding(next.id, { type: "activate" });
+      await this.options.lifecycleEvents.publish(createdEvent); await this.options.lifecycleEvents.publish(unavailableEvent); await this.options.publish(next.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.threadId }); this.options.logger.info({ event: "discovered-binding-recovered", bindingId: next.id, paneId: pane.paneId, outcome: "completed" }, "resumed interrupted discovered-pane provisioning");
     } catch (error) { this.options.logger.error({ event: "discovered-binding-recovery-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "retry_on_restart" }, "discovered-pane provisioning remains recoverable"); }
   }
 }
