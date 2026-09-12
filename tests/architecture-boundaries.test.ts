@@ -238,6 +238,28 @@ describe("application composition boundaries", () => {
     expect(recovery).not.toContain("new SqliteOutboxDeliveryStore");
   });
 
+  it("keeps Primary prompt recovery in one deep SQLite module", () => {
+    const prompt = readFileSync(new URL("../src/store/sqlite/prompt-store.ts", import.meta.url), "utf8");
+    const recoveryPath = new URL("../src/store/sqlite/prompt-recovery-store.ts", import.meta.url);
+    expect(existsSync(recoveryPath)).toBe(true);
+    const recovery = readFileSync(recoveryPath, "utf8");
+    const capability = readFileSync(new URL("../src/store/sqlite/prompt-capability-store.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    const recoveryMethods = [
+      "recoverRunningPrompts", "scanDurablePromptWork", "listStaleUndispatchedPromptClaims",
+      "requeueStaleUndispatchedPromptClaim", "releaseUndispatchedPromptClaim", "listDetachedPrompts",
+      "settleDetachedPrompt", "skipOldestDetachedPrompt"
+    ];
+    for (const method of recoveryMethods) {
+      expect(recovery).toContain(`${method}(`);
+      expect(prompt).not.toContain(`${method}(`);
+    }
+    expect(recovery).toContain("private readonly context: SqliteContext");
+    expect(capability).toContain("private readonly recovery: SqlitePromptRecoveryStore");
+    expect(capability).toContain("this.recovery.");
+    expect(graph).toContain("new SqlitePromptRecoveryStore");
+  });
+
   it("executes prompt acceptance effects only from a committed typed receipt", () => {
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const effects = readFileSync(new URL("../src/coordinator/prompt-acceptance-effects.ts", import.meta.url), "utf8");

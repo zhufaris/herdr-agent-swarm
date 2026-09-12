@@ -25,6 +25,7 @@ import type { SqliteSessionOperationStore } from "../../src/store/sqlite/session
 import type { SqliteWorkerTurnStore } from "../../src/store/sqlite/worker-turn-store.js";
 import type { SqliteProjectionStore } from "../../src/store/sqlite/projection-store.js";
 import type { SqlitePromptStore } from "../../src/store/sqlite/prompt-store.js";
+import type { SqlitePromptRecoveryStore } from "../../src/store/sqlite/prompt-recovery-store.js";
 import type { SqliteOutboxStore } from "../../src/store/sqlite/outbox-store.js";
 import type { SqliteInstanceStore } from "../../src/store/sqlite/instance-store.js";
 import type { SqliteCardContextStore } from "../../src/store/sqlite/card-context-store.js";
@@ -42,6 +43,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   private readonly workerTurns: SqliteWorkerTurnStore;
   private readonly projections: SqliteProjectionStore;
   private readonly prompts: SqlitePromptStore;
+  private readonly promptRecovery: SqlitePromptRecoveryStore;
   private readonly outbox: SqliteOutboxStore;
   private readonly instances: SqliteInstanceStore;
   private readonly cardContexts: SqliteCardContextStore;
@@ -62,6 +64,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.outbox = this.graph.outbox;
     this.bindingProjections = this.graph.bindingProjections;
     this.prompts = this.graph.prompts;
+    this.promptRecovery = this.graph.promptRecovery;
     this.workerTurns = this.graph.workerTurns;
     this.instances = this.graph.instances;
     this.cardContexts = this.graph.cardContexts;
@@ -439,39 +442,39 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   recoverRunningPrompts(): number {
-    return this.prompts.recoverRunningPrompts();
+    return this.promptRecovery.recoverRunningPrompts();
   }
 
   scanDurablePromptWork(): DurablePromptWorkScan {
-    return this.prompts.scanDurablePromptWork();
+    return this.promptRecovery.scanDurablePromptWork();
   }
 
   listStaleUndispatchedPromptClaims(updatedBefore: string, limit: number): StalePromptClaim[] {
-    return this.prompts.listStaleUndispatchedPromptClaims(updatedBefore, limit);
+    return this.promptRecovery.listStaleUndispatchedPromptClaims(updatedBefore, limit);
   }
 
   requeueStaleUndispatchedPromptClaim(candidate: StalePromptClaim): boolean {
-    return this.prompts.requeueStaleUndispatchedPromptClaim(candidate);
+    return this.promptRecovery.requeueStaleUndispatchedPromptClaim(candidate);
   }
 
   releaseUndispatchedPromptClaim(candidate: StalePromptClaim): boolean {
-    return this.prompts.releaseUndispatchedPromptClaim(candidate);
+    return this.promptRecovery.releaseUndispatchedPromptClaim(candidate);
   }
 
   listDetachedPrompts(): PromptJob[] {
-    return this.prompts.listDetachedPrompts();
+    return this.promptRecovery.listDetachedPrompts();
   }
 
   skipOldestDetachedPrompt(input: { bindingId: string; expectedBindingGeneration: number; actorOpenId: string; sourceMessageId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): import("../domain/ports/prompt.js").DetachedPromptSkipResult {
-    return this.prompts.skipOldestDetachedPrompt(input);
+    return this.promptRecovery.skipOldestDetachedPrompt(input);
   }
 
   settleDetachedPrompt(input: { promptId: string; bindingId: string; runtime: Binding["lastAgentState"]; occurredAt: string; terminal: { kind: "completed"; answer: string; outputFingerprint: string } | { kind: "failed"; error: string } }): boolean {
-    return this.prompts.settleDetachedPrompt(input);
+    return this.promptRecovery.settleDetachedPrompt(input);
   }
 
   markPromptObservationDetached(id: string, notice: string): void {
-    this.prompts.markPromptObservationDetached(id, notice);
+    this.promptRecovery.markPromptObservationDetached(id, notice);
   }
 
   markPromptDispatched(id: string): void;

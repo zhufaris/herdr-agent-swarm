@@ -20,6 +20,7 @@ import { SqliteOutboxStore } from "./outbox-store.js";
 import { SqlitePaneOperationStore } from "./pane-operation-store.js";
 import { SqliteProjectionStore } from "./projection-store.js";
 import { SqlitePromptStore } from "./prompt-store.js";
+import { SqlitePromptRecoveryStore } from "./prompt-recovery-store.js";
 import { SqlitePromptCapabilityStore } from "./prompt-capability-store.js";
 import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./runtime-stores.js";
 import { SqliteSessionOperationStore } from "./session-operation-store.js";
@@ -43,6 +44,7 @@ export class SqliteCapabilityGraph {
   readonly workerTurns: SqliteWorkerTurnStore;
   readonly projections: SqliteProjectionStore;
   readonly prompts: SqlitePromptStore;
+  readonly promptRecovery: SqlitePromptRecoveryStore;
   readonly outbox: SqliteOutboxStore;
   readonly instances: SqliteInstanceStore;
   readonly cardContexts: SqliteCardContextStore;
@@ -99,6 +101,13 @@ export class SqliteCapabilityGraph {
       loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.cardContexts.loadPrimaryWorkerActivity(promptId, bindingGeneration),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
     });
+    this.promptRecovery = new SqlitePromptRecoveryStore(this.context, this.projections, {
+      persistBindingPatch: (id, patch) => this.bindings.persistBindingPatch(id, patch),
+      transitionBinding: (id, transition) => this.bindings.transitionBinding(id, transition),
+      loadCardContextInvalidation: (target) => this.cardContexts.loadCardContextInvalidation(target),
+      loadPrimaryWorkerActivity: (promptId, bindingGeneration) => this.cardContexts.loadPrimaryWorkerActivity(promptId, bindingGeneration),
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
+    });
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.instances.getAgentInstance(id),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
@@ -148,10 +157,10 @@ export class SqliteCapabilityGraph {
   }
 
   capabilityModules() {
-    const prompt = new SqlitePromptCapabilityStore(this.prompts, this.bindings, this.bindingProjections, this.projections, this.operations);
+    const prompt = new SqlitePromptCapabilityStore(this.prompts, this.promptRecovery, this.bindings, this.bindingProjections, this.projections, this.operations);
     const bindingSession = new SqliteBindingSessionCapabilityStore(this.bindings, this.bindingProjections, this.prompts, this.projections, this.inboundProjects, this.paneOperations, this.operations);
     const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.threadAliases, this.inboundProjects);
-    const ingress = new SqliteIngressCapabilityStore(routing, this.prompts, this.bindings, this.bindingProjections, this.projections, this.operations);
+    const ingress = new SqliteIngressCapabilityStore(routing, this.prompts, this.promptRecovery, this.bindings, this.bindingProjections, this.projections, this.operations);
     const paneControl = new SqlitePaneControlCapabilityStore(this.paneOperations, this.bindings, this.prompts, this.projections, this.sessionOperations, this.operations);
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
