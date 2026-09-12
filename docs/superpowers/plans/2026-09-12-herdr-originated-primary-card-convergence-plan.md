@@ -4,8 +4,9 @@
 its durable Answer Card and Primary Main Card promptly from Herdr hints.
 
 **Architecture:** Extend `HerdrEventRouter` with a Primary external-turn observer
-consumer ordered after binding reconciliation. Preserve EOF baselining and route
-all observed transcript lifecycle through the existing `BridgeEventBus`,
+consumer ordered after binding reconciliation. Preserve EOF baselining for
+Bridge dispatch, use a bounded active-turn cursor for direct Herdr turns, and
+route all observed transcript lifecycle through the existing `BridgeEventBus`,
 `ConversationViewProjector`, card workflows, and durable outbox.
 
 ## Test seams
@@ -34,8 +35,11 @@ all observed transcript lifecycle through the existing `BridgeEventBus`,
 
 ## Task 3: Prove baseline and deduplication
 
-- Keep first normal observation as EOF baseline and assert existing transcript
+- Keep normal Bridge dispatch at its EOF baseline. For external observation,
+  boundedly replay only the latest active turn and assert completed transcript
   history creates no prompt or outbox work.
+- Parse legacy `user_message`, current `history_mutation` user messages, and
+  current `item_completed/UserMessage` records with message-ID deduplication.
 - Append a direct turn after baseline, deliver repeated pane hints, and assert one
   `executionOrigin='herdr'` prompt with exact transcript identity.
 - Assert duplicate hints do not create duplicate prompts or card intents.

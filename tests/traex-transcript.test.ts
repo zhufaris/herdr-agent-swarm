@@ -351,6 +351,54 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("reports the current history and item-completed UserMessage formats once", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const messageId = "msg_01a04f35-8c1f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: messageId, role: "user", content: [{ type: "input_text", text: "direct current request" }] }]),
+      eventMessage({ type: "item_completed", turn_id: turnId, item: { type: "UserMessage", id: messageId, content: [{ type: "text", text: "direct current request" }] } })
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, freshTurnStart: true, requestText: "direct current request", answerDelta: ""
+    });
+    await expect(cursor.readObservation?.()).resolves.toEqual({ turnId, answerDelta: "", turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" } });
+  });
+
+  it("accepts an item-completed UserMessage when no history mutation is present", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({ type: "item_completed", turn_id: turnId, item: { type: "UserMessage", id: "user-1", content: [{ type: "text", text: "fallback request" }] } })
+    ].join(""));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnId, requestText: "fallback request" });
+  });
+
+  it("replays a current-format active turn when opening after it already started", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "user-1", role: "user", content: [{ type: "input_text", text: "recover active request" }] }]),
+      mutation([{ type: "message", id: "answer-1", role: "assistant", content: [{ type: "output_text", text: "partial answer" }] }]),
+      eventMessage({ type: "agent_reasoning_raw_content", text: "x".repeat(2_048) })
+    ].join(""));
+
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, maxReadBytes: 1_024 });
+    const cursor = await expectTyped(await reader.openActiveTurn!(session()));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, freshTurnStart: true, requestText: "recover active request", answerDelta: "partial answer",
+      turnLifecycle: { turnId, state: "active" }
+    });
+  });
+
   it("emits adjacent transcript turns as separate lifecycle-scoped observations", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

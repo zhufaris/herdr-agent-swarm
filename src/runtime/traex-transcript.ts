@@ -118,6 +118,20 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     }
   }
 
+  async openActiveTurn(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
+    if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
+    if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) return { mode: "unavailable", reason: "unsupported_session_identity" };
+    try {
+      const path = await this.resolveTranscriptPath(session.value);
+      if (!path) return { mode: "unavailable", reason: "transcript_not_found" };
+      const file = await stat(path);
+      const baseline = await latestTranscriptBaseline(path, file.size, MAX_RECOVERY_SCAN_BYTES, this.maxRenderedDeltaChars);
+      return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, baseline.replayOffset ?? file.size, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, baseline.replayOffset === null ? baseline.turnLifecycle : undefined) };
+    } catch {
+      return { mode: "unavailable", reason: "transcript_validation_failed" };
+    }
+  }
+
   async openFirstTurn(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
     if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
     if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) {
@@ -361,33 +375,56 @@ function eventTime(epochSeconds: number): string {
 interface TranscriptBaseline {
   tokenCount: number | null;
   turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
+  replayOffset: number | null;
 }
 
 async function latestTranscriptBaseline(path: string, end: number, maxBytes: number, maxRenderedDeltaChars: number): Promise<TranscriptBaseline> {
-  if (end <= 0) return { tokenCount: null, turnLifecycle: undefined };
+  if (end <= 0) return { tokenCount: null, turnLifecycle: undefined, replayOffset: null };
   const start = Math.max(0, end - maxBytes);
   const handle = await open(path, "r");
-  const buffer = Buffer.alloc(end - start);
   try {
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-    const source = buffer.subarray(0, bytesRead).toString("utf8");
-    const lines = source.split("\n");
-    if (start > 0) lines.shift();
     let tokenCount: number | null = null;
     let turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const envelope = envelopeSchema.safeParse(JSON.parse(line));
-        if (!envelope.success) continue;
-        turnLifecycle = reduceTurnLifecycle(turnLifecycle, envelope.data, maxRenderedDeltaChars);
-        if (envelope.data.type === "event_msg") {
-          const tokens = tokenCountEventSchema.safeParse(envelope.data.payload);
-          if (tokens.success) tokenCount = tokens.data.info.total_token_usage.total_tokens;
-        }
-      } catch {}
+    let activeTurnOffset: number | null = null;
+    let activeTurnTokenBaseline: number | null = null;
+    let readOffset = start;
+    let carry = Buffer.alloc(0);
+    let carryOffset = start;
+    let skipPartialFirstRecord = start > 0;
+    const inspect = (line: string, offset: number) => {
+      const envelope = parseEnvelope(line);
+      if (!envelope) return;
+      if (envelope.type === "event_msg") {
+        const started = taskStartedEventSchema.safeParse(envelope.payload);
+        if (started.success) { activeTurnOffset = offset; activeTurnTokenBaseline = tokenCount; }
+        const tokens = tokenCountEventSchema.safeParse(envelope.payload);
+        if (tokens.success) tokenCount = tokens.data.info.total_token_usage.total_tokens;
+      }
+      turnLifecycle = reduceTurnLifecycle(turnLifecycle, envelope, maxRenderedDeltaChars);
+      if (turnLifecycle?.state !== "active") { activeTurnOffset = null; activeTurnTokenBaseline = null; }
+    };
+    while (readOffset < end) {
+      const length = Math.min(RECOVERY_SCAN_CHUNK_BYTES, end - readOffset);
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, readOffset);
+      if (bytesRead === 0) break;
+      const source = carry.length === 0 ? chunk.subarray(0, bytesRead) : Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+      const sourceOffset = carry.length === 0 ? readOffset : carryOffset;
+      let recordStart = 0;
+      while (true) {
+        const newline = source.indexOf(0x0a, recordStart);
+        if (newline < 0) break;
+        if (skipPartialFirstRecord) skipPartialFirstRecord = false;
+        else inspect(source.subarray(recordStart, newline).toString("utf8"), sourceOffset + recordStart);
+        recordStart = newline + 1;
+      }
+      carry = source.subarray(recordStart);
+      carryOffset = sourceOffset + recordStart;
+      if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX baseline record exceeds bounded size");
+      readOffset += bytesRead;
     }
-    return { tokenCount, turnLifecycle };
+    if (!skipPartialFirstRecord && carry.length > 0) inspect(carry.toString("utf8"), carryOffset);
+    return { tokenCount: activeTurnOffset === null ? tokenCount : activeTurnTokenBaseline, turnLifecycle, replayOffset: turnLifecycle?.state === "active" ? activeTurnOffset : null };
   } finally {
     await handle.close();
   }

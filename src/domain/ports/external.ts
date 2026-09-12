@@ -82,6 +82,7 @@ export type TraexTranscriptOpenResult = { mode: "typed"; cursor: TraexTranscript
 
 export interface TraexTranscriptReaderPort {
   open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
+  openActiveTurn?(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
   openFirstTurn?(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
   openAtTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
   openAfterTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;

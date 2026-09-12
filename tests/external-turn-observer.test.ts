@@ -25,7 +25,7 @@ describe("ExternalTurnObserver", () => {
       { answerDelta: "" }
     ];
     const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
-    const transcriptReader = { open: vi.fn(async () => ({ mode: "typed" as const, cursor })) };
+    const transcriptReader = { open: vi.fn(async () => ({ mode: "typed" as const, cursor })), openActiveTurn: vi.fn(async () => ({ mode: "typed" as const, cursor })) };
     const mainUpdates: object[] = [];
     const answerUpdates: string[] = [];
     const lark: LarkPort = {
@@ -55,6 +55,8 @@ describe("ExternalTurnObserver", () => {
 
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
 
+    expect(transcriptReader.openActiveTurn).toHaveBeenCalledOnce();
+    expect(transcriptReader.open).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", executionOrigin: "herdr", transcriptTurnId: "turn-1" }));
     await vi.waitFor(() => expect(answerUpdates.some((content) => content.includes("direct answer"))).toBe(true));
     await vi.waitFor(() => expect(mainUpdates.some((card) => JSON.stringify(card).includes("direct answer"))).toBe(true));

@@ -15,10 +15,15 @@ const taskStartedEventSchema = z.object({ type: z.literal("task_started"), turn_
 const taskCompleteEventSchema = z.object({ type: z.literal("task_complete"), turn_id: z.string().min(1), started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS), last_agent_message: z.string().nullable().optional() }).passthrough();
 const turnAbortedEventSchema = z.object({ type: z.literal("turn_aborted"), turn_id: z.string().min(1), reason: z.string().min(1).optional() }).passthrough();
 const userMessageEventSchema = z.object({ type: z.literal("user_message"), message: z.string() }).passthrough();
+const completedUserMessageEventSchema = z.object({
+  type: z.literal("item_completed"), turn_id: z.string().min(1),
+  item: z.object({ type: z.literal("UserMessage"), id: z.string().min(1), content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()) }).passthrough()
+}).passthrough();
 const planArgumentsSchema = z.object({ plan: z.array(z.object({ step: z.string(), status: z.enum(["pending", "in_progress", "completed"]) })).max(100) }).passthrough();
 
 export class TraexTranscriptProjector {
   private readonly emittedItemIds = new Set<string>();
+  private readonly emittedUserMessageIds = new Set<string>();
   private readonly callsById = new Map<string, ToolActivityDescriptor>();
 
   project(input: { lines: readonly string[]; initialLifecycle: TraexTranscriptObservation["turnLifecycle"]; tokenBaseline: number | null; maxRenderedDeltaChars: number }): { observation: TraexTranscriptObservation; lifecycle: TraexTranscriptObservation["turnLifecycle"] } {
@@ -29,10 +34,15 @@ export class TraexTranscriptProjector {
       const envelope = parseEnvelope(line); if (!envelope) continue;
       if (envelope.type === "event_msg") {
         const started = taskStartedEventSchema.safeParse(envelope.payload);
-        if (started.success) { observationTurnId = started.data.turn_id; freshTurnStart = true; this.callsById.clear(); }
+        if (started.success) { observationTurnId = started.data.turn_id; freshTurnStart = true; this.callsById.clear(); this.emittedUserMessageIds.clear(); }
         lifecycle = reduceTurnLifecycle(lifecycle, envelope, input.maxRenderedDeltaChars);
         const userMessage = userMessageEventSchema.safeParse(envelope.payload);
         if (userMessage.success && observationTurnId && lifecycle?.turnId === observationTurnId) requestText = boundMarkdown(redactSecrets(userMessage.data.message), input.maxRenderedDeltaChars);
+        const completedUserMessage = completedUserMessageEventSchema.safeParse(envelope.payload);
+        if (completedUserMessage.success && observationTurnId && completedUserMessage.data.turn_id === observationTurnId && lifecycle?.turnId === observationTurnId) {
+          const text = this.userMessageText(completedUserMessage.data.item, input.maxRenderedDeltaChars);
+          if (text) requestText = text;
+        }
         const reasoning = reasoningEventSchema.safeParse(envelope.payload); if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
         const tokens = tokenCountEventSchema.safeParse(envelope.payload); if (tokens.success && input.tokenBaseline !== null && tokens.data.info.total_token_usage.total_tokens >= input.tokenBaseline) tokenCount = tokens.data.info.total_token_usage.total_tokens - input.tokenBaseline;
         continue;
@@ -40,6 +50,12 @@ export class TraexTranscriptProjector {
       if (envelope.type !== "history_mutation") continue;
       const mutation = historyMutationSchema.safeParse(envelope.payload); if (!mutation.success) continue;
       for (const item of mutation.data.items) {
+        const userMessage = messageItemSchema.safeParse(item);
+        if (userMessage.success && userMessage.data.role === "user" && observationTurnId && lifecycle?.turnId === observationTurnId) {
+          const text = this.userMessageText(userMessage.data, input.maxRenderedDeltaChars);
+          if (text) requestText = text;
+          continue;
+        }
         const plan = parsePlanSnapshot(item);
         if (plan) { planSteps = plan; const call = functionCallSchema.safeParse(item); if (call.success) this.emittedItemIds.add(call.data.id); continue; }
         const rendered = this.renderItem(item, toolActivities); if (rendered) blocks.push(rendered);
@@ -49,6 +65,14 @@ export class TraexTranscriptProjector {
     const observation: TraexTranscriptObservation = { ...(observationTurnId ? { turnId: observationTurnId } : {}), ...(freshTurnStart ? { freshTurnStart: true } : {}), ...(requestText !== undefined ? { requestText } : {}), answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), input.maxRenderedDeltaChars), ...(toolActivities.length ? { toolActivities } : {}), ...(Object.keys(mainStatus).length ? { mainStatus } : {}), ...(observationTurnId && lifecycle?.turnId === observationTurnId ? { turnLifecycle: lifecycle } : {}) };
     if (lifecycle?.state === "completed" || lifecycle?.state === "aborted") this.callsById.clear();
     return { observation, lifecycle };
+  }
+
+  private userMessageText(message: { id: string; content: Array<{ type: string; text?: string | undefined }> }, max: number): string | null {
+    if (this.emittedUserMessageIds.has(message.id)) return null;
+    const text = message.content.filter((part) => part.type === "input_text" || part.type === "text").map((part) => part.text?.trim() ?? "").filter(Boolean).join("\n\n");
+    if (!text) return null;
+    this.emittedUserMessageIds.add(message.id);
+    return boundMarkdown(redactSecrets(text), max);
   }
 
   private renderItem(item: unknown, toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]>): string {

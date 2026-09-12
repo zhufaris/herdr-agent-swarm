@@ -243,7 +243,7 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 
 卡片设计/可读性/稳定性优化和 instances 多 Agent 易用性优化已记为后续待办，先各自形成方案再实施；不扩入当前稳定性切片。当前本地完成状态不代表上线批准。
 
-Herdr 直接发起的 Primary turn 现已纳入事件驱动双投影收敛：pane hint 先完成 Binding identity reconcile，再显式唤醒 Primary external-turn observer；canonical transcript 生成的生命周期事件同时驱动 Main Card 与对应 Answer Card。首次 EOF baseline 不回放历史，周期扫描继续提供丢失 hint 的兜底。
+Herdr 直接发起的 Primary turn 现已纳入事件驱动双投影收敛：pane hint 先完成 Binding identity reconcile，再显式唤醒 Primary external-turn observer；canonical transcript 生成的生命周期事件同时驱动 Main Card 与对应 Answer Card。普通 Bridge dispatch 保持 EOF baseline；external observer 可有界重放唯一的最新 active turn，但不导入 completed history，周期扫描继续提供丢失 hint 的兜底。
 
 Startup view convergence 新生成的 Main/Answer 修复 intent 统一标记为 `history`，正常交互和 Herdr/Lark 实时 turn 仍保持 `live`。因此重启后即使存在大量历史卡片修复，3:1 outbox 公平调度也会让新 Answer 在首批可用槽位内投递；重启前已持久化 intent 的 work class 不被改写。
 

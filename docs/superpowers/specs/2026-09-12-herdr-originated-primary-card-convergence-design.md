@@ -23,7 +23,8 @@ making both Primary cards appear stale after a single pane event.
 - Keep canonical TraeX transcript observations as the only message/output source.
 - Drive both Primary Main Card and corresponding Answer Card through the existing
   lifecycle-event projector and durable outbox.
-- Preserve EOF baselining so pre-binding historical turns are not replayed.
+- Preserve EOF baselining for Bridge dispatch while allowing the external-turn
+  observer to boundedly replay the one latest active turn.
 - Keep event hints best-effort and periodic scans authoritative for convergence.
 - Preserve exact turn ownership, generation/session fencing, and no Prompt
   replay.
@@ -113,28 +114,34 @@ cleanup consumers do not suppress Primary observation.
 ## Cursor initialization and event timing
 
 Opening the normal `latest` transcript cursor positions it at EOF and records a
-bounded lifecycle/token baseline. That is essential: it prevents old transcript
-history from becoming new Lark prompts.
+bounded lifecycle/token baseline. That remains essential for Bridge dispatch: it
+prevents a pre-existing turn from being mistaken for the prompt just submitted.
 
-The observer retains this rule. It does not attempt to drain historical bytes on
-first registration. Instead:
+The external-turn observer uses a distinct active-turn cursor. It scans at most
+64 MiB backward, and only when the latest lifecycle is still active does it replay
+from that exact `task_started` record. This recovers a direct turn that started
+before observer registration or service restart without replaying completed
+history. Instead:
 
-- startup/runtime reconciliation initializes cursors for already bound Primary
-  panes before live Herdr event handling starts;
+- startup/runtime reconciliation can adopt the one currently active direct turn
+  for already bound Primary panes;
 - later pane events explicitly invoke `observeByPane` and drain bytes appended
   after that baseline in the same routed pass;
-- if a binding is newly discovered by the same event, the first call establishes
-  its baseline and deliberately does not adopt a turn that predates binding
-  ownership;
+- binding generation, pane identity, native session identity, turn ID, and start
+  time still fence adoption;
 - the next transcript append or periodic scan handles later records.
 
-This chooses no historical replay over guessing whether a turn written before
-ownership should be surfaced. A future explicit import feature would require a
-separate policy and UI.
+This imports only the uniquely active turn and never completed history. If its
+start falls outside the bounded scan window, the cursor stays at EOF instead of
+guessing. A future explicit completed-history import would require a separate
+policy and UI.
 
 ## Projection and delivery behavior
 
-Once an external turn has a scoped `task_started` and `user_message`:
+Once an external turn has a scoped `task_started` and user message, the parser
+accepts the legacy `user_message` event plus current `history_mutation` user
+messages and `item_completed/UserMessage` records. Duplicate current-format
+records share their message ID and yield one request. Then:
 
 1. `adoptExternalTurn` transactionally creates or adopts the exact prompt,
    records `execution_origin='herdr'` and transcript identity, and reserves the

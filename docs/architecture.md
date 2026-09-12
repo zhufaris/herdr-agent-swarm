@@ -963,15 +963,17 @@ content exists, completion uses the fixed safe notice
 `⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
 A transcript failure does not fail or replay the prompt.
 
-For a bound pane, reconciliation also keeps an independent EOF cursor as an
-event-woken observer with a lightweight two-second transcript poll between full
-Herdr reconciliations. Background polling pauses while the binding worker owns
-the turn boundary. Before that worker claims each queued Lark prompt, it performs
-one serialized handoff scan so external transcript work is adopted before the
-next bridge dispatch; external completion wakes the binding worker to resume its
-FIFO. The scan reads only durable active bindings and their transcript files; it
-does not perform a Herdr snapshot or treat socket payloads as authoritative state. A new
-`task_started` plus its scoped `user_message` may adopt exactly one queued
+For a bound pane, reconciliation also keeps an independent external-turn cursor
+with a lightweight two-second transcript poll between full Herdr reconciliations.
+It boundedly replays only the latest active turn so a process restart or late
+observer registration does not lose a direct Herdr request; completed history is
+never imported. Background polling pauses while the binding worker owns the turn
+boundary. Before that worker claims each queued Lark prompt, it performs one
+serialized handoff scan so external transcript work is adopted before the next
+bridge dispatch; external completion wakes the binding worker to resume its FIFO.
+The scan reads only durable active bindings and their transcript files; it does
+not perform a Herdr snapshot or treat socket payloads as authoritative state. A
+new `task_started` plus its scoped user message may adopt exactly one queued
 ordinary prompt only when binding generation, pane, native session, request
 body (apart from line-ending normalization), and creation time all match. An
 ambiguous or absent match creates a separate durable prompt and Answer Card.
@@ -989,17 +991,21 @@ cursor through this handoff so the start or request record cannot be lost
 between observers. Other turn conflicts remain ignored. Periodic scans and
 explicit handoffs are serialized per binding so two external cursor reads
 cannot race.
+The transcript projector accepts both the legacy `user_message` event and the
+current `history_mutation` user message plus `item_completed/UserMessage` pair.
+The current formats share a message ID and are deduplicated before adoption.
+System/developer messages and user messages outside an active turn remain ignored.
 
 Herdr pane hints explicitly observe Primary external turns after the affected
 Binding reconciliation completes. Instance reconciliation, Worker turn
 observation, and retired-pane cleanup remain independent consumers of the same
 bounded hint. The Primary observer publishes the existing lifecycle events, so
 `ConversationViewProjector` independently converges the corresponding Answer
-Card and the owning Main Card through their durable outbox paths. A first normal
-observation still establishes an EOF baseline and never imports pre-binding
-history; the event route only lowers latency for transcript records appended
-after that baseline. Lost or failed hints retain the periodic observer scan as
-the convergence path.
+Card and the owning Main Card through their durable outbox paths. Ordinary Bridge
+dispatch still establishes an EOF baseline. An external observation may replay
+only the latest active turn within its bounded scan window; it never imports
+completed history. Lost or failed hints retain the periodic observer scan as the
+convergence path.
 
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;

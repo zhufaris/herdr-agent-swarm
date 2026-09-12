@@ -164,7 +164,7 @@ export class ExternalTurnObserver {
         session,
         boundary: durable?.transcriptTurnId && durable.transcriptTurnStartedAt
           ? { kind: "at", turnId: durable.transcriptTurnId, startedAt: durable.transcriptTurnStartedAt }
-          : { kind: "latest" }
+          : { kind: "active" }
       });
       if (opened.mode !== "typed") { this.bindings.delete(binding.id); return; }
       observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map() };

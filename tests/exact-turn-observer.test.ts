@@ -10,6 +10,7 @@ function reader(observations: TraexTranscriptObservation[]): TraexTranscriptRead
   const opened = { mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } };
   return {
     open: vi.fn(async () => opened),
+    openActiveTurn: vi.fn(async () => opened),
     openFirstTurn: vi.fn(async () => opened),
     openAtTurn: vi.fn(async () => opened),
     openAfterTurn: vi.fn(async () => opened)
@@ -17,16 +18,18 @@ function reader(observations: TraexTranscriptObservation[]): TraexTranscriptRead
 }
 
 describe("ExactTurnObserver", () => {
-  it("opens latest, first-turn, at-turn, and after-turn cursors through one interface", async () => {
+  it("opens latest, active-turn, first-turn, at-turn, and after-turn cursors through one interface", async () => {
     const source = reader([]);
     const observer = new ExactTurnObserver(source);
 
     expect((await observer.open({ session, boundary: { kind: "latest" } })).mode).toBe("typed");
+    expect((await observer.open({ session, boundary: { kind: "active" } })).mode).toBe("typed");
     expect((await observer.open({ session, boundary: { kind: "first" } })).mode).toBe("typed");
     expect((await observer.open({ session, boundary: { kind: "at", ...exact } })).mode).toBe("typed");
     expect((await observer.open({ session, boundary: { kind: "after", ...exact } })).mode).toBe("typed");
 
     expect(source.open).toHaveBeenCalledWith(session);
+    expect(source.openActiveTurn).toHaveBeenCalledWith(session);
     expect(source.openFirstTurn).toHaveBeenCalledWith(session);
     expect(source.openAtTurn).toHaveBeenCalledWith(session, exact.turnId, exact.startedAt);
     expect(source.openAfterTurn).toHaveBeenCalledWith(session, exact.turnId, exact.startedAt);
