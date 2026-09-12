@@ -33,6 +33,7 @@ export class SqliteOutboxQueueStore {
     const intentJson = input.intentJson ?? encoded.intentJson;
     const rendererRevision = input.rendererRevision ?? encoded.rendererRevision;
     const workClass = input.workClass ?? "live";
+    let cardSequence = input.cardSequence ?? null;
     const gatewayId = input.gatewayId ?? "feishu:primary";
     const laneKey = gatewayScopedOutboundLaneKey(gatewayId, logicalLaneKey);
     const gatewayProfileId = input.gatewayProfileId ?? "feishu-cardkit-v1";
@@ -52,7 +53,24 @@ export class SqliteOutboxQueueStore {
         if (existing.state !== "pending") return existing;
         if (this.wasClaimed(existing.id)) throw new Error("outbound_idempotency_conflict");
       }
-      if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId) {
+      if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId && input.targetRole === "session_status") {
+        const replaceable = this.context.database.prepare(`
+          SELECT MIN(card_sequence) AS reusable_sequence
+          FROM outbound_replies
+          WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
+            AND lane_key = ? AND kind = 'card_update' AND target_role = 'session_status' AND state = 'pending'
+            AND claim_attempt_id IS NULL AND first_claimed_at IS NULL AND attempt_count = 0
+            AND card_id_checkpoint IS NULL AND projection_key IS NULL
+        `).get(input.bindingId, rootMessageId, laneKey) as { reusable_sequence: number | null };
+        if (replaceable.reusable_sequence !== null && cardSequence !== null) cardSequence = Math.min(cardSequence, Number(replaceable.reusable_sequence));
+        this.context.database.prepare(`
+          DELETE FROM outbound_replies
+          WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
+            AND lane_key = ? AND kind = 'card_update' AND target_role = 'session_status' AND state = 'pending'
+            AND claim_attempt_id IS NULL AND first_claimed_at IS NULL AND attempt_count = 0
+            AND card_id_checkpoint IS NULL AND projection_key IS NULL
+        `).run(input.bindingId, rootMessageId, laneKey);
+      } else if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId) {
         this.context.database.prepare(`
           DELETE FROM outbound_replies
           WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
@@ -84,7 +102,7 @@ export class SqliteOutboxQueueStore {
           intent_json = CASE WHEN outbound_replies.state = 'pending' THEN excluded.intent_json ELSE outbound_replies.intent_json END,
           renderer_revision = CASE WHEN outbound_replies.state = 'pending' THEN excluded.renderer_revision ELSE outbound_replies.renderer_revision END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, gatewayId, gatewayProfileId, gatewayPlanJson, gatewayPlanHash, gatewayCheckpointJson, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, threadAliasId, workerThreadId, targetChatId, workClass, rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, gatewayId, gatewayProfileId, gatewayPlanJson, gatewayPlanHash, gatewayCheckpointJson, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, cardSequence, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, threadAliasId, workerThreadId, targetChatId, workClass, rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
       const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
       if (input.kind === "stream_card_create" && input.promptId) {

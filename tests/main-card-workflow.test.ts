@@ -58,6 +58,23 @@ describe("MainCardWorkflow", () => {
     store.close();
   });
 
+  it("supersedes an unclaimed startup snapshot with the latest live projection", async () => {
+    const { stores, store } = setupStore();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+    const wake = vi.fn();
+    const workflow = new MainCardWorkflow(stores.mainCards, wake, primaryPresentation);
+
+    await workflow.project({ ...initialTopicView("b1"), title: "Startup", viewVersion: 1 }, "history");
+    await workflow.project({ ...initialTopicView("b1"), title: "Live", viewVersion: 2 }, "live");
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      kind: "card_update", targetRole: "session_status", workClass: "live", viewVersion: 2, cardSequence: 1
+    })]);
+    expect(wake).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
   it("hydrates the durable model preference before reserving the Main Card", async () => {
     const { stores, store } = setupStore();
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

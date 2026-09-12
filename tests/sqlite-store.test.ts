@@ -3539,6 +3539,36 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_reply", bindingId: "b1", viewVersion: 1, targetRole: "session_status" })]);
   });
 
+  it("replaces an unclaimed history Main Card snapshot with the latest live snapshot", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+
+    expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "History", viewVersion: 1 }, "root-1", { version: 1 }, "history")).toBe("reserved");
+    expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "Live", viewVersion: 2 }, "root-1", { version: 2 }, "live")).toBe("reserved");
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      targetRole: "session_status", workClass: "live", viewVersion: 2, cardSequence: 1, payload: JSON.stringify({ version: 2 })
+    })]);
+  });
+
+  it("keeps a claimed Main Card snapshot and coalesces its successors to one contiguous sequence", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+    expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "First", viewVersion: 1 }, "root-1", { version: 1 })).toBe("reserved");
+    const first = store.listPendingOutboundReplies()[0]!;
+    expect(store.claimOutboundReply(first.id, null)).not.toBeNull();
+
+    expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "Second", viewVersion: 2 }, "root-1", { version: 2 })).toBe("reserved");
+    expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "Latest", viewVersion: 3 }, "root-1", { version: 3 })).toBe("reserved");
+
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ id: first.id, viewVersion: 1, cardSequence: 1 }),
+      expect.objectContaining({ viewVersion: 3, cardSequence: 2, payload: JSON.stringify({ version: 3 }) })
+    ]);
+  });
+
   it("rolls back a Main Card projection when its outbox reservation fails", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -4032,10 +4062,11 @@ describe("SQLite store", () => {
     const second = { ...initialTopicView("b1"), title: "Second", viewVersion: 2, deliveredVersion: 1 };
     expect(store.reserveMainCard(second, "root-1", { version: 2 })).toBe("reserved");
     const [failed] = store.listPendingOutboundReplies();
+    const claim = store.claimOutboundReply(failed!.id, null)!;
     const third = { ...second, title: "Third", viewVersion: 3 };
     expect(store.reserveMainCard(third, "root-1", { version: 3 })).toBe("reserved");
 
-    expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "card action is lock", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099", recoveryKind: "stale_main_card" })).toMatchObject({
+    expect(store.markOutboundReplyFailedWithQuarantine(claim, "card action is lock", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099", recoveryKind: "stale_main_card" })).toMatchObject({
       action: "rebuild_main", laneClass: "main_card", reply: { attemptCount: 1, state: "dead_letter" }
     });
     expect(store.getBinding("b1")?.statusMessageId).toBe("locked-main");
