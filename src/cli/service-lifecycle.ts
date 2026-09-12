@@ -541,6 +541,7 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
   const deadline = Date.now() + timeoutMs;
   let consecutiveHealthyChecks = 0;
+  let observedStatus = "unavailable";
   let observedBuildId = "unavailable";
   let observedStartupState = "unavailable";
   let observedOwnership = "unavailable";
@@ -550,10 +551,11 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
     unitState = active ? "active" : "inactive";
     const startup = active ? await probeStartupStatus(config.http.host, config.http.port) : null;
     const ownership = active && startup?.connectedAddress ? probeListenerOwnership(paths.serviceName, startup.connectedAddress, config.http.port, base) : null;
+    observedStatus = startup?.status ?? "unavailable";
     observedBuildId = startup?.buildId ?? "unavailable";
     observedStartupState = startup?.startupRecoveryState ?? "unavailable";
     observedOwnership = ownership?.detail ?? "unavailable";
-    const healthy = startup?.status === "ok" && startup.serviceId === AGENT_SWARM_SERVICE_ID
+    const healthy = (startup?.status === "ok" || startup?.status === "degraded") && startup.serviceId === AGENT_SWARM_SERVICE_ID
       && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed" && ownership?.matches === true;
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
@@ -565,7 +567,7 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   } while (Date.now() < deadline);
-  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; observed build ${observedBuildId}; startup ${observedStartupState}; listener ownership ${observedOwnership}; configured listener PID must belong to canonical unit MainPID; inspect systemctl --user status ${paths.serviceName}`);
+  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; status ${observedStatus}; observed build ${observedBuildId}; startup ${observedStartupState}; listener ownership ${observedOwnership}; configured listener PID must belong to canonical unit MainPID; inspect systemctl --user status ${paths.serviceName}`);
 }
 
 function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.SWARM_SERVICE_START_TIMEOUT_MS, 15_000); }
