@@ -224,14 +224,14 @@ export class HerdrCliAdapter implements HerdrPort {
     try {
       const { stdout } = await this.runner.run(
         this.executable,
-        ["agent", "prompt", paneId, text],
-        this.commandTimeoutMs,
+        ["agent", "prompt", paneId, text, "--wait", "--until", "working", "--until", "blocked", "--until", "done", "--timeout", String(this.commandTimeoutMs)],
+        this.commandTimeoutMs * 2,
         () => { commandStarted = true; }
       );
       await reportDispatched();
       const accepted = promptResultState(stdout);
       await onObservation?.({ state: accepted === "blocked" ? "blocked" : "working", stateSource: "structured" });
-      if (accepted === "blocked") return "blocked";
+      if (accepted === "blocked" || accepted === "done") return accepted;
       return this.waitForAgent(paneId, timeoutMs, onObservation, signal);
     } catch (error) {
       if (!isExplicitPreDispatchAgentPromptError(error) && (commandStarted || isPossiblyDispatchedAgentPromptError(error))) {

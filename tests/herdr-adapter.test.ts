@@ -237,20 +237,20 @@ describe("Herdr adapter structured control", () => {
     });
   });
 
-  it("submits prompts before waiting separately and emits structured completion", async () => {
+  it("waits for a new prompt lifecycle before waiting separately for completion", async () => {
     const calls: string[][] = [];
     const observations: object[] = [];
     let dispatched = 0;
     const runner: CommandRunner = { async run(_executable, args, timeout, onStarted) {
       calls.push(args);
-      expect(timeout).toBe(args[1] === "prompt" ? 1000 : 3000);
+      expect(timeout).toBe(args[1] === "prompt" ? 2000 : 3000);
       await onStarted?.();
       return { stdout: JSON.stringify({ result: { prompt: { agent_status: args[1] === "prompt" ? "working" : "done" } } }), stderr: "" };
     } };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, (value) => { observations.push(value); }, undefined, () => { dispatched += 1; })).resolves.toBe("done");
     expect(calls).toEqual([
-      ["agent", "prompt", "w1:p1", "hello"],
+      ["agent", "prompt", "w1:p1", "hello", "--wait", "--until", "working", "--until", "blocked", "--until", "done", "--timeout", "1000"],
       ["agent", "wait", "w1:p1", "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", "2000"]
     ]);
     expect(observations).toEqual([
@@ -301,7 +301,7 @@ describe("Herdr adapter structured control", () => {
     const prompt = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { dispatched += 1; });
     await vi.waitFor(() => expect(dispatched).toBe(1));
     expect(calls).toEqual([
-      ["agent", "prompt", "w1:p1", "hello"],
+      ["agent", "prompt", "w1:p1", "hello", "--wait", "--until", "working", "--until", "blocked", "--until", "done", "--timeout", "1000"],
       ["agent", "wait", "w1:p1", "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", "2000"]
     ]);
     releaseCompletion();
