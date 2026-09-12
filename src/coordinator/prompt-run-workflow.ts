@@ -3,7 +3,7 @@ import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-e
 import type { BridgeEvent } from "../domain/events.js";
 import type { HerdrPort, TraexControlPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { DetachedPromptSkipResult } from "../domain/ports/prompt-acceptance.js";
-import type { PromptRunStore } from "../domain/ports/prompt-run.js";
+import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../domain/ports/prompt-run.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
 import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from "../domain/types.js";
@@ -41,7 +41,7 @@ export interface PromptRunWorkflowPort {
 }
 
 interface PromptRunWorkflowOptions {
-  store: PromptRunStore;
+  stores: { dispatch: PromptDispatchStore; recovery: PromptRecoveryStore; session: PromptSessionStore };
   herdr: HerdrPort;
   traexControl?: TraexControlPort;
   bus: LifecycleEventPublisher;
@@ -77,13 +77,13 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.shutdownGraceMs = options.shutdownGraceMs ?? 30_000;
     const intervalMs = options.safetyScanIntervalMs ?? 5_000;
     this.safetyScanner = new PromptSafetyScanner({
-      store: options.store, scheduler: options.scheduler, logger: options.logger, intervalMs,
+      store: options.stores.recovery, scheduler: options.scheduler, logger: options.logger, intervalMs,
       staleClaimGraceMs: options.staleClaimGraceMs ?? Math.max(10_000, intervalMs * 2),
       isBindingOwned: (bindingId) => this.registry.hasWorker(bindingId) || this.registry.hasTurn(bindingId),
       maintainObserverCaches: () => this.transcriptObserver.prune()
     });
     this.transcriptObserver = new TranscriptObserver({
-      store: options.store, herdr: options.herdr, adoptRuntimeIdentity: options.adoptRuntimeIdentity, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
+      store: options.stores.dispatch, herdr: options.herdr, adoptRuntimeIdentity: options.adoptRuntimeIdentity, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
       ...(options.transcriptPolling ? { identityPollMs: options.transcriptPolling.identityMs, attachedPollMs: options.transcriptPolling.attachedMs } : {}),
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       publishObservation: async (bindingId, promptId, observation) => {
@@ -91,18 +91,18 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       }
     });
     this.turnExecutor = new PromptTurnExecutor({
-      store: options.store, herdr: options.herdr, ...(options.traexControl ? { traexControl: options.traexControl } : {}), transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
+      store: options.stores.dispatch, herdr: options.herdr, ...(options.traexControl ? { traexControl: options.traexControl } : {}), transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       updateTurnState: (bindingId, promptId, state) => this.registry.updateTurnState(bindingId, promptId, state),
       convergeMainCard: (bindingId) => this.convergeMainCard(bindingId),
-      releaseUndispatched: ({ binding, prompt }) => this.options.store.releaseUndispatchedPromptClaim?.({ promptId: prompt.id, bindingId: binding.id, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }) ?? false,
+      releaseUndispatched: ({ binding, prompt }) => this.options.stores.recovery.releaseUndispatchedPromptClaim({ promptId: prompt.id, bindingId: binding.id, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }),
       observeDetached: (prompt, binding, source, controller) => this.observeDetachedTurnWithSource(prompt, binding, source, controller),
       publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload)
     });
   }
 
   prepareRecovery(): void {
-    const recovered = this.options.store.recoverRunningPrompts();
+    const recovered = this.options.stores.recovery.recoverRunningPrompts();
     if (recovered > 0) this.options.logger.warn({ event: "startup-prompts-recovered", recovered, outcome: "detached_without_replay" }, "detached from interrupted prompt observers without replay");
   }
 
@@ -132,7 +132,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (this.stopping) return;
     try {
       if (event.kind === "detached-observer-ready") {
-        const prompt = this.options.store.getPrompt(event.promptId);
+        const prompt = this.options.stores.recovery.getPrompt(event.promptId);
         if (prompt?.bindingId === event.bindingId && prompt.state === "running" && prompt.observationState === "detached") this.scheduleDetachedObserver(prompt);
         return;
       }
@@ -152,9 +152,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   async awake(bindingId: string): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "busy" | "unavailable"; reason: string }> {
-    const prompt = this.options.store.listDetachedPrompts().find((candidate) => candidate.bindingId === bindingId);
+    const prompt = this.options.stores.recovery.listDetachedPrompts().find((candidate) => candidate.bindingId === bindingId);
     if (!prompt) return { outcome: "none", reason: "no_detached_prompt" };
-    const binding = this.options.store.getBinding(bindingId);
+    const binding = this.options.stores.recovery.getBinding(bindingId);
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") return { outcome: "unavailable", reason: "binding_not_active" };
     if (!this.options.recoverExternalTurns) return { outcome: "unavailable", reason: "recovery_unavailable" };
     const existing = this.registry.worker(bindingId);
@@ -175,7 +175,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   skipDetached(bindingId: string, expectedBindingGeneration: number, actorOpenId: string, sourceMessageId: string, rootMessageId: string | null): DetachedPromptSkipResult {
-    const result = this.options.store.skipOldestDetachedPrompt({
+    const result = this.options.stores.recovery.skipOldestDetachedPrompt({
       bindingId, expectedBindingGeneration, actorOpenId, sourceMessageId, rootMessageId,
       reason: "人工跳过；此前执行结果不确定，任务不会自动重放。",
       occurredAt: new Date().toISOString(), renderRunCard: this.options.presentation.answerCard
@@ -202,7 +202,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const abortObservers = () => {
       this.options.logger.warn({ event: "bridge-shutdown-turns-aborted", activeTurns: this.registry.activeTurnCount, graceMs: context?.remainingMs() ?? this.shutdownGraceMs, outcome: "aborted" }, "aborting Bridge prompt waiters after shutdown grace period");
       this.registry.abortAll((run) => {
-        this.options.store.markPromptObservationDetached(run.promptId, "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。");
+        this.options.stores.recovery.markPromptObservationDetached(run.promptId, "Bridge 已停止观察，但 TraeX 任务可能仍在运行；重启后会继续观察，不会重复发送请求。");
       });
     };
     if (context?.signal.aborted) abortObservers();
@@ -227,13 +227,13 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private async drain(bindingId: string): Promise<void> {
     while (!this.stopping) {
       if (this.options.handoffExternalTurns) await this.options.handoffExternalTurns(bindingId);
-      const claimed = this.options.store.claimNextDispatchablePrompt(bindingId);
+      const claimed = this.options.stores.dispatch.claimNextDispatchablePrompt(bindingId);
       if (!claimed) return;
       const { binding, prompt, model } = claimed;
       let livePane;
       try { livePane = this.options.herdr.getPane ? await this.options.herdr.getPane(binding.paneId!) : null; }
       catch (error) {
-        const released = this.options.store.releaseUndispatchedPromptClaim?.({ promptId: prompt.id, bindingId, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }) ?? false;
+        const released = this.options.stores.recovery.releaseUndispatchedPromptClaim({ promptId: prompt.id, bindingId, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! });
         this.options.logger.warn({ event: "prompt-pre-dispatch-observation-failed", err: safeLogError(error), bindingId, promptId: prompt.id, paneId: binding.paneId, outcome: released ? "requeued_before_dispatch" : "stale_claim" }, "could not verify the pane was settled before prompt dispatch");
         return;
       }
@@ -248,7 +248,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         } catch { unavailableReason = "runtime_identity_changed"; }
       }
       if (unavailableReason) {
-        const released = this.options.store.releaseUndispatchedPromptClaim?.({ promptId: prompt.id, bindingId, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }) ?? false;
+        const released = this.options.stores.recovery.releaseUndispatchedPromptClaim({ promptId: prompt.id, bindingId, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! });
         this.options.logger.warn({ event: "prompt-pre-dispatch-runtime-unavailable", bindingId, promptId: prompt.id, paneId: binding.paneId, reason: unavailableReason, agentState: livePane?.agentState ?? "unknown", outcome: released ? "requeued_before_dispatch" : "stale_claim" }, "deferred prompt dispatch because the live Herdr pane was not dispatchable");
         if (released && unavailableReason === "runtime_busy" && this.options.handoffExternalTurns) await this.options.handoffExternalTurns(bindingId);
         return;
@@ -264,7 +264,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       } finally {
         this.registry.detachTurn(bindingId, prompt.id);
         this.options.scheduler.wake({ kind: "control-ready", bindingId });
-        const latestBinding = this.options.store.getBinding(bindingId);
+        const latestBinding = this.options.stores.session.getBinding(bindingId);
         if (!observerDetached && latestBinding?.lifecycle === "draining") await this.archiveDrainedBinding(latestBinding);
       }
       if (dispatchDeferred) {
@@ -278,7 +278,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (this.registry.hasWorker(prompt.bindingId)) return;
     const worker = this.observeDetachedTurn(prompt).finally(() => {
       this.registry.releaseWorker(prompt.bindingId, worker);
-      const latest = this.options.store.getPrompt(prompt.id);
+      const latest = this.options.stores.recovery.getPrompt(prompt.id);
       if (!this.stopping && latest && !(latest.state === "running" && latest.observationState === "detached")) {
         this.options.scheduler.wake({ kind: "prompt-ready", bindingId: prompt.bindingId });
       }
@@ -287,11 +287,11 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   }
 
   private async observeDetachedTurn(prompt: PromptJob): Promise<void> {
-    const currentPrompt = this.options.store.getPrompt(prompt.id);
+    const currentPrompt = this.options.stores.recovery.getPrompt(prompt.id);
     if (!currentPrompt || currentPrompt.state !== "running" || currentPrompt.observationState !== "detached") return;
     if (!currentPrompt.transcriptTurnId || !currentPrompt.transcriptTurnStartedAt) return;
     prompt = currentPrompt;
-    const binding = this.options.store.getBinding(prompt.bindingId);
+    const binding = this.options.stores.recovery.getBinding(prompt.bindingId);
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
     const abortController = this.registry.attachTurn(binding.id, prompt.id, paneId, binding.lastAgentState);
@@ -314,7 +314,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     let supersedingTurnInProgress = false;
     try {
       while (!this.stopping && !abortController.signal.aborted) {
-        const durablePrompt = this.options.store.getPrompt(prompt.id);
+        const durablePrompt = this.options.stores.recovery.getPrompt(prompt.id);
         if (!durablePrompt || (!supersedingTurnInProgress && (durablePrompt.state !== "running" || durablePrompt.observationState !== "detached"))) return;
         if (durablePrompt.state === "running") prompt = durablePrompt;
         if (!this.isBindingActive(binding.id)) return;
@@ -347,23 +347,23 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
         if (terminal.kind === "completed") {
           const sourceAnswer = terminal.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.output.text : "");
           const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
-          const settled = this.options.store.settleDetachedPrompt({
+          const settled = this.options.stores.recovery.settleDetachedPrompt({
             promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(),
             terminal: { kind: "completed", answer: finalAnswer, outputFingerprint: outputFingerprint(sourceAnswer) }
           });
           if (!settled) return;
-          await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+          await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: finalAnswer, queueDepth: this.options.stores.recovery.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
           return;
         }
         if (terminal.kind === "aborted") {
           const reason = abortedPromptNotice(terminal.reason);
-          const settled = this.options.store.settleDetachedPrompt({
+          const settled = this.options.stores.recovery.settleDetachedPrompt({
             promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(),
             terminal: { kind: "failed", error: reason }
           });
           if (!settled) return;
-          await this.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+          await this.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.stores.recovery.countPendingPrompts(binding.id) });
           this.options.logger.info({ event: "detached-turn-aborted", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "failed_without_replay" }, "observed explicit abort of an existing TraeX turn");
           return;
         }
@@ -372,26 +372,26 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       }
     } catch (error) {
       if (abortController.signal.aborted || this.stopping) return;
-      this.options.store.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
+      this.options.stores.recovery.markPromptObservationDetached(prompt.id, `无法确认 TraeX 任务结果：${errorMessage(error)}；请求不会自动重发。`);
       this.options.logger.warn({ event: "detached-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId, outcome: "uncertain" }, "could not observe existing TraeX turn");
     }
   }
 
   private isBindingActive(bindingId: string): boolean {
-    const binding = this.options.store.getBinding(bindingId);
+    const binding = this.options.stores.session.getBinding(bindingId);
     return binding?.state === "active" && binding.lifecycle === "active";
   }
 
   private async archiveDrainedBinding(binding: Binding): Promise<void> {
     const event = createBridgeEvent(binding.id, "BindingArchived", "bridge", { reason: "当前任务已结束，话题归档完成；Herdr pane 与 TraeX 保持运行。" });
-    const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id);
+    const current = this.options.stores.session.loadTopicView(binding.id) ?? initialTopicView(binding.id);
     const view = reduceTopicView(current, event);
     if (!binding.statusMessageId) {
-      this.options.store.transitionBinding(binding.id, { type: "drain_completed" });
+      this.options.stores.session.transitionBinding(binding.id, { type: "drain_completed" });
       await this.options.bus.publish(event);
       return;
     }
-    this.options.store.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view) });
+    this.options.stores.session.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view) });
     this.options.outboundWork.wake();
     await this.options.bus.publish(event);
   }

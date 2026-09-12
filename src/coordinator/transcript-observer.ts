@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { HerdrPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
-import type { PromptRunStore } from "../domain/ports/prompt-run.js";
+import type { PromptDispatchStore } from "../domain/ports/prompt-run.js";
 import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -14,7 +14,7 @@ export type TurnOutputSource =
   | { mode: "typed"; cursor: ExactTurnCursor; emitted: boolean; output: ReturnType<typeof createBoundedTurnOutput>; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
 
 interface TranscriptObserverOptions {
-  store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn"> & Partial<Pick<PromptRunStore, "loadRunCard">>;
+  store: Pick<PromptDispatchStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn" | "loadRunCard">;
   reader?: TraexTranscriptReaderPort;
   herdr: Pick<HerdrPort, "observeRuntime">;
   adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;

@@ -117,8 +117,11 @@ describe("application composition boundaries", () => {
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
     expect(storeBundle).toContain("promptAcceptance: modules.promptAcceptance");
-    expect(storeBundle).toContain("promptRun: modules.promptRun");
-    expect(storeBundle).not.toMatch(/prompt(?:Acceptance|Run):\s*store/);
+    for (const capability of ["promptDispatch", "promptRecovery", "promptSession"]) {
+      expect(storeBundle).toContain(`${capability}: modules.${capability}`);
+      expect(storeBundle).not.toMatch(new RegExp(`${capability}:\s*store`));
+    }
+    expect(storeBundle).not.toMatch(/promptAcceptance:\s*store/);
     for (const capability of ["bindingProvisioning", "runtimeReconciliation", "retiredPaneCleanup", "sessionAdministration", "paneRetention"]) {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
@@ -148,7 +151,9 @@ describe("application composition boundaries", () => {
       ), "utf8")).not.toMatch(/store: InstanceStore(?:;|,)/);
     }
     expect(storeBundle).not.toContain("SqliteBindingStore");
-    expect(composition).toContain("stores.promptRun");
+    expect(composition).toContain("stores.promptDispatch");
+    expect(composition).toContain("stores.promptRecovery");
+    expect(composition).toContain("stores.promptSession");
     expect(composition).toContain("stores.instance");
     const worker = readFileSync(new URL("../src/composition/create-worker-runtime.ts", import.meta.url), "utf8");
     expect(worker).toContain("stores.instanceLifecycle");
@@ -319,6 +324,24 @@ describe("application composition boundaries", () => {
     expect(capability).toContain("private readonly dispatch: SqlitePromptDispatchStore");
     expect(capability).toContain("this.dispatch.");
     expect(graph).toContain("new SqlitePromptDispatchStore");
+  });
+
+  it("gives Primary prompt consumers separate dispatch recovery and session ports", () => {
+    const ports = readFileSync(new URL("../src/domain/ports/prompt-run.ts", import.meta.url), "utf8");
+    const workflow = readFileSync(new URL("../src/coordinator/prompt-run-workflow.ts", import.meta.url), "utf8");
+    const executor = readFileSync(new URL("../src/coordinator/prompt-turn-executor.ts", import.meta.url), "utf8");
+    const scanner = readFileSync(new URL("../src/coordinator/prompt-safety-scanner.ts", import.meta.url), "utf8");
+    const bundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
+    for (const name of ["PromptDispatchStore", "PromptRecoveryStore", "PromptSessionStore"]) expect(ports).toContain(`interface ${name}`);
+    expect(ports).not.toContain("interface PromptRunStore");
+    expect(workflow).toContain("stores:");
+    expect(workflow).not.toContain("store: PromptRunStore");
+    expect(executor).toContain("store: PromptDispatchStore");
+    expect(scanner).toContain("store: PromptRecoveryStore");
+    expect(bundle).toContain("readonly promptDispatch: PromptDispatchStore");
+    expect(bundle).toContain("readonly promptRecovery: PromptRecoveryStore");
+    expect(bundle).toContain("readonly promptSession: PromptSessionStore");
+    expect(bundle).not.toContain("readonly promptRun: PromptRunStore");
   });
 
   it("executes prompt acceptance effects only from a committed typed receipt", () => {

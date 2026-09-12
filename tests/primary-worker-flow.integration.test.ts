@@ -74,7 +74,7 @@ describe("Primary to Worker product flow", () => {
     } as never;
     const promptScheduler = new InProcessPromptWorkScheduler();
     const primaryTurnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9"; let transcriptRead = false;
-    promptRun = new PromptRunWorkflow({ store, herdr: primaryHerdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, presentation: primaryPresentation, logger: pino({ enabled: false }), turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
+    promptRun = new PromptRunWorkflow({ stores: { dispatch: store, recovery: store, session: store }, herdr: primaryHerdr, bus: new BridgeEventBus(), scheduler: promptScheduler, outboundWork: { wake() {} }, presentation: primaryPresentation, logger: pino({ enabled: false }), turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
       async readDelta() { return ""; },
       async readObservation() {
         const answerDelta = transcriptRead ? "" : primaryAnswer; transcriptRead = true; primaryAnswer = "";

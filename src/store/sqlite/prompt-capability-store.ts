@@ -1,5 +1,5 @@
 import type { PromptAcceptanceStore } from "../../domain/ports/prompt-acceptance.js";
-import type { PromptRunStore } from "../../domain/ports/prompt-run.js";
+import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../../domain/ports/prompt-run.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
 import type { SqliteBindingProjectionStore } from "./binding-projection-store.js";
 import type { SqliteOperationsStore } from "./operations-store.js";
@@ -9,48 +9,77 @@ import type { SqlitePromptRecoveryStore } from "./prompt-recovery-store.js";
 import type { SqlitePromptAcceptanceStore } from "./prompt-acceptance-store.js";
 import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 
-export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, PromptRunStore {
+export class SqlitePromptAcceptanceCapabilityStore implements PromptAcceptanceStore {
   constructor(
-    private readonly prompts: SqlitePromptStore,
-    private readonly recovery: SqlitePromptRecoveryStore,
     private readonly acceptance: SqlitePromptAcceptanceStore,
-    private readonly dispatch: SqlitePromptDispatchStore,
-    private readonly bindings: SqliteBindingLifecycleStore,
-    private readonly bindingProjections: SqliteBindingProjectionStore,
-    private readonly projections: SqliteProjectionStore,
+    private readonly prompts: SqlitePromptStore,
     private readonly operations: SqliteOperationsStore
   ) {}
 
-  acceptPrompt(input: Parameters<PromptAcceptanceStore["acceptPrompt"]>[0]): ReturnType<PromptAcceptanceStore["acceptPrompt"]> { return this.acceptance.acceptPrompt(input); }
-  acceptPromptWithEffects(input: Parameters<PromptAcceptanceStore["acceptPromptWithEffects"]>[0]): ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]> { return this.acceptance.acceptPromptWithEffects(input); }
-  acceptInterruptedContinuation(input: Parameters<PromptAcceptanceStore["acceptInterruptedContinuation"]>[0]): ReturnType<PromptAcceptanceStore["acceptInterruptedContinuation"]> { return this.acceptance.acceptInterruptedContinuation(input); }
-  audit(input: Parameters<PromptAcceptanceStore["audit"]>[0]): void { this.operations.audit(input); }
-  countPendingPrompts(bindingId: string): number { return this.prompts.countPendingPrompts(bindingId); }
+  acceptPrompt: PromptAcceptanceStore["acceptPrompt"] = (input) => this.acceptance.acceptPrompt(input);
+  acceptPromptWithEffects: PromptAcceptanceStore["acceptPromptWithEffects"] = (input) => this.acceptance.acceptPromptWithEffects(input);
+  acceptInterruptedContinuation: PromptAcceptanceStore["acceptInterruptedContinuation"] = (input) => this.acceptance.acceptInterruptedContinuation(input);
+  audit: PromptAcceptanceStore["audit"] = (input) => this.operations.audit(input);
+  countPendingPrompts: PromptAcceptanceStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
+}
 
-  recoverRunningPrompts(): number { return this.recovery.recoverRunningPrompts(); }
-  listDetachedPrompts(): ReturnType<PromptRunStore["listDetachedPrompts"]> { return this.recovery.listDetachedPrompts(); }
-  skipOldestDetachedPrompt(input: Parameters<PromptRunStore["skipOldestDetachedPrompt"]>[0]): ReturnType<PromptRunStore["skipOldestDetachedPrompt"]> { return this.recovery.skipOldestDetachedPrompt(input); }
-  settleDetachedPrompt(input: Parameters<PromptRunStore["settleDetachedPrompt"]>[0]): boolean { return this.recovery.settleDetachedPrompt(input); }
-  scanDurablePromptWork(): ReturnType<PromptRunStore["scanDurablePromptWork"]> { return this.recovery.scanDurablePromptWork(); }
-  listStaleUndispatchedPromptClaims(updatedBefore: string, limit: number): NonNullable<ReturnType<NonNullable<PromptRunStore["listStaleUndispatchedPromptClaims"]>>> { return this.recovery.listStaleUndispatchedPromptClaims(updatedBefore, limit); }
-  requeueStaleUndispatchedPromptClaim(candidate: Parameters<NonNullable<PromptRunStore["requeueStaleUndispatchedPromptClaim"]>>[0]): boolean { return this.recovery.requeueStaleUndispatchedPromptClaim(candidate); }
-  releaseUndispatchedPromptClaim(candidate: Parameters<NonNullable<PromptRunStore["releaseUndispatchedPromptClaim"]>>[0]): boolean { return this.recovery.releaseUndispatchedPromptClaim(candidate); }
-  getBinding(id: string): ReturnType<PromptRunStore["getBinding"]> { return this.bindings.getBinding(id); }
-  getPrompt(id: string): ReturnType<PromptRunStore["getPrompt"]> { return this.dispatch.getPrompt(id); }
-  claimNextDispatchablePrompt(bindingId: string): ReturnType<PromptRunStore["claimNextDispatchablePrompt"]> { return this.dispatch.claimNextDispatchablePrompt(bindingId); }
-  markPromptDispatched(id: string, dispatchedAt: string): void { this.dispatch.markPromptDispatched(id, dispatchedAt); }
-  markModelPromptPrepared(input: Parameters<PromptRunStore["markModelPromptPrepared"]>[0]): boolean { return this.dispatch.markModelPromptPrepared(input); }
-  markModelPromptAccepted(input: Parameters<PromptRunStore["markModelPromptAccepted"]>[0]): boolean { return this.dispatch.markModelPromptAccepted(input); }
-  rollbackPreparedModelPrompt(input: Parameters<PromptRunStore["rollbackPreparedModelPrompt"]>[0]): boolean { return this.dispatch.rollbackPreparedModelPrompt(input); }
-  claimPromptTranscriptTurn(input: Parameters<PromptRunStore["claimPromptTranscriptTurn"]>[0]): ReturnType<PromptRunStore["claimPromptTranscriptTurn"]> { return this.dispatch.claimPromptTranscriptTurn(input); }
-  markPromptObservationDetached(id: string, notice: string): void { this.recovery.markPromptObservationDetached(id, notice); }
-  updatePrompt(id: string, state: Parameters<PromptRunStore["updatePrompt"]>[1], error?: string | null): void { this.dispatch.updatePrompt(id, state, error); }
-  completeTurn(input: Parameters<PromptRunStore["completeTurn"]>[0]): ReturnType<PromptRunStore["completeTurn"]> { return this.dispatch.completeTurn(input); }
-  failPrompt(input: Parameters<PromptRunStore["failPrompt"]>[0]): void { this.dispatch.failPrompt(input); }
-  updateBindingMetadata(...args: Parameters<PromptRunStore["updateBindingMetadata"]>): ReturnType<PromptRunStore["updateBindingMetadata"]> { return this.bindings.updateBindingMetadata(...args); }
-  transitionBinding(...args: Parameters<PromptRunStore["transitionBinding"]>): ReturnType<PromptRunStore["transitionBinding"]> { return this.bindings.transitionBinding(...args); }
-  listQueuedTurnRunCards(bindingId: string): ReturnType<PromptRunStore["listQueuedTurnRunCards"]> { return this.prompts.listQueuedTurnRunCards(bindingId); }
-  loadRunCard(promptId: string): ReturnType<PromptRunStore["loadRunCard"]> { return this.projections.loadRunCard(promptId); }
-  loadTopicView(bindingId: string): ReturnType<PromptRunStore["loadTopicView"]> { return this.projections.loadTopicView(bindingId); }
-  transitionBindingWithOutbox(input: Parameters<PromptRunStore["transitionBindingWithOutbox"]>[0]): ReturnType<PromptRunStore["transitionBindingWithOutbox"]> { return this.bindingProjections.transitionBindingWithOutbox(input); }
+export class SqlitePromptDispatchCapabilityStore implements PromptDispatchStore {
+  constructor(
+    private readonly dispatch: SqlitePromptDispatchStore,
+    private readonly recovery: SqlitePromptRecoveryStore,
+    private readonly prompts: SqlitePromptStore,
+    private readonly bindings: SqliteBindingLifecycleStore,
+    private readonly projections: SqliteProjectionStore
+  ) {}
+
+  getBinding: PromptDispatchStore["getBinding"] = (id) => this.bindings.getBinding(id);
+  getPrompt: PromptDispatchStore["getPrompt"] = (id) => this.dispatch.getPrompt(id);
+  getActiveOrdinaryPrompt: PromptDispatchStore["getActiveOrdinaryPrompt"] = (id, generation) => this.dispatch.getActiveOrdinaryPrompt(id, generation);
+  claimNextDispatchablePrompt: PromptDispatchStore["claimNextDispatchablePrompt"] = (id) => this.dispatch.claimNextDispatchablePrompt(id);
+  markPromptDispatched: PromptDispatchStore["markPromptDispatched"] = (id, at) => this.dispatch.markPromptDispatched(id, at);
+  markModelPromptPrepared: PromptDispatchStore["markModelPromptPrepared"] = (input) => this.dispatch.markModelPromptPrepared(input);
+  markModelPromptAccepted: PromptDispatchStore["markModelPromptAccepted"] = (input) => this.dispatch.markModelPromptAccepted(input);
+  rollbackPreparedModelPrompt: PromptDispatchStore["rollbackPreparedModelPrompt"] = (input) => this.dispatch.rollbackPreparedModelPrompt(input);
+  claimPromptTranscriptTurn: PromptDispatchStore["claimPromptTranscriptTurn"] = (input) => this.dispatch.claimPromptTranscriptTurn(input);
+  markPromptObservationDetached: PromptDispatchStore["markPromptObservationDetached"] = (id, notice) => this.recovery.markPromptObservationDetached(id, notice);
+  completeTurn: PromptDispatchStore["completeTurn"] = (input) => this.dispatch.completeTurn(input);
+  failPrompt: PromptDispatchStore["failPrompt"] = (input) => this.dispatch.failPrompt(input);
+  transitionBinding: PromptDispatchStore["transitionBinding"] = (id, transition) => this.bindings.transitionBinding(id, transition);
+  countPendingPrompts: PromptDispatchStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
+  loadRunCard: PromptDispatchStore["loadRunCard"] = (id) => this.projections.loadRunCard(id);
+}
+
+export class SqlitePromptRecoveryCapabilityStore implements PromptRecoveryStore {
+  constructor(
+    private readonly recovery: SqlitePromptRecoveryStore,
+    private readonly dispatch: SqlitePromptDispatchStore,
+    private readonly prompts: SqlitePromptStore,
+    private readonly bindings: SqliteBindingLifecycleStore
+  ) {}
+
+  recoverRunningPrompts: PromptRecoveryStore["recoverRunningPrompts"] = () => this.recovery.recoverRunningPrompts();
+  listDetachedPrompts: PromptRecoveryStore["listDetachedPrompts"] = () => this.recovery.listDetachedPrompts();
+  skipOldestDetachedPrompt: PromptRecoveryStore["skipOldestDetachedPrompt"] = (input) => this.recovery.skipOldestDetachedPrompt(input);
+  settleDetachedPrompt: PromptRecoveryStore["settleDetachedPrompt"] = (input) => this.recovery.settleDetachedPrompt(input);
+  scanDurablePromptWork: PromptRecoveryStore["scanDurablePromptWork"] = () => this.recovery.scanDurablePromptWork();
+  listStaleUndispatchedPromptClaims: PromptRecoveryStore["listStaleUndispatchedPromptClaims"] = (before, limit) => this.recovery.listStaleUndispatchedPromptClaims(before, limit);
+  requeueStaleUndispatchedPromptClaim: PromptRecoveryStore["requeueStaleUndispatchedPromptClaim"] = (candidate) => this.recovery.requeueStaleUndispatchedPromptClaim(candidate);
+  releaseUndispatchedPromptClaim: PromptRecoveryStore["releaseUndispatchedPromptClaim"] = (candidate) => this.recovery.releaseUndispatchedPromptClaim(candidate);
+  getBinding: PromptRecoveryStore["getBinding"] = (id) => this.bindings.getBinding(id);
+  getPrompt: PromptRecoveryStore["getPrompt"] = (id) => this.dispatch.getPrompt(id);
+  markPromptObservationDetached: PromptRecoveryStore["markPromptObservationDetached"] = (id, notice) => this.recovery.markPromptObservationDetached(id, notice);
+  countPendingPrompts: PromptRecoveryStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
+}
+
+export class SqlitePromptSessionCapabilityStore implements PromptSessionStore {
+  constructor(
+    private readonly bindings: SqliteBindingLifecycleStore,
+    private readonly bindingProjections: SqliteBindingProjectionStore,
+    private readonly projections: SqliteProjectionStore
+  ) {}
+
+  getBinding: PromptSessionStore["getBinding"] = (id) => this.bindings.getBinding(id);
+  loadTopicView: PromptSessionStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
+  transitionBinding: PromptSessionStore["transitionBinding"] = (id, transition) => this.bindings.transitionBinding(id, transition);
+  transitionBindingWithOutbox: PromptSessionStore["transitionBindingWithOutbox"] = (input) => this.bindingProjections.transitionBindingWithOutbox(input);
 }

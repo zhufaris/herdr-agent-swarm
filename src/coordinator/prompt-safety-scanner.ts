@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { PromptRunStore } from "../domain/ports/prompt-run.js";
+import type { PromptRecoveryStore } from "../domain/ports/prompt-run.js";
 import type { PromptWorkerDiagnostics } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -10,7 +10,7 @@ type SafetyScanDiagnostics = Pick<PromptWorkerDiagnostics,
 >;
 
 interface PromptSafetyScannerOptions {
-  store: Pick<PromptRunStore, "scanDurablePromptWork" | "listStaleUndispatchedPromptClaims" | "requeueStaleUndispatchedPromptClaim">;
+  store: PromptRecoveryStore;
   scheduler: Pick<PromptWorkScheduler, "wake">;
   logger: Logger;
   intervalMs: number;

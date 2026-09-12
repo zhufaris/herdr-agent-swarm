@@ -4,7 +4,7 @@ import type { SqliteBindingThreadAliasStore } from "./binding-thread-alias-store
 import type { SqliteInboundProjectStore } from "./inbound-project-store.js";
 import type { SqliteOperationsStore } from "./operations-store.js";
 import type { SqliteOutboxStore } from "./outbox-store.js";
-import { SqlitePromptCapabilityStore } from "./prompt-capability-store.js";
+import { SqlitePromptAcceptanceCapabilityStore } from "./prompt-capability-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqliteExternalTurnAdoptionStore } from "./external-turn-adoption-store.js";
 import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
@@ -26,15 +26,15 @@ export class SqliteInboundRoutingCapabilityStore implements InboundRoutingStore 
 
 /** Transitional aggregate for consumers that still combine routing and prompt
  * acceptance. Slice 6 replaces those intersections with consumer-shaped ports. */
-export class SqliteIngressCapabilityStore extends SqlitePromptCapabilityStore implements InboundRoutingStore {
+export class SqliteIngressCapabilityStore extends SqlitePromptAcceptanceCapabilityStore implements InboundRoutingStore {
   constructor(
     private readonly routing: SqliteInboundRoutingCapabilityStore,
-    ...promptDependencies: ConstructorParameters<typeof SqlitePromptCapabilityStore>
+    ...promptDependencies: ConstructorParameters<typeof SqlitePromptAcceptanceCapabilityStore>
   ) { super(...promptDependencies); }
 
   findBindingByLarkScope: InboundRoutingStore["findBindingByLarkScope"] = (topicId, rootMessageId) => this.routing.findBindingByLarkScope(topicId, rootMessageId);
   isBindingThreadAlias: InboundRoutingStore["isBindingThreadAlias"] = (topicId, rootMessageId) => this.routing.isBindingThreadAlias(topicId, rootMessageId);
-  override getBinding: InboundRoutingStore["getBinding"] = (id) => this.routing.getBinding(id);
+  getBinding: InboundRoutingStore["getBinding"] = (id) => this.routing.getBinding(id);
   isBridgeMessage: InboundRoutingStore["isBridgeMessage"] = (id) => this.routing.isBridgeMessage(id);
   listCompletedProjectSelectionsWithInitialPrompt: InboundRoutingStore["listCompletedProjectSelectionsWithInitialPrompt"] = () => this.routing.listCompletedProjectSelectionsWithInitialPrompt();
 }

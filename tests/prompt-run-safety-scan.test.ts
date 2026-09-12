@@ -69,11 +69,11 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const candidate = { promptId: "p1", bindingId: "b1", updatedAt: "2026-09-05T00:00:00.000Z" };
     const requeue = vi.fn(() => true);
     const workflow = new PromptRunWorkflow({
-      store: {
+      stores: promptStores({
         scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
         listStaleUndispatchedPromptClaims: vi.fn(() => [candidate]),
         requeueStaleUndispatchedPromptClaim: requeue
-      } as never,
+      }),
       scheduler: { subscribe: () => () => {}, wake }, safetyScanIntervalMs: 100, staleClaimGraceMs: 1_000, turnTimeoutMs: 1_000,
       herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
       presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
@@ -91,7 +91,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const requeue = vi.fn(() => true);
     let claimCount = 0;
     const workflow = new PromptRunWorkflow({
-      store: {
+      stores: promptStores({
         scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
         listStaleUndispatchedPromptClaims: vi.fn(() => [candidate]),
         requeueStaleUndispatchedPromptClaim: requeue,
@@ -102,7 +102,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
         } : null),
         countPendingPrompts: () => 1,
         getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" })
-      } as never,
+      }),
       scheduler: { subscribe: () => () => {}, wake: vi.fn() }, safetyScanIntervalMs: 100, staleClaimGraceMs: 1_000, turnTimeoutMs: 1_000,
       transcriptReader: { async open() { return new Promise(() => undefined); } },
       herdr: { async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] }; } } as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
@@ -190,7 +190,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const handoff = vi.fn(async () => { order.push("handoff"); });
     const claim = vi.fn(() => { order.push("claim"); return null; });
     const workflow = new PromptRunWorkflow({
-      store: { scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }), claimNextDispatchablePrompt: claim } as never,
+      stores: promptStores({ scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }), claimNextDispatchablePrompt: claim }),
       scheduler: new InProcessPromptWorkScheduler(), safetyScanIntervalMs: 100, turnTimeoutMs: 1_000,
       herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
       presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never, handoffExternalTurns: handoff
@@ -210,7 +210,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const release = vi.fn(() => { order.push("release"); return true; });
     let claimCount = 0;
     const workflow = new PromptRunWorkflow({
-      store: {
+      stores: promptStores({
         scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
         claimNextDispatchablePrompt: vi.fn(() => {
           order.push("claim");
@@ -222,7 +222,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
         }),
         releaseUndispatchedPromptClaim: release,
         getBinding: vi.fn(() => null)
-      } as never,
+      }),
       scheduler: new InProcessPromptWorkScheduler(), turnTimeoutMs: 1_000,
       herdr: {
         getPane: vi.fn(async () => { order.push("observe"); return { paneId: "w1:p1", workspaceId: "w1", agentState: "working", activeTurnId: "external-turn", foregroundExecutables: ["traex"] }; }),
@@ -247,7 +247,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     let claimCount = 0;
     const handoff = vi.fn(async () => undefined);
     const workflow = new PromptRunWorkflow({
-      store: {
+      stores: promptStores({
         scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
         claimNextDispatchablePrompt: vi.fn(() => claimCount++ === 0 ? {
           binding: { id: "b1", generation: 2, workspaceId: "w1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" },
@@ -255,7 +255,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
           model: null
         } : null),
         releaseUndispatchedPromptClaim: release, failPrompt, countPendingPrompts: () => 1, getBinding: () => null
-      } as never,
+      }),
       scheduler: new InProcessPromptWorkScheduler(), turnTimeoutMs: 1_000,
       herdr: {
         async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] }; },
@@ -300,10 +300,10 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const wake = vi.fn();
     const prompt = { id: "p1", bindingId: "b1", state: "running", observationState: "detached" };
     const workflow = new PromptRunWorkflow({
-      store: {
+      stores: promptStores({
         getPrompt: vi.fn(() => prompt),
         getBinding: vi.fn(() => null)
-      } as never,
+      }),
       scheduler: { subscribe: () => () => {}, wake },
       turnTimeoutMs: 1_000,
       herdr: {} as never, bus: { async publish() {} },
@@ -325,7 +325,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const getPrompt = vi.fn().mockReturnValueOnce(running).mockReturnValueOnce(running).mockReturnValue(delivered);
     const observeRuntime = vi.fn();
     const workflow = new PromptRunWorkflow({
-      store: { getPrompt, getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" }) } as never,
+      stores: promptStores({ getPrompt, getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" }) }),
       scheduler: { subscribe: () => () => {}, wake },
       turnTimeoutMs: 1_000, transcriptReader: { async open() { return { mode: "unavailable" as const, reason: "transcript_not_found" as const }; } },
       herdr: { observeRuntime } as never, bus: { async publish() {} },
@@ -349,10 +349,10 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const getPrompt = vi.fn(() => skippedAfterTerminalRead ? skipped : running);
     const settleDetachedPrompt = vi.fn(() => !skippedAfterTerminalRead);
     const workflow = new PromptRunWorkflow({
-      store: {
+      stores: promptStores({
         getPrompt, settleDetachedPrompt, countPendingPrompts: () => 0,
         getBinding: () => ({ id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "working" })
-      } as never,
+      }),
       scheduler: { subscribe: () => () => {}, wake },
       turnTimeoutMs: 1_000,
       transcriptReader: { async open() { return { mode: "typed" as const, cursor: {
@@ -385,7 +385,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const outboundWake = vi.fn();
     const skipOldestDetachedPrompt = vi.fn(() => ({ outcome: "skipped" as const, promptId: "p1", outboxReserved: true }));
     const workflow = new PromptRunWorkflow({
-      store: { skipOldestDetachedPrompt } as never,
+      stores: promptStores({ skipOldestDetachedPrompt }),
       scheduler: { subscribe: () => () => {}, wake: schedulerWake },
       turnTimeoutMs: 1_000, herdr: {} as never, bus: { async publish() {} },
       outboundWork: { wake: outboundWake, subscribe() { return () => {}; } },
@@ -406,7 +406,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
     const outboundWake = vi.fn();
     const skipOldestDetachedPrompt = vi.fn(() => ({ outcome: "none" as const }));
     const workflow = new PromptRunWorkflow({
-      store: { skipOldestDetachedPrompt } as never, scheduler: { subscribe: () => () => {}, wake: schedulerWake },
+      stores: promptStores({ skipOldestDetachedPrompt }), scheduler: { subscribe: () => () => {}, wake: schedulerWake },
       turnTimeoutMs: 1_000, herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake: outboundWake, subscribe() { return () => {}; } },
       presentation: primaryPresentation, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never
     });
@@ -421,8 +421,13 @@ function createWorkflow(storeOverrides: Record<string, unknown>, safetyScanInter
   const scheduler = new InProcessPromptWorkScheduler();
   const store = { scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }), claimNextDispatchablePrompt: () => null, releaseUndispatchedPromptClaim: () => false, ...storeOverrides };
   return new PromptRunWorkflow({
-    store: store as never, scheduler, safetyScanIntervalMs, turnTimeoutMs: 1_000,
+    stores: promptStores(store), scheduler, safetyScanIntervalMs, turnTimeoutMs: 1_000,
     herdr: {} as never, bus: { async publish() {} }, outboundWork: { wake() {}, subscribe() { return () => {}; } },
     presentation: primaryPresentation, logger: { info, warn: vi.fn(), error } as never
   });
+}
+
+function promptStores(store: Record<string, unknown>) {
+  const compatible = { releaseUndispatchedPromptClaim: () => false, ...store };
+  return { dispatch: compatible, recovery: compatible, session: compatible } as never;
 }
