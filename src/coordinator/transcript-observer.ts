@@ -14,7 +14,7 @@ export type TurnOutputSource =
   | { mode: "typed"; cursor: ExactTurnCursor; emitted: boolean; output: ReturnType<typeof createBoundedTurnOutput>; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
 
 interface TranscriptObserverOptions {
-  store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn" | "loadRunCard">;
+  store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn"> & Partial<Pick<PromptRunStore, "loadRunCard">>;
   reader?: TraexTranscriptReaderPort;
   herdr: Pick<HerdrPort, "observeRuntime">;
   adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;
@@ -68,7 +68,7 @@ export class TranscriptObserver {
   }
 
   async openDetached(binding: Binding, prompt: PromptJob): Promise<TurnOutputSource> {
-    const persistedAnswer = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
+    const persistedAnswer = this.options.store.loadRunCard?.(prompt.id)?.answer ?? "";
     const fallback = async () => {
       const source = await this.open(binding);
       if (source.mode === "typed") { source.output = createBoundedTurnOutput(persistedAnswer); source.emitted = Boolean(persistedAnswer); }
