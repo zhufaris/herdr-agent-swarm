@@ -83,16 +83,19 @@ describe("active-turn steering", () => {
       async replyCard() { cardNumber += 1; return { messageId: `card-${cardNumber}` }; },
       async updateCard() {}
     };
+    let promptStarted = false;
     const herdr: HerdrPort = {
       async assertWorkspace() {},
       async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }]; },
-      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, activeTurnId: "runtime-1" }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
+      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: promptStarted ? "working" : "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, ...(promptStarted ? { activeTurnId: "runtime-1" } : {}) }; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
+        promptStarted = true;
         turns.push(text);
         await onObservation?.({ state: "working", stateSource: "structured", output, turnId: "runtime-1", turnStartedAt: "2026-09-05T00:00:00.000Z" });
         await hold;
         output += "\n◆ parent answer\n────────";
         await onObservation?.({ state: "done", stateSource: "structured", output });
+        promptStarted = false;
         return "done";
       },
       async interruptAgent(input) { escapes.push(input.paneId); return { status: "interrupted" }; }, async renamePane() {}

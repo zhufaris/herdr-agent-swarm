@@ -3,7 +3,7 @@ import type { DeliveryFailureClass, OutboundReplyKind, OutboundReplyState, Outbo
 import type { Binding, BindingState } from "./binding.js";
 import type { PromptState } from "./prompt.js";
 export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
-export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
+export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority, UndispatchedPromptClaimFence } from "./prompt.js";
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
 export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, BindingThreadAlias, DeadLetterActionOutcome, DeliveryEffectCertainty, DeliveryFailureClass, DeliveryFailureMetadata, DeliveryOperationContext, LarkDeliveryOperation, LarkDeliveryTarget, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboundWorkClass, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";

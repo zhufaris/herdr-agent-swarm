@@ -8,6 +8,7 @@ export type PromptWorkHint =
   | { kind: "binding-runtime-changed"; bindingId: string };
 export interface DurablePromptWorkScan { cancelled: number; failedDetached: number; hints: PromptWorkHint[] }
 export interface StalePromptClaim { promptId: string; bindingId: string; updatedAt: string }
+export interface UndispatchedPromptClaimFence extends StalePromptClaim { bindingGeneration: number; paneId: string }
 export interface PromptJob {
   id: string; bindingId: string; larkMessageId: string; actorOpenId: string; body: string; executionOrigin: "bridge" | "herdr";
   parentPromptId: string | null;

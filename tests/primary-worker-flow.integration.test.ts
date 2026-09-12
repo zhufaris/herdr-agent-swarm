@@ -56,6 +56,7 @@ describe("Primary to Worker product flow", () => {
     };
     let primaryAnswer = "";
     const primaryHerdr = {
+      async getPane() { return { paneId: "primary:pane", workspaceId: "herdr", cwd: "/repo", label: "primary", agentState: "idle", foregroundExecutables: ["traex"] }; },
       async runPrompt(_paneId: string, _text: string, _timeoutMs: number, _onObservation?: unknown, _signal?: AbortSignal, onDispatched?: () => void) {
         onDispatched?.();
         expect(await invoke("list_instances", {})).toMatchObject([{ id: worker.id }]);

@@ -4,7 +4,7 @@ import type { PromptAcceptanceEffect, PromptAcceptanceReceipt } from "../../doma
 import { createBridgeEvent } from "../../domain/create-bridge-event.js";
 import type { AdoptExternalTurnInput } from "../../domain/ports/workflow.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, OutboundWorkClass, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, OutboundWorkClass, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, UndispatchedPromptClaimFence } from "../../domain/types.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
 import { acceptModelSelection } from "../../domain/model-selection.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
@@ -526,6 +526,13 @@ export class SqlitePromptStore {
       if (Number(result.changes) !== 1) throw new Error("Stale prompt claim changed during recovery");
       this.context.database.prepare(`UPDATE run_cards SET phase = 'queued', started_at = NULL, finished_at = NULL, notice = NULL, queue_position = 1, view_version = view_version + 1, updated_at = ? WHERE prompt_id = ?`).run(timestamp, candidate.promptId);
       return true;
+    });
+  }
+
+  releaseUndispatchedPromptClaim(candidate: UndispatchedPromptClaimFence): boolean {
+    return this.context.transaction(() => {
+      const binding = this.context.database.prepare("SELECT 1 FROM bindings WHERE id = ? AND generation = ? AND pane_id = ? AND state = 'active' AND lifecycle = 'active' AND attachment = 'attached'").get(candidate.bindingId, candidate.bindingGeneration, candidate.paneId);
+      return Boolean(binding) && this.requeueStaleUndispatchedPromptClaim(candidate);
     });
   }
 

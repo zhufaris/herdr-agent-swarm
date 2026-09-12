@@ -2992,6 +2992,30 @@ describe("SQLite store", () => {
     expect(duplicate.consumeEffects()).toEqual([]);
   });
 
+  it("durably catches up a queued Answer view advanced while its card create was in flight", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-create-catch-up-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "hi", queuePosition: 3, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "hi" }, view: initial, rootMessageId: "root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1")!;
+    store.saveRunCard({ ...initial, queuePosition: 2, viewVersion: 2, updatedAt: "later" });
+
+    expect(store.markOutboundReplyDelivered(create.id, "answer-1", "card-1")).toBe(true);
+    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "answer-1", viewVersion: 2, answerDeliveredVersion: 1 });
+    expect(store.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({ targetKind: "primary-turn", targetId: "p1", targetGeneration: 1, reason: "answer-create.delivered" }));
+    store.close(); store = new SqliteBindingStore(path);
+
+    const invalidation = store.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "primary-turn" && targetId === "p1")!;
+    expect(store.projectCardContext(invalidation, {
+      primaryAnswer: (view) => ({ promptId: view.promptId, version: view.viewVersion }),
+      primaryMain: () => { throw new Error("not used"); }, workerMain: () => { throw new Error("not used"); }, workerTask: () => { throw new Error("not used"); }
+    })).toBe("reserved");
+    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ promptId: "p1", kind: "card_update", viewVersion: 2, rootMessageId: "answer-1" }));
+    expect(store.markOutboundReplyDelivered(create.id, "duplicate", "duplicate-card")).toBe(false);
+  });
+
 
   it("projects changed queued run cards in one batch with per-card answer lanes", () => {
     store = new SqliteBindingStore(":memory:");
@@ -4778,6 +4802,21 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("orphan")).toMatchObject({ phase: "queued", startedAt: null, notice: null });
     expect(store.scanDurablePromptWork().hints).toContainEqual({ kind: "prompt-ready", bindingId: "b1" });
     expect(store.requeueStaleUndispatchedPromptClaim(candidate!)).toBe(false);
+  });
+
+  it("releases an undispatched claim only behind its exact binding generation and pane fence", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "private" });
+    const claimed = store.claimNextDispatchablePrompt("b1")!.prompt;
+    const fence = { promptId: "p1", bindingId: "b1", updatedAt: claimed.updatedAt, bindingGeneration: 1, paneId: "w1:p1" };
+
+    expect(store.releaseUndispatchedPromptClaim({ ...fence, bindingGeneration: 2 })).toBe(false);
+    expect(store.releaseUndispatchedPromptClaim({ ...fence, paneId: "w1:p2" })).toBe(false);
+    expect(store.releaseUndispatchedPromptClaim(fence)).toBe(true);
+    expect(store.getPrompt("p1")).toMatchObject({ state: "queued", observationState: "not_started", dispatchedAt: null, transcriptTurnId: null });
+    expect(store.releaseUndispatchedPromptClaim(fence)).toBe(false);
   });
 
   it.each([

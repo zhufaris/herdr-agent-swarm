@@ -454,6 +454,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.requeueStaleUndispatchedPromptClaim(candidate);
   }
 
+  releaseUndispatchedPromptClaim(candidate: StalePromptClaim): boolean {
+    return this.prompts.releaseUndispatchedPromptClaim(candidate);
+  }
+
   listDetachedPrompts(): PromptJob[] {
     return this.prompts.listDetachedPrompts();
   }

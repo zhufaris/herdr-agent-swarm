@@ -55,6 +55,12 @@ export function createTestRouter(
   observeExternalTurns = false,
   traexControl: TraexControlPort = { async listModels() { throw new Error("TraeX model control is not configured"); }, async runModelPrompt() { throw new Error("TraeX model control is not configured"); } }
 ): InboundRouter {
+  const promptHerdr: HerdrPort = {
+    ...herdr,
+    getPane: async (paneId) => await herdr.getPane(paneId)
+      ?? (await herdr.listPanes(paneId.split(":")[0] ?? "w1")).find((pane) => pane.paneId === paneId)
+      ?? fallbackPromptPane(store.findBindingByPane(paneId), paneId)
+  };
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   const gatewayEffects = new GatewayEffectClient(createFeishuCompatibilityDelivery(lark, config.gateway?.id ?? "feishu:primary"));
   outboundWork.subscribe(() => outbound.requestScan());
@@ -68,7 +74,7 @@ export function createTestRouter(
     wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
   }) : undefined;
   promptRun = new PromptRunWorkflow({
-    store, herdr, traexControl, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
+    store, herdr: promptHerdr, traexControl, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
     adoptRuntimeIdentity: (input) => store.applyRuntimeObservation(input),
     handoffExternalTurns: externalTurns ? (bindingId) => externalTurns.handoff(bindingId) : undefined,
     observeSupersedingExternalTurn: externalTurns ? (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation) : undefined,
@@ -112,4 +118,10 @@ export function createTestRouter(
   const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
   const router = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
   return router;
+}
+
+function fallbackPromptPane(binding: ReturnType<SqliteBindingStore["findBindingByPane"]>, paneId: string): NonNullable<Awaited<ReturnType<HerdrPort["getPane"]>>> {
+  return { paneId, workspaceId: binding?.workspaceId ?? paneId.split(":")[0] ?? "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"],
+    ...(binding?.traexSessionId ? { terminalId: binding.traexSessionId } : {}),
+    ...(binding?.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue ? { agentSession: { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } } : {}) };
 }

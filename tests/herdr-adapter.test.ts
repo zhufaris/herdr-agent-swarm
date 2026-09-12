@@ -237,20 +237,27 @@ describe("Herdr adapter structured control", () => {
     });
   });
 
-  it("submits prompts through agent prompt --wait and emits structured completion", async () => {
+  it("submits prompts before waiting separately and emits structured completion", async () => {
     const calls: string[][] = [];
     const observations: object[] = [];
     let dispatched = 0;
     const runner: CommandRunner = { async run(_executable, args, timeout, onStarted) {
       calls.push(args);
-      expect(timeout).toBe(3000);
+      expect(timeout).toBe(args[1] === "prompt" ? 1000 : 3000);
       await onStarted?.();
-      return { stdout: JSON.stringify({ result: { prompt: { agent_status: "done" } } }), stderr: "" };
+      return { stdout: JSON.stringify({ result: { prompt: { agent_status: args[1] === "prompt" ? "working" : "done" } } }), stderr: "" };
     } };
 
     await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, (value) => { observations.push(value); }, undefined, () => { dispatched += 1; })).resolves.toBe("done");
-    expect(calls).toEqual([["agent", "prompt", "w1:p1", "hello", "--wait", "--timeout", "2000"]]);
-    expect(observations).toEqual([{ state: "done", stateSource: "structured" }]);
+    expect(calls).toEqual([
+      ["agent", "prompt", "w1:p1", "hello"],
+      ["agent", "wait", "w1:p1", "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", "2000"]
+    ]);
+    expect(observations).toEqual([
+      { state: "working", stateSource: "structured" },
+      { state: "working", stateSource: "structured" },
+      { state: "done", stateSource: "structured" }
+    ]);
     expect(dispatched).toBe(1);
   });
 
@@ -278,22 +285,25 @@ describe("Herdr adapter structured control", () => {
     expect(onDispatched).not.toHaveBeenCalled();
   });
 
-  it("reports dispatch only after successful prompt completion", async () => {
+  it("reports dispatch after prompt acceptance before waiting for completion", async () => {
     let releaseCompletion!: () => void;
     const completion = new Promise<void>((resolve) => { releaseCompletion = resolve; });
-    let runnerSettled = false;
+    const calls: string[][] = [];
     let dispatched = 0;
-    const runner: CommandRunner = { async run(_executable, _args, _timeout, onStarted) {
+    const runner: CommandRunner = { async run(_executable, args, _timeout, onStarted) {
+      calls.push(args);
       await onStarted?.();
+      if (args[1] === "prompt") return { stdout: JSON.stringify({ result: { prompt: { agent_status: "working" } } }), stderr: "" };
       await completion;
-      runnerSettled = true;
-      return { stdout: JSON.stringify({ result: { prompt: { agent_status: "done" } } }), stderr: "" };
+      return { stdout: JSON.stringify({ result: { agent: { agent_status: "done" } } }), stderr: "" };
     } };
 
     const prompt = new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, undefined, () => { dispatched += 1; });
-    await Promise.resolve();
-    expect(dispatched).toBe(0);
-    expect(runnerSettled).toBe(false);
+    await vi.waitFor(() => expect(dispatched).toBe(1));
+    expect(calls).toEqual([
+      ["agent", "prompt", "w1:p1", "hello"],
+      ["agent", "wait", "w1:p1", "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", "2000"]
+    ]);
     releaseCompletion();
 
     await expect(prompt).resolves.toBe("done");

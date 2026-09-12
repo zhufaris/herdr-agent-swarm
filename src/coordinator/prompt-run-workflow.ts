@@ -16,6 +16,7 @@ import { abortableWait } from "../runtime/abortable-wait.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { PromptRunRegistry } from "./prompt-run-registry.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
+import { requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 import { PromptSafetyScanner } from "./prompt-safety-scanner.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { TranscriptObserver, type TurnOutputSource } from "./transcript-observer.js";
@@ -228,6 +229,29 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       const claimed = this.options.store.claimNextDispatchablePrompt(bindingId);
       if (!claimed) return;
       const { binding, prompt, model } = claimed;
+      let livePane;
+      try { livePane = this.options.herdr.getPane ? await this.options.herdr.getPane(binding.paneId!) : null; }
+      catch (error) {
+        const released = this.options.store.releaseUndispatchedPromptClaim?.({ promptId: prompt.id, bindingId, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }) ?? false;
+        this.options.logger.warn({ event: "prompt-pre-dispatch-observation-failed", err: safeLogError(error), bindingId, promptId: prompt.id, paneId: binding.paneId, outcome: released ? "requeued_before_dispatch" : "stale_claim" }, "could not verify the pane was settled before prompt dispatch");
+        return;
+      }
+      let unavailableReason: string | null = null;
+      if (!livePane) unavailableReason = "pane_missing";
+      else {
+        try {
+          requireMatchingRuntimeIdentity(binding, livePane);
+          if (livePane.workspaceId !== binding.workspaceId) unavailableReason = "workspace_changed";
+          else if (livePane.agentState === "working" || livePane.agentState === "blocked") unavailableReason = "runtime_busy";
+          else if (livePane.agentState === "unknown") unavailableReason = "runtime_unknown";
+        } catch { unavailableReason = "runtime_identity_changed"; }
+      }
+      if (unavailableReason) {
+        const released = this.options.store.releaseUndispatchedPromptClaim?.({ promptId: prompt.id, bindingId, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }) ?? false;
+        this.options.logger.warn({ event: "prompt-pre-dispatch-runtime-unavailable", bindingId, promptId: prompt.id, paneId: binding.paneId, reason: unavailableReason, agentState: livePane?.agentState ?? "unknown", outcome: released ? "requeued_before_dispatch" : "stale_claim" }, "deferred prompt dispatch because the live Herdr pane was not dispatchable");
+        if (released && unavailableReason === "runtime_busy" && this.options.handoffExternalTurns) await this.options.handoffExternalTurns(bindingId);
+        return;
+      }
       if (model) await this.convergeMainCard(bindingId);
       const abortController = this.registry.attachTurn(bindingId, prompt.id, binding.paneId!);
       let observerDetached = false;

@@ -28,6 +28,7 @@ export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, Promp
   scanDurablePromptWork(): ReturnType<PromptRunStore["scanDurablePromptWork"]> { return this.prompts.scanDurablePromptWork(); }
   listStaleUndispatchedPromptClaims(updatedBefore: string, limit: number): NonNullable<ReturnType<NonNullable<PromptRunStore["listStaleUndispatchedPromptClaims"]>>> { return this.prompts.listStaleUndispatchedPromptClaims(updatedBefore, limit); }
   requeueStaleUndispatchedPromptClaim(candidate: Parameters<NonNullable<PromptRunStore["requeueStaleUndispatchedPromptClaim"]>>[0]): boolean { return this.prompts.requeueStaleUndispatchedPromptClaim(candidate); }
+  releaseUndispatchedPromptClaim(candidate: Parameters<NonNullable<PromptRunStore["releaseUndispatchedPromptClaim"]>>[0]): boolean { return this.prompts.releaseUndispatchedPromptClaim(candidate); }
   getBinding(id: string): ReturnType<PromptRunStore["getBinding"]> { return this.bindings.getBinding(id); }
   getPrompt(id: string): ReturnType<PromptRunStore["getPrompt"]> { return this.prompts.getPrompt(id); }
   claimNextDispatchablePrompt(bindingId: string): ReturnType<PromptRunStore["claimNextDispatchablePrompt"]> { return this.prompts.claimNextDispatchablePrompt(bindingId); }
