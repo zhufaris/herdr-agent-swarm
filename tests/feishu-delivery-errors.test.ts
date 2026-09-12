@@ -16,6 +16,7 @@ describe("Feishu delivery error normalization", () => {
     [Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" }), { failureClass: "unknown", effectCertainty: "uncertain" }],
     [{ response: { status: 400, data: { code: 200740 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, providerCode: "200740" }],
     [{ response: { status: 400, data: { code: 230028 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, providerCode: "230028" }],
+    [{ response: { status: 400, data: { code: 230031 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, providerCode: "230031" }],
     [{ response: { status: 400, data: { code: 300309 } } }, { failureClass: "permanent", effectCertainty: "rejected", providerCode: "300309" }],
     [{ response: { status: 400, data: { code: 300317 } } }, { failureClass: "permanent", effectCertainty: "rejected", providerCode: "300317" }],
     [{ response: { status: 400, data: { code: 230099 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, providerCode: "230099" }]
@@ -28,6 +29,8 @@ describe("Feishu delivery error normalization", () => {
     [230099, "update_cardkit", "primary-main", "stale_main_card"],
     [300317, "update_cardkit", "primary-main", "stale_main_card"],
     [300309, "stream_card_content", "primary-answer", "closed_answer_stream"]
+    ,[230031, "update_card", "primary-answer", "expired_view_target"]
+    ,[230031, "update_cardkit", "primary-answer", "expired_view_target"]
   ] as const)("derives recovery for Feishu code %s on its exact operation", (providerCode, operation, purpose, recoveryKind) => {
     const error = { response: { status: 400, data: { code: providerCode } } };
     expect(classifyFeishuFailure(error, viewIntent(purpose), operation)).toMatchObject({ failureClass: "permanent", effectCertainty: "rejected", recoveryKind, providerOperation: operation });
@@ -40,6 +43,8 @@ describe("Feishu delivery error normalization", () => {
     [300317, "update_cardkit", "primary-answer"],
     [300309, "stream_card_content", "worker-turn"],
     [300309, "finish_streaming_card", "primary-answer"]
+    ,[230031, "update_card", "primary-main"]
+    ,[230031, "reply_card", "primary-answer"]
   ] as const)("does not derive recovery for Feishu code %s on a different operation or purpose", (providerCode, operation, purpose) => {
     const error = { response: { status: 400, data: { code: providerCode } } };
     const classified = classifyFeishuFailure(error, viewIntent(purpose), operation);

@@ -141,6 +141,7 @@ export class SqliteMigrations {
     this.gateway.ensureGatewayIdentityAndPlans();
     this.gateway.ensureGatewayScopedOutboxLanes();
     this.cards.ensureOutboundClaims();
+    this.gateway.convergeLegacyExpiredAnswerTargets();
   }
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {

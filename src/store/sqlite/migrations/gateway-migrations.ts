@@ -54,4 +54,30 @@ export class GatewayMigrations {
     }
     this.context.database.exec("DROP TRIGGER IF EXISTS outbound_replies_gateway_lane_insert; DROP TRIGGER IF EXISTS outbound_replies_gateway_lane_update");
   }
+
+  convergeLegacyExpiredAnswerTargets(): void {
+    if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 41").get()) return;
+    this.context.transaction(() => {
+      const timestamp = new Date().toISOString();
+      this.context.database.prepare(`
+        UPDATE outbound_replies
+        SET failure_class = 'permanent', effect_certainty = 'rejected', updated_at = ?
+        WHERE gateway_id = ? AND card_role = 'answer' AND kind = 'card_update'
+          AND state = 'dead_letter' AND lark_error_code = '230031' AND projection_key IS NOT NULL
+      `).run(timestamp, LEGACY_GATEWAY_ID);
+      this.context.database.prepare(`
+        UPDATE delivery_recoveries AS recovery
+        SET state = 'dismissed', failure_class = 'permanent', action = 'expired_view_target',
+            resolved_at = COALESCE(resolved_at, ?), updated_at = ?
+        WHERE EXISTS (
+          SELECT 1 FROM outbound_replies failed
+          WHERE failed.id = recovery.failed_reply_id AND failed.gateway_id = ?
+            AND failed.card_role = 'answer' AND failed.kind = 'card_update'
+            AND failed.state = 'dead_letter' AND failed.lark_error_code = '230031'
+            AND failed.projection_key IS NOT NULL
+        )
+      `).run(timestamp, timestamp, LEGACY_GATEWAY_ID);
+      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (41)").run();
+    });
+  }
 }

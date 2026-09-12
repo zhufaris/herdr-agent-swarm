@@ -41,6 +41,8 @@ export class SqliteOutboxRecoveryStore {
       if (before.state !== "pending") return null;
       const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && metadata.recoveryKind === "stale_main_card";
       const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && metadata.recoveryKind === "closed_answer_stream";
+      const projection = this.context.database.prepare("SELECT projection_key FROM outbound_replies WHERE id = ?").get(id) as { projection_key: string | null } | undefined;
+      const expiredViewTarget = before.cardRole === "answer" && before.kind === "card_update" && projection?.projection_key !== null && projection?.projection_key !== undefined && metadata.recoveryKind === "expired_view_target";
       const effectCertainty = normalizedEffectCertainty(metadata);
       const uncertainEffect = effectCertainty === "uncertain";
       const settledMetadata = { ...metadata, effectCertainty, ...(uncertainEffect ? { failureClass: "unknown" as const } : {}) };
@@ -55,7 +57,10 @@ export class SqliteOutboxRecoveryStore {
       let action: OutboundFailureTransition["action"] = "blocked";
       let quarantineState: "active" | "released" = "active";
       let replacementReplyId: string | null = null;
-      if (!uncertainEffect && closedAnswerStream && failed.promptId) {
+      if (!uncertainEffect && expiredViewTarget && projection?.projection_key) {
+        this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Dismissed after Gateway rejected the expired view target', updated_at = ? WHERE projection_key = ? AND state = 'pending' AND first_claimed_at IS NULL AND claim_attempt_id IS NULL`).run(timestamp, projection.projection_key);
+        action = "expired_view_target"; quarantineState = "released";
+      } else if (!uncertainEffect && closedAnswerStream && failed.promptId) {
         const pageIndex = streamContentPageIndex(failed.payload);
         if (pageIndex === null) throw new Error(`Closed Answer stream ${failed.id} has invalid page metadata`);
         this.context.database.prepare(`UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND card_id = ?`).run(timestamp, failed.promptId, pageIndex, failed.rootMessageId);
@@ -76,6 +81,7 @@ export class SqliteOutboxRecoveryStore {
         action = "released_newer_snapshot"; quarantineState = "released";
       }
       this.context.database.prepare("UPDATE delivery_recoveries SET action = ?, replacement_reply_id = ?, state = ?, updated_at = ? WHERE failed_reply_id = ? AND state IN ('unresolved','replacement_pending')").run(action, replacementReplyId, replacementReplyId ? "replacement_pending" : "unresolved", timestamp, id);
+      if (action === "expired_view_target") this.context.database.prepare("UPDATE delivery_recoveries SET state = 'dismissed', resolved_at = ?, updated_at = ? WHERE failed_reply_id = ?").run(timestamp, timestamp, id);
       const laneKey = failed.laneKey;
       this.context.database.prepare(`INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(lane_key) DO UPDATE SET failed_reply_id = excluded.failed_reply_id, lane_class = excluded.lane_class, failure_class = excluded.failure_class, state = excluded.state, action = excluded.action, reason = excluded.reason, updated_at = excluded.updated_at, released_at = excluded.released_at`).run(laneKey, id, laneClass, metadata.failureClass, quarantineState, action, boundedOutboxError(error), timestamp, timestamp, quarantineState === "released" ? timestamp : null);
       if (quarantineState === "released") this.queue.refreshLaneHead(laneKey);

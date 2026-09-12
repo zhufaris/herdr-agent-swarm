@@ -50,6 +50,46 @@ describe("AnswerPageWorkflow", () => {
       } finally { store.close(); }
     });
 
+    it("terminalizes an expired Answer target and suppresses later snapshots for that exact message", () => {
+      const store = readyStore();
+      try {
+        store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'p1'").run();
+        const input = { promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", card: { content: "first" } };
+        expect(store.reserveFinalAnswerCardUpdate(input)).toBe("reserved");
+        const first = store.listPendingOutboundReplies()[0]!;
+        const claim = store.claimOutboundReply(first.id, null)!;
+        expect(store.markOutboundReplyFailedWithQuarantine(claim, "message expired", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031", recoveryKind: "expired_view_target" })).toMatchObject({
+          action: "expired_view_target", state: "dead_letter"
+        });
+
+        const advanced = store.loadRunCard("p1")!;
+        store.saveRunCard({ ...advanced, viewVersion: advanced.viewVersion + 1 });
+        expect(store.reserveFinalAnswerCardUpdate({ ...input, card: { content: "newer" } })).toBe("waiting");
+        expect(store.listPendingOutboundReplies()).toEqual([]);
+        expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = ?").get(first.id)).toEqual({ state: "dismissed", action: "expired_view_target" });
+
+        store.database.prepare("UPDATE answer_pages SET message_id = 'answer-2', card_id = 'card-2' WHERE prompt_id = 'p1' AND page_index = 0").run();
+        expect(store.reserveFinalAnswerCardUpdate({ ...input, messageId: "answer-2", cardId: "card-2", card: { content: "rebuilt" } })).toBe("reserved");
+      } finally { store.close(); }
+    });
+
+    it("dismisses only unclaimed successors after an expired Answer target rejection", () => {
+      const store = readyStore();
+      try {
+        store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'p1'").run();
+        const target = { promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1" };
+        expect(store.reserveFinalAnswerCardUpdate({ ...target, card: { content: "first" } })).toBe("reserved");
+        const first = store.listPendingOutboundReplies()[0]!;
+        const claim = store.claimOutboundReply(first.id, null)!;
+        expect(store.reserveFinalAnswerCardUpdate({ ...target, card: { content: "second" } })).toBe("reserved");
+
+        store.markOutboundReplyFailedWithQuarantine(claim, "message expired", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031", recoveryKind: "expired_view_target" });
+
+        expect(store.listPendingOutboundReplies()).toEqual([]);
+        expect(store.database.prepare("SELECT state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all(`answer-final-fold:p1:0:card-1`)).toEqual([{ state: "dead_letter" }, { state: "dismissed" }]);
+      } finally { store.close(); }
+    });
+
     it("does not resend identical final payload when only the view version advances", () => {
       const store = readyStore();
       try {

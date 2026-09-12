@@ -1,7 +1,7 @@
 import { GatewayDeliveryError, type GatewayDeliveryIntent, type GatewayFailure } from "../contract/plugin.js";
 import { safeLogError } from "../../runtime/safe-error.js";
 
-const PERMANENT_CODES = new Set(["10002", "200740", "200750", "230028", "230099", "300309", "300317"]);
+const PERMANENT_CODES = new Set(["10002", "200740", "200750", "230028", "230031", "230099", "300309", "300317"]);
 const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT"]);
 
 export async function performFeishuDelivery<T>(intent: GatewayDeliveryIntent, providerOperation: string, operation: () => Promise<T>): Promise<T> {
@@ -24,6 +24,8 @@ export function classifyFeishuFailure(error: unknown, intent: GatewayDeliveryInt
   else if (timeout || effectCertainty === "uncertain") failureClass = "unknown";
   const recoveryKind = providerCode === "300309" && providerOperation === "stream_card_content" && intent.purpose === "primary-answer"
     ? "closed_answer_stream" as const
+    : providerCode === "230031" && (providerOperation === "update_card" || providerOperation === "update_cardkit") && intent.purpose === "primary-answer"
+      ? "expired_view_target" as const
     : (providerCode === "230099" && (providerOperation === "update_card" || providerOperation === "update_cardkit") || providerCode === "300317" && providerOperation === "update_cardkit") && intent.purpose === "primary-main"
       ? "stale_main_card" as const : undefined;
   const retryAfterMs = httpStatus === 429 ? retryAfterDelayMs(error, currentTime) : undefined;

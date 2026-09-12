@@ -99,7 +99,7 @@ export interface GatewayDeliveryContext {
 export interface GatewayDeliveryReceipt { refs: readonly GatewayExternalRef[]; }
 export interface GatewayFailure {
   failureClass: "transient" | "permanent" | "unknown"; effectCertainty: "not-started" | "rejected" | "uncertain";
-  providerCode: string | null; providerOperation?: string; httpStatus: number | null; retryAfterMs?: number; recoveryKind?: "closed_answer_stream" | "stale_main_card"; safeMessage: string;
+  providerCode: string | null; providerOperation?: string; httpStatus: number | null; retryAfterMs?: number; recoveryKind?: "closed_answer_stream" | "stale_main_card" | "expired_view_target"; safeMessage: string;
 }
 export class GatewayDeliveryError extends Error {
   readonly name = "GatewayDeliveryError";

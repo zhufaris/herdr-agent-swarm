@@ -4,14 +4,14 @@ export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dism
 export type OutboundWorkClass = "live" | "history";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export type DeliveryEffectCertainty = "not-started" | "rejected" | "uncertain";
-export type GatewayRecoveryKind = "closed_answer_stream" | "stale_main_card";
+export type GatewayRecoveryKind = "closed_answer_stream" | "stale_main_card" | "expired_view_target";
 export interface DeliveryFailureMetadata {
   failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null;
   effectCertainty?: DeliveryEffectCertainty;
   recoveryKind?: GatewayRecoveryKind;
 }
 export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
-export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_terminalized";
+export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "expired_view_target" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_terminalized";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "group_card_create" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type OutboundTargetRole = "session_status" | "operation_result";

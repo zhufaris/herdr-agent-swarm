@@ -221,6 +221,8 @@ export class SqliteProjectionStore {
 
   private reserveAnswerSnapshot(key: string, view: RunCardView, messageId: string, card: object, workClass?: OutboundWorkClass): AnswerPageReservationOutcome {
     const payload = JSON.stringify(card);
+    const expired = this.context.database.prepare(`SELECT 1 FROM delivery_recoveries recovery JOIN outbound_replies failed ON failed.id = recovery.failed_reply_id WHERE failed.projection_key = ? AND recovery.action = 'expired_view_target' AND recovery.state = 'dismissed' LIMIT 1`).get(key);
+    if (expired) return "waiting";
     const existing = this.context.database.prepare("SELECT id, payload, snapshot_revision FROM outbound_replies WHERE projection_key = ? OR idempotency_key = ? ORDER BY snapshot_revision DESC LIMIT 1").get(key, key) as { id: string; payload: string; snapshot_revision: number } | undefined;
     if (existing?.payload === payload) return "waiting";
     if (existing) this.context.database.prepare("UPDATE outbound_replies SET projection_key = ? WHERE id = ?").run(key, existing.id);

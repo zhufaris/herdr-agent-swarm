@@ -4551,6 +4551,30 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 40").get()).toEqual({ version: 40 });
   });
 
+  it("migrates precise legacy Feishu expired Answer targets into terminal projection evidence", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-expired-answer-target-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'p1'").run();
+    expect(store.reserveFinalAnswerCardUpdate({ promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", card: { content: "final" } })).toBe("reserved");
+    const expired = store.listPendingOutboundReplies()[0]!;
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(expired.id, null)!, "message expired", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
+    store.enqueueOutboundReply({ id: "unscoped", idempotencyKey: "unscoped", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "answer-1", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyDeadLetter("unscoped", "message expired", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
+    store.database.prepare("DELETE FROM schema_migrations WHERE version = 41").run();
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT state, action, failure_class FROM delivery_recoveries WHERE failed_reply_id = ?").get(expired.id)).toEqual({ state: "dismissed", action: "expired_view_target", failure_class: "permanent" });
+    expect(store.getOutboundReply(expired.id)).toMatchObject({ state: "dead_letter", failureClass: "permanent", effectCertainty: "rejected", larkErrorCode: "230031" });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'unscoped'").get()).toEqual({ state: "unresolved", action: "blocked" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 41").get()).toEqual({ version: 41 });
+    expect(store.reserveFinalAnswerCardUpdate({ promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", card: { content: "newer" } })).toBe("waiting");
+  });
+
   it("persists classified failures and reopens one cooled transient round only", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
