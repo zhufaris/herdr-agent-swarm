@@ -23,6 +23,7 @@ interface PromptTurnExecutorOptions {
   isStopping(): boolean;
   updateTurnState(bindingId: string, promptId: string, state: import("../domain/types.js").AgentState): void;
   convergeMainCard(bindingId: string): Promise<void>;
+  releaseUndispatched(claimed: ClaimedPrompt): boolean;
   observeDetached(prompt: PromptJob, binding: ClaimedPrompt["binding"], source: TurnOutputSource, controller: AbortController): Promise<void>;
   publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void>;
 }
@@ -30,7 +31,7 @@ interface PromptTurnExecutorOptions {
 export class PromptTurnExecutor {
   constructor(private readonly options: PromptTurnExecutorOptions) {}
 
-  async execute(claimed: ClaimedPrompt, abortController: AbortController): Promise<{ observerDetached: boolean }> {
+  async execute(claimed: ClaimedPrompt, abortController: AbortController): Promise<{ observerDetached: boolean; dispatchDeferred?: boolean }> {
     let { binding, prompt, model } = claimed;
     const bindingId = binding.id;
     const paneId = binding.paneId!;
@@ -142,6 +143,11 @@ export class PromptTurnExecutor {
         const detachedPrompt = this.options.store.getPrompt(prompt.id);
         if (!this.options.isStopping() && detachedPrompt?.transcriptTurnId && detachedPrompt.transcriptTurnStartedAt) await this.options.observeDetached(detachedPrompt, binding, outputSource, abortController);
         return { observerDetached };
+      }
+      if (failure.kind === "retry") {
+        const released = this.options.releaseUndispatched(claimed);
+        this.options.logger.warn({ event: "prompt-pre-dispatch-rejected", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, durationMs: Date.now() - startedAt, outcome: released ? "requeued_before_dispatch" : "stale_claim" }, "Herdr rejected prompt before acceptance; returned it to the FIFO");
+        return { observerDetached, dispatchDeferred: true };
       }
       if (failure.kind === "ignore") return { observerDetached: true };
       this.options.store.failPrompt({ promptId: prompt.id, error: failure.error, occurredAt: new Date().toISOString() });

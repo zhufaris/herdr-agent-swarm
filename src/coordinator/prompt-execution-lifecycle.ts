@@ -1,8 +1,10 @@
 import type { TraexTranscriptObservation } from "../domain/ports/external.js";
 import type { PromptJob } from "../domain/types.js";
+import { classifyPromptSubmissionFailure } from "../domain/prompt-submission.js";
 
 export type PromptExecutionFailureDisposition =
   | { kind: "detach"; notice: string }
+  | { kind: "retry"; reason: string }
   | { kind: "fail"; error: string }
   | { kind: "ignore" };
 
@@ -30,6 +32,8 @@ export function decidePromptExecutionFailure(input: {
         : `TraeX 请求已尝试投递，但 Bridge 无法确认最终结果：${input.error}；不会自动重发。`
     };
   }
+  const submission = classifyPromptSubmissionFailure(input.error);
+  if (submission?.kind === "rejected") return { kind: "retry", reason: submission.reason };
   if (input.observerAborted && input.stopping) return { kind: "ignore" };
   return { kind: "fail", error: input.error };
 }

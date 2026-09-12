@@ -95,6 +95,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       updateTurnState: (bindingId, promptId, state) => this.registry.updateTurnState(bindingId, promptId, state),
       convergeMainCard: (bindingId) => this.convergeMainCard(bindingId),
+      releaseUndispatched: ({ binding, prompt }) => this.options.store.releaseUndispatchedPromptClaim?.({ promptId: prompt.id, bindingId: binding.id, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }) ?? false,
       observeDetached: (prompt, binding, source, controller) => this.observeDetachedTurnWithSource(prompt, binding, source, controller),
       publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload)
     });
@@ -255,13 +256,20 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       if (model) await this.convergeMainCard(bindingId);
       const abortController = this.registry.attachTurn(bindingId, prompt.id, binding.paneId!);
       let observerDetached = false;
+      let dispatchDeferred = false;
       try {
-        ({ observerDetached } = await this.turnExecutor.execute(claimed, abortController));
+        const execution = await this.turnExecutor.execute(claimed, abortController);
+        observerDetached = execution.observerDetached;
+        dispatchDeferred = execution.dispatchDeferred ?? false;
       } finally {
         this.registry.detachTurn(bindingId, prompt.id);
         this.options.scheduler.wake({ kind: "control-ready", bindingId });
         const latestBinding = this.options.store.getBinding(bindingId);
         if (!observerDetached && latestBinding?.lifecycle === "draining") await this.archiveDrainedBinding(latestBinding);
+      }
+      if (dispatchDeferred) {
+        if (this.options.handoffExternalTurns) await this.options.handoffExternalTurns(bindingId);
+        return;
       }
     }
   }

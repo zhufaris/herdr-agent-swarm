@@ -16,6 +16,7 @@ describe("prompt execution lifecycle", () => {
       notice: "TraeX 请求已尝试投递，但 Bridge 无法确认最终结果：socket closed；不会自动重发。"
     });
     expect(decidePromptExecutionFailure({ dispatched: false, stopping: false, observerAborted: false, error: "rejected" })).toEqual({ kind: "fail", error: "rejected" });
+    expect(decidePromptExecutionFailure({ dispatched: false, stopping: false, observerAborted: false, error: '{"error":{"code":"agent_not_ready"}}' })).toMatchObject({ kind: "retry" });
     expect(decidePromptExecutionFailure({ dispatched: false, stopping: true, observerAborted: true, error: "observer detached" })).toEqual({ kind: "ignore" });
   });
 
