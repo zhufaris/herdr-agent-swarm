@@ -27,6 +27,14 @@
 - [x] Apply the approved hierarchy without changing callback identity, delivery,
   pagination, or recovery semantics.
 
+## Herdr-originated messages
+
+- [ ] When a message or turn is initiated directly in Herdr rather than through
+  Lark, observe its canonical transcript and converge both the owning Primary
+  Main Card and the corresponding Answer Card. Preserve independent projection
+  checkpoints, durable outbox ordering, exact turn ownership, and the no-replay
+  guarantee; do not infer completion from rendered card state.
+
 ## Worker Session threads
 
 - [x] Give each new Worker Session generation one independent group-root Thread
