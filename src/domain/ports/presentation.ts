@@ -46,6 +46,8 @@ export interface ThreadPrimaryView { bindingId: string; generation: number; pane
 export type InteractionToast = { toast: { type: "success" | "warning" | "error"; content: string } };
 
 export interface ApplicationPresentation extends PrimaryPresentation, WorkerPresentation {
+  commandResult(input: { title: string; text: string }): object;
+  projectDirectory(input: { projects: readonly ProjectConfig[]; selectedProjectId?: string }): object;
   projectSelector(input: { selectionId: string; projects: ProjectConfig[] }): object;
   projectSelectionStatus(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; bindingId?: string; message?: string }): object;
   attachStatus(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object;

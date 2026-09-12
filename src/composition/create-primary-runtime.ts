@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
 import type { HerdrPort, TraexControlPort, TraexTranscriptReaderPort } from "../domain/ports/external.js";
-import { cardKitPrimaryPresentation } from "../cards/cardkit-primary-presentation.js";
+import { feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import { ExternalTurnObserver } from "../coordinator/external-turn-observer.js";
 import type { MainCardWorkflowPort } from "../coordinator/main-card-workflow.js";
 import { PromptRunWorkflow } from "../coordinator/prompt-run-workflow.js";
@@ -21,7 +21,7 @@ export function createPrimaryRuntime(options: {
   presentation?: PrimaryPresentation;
 }) {
   const { config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards } = options;
-  const presentation = options.presentation ?? cardKitPrimaryPresentation;
+  const presentation = options.presentation ?? feishuGatewayPrimaryPresentation;
   const promptRunLink = new RuntimeLink<PromptRunWorkflow>("Primary prompt runtime");
   const externalTurns = new ExternalTurnObserver({
     store: stores.externalTurns, transcriptReader, bus, outboundWork, logger, presentation,

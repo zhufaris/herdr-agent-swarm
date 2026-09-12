@@ -1,4 +1,6 @@
 import type { Logger } from "pino";
+import type { GatewayRenderableView } from "./view.js";
+export type { GatewayRenderableView, GatewayView, GatewayViewNode, LegacyGatewayView } from "./view.js";
 
 export const GATEWAY_PROTOCOL_VERSION = 1 as const;
 
@@ -76,11 +78,11 @@ export interface GatewayIngressSink { accept(event: GatewayInboundEvent): Promis
 export interface GatewayIngressPort { start(sink: GatewayIngressSink): Promise<void>; stop(): Promise<void>; }
 
 export type GatewayDeliveryIntent =
-  | { kind: "conversation.create"; purpose: GatewayDeliveryPurpose; conversationId: string; view: object; idempotencyKey: string }
+  | { kind: "conversation.create"; purpose: GatewayDeliveryPurpose; conversationId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "message.reply.text"; purpose: GatewayDeliveryPurpose; rootMessageId: string; text: string; idempotencyKey: string }
-  | { kind: "message.reply.view"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: object; idempotencyKey: string }
-  | { kind: "surface.replace"; purpose: GatewayDeliveryPurpose; messageId: string; view: object; sequence?: number }
-  | { kind: "stream.create"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: object; idempotencyKey: string }
+  | { kind: "message.reply.view"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }
+  | { kind: "surface.replace"; purpose: GatewayDeliveryPurpose; messageId: string; view: GatewayRenderableView; sequence?: number }
+  | { kind: "stream.create"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "stream.append"; purpose: GatewayDeliveryPurpose; surfaceId: string; slot: string; content: string; sequence: number }
   | { kind: "stream.finish"; purpose: GatewayDeliveryPurpose; surfaceId: string; sequence: number; summary: string }
   | { kind: "conversation.share"; purpose: GatewayDeliveryPurpose; conversationId: string; messageId: string; targetConversationId: string };

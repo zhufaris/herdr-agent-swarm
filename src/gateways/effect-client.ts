@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { GatewayDeliveryIntent, GatewayDeliveryPort, GatewayDeliveryPurpose, GatewayExternalRef } from "./contract/plugin.js";
+import { isGatewayView, legacyGatewayView } from "./contract/view.js";
 
 export interface GatewayEffectPort {
   createConversation(input: { conversationId: string; view: object; idempotencyKey: string; purpose: GatewayDeliveryPurpose }): Promise<{ threadId: string; rootMessageId: string }>;
@@ -11,7 +12,7 @@ export class GatewayEffectClient implements GatewayEffectPort {
   constructor(private readonly delivery: GatewayDeliveryPort) {}
 
   async createConversation(input: { conversationId: string; view: object; idempotencyKey: string; purpose: GatewayDeliveryPurpose }): Promise<{ threadId: string; rootMessageId: string }> {
-    const receipt = await this.execute({ kind: "conversation.create", ...input });
+    const receipt = await this.execute({ kind: "conversation.create", ...input, view: isGatewayView(input.view) ? input.view : legacyGatewayView(input.view) });
     return { threadId: requiredRef(receipt.refs, "thread"), rootMessageId: requiredRef(receipt.refs, "message") };
   }
 

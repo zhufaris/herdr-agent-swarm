@@ -12,13 +12,12 @@ import { createWorkerRuntime } from "./create-worker-runtime.js";
 import { createPrimaryRuntime } from "./create-primary-runtime.js";
 import { createApplicationRuntime } from "./create-application-runtime.js";
 import type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
-import { createCardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
-import { cardKitPanePresentation } from "../cards/cardkit-pane-presentation.js";
+import { createFeishuGatewayApplicationPresentation, feishuGatewayPanePresentation } from "../gateways/feishu/presentation.js";
 
 export type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
 export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBundle, logger: Logger, availability: AgentRuntimeAvailability) {
-  const applicationPresentation = createCardKitApplicationPresentation(config.runtimeTuning.cards);
-  const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: cardKitPanePresentation };
+  const applicationPresentation = createFeishuGatewayApplicationPresentation(config.runtimeTuning.cards);
+  const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: feishuGatewayPanePresentation };
   const events = new RuntimeEventIntegration(logger);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => events.handleHerdrHint(hint));
   const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, transcriptReader } = infrastructure;

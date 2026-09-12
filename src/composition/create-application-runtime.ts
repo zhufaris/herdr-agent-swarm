@@ -1,8 +1,6 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
-import { cardKitPanePresentation } from "../cards/cardkit-pane-presentation.js";
-import { cardKitPrimaryPresentation } from "../cards/cardkit-primary-presentation.js";
-import { cardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
+import { feishuGatewayApplicationPresentation, feishuGatewayPanePresentation, feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
@@ -33,7 +31,7 @@ export function createApplicationRuntime(options: {
   presentation?: { application: ApplicationPresentation; primary: PrimaryPresentation; pane: PanePresentation };
 }) {
   const { config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker } = options;
-  const presentation = options.presentation ?? { application: cardKitApplicationPresentation, primary: cardKitPrimaryPresentation, pane: cardKitPanePresentation };
+  const presentation = options.presentation ?? { application: feishuGatewayApplicationPresentation, primary: feishuGatewayPrimaryPresentation, pane: feishuGatewayPanePresentation };
   const shared = { config, stores, logger, scheduler, infrastructure, delivery, primary, worker, presentation };
   const bindingSession = createBindingSessionRuntime({ ...shared, bus });
   const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession });

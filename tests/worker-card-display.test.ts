@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerCardDisplayWorkflow } from "../src/coordinator/worker-card-display-workflow.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
@@ -20,7 +21,7 @@ function setup(withTask = true) {
     const view = createQueuedWorkerTurnCard({ turnId: "turn", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-06T00:00:01.000Z" });
     store.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_session_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, phase, request_text, answer, status_title, progress_json, queue_position, started_at, finished_at, notice, result_capture, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, NULL, '[]', ?, NULL, NULL, NULL, ?, 0, 0, 0, 1, 0, ?, ?)`).run(view.turnId, view.instanceId, view.instanceGeneration, view.workerSessionGeneration, view.workerName, view.rootMessageId, view.elementId, view.phase, view.requestText, view.answer, view.queuePosition, view.resultCapture, view.createdAt, view.updatedAt);
   }
-  const workflow = new WorkerCardDisplayWorkflow(store, () => undefined);
+  const workflow = new WorkerCardDisplayWorkflow(store, () => undefined, applicationPresentation);
   const input = { bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent", projectId: "p1", workerName: "reviewer", rootMessageId: "root", idempotencyKey: "display" };
   return { workflow, input };
 }

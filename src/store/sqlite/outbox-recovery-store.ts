@@ -331,8 +331,14 @@ function streamContentPageIndex(payload: string): number | null {
 }
 
 function lightweightAnswerCardPayload(payload: string): string {
-  const decoded = JSON.parse(payload) as { card?: { body?: { elements?: Array<Record<string, unknown>> } }; stream?: { elementId?: unknown } };
+  const decoded = JSON.parse(payload) as { card?: { schemaVersion?: unknown; nodes?: Array<Record<string, unknown>>; body?: { elements?: Array<Record<string, unknown>> } }; stream?: { elementId?: unknown } };
   if (!decoded.card || !decoded.stream || typeof decoded.stream.elementId !== "string") throw new Error("Answer continuation metadata missing for lightweight recovery");
+  if (decoded.card.schemaVersion === 1 && Array.isArray(decoded.card.nodes)) {
+    let replaced = false;
+    decoded.card.nodes = replaceGatewaySlotContent(decoded.card.nodes, decoded.stream.elementId, () => { replaced = true; });
+    if (!replaced) throw new Error("Answer card streaming element missing for lightweight recovery");
+    return JSON.stringify(decoded);
+  }
   const elements = decoded.card.body?.elements;
   if (!Array.isArray(elements)) throw new Error("Answer card body missing for lightweight recovery");
   let replaced = false;
@@ -343,4 +349,13 @@ function lightweightAnswerCardPayload(payload: string): string {
   });
   if (!replaced) throw new Error("Answer card streaming element missing for lightweight recovery");
   return JSON.stringify(decoded);
+}
+function replaceGatewaySlotContent(nodes: Array<Record<string, unknown>>, slot: string, replaced: () => void): Array<Record<string, unknown>> {
+  return nodes.map((node) => {
+    if (node.kind === "markdown" && node.slot === slot) { replaced(); return { ...node, content: "正在恢复本页内容…" }; }
+    const next = { ...node };
+    if (Array.isArray(next.nodes)) next.nodes = replaceGatewaySlotContent(next.nodes as Array<Record<string, unknown>>, slot, replaced);
+    if (Array.isArray(next.columns)) next.columns = (next.columns as Array<Record<string, unknown>>).map((column) => ({ ...column, ...(Array.isArray(column.nodes) ? { nodes: replaceGatewaySlotContent(column.nodes as Array<Record<string, unknown>>, slot, replaced) } : {}) }));
+    return next;
+  });
 }

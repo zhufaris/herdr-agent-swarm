@@ -20,7 +20,7 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { HerdrPaneHost } from "../runtime/herdr/pane-host.js";
 import type { TraexTranscriptReader } from "../runtime/traex-transcript.js";
 import { RuntimeLink } from "./runtime-link.js";
-import { cardKitWorkerPresentation } from "../cards/cardkit-worker-presentation.js";
+import { feishuGatewayApplicationPresentation, feishuGatewayWorkerPresentation } from "../gateways/feishu/presentation.js";
 
 export type WorkerRuntimeStores = Pick<SqliteStoreBundle, "instance" | "instanceLifecycle" | "instanceTurns" | "workerCardDisplay">;
 
@@ -33,13 +33,13 @@ export function createWorkerRuntime(options: {
   const instanceWorkLink = new RuntimeLink<InstanceWorkScheduler>("instance work scheduler");
   if (stores.instanceLifecycle !== stores.instanceTurns as unknown) throw new Error("Instance lifecycle and turn capabilities must share one SQLite transaction context");
   const executionStore = stores.instanceLifecycle as InstanceLifecycleStore & InstanceTurnStore;
-  const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
-  const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
+  const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
+  const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, logger });
   instanceWorkLink.connect(instanceWork);
-  const instanceTurns = new InstanceTurnSupervisor({ store: executionStore, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: cardKitWorkerPresentation, logger });
+  const instanceTurns = new InstanceTurnSupervisor({ store: executionStore, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, logger });
   const instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store: executionStore, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeCardContext: () => outboundWork.wake(), logger });
-  const instanceMessaging = new InstanceMessagingWorkflow({ store: stores.instance, turnControl, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, presentation: cardKitWorkerPresentation, maxQueueDepth: config.maxQueueDepth });
-  const workerCardDisplay = new WorkerCardDisplayWorkflow(stores.workerCardDisplay, () => outboundWork.wake());
+  const instanceMessaging = new InstanceMessagingWorkflow({ store: stores.instance, turnControl, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, presentation: feishuGatewayWorkerPresentation, maxQueueDepth: config.maxQueueDepth });
+  const workerCardDisplay = new WorkerCardDisplayWorkflow(stores.workerCardDisplay, () => outboundWork.wake(), feishuGatewayApplicationPresentation);
   const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("../cli/primary-tools-mcp.js", import.meta.url))], stores.instance, instanceMessaging, logger, [], {}, workerCardDisplay);
   const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store: stores.instance, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
   return { workerTurns, instanceWork, instanceTurns, instanceRuntime, instanceMessaging, primaryToolGateway, instanceControl };

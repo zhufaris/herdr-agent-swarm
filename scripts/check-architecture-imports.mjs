@@ -31,6 +31,7 @@ for (const file of files) {
   const text = readFileSync(file, "utf8");
   if (importer !== "src/adapters/lark-adapter.ts" && text.includes("@larksuiteoapi")) violations.push(`${importer} may not import the Feishu SDK`);
   if (/^src\/(?:coordinator|events)\//.test(importer) && /\bLarkPort\b/.test(text)) violations.push(`${importer} may not depend on LarkPort`);
+  if (/^src\/(?:coordinator|events|composition)\//.test(importer) && /from ["'][^"']*\/cards\//.test(text) && importer !== "src/gateways/feishu/presentation.ts") violations.push(`${importer} may not import Feishu CardKit renderers`);
 }
 
 if (violations.length > 0) {

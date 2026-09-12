@@ -91,5 +91,5 @@ export function assertWorkerMessageTarget(store: Pick<OutboxStore, "loadWorkerTu
 function collectElementIds(value: unknown): string[] {
   if (Array.isArray(value)) return value.flatMap(collectElementIds);
   if (typeof value !== "object" || value === null) return [];
-  return Object.entries(value).flatMap(([key, item]) => key === "element_id" && typeof item === "string" ? [item] : collectElementIds(item));
+  return Object.entries(value).flatMap(([key, item]) => (key === "element_id" || key === "slot") && typeof item === "string" ? [item] : collectElementIds(item));
 }

@@ -4,7 +4,7 @@ import type { InstanceMessagingWorkflow } from "../instance-messaging-workflow.j
 import { InstanceConversationContext } from "./conversation-context.js";
 import { InstanceViewQuery } from "./instance-view-query.js";
 
-interface InstanceCommandPresentation { requestRejected(reason: string): object }
+interface InstanceCommandPresentation { requestRejected(reason: string): object; commandResult(input: { title: string; text: string }): object; projectDirectory(input: { projects: readonly ProjectConfig[]; selectedProjectId?: string }): object; }
 
 export class InstanceCommandActions {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
@@ -23,7 +23,7 @@ export class InstanceCommandActions {
     const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
     const context = this.options.context.resolve(message);
     const current = this.options.context.selected(context, message.chatId);
-    if (command.kind === "projects") return this.options.reply(message, projectCard(this.options.projects, current?.projectId));
+    if (command.kind === "projects") return this.options.reply(message, this.options.presentation.projectDirectory({ projects: this.options.projects, ...(current?.projectId ? { selectedProjectId: current.projectId } : {}) }));
     if (command.kind === "project") {
       const project = this.projects.get(command.projectId);
       if (!project) return this.reject(message, "项目不存在。");
@@ -44,15 +44,12 @@ export class InstanceCommandActions {
     }
     if (command.kind === "steer_instance") {
       const result = await this.options.messaging.steer({ idempotencyKey: `lark:${message.messageId}:steer`, actor, targetInstanceId: instance.id, text: command.text, resultTargetMessageId: message.rootMessageId ?? message.messageId });
-      if (result.durableResult === false) await this.options.reply(message, statusCard(`Steer: ${result.status}`));
+      if (result.durableResult === false) await this.options.reply(message, this.options.presentation.commandResult({ title: "Agent control", text: `Steer: ${result.status}` }));
       return;
     }
     const result = await this.options.messaging.interrupt({ idempotencyKey: `lark:${message.messageId}:interrupt`, actor, targetInstanceId: instance.id });
-    return this.options.reply(message, statusCard(`Stop: ${result.status}`));
+    return this.options.reply(message, this.options.presentation.commandResult({ title: "Agent control", text: `Stop: ${result.status}` }));
   }
 
   private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.options.reply(message, this.options.presentation.requestRejected(reason)); }
 }
-
-function projectCard(projects: readonly ProjectConfig[], selected?: string): object { return { schema: "2.0", header: { title: { tag: "plain_text", content: "Projects" }, template: "blue" }, body: { elements: projects.map((project) => ({ tag: "markdown", content: `${project.id === selected ? "▶ " : ""}**${project.displayName}** · \`${project.id}\`\n${project.description}` })) } }; }
-function statusCard(text: string): object { return { schema: "2.0", header: { title: { tag: "plain_text", content: "Agent control" }, template: "blue" }, body: { elements: [{ tag: "markdown", content: text }] } }; }

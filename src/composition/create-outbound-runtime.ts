@@ -10,15 +10,14 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { QueueFeedbackProjector } from "../events/queue-feedback-projector.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "../coordinator/main-card-workflow.js";
-import { cardKitPrimaryPresentation } from "../cards/cardkit-primary-presentation.js";
-import { cardKitApplicationPresentation } from "../cards/cardkit-application-presentation.js";
+import { feishuGatewayApplicationPresentation, feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import { OutboxRetentionMaintainer } from "../runtime/outbox-retention-maintainer.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 
 export type OutboundRuntimeStores = Pick<SqliteStoreBundle, "outboundIntent" | "outbox" | "answerPages" | "mainCards" | "projection" | "queueFeedback" | "cardContext" | "retention">;
 
-export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, gateway: GatewaySession, bus: LifecycleEventPublisher & LifecycleEventSubscriber, outboundWork: OutboundWorkNotifier, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: cardKitPrimaryPresentation, application: cardKitApplicationPresentation }) {
+export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, gateway: GatewaySession, bus: LifecycleEventPublisher & LifecycleEventSubscriber, outboundWork: OutboundWorkNotifier, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: feishuGatewayPrimaryPresentation, application: feishuGatewayApplicationPresentation }) {
   const outbound = new OutboundIntentWriter(stores.outboundIntent, outboundWork);
   const channelPublisher = new GatewayOutboxDispatcher(stores.outbox, gateway.delivery, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
   const answerPages = new AnswerPageWorkflow(stores.answerPages, () => outboundWork.wake(), presentation.primary, logger, { pageLimit: config.runtimeTuning.cards.answerPageLimitChars, answerStreamContent: presentation.primary.answerStreamContent, renderAnswerStreamPage: presentation.primary.answerStreamPage });

@@ -1,6 +1,7 @@
 import type { OutboxStore } from "../domain/ports/outbox.js";
 import type { OutboundReply } from "../domain/types.js";
 import type { GatewayDeliveryIntent, GatewayDeliveryPurpose } from "../gateways/contract/plugin.js";
+import { isGatewayView, legacyGatewayView } from "../gateways/contract/view.js";
 import { materializeOutboundReply } from "./outbound-intent-materializer.js";
 import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerProgressTarget, PermanentDeliveryError } from "./outbound-target-validation.js";
 
@@ -11,20 +12,20 @@ export function prepareOutboundGatewayIntent(store: OutboxStore, reply: Outbound
   const purpose = deliveryPurpose(reply);
   if (reply.kind === "group_card_create") {
     if (!reply.targetChatId || (reply.threadAliasId === null) === (reply.workerThreadId === null)) throw new PermanentDeliveryError("Group card target is incomplete");
-    return { intent: { kind: "conversation.create", purpose, conversationId: reply.targetChatId, view: parseObject(payload), idempotencyKey: reply.idempotencyKey }, streamMetadata: false, emptyStreamContent: false };
+    return { intent: { kind: "conversation.create", purpose, conversationId: reply.targetChatId, view: renderableView(payload), idempotencyKey: reply.idempotencyKey }, streamMetadata: false, emptyStreamContent: false };
   }
   const rootMessageId = requireRootMessageId(reply);
   if (reply.kind === "card_update") {
     if (reply.cardRole === "answer") assertAnswerMessageTarget(store, reply.bindingId, reply.promptId, rootMessageId);
     if (reply.workerTurnId) assertWorkerMessageTarget(store, reply.workerTurnId, rootMessageId);
     if (reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainMessageTarget(store, reply.workerId, reply.workerSessionGeneration, rootMessageId);
-    return { intent: { kind: "surface.replace", purpose, messageId: rootMessageId, view: parseObject(payload), ...(reply.targetRole === "session_status" ? { sequence: reply.cardSequence ?? 1 } : {}) }, streamMetadata: false, emptyStreamContent: false };
+    return { intent: { kind: "surface.replace", purpose, messageId: rootMessageId, view: renderableView(payload), ...(reply.targetRole === "session_status" ? { sequence: reply.cardSequence ?? 1 } : {}) }, streamMetadata: false, emptyStreamContent: false };
   }
   if (reply.kind === "stream_card_create") {
     const decoded = decodeStreamingCardPayload(payload);
     if (reply.workerTurnId) assertWorkerCardCreateTarget(store, reply.workerTurnId, rootMessageId, decoded.card, decoded.stream);
     else assertAnswerCardCreateTarget(store, reply.bindingId, reply.promptId, rootMessageId, decoded.card, decoded.stream);
-    return { intent: { kind: "stream.create", purpose, rootMessageId, view: decoded.card, idempotencyKey: reply.idempotencyKey }, streamMetadata: Boolean(decoded.stream), emptyStreamContent: false };
+    return { intent: { kind: "stream.create", purpose, rootMessageId, view: gatewayView(decoded.card), idempotencyKey: reply.idempotencyKey }, streamMetadata: Boolean(decoded.stream), emptyStreamContent: false };
   }
   if (reply.kind === "stream_content") {
     const decoded = parseObject(payload) as { elementId?: unknown; content?: unknown; sequence?: unknown; pageIndex?: unknown; workerElement?: unknown };
@@ -48,7 +49,7 @@ export function prepareOutboundGatewayIntent(store: OutboxStore, reply: Outbound
   return {
     intent: reply.kind === "text"
       ? { kind: "message.reply.text", purpose, rootMessageId, text: payload, idempotencyKey: reply.idempotencyKey }
-      : { kind: "message.reply.view", purpose, rootMessageId, view: parseObject(payload), idempotencyKey: reply.idempotencyKey },
+      : { kind: "message.reply.view", purpose, rootMessageId, view: renderableView(payload), idempotencyKey: reply.idempotencyKey },
     streamMetadata: false, emptyStreamContent: false
   };
 }
@@ -66,6 +67,8 @@ function parseObject(payload: string): object {
   try { const value: unknown = JSON.parse(payload); if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(); return value; }
   catch { throw new PermanentDeliveryError("Durable delivery payload is not a JSON object"); }
 }
+function renderableView(payload: string): import("../gateways/contract/plugin.js").GatewayRenderableView { return gatewayView(parseObject(payload)); }
+function gatewayView(value: object): import("../gateways/contract/plugin.js").GatewayRenderableView { return isGatewayView(value) ? value : legacyGatewayView(value); }
 function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" } } {
   const decoded = parseObject(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown; deliveryMode?: unknown } };
   if (!decoded.card || !decoded.stream) return { card: decoded };

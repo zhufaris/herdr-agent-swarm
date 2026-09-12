@@ -24,7 +24,7 @@ interface Options {
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
   promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlWorkflow, "createWorker" | "inspect">;
-  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected">;
+  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult">;
 }
 
 export interface SwarmCommandGatewayPort {
@@ -180,7 +180,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `awake:${message.messageId}`, this.options.presentation.awakeStatus(detail, recovered)); return recovered || result.outcome === "none";
   }
   private async reject(message: IncomingLarkMessage, reason: string, kind: string, outcome: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-rejected:${message.messageId}:${kind}`, this.options.presentation.requestRejected(reason)); this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${kind}`, target: message.messageId, outcome }); }
-  private async reply(message: IncomingLarkMessage, text: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-result:${message.messageId}`, { schema: "2.0", header: { title: { tag: "plain_text", content: "Swarm command" }, template: "blue" }, body: { elements: [{ tag: "markdown", content: text }] } }); }
+  private async reply(message: IncomingLarkMessage, text: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-result:${message.messageId}`, this.options.presentation.commandResult({ title: "Swarm command", text })); }
 }
 
 function messageFrom(intent: CommandIntent): IncomingLarkMessage { return { eventId: `command:${intent.id}`, messageId: intent.context.sourceMessageId, parentMessageId: null, chatId: intent.context.chatId, topicId: intent.context.topicId, rootMessageId: intent.context.rootMessageId, actorOpenId: intent.context.actorOpenId, text: "", mentionsBot: true, isRootMessage: false }; }

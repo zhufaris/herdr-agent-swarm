@@ -23,7 +23,7 @@ function replaceCardElementIds(value: unknown, elementId: string): unknown {
   if (Array.isArray(value)) return value.map((item) => replaceCardElementIds(item, elementId));
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-    key, key === "element_id" && typeof item === "string" ? elementId : replaceCardElementIds(item, elementId)
+    key, (key === "element_id" || key === "slot") && typeof item === "string" ? elementId : replaceCardElementIds(item, elementId)
   ]));
 }
 

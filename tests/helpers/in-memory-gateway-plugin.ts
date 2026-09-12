@@ -2,6 +2,7 @@ import { GATEWAY_PROTOCOL_VERSION, type ConversationGatewayPlugin, type GatewayD
 
 export interface InMemoryGatewayControl {
   readonly delivered: GatewayDeliveryIntent[];
+  readonly fallbackMessages?: string[];
   emit: GatewayIngressSink["accept"];
 }
 
@@ -18,7 +19,14 @@ export function createInMemoryGatewayPlugin(control: InMemoryGatewayControl): Co
       });
       const delivery = {
         prepare(intent: GatewayDeliveryIntent): PreparedGatewayDelivery { return { protocolVersion: GATEWAY_PROTOCOL_VERSION, gatewayId: config.gatewayId, profileId: profile.id, rendererRevision: profile.rendererRevision, operation: intent.kind, intent: structuredClone(intent) }; },
-        async execute(plan: PreparedGatewayDelivery, _context: GatewayDeliveryContext): Promise<GatewayDeliveryReceipt> { control.delivered.push(plan.intent); return { refs: [] }; }
+        async execute(plan: PreparedGatewayDelivery, _context: GatewayDeliveryContext): Promise<GatewayDeliveryReceipt> {
+          control.delivered.push(plan.intent);
+          if ("view" in plan.intent) {
+            if (plan.intent.view.schemaVersion !== 1) throw new Error("Memory Gateway rejects legacy provider views");
+            control.fallbackMessages?.push(plan.intent.view.fallbackText);
+          }
+          return { refs: [] };
+        }
       };
       return {
         gatewayId: config.gatewayId, profile,

@@ -17,7 +17,7 @@ export type { InstanceCardActionCommand } from "./card-action-command.js";
 
 interface Options {
   projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort;
-  presentation: Pick<ApplicationPresentation, "answerCard" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">;
+  presentation: Pick<ApplicationPresentation, "answerCard" | "commandResult" | "projectDirectory" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">;
   workerCreation?: WorkerCreationGateway; idFactory?: () => string;
   wakeOutbound?: () => void;
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "publishFromCard">;
