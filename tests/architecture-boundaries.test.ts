@@ -163,6 +163,16 @@ describe("application composition boundaries", () => {
     expect(factory).not.toContain("startHealthServer(");
   });
 
+  it("keeps Conversation Gateway selection in composition and isolates its contract from workflows and runtimes", () => {
+    const infrastructure = readFileSync(new URL("../src/composition/create-infrastructure-runtime.ts", import.meta.url), "utf8");
+    const registry = readFileSync(new URL("../src/gateways/registry.ts", import.meta.url), "utf8");
+    const contract = readFileSync(new URL("../src/gateways/contract/plugin.ts", import.meta.url), "utf8");
+    expect(infrastructure).toContain("new BuiltinGatewayRegistry");
+    expect(infrastructure).not.toContain("new LarkSdkAdapter");
+    expect(registry).not.toMatch(/from .*coordinator|from .*runtime\/herdr|from .*traex|from .*prompt/);
+    expect(contract).not.toMatch(/from .*coordinator|from .*runtime|from .*adapters|Herdr|Traex|PromptRun/);
+  });
+
   it("owns process-local event integration in one composition module", () => {
     const factory = readFileSync(new URL("../src/composition/create-bridge-runtime.ts", import.meta.url), "utf8");
     const outbound = readFileSync(new URL("../src/composition/create-outbound-runtime.ts", import.meta.url), "utf8");

@@ -140,6 +140,7 @@ async function collectProjects(prompts: SetupPromptPort, herdr: SetupHerdrProbe,
 function emptyDraft(context: SetupContext): SetupDraft {
   return {
     environment: {
+      GATEWAY_KIND: "feishu", GATEWAY_ID: "feishu:primary",
       PROJECTS_CONFIG_PATH: `${context.configDirectory}/projects.json`,
       RUNTIME_CONFIG_PATH: `${context.configDirectory}/runtime.yaml`,
       BRIDGE_DATABASE_PATH: `${context.stateDirectory}/bridge.db`,

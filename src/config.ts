@@ -32,6 +32,8 @@ const projectRegistrySchema = z.object({
 });
 
 const environmentSchema = z.object({
+  GATEWAY_KIND: z.literal("feishu").default("feishu"),
+  GATEWAY_ID: z.string().regex(/^[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$/).default("feishu:primary"),
   LARK_APP_ID: z.string().min(1),
   LARK_APP_SECRET: z.string().min(1),
   LARK_CHAT_ID: z.string().min(1),
@@ -92,6 +94,7 @@ function buildConfig(
   if (outsideAllowed.length) throw new Error("LARK_ADMIN_OPEN_IDS must be a subset of LARK_ALLOWED_OPEN_IDS");
   const defaultProject = registry.projects.find((project) => project.id === registry.defaultProjectId)!;
   return {
+    gateway: { kind: value.GATEWAY_KIND, id: value.GATEWAY_ID },
     lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS, allowedOpenIds, adminOpenIds },
     herdr: { workspaceId: defaultProject.workspaceId, workspaceCwd: defaultProject.cwd, executable: value.HERDR_BIN },
     projects: registry.projects,

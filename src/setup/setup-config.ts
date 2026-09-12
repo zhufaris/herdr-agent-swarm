@@ -7,6 +7,7 @@ import type { SetupCheck, SetupConfigPort, SetupContext, SetupDraft } from "./se
 import { defaultRuntimeTuning, loadRuntimeTuning, serializeRuntimeTuning, validateRuntimeTuning } from "../runtime-config.js";
 
 export const setupEnvironmentOrder = [
+  "GATEWAY_KIND", "GATEWAY_ID",
   "LARK_APP_ID", "LARK_APP_SECRET", "LARK_CHAT_ID", "LARK_BOT_OPEN_ID", "LARK_ALLOWED_OPEN_IDS", "LARK_ADMIN_OPEN_IDS",
   "PROJECTS_CONFIG_PATH", "RUNTIME_CONFIG_PATH", "BRIDGE_DATABASE_PATH", "TRAEX_SESSIONS_ROOT",
   "HERDR_BIN", "TRAEX_BIN", "CODEX_BIN", "CLAUDE_CODE_BIN", "PI_BIN", "TRAEX_PERMISSION_MODE",

@@ -3,7 +3,8 @@ import { dirname, resolve } from "node:path";
 import type { BridgeConfig } from "../config.js";
 import { HerdrCliAdapter } from "../adapters/herdr-adapter.js";
 import { TraexControlAdapter } from "../adapters/traex-control-adapter.js";
-import { LarkSdkAdapter } from "../adapters/lark-adapter.js";
+import { createFeishuGatewayPlugin, requireFeishuCompatibilityPort } from "../gateways/feishu/plugin.js";
+import { BuiltinGatewayRegistry } from "../gateways/registry.js";
 import { ExecFileCommandRunner } from "../infra/command-runner.js";
 import { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import { ClaudeCodeDriver } from "../runtime/agents/claude-code-driver.js";
@@ -43,6 +44,11 @@ export function createInfrastructureRuntime(
   const herdr = new WorkspaceSnapshotCache(herdrCircuitBreaker, config.runtimeTuning.cache.herdrSnapshotTtlMs, logger);
   herdrLink.connect(herdr);
   const paneHost = new HerdrPaneHost(herdr);
+  const gateway = new BuiltinGatewayRegistry([createFeishuGatewayPlugin()]).create(
+    config.gateway.kind, { gatewayId: config.gateway.id, ...config.lark }, { logger },
+    { threads: true, richViews: true, mutableSurfaces: true, interactions: true, orderedStreaming: true }
+  );
+  const lark = requireFeishuCompatibilityPort(gateway);
   const agentDrivers = new AgentDriverRegistry([
     new TraexDriver(herdr, config.traex.executable, config.turnTimeoutMs),
     new CodexDriver(herdr, config.agents.codex, config.turnTimeoutMs, availability.codex),
@@ -52,7 +58,7 @@ export function createInfrastructureRuntime(
   return {
     runner, worktreeNameResolver, herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers,
     worktrees: new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs }),
-    lark: new LarkSdkAdapter(config.lark, logger),
+    gateway, lark,
     transcriptReader: new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot })
   };
 }
