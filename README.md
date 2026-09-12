@@ -1,14 +1,17 @@
 # Herdr Agent Swarm
 
 Herdr Agent Swarm is a standalone, human-controlled multi-agent service built on the
-Herdr headless runtime. One Feishu gateway can manage multiple projects; each
-bound Lark thread owns its sole TraeX Primary, while durable project instances
+Herdr headless runtime. One statically registered Conversation Gateway manages
+multiple projects; Feishu is the current production plugin. Each bound thread
+owns its sole TraeX Primary, while durable project instances
 are explicitly created Workers using TraeX, Codex, Claude Code, or Pi. Herdr
 owns live panes and processes, while its CLI and socket API remain the required
 runtime control plane. The standalone
 user-systemd service is the repository's only supported deployment identity.
 
-Each ordinary Lark message gets an Answer CardKit entity. The bridge streams safe
+Each ordinary Feishu message gets an Answer CardKit entity. Core presentation is
+stored as a provider-neutral GatewayView with required fallback text; the Feishu
+plugin materializes it as CardKit. The bridge streams safe
 structured TraeX transcript output into its fixed Markdown element as the request moves from queued
 to running, blocked, completed, or failed. Large answers continue in a new
 continuation card without rewriting the frozen earlier card. It does not post
@@ -17,15 +20,15 @@ separate acknowledgement or final-answer text messages.
 ## How it works
 
 ```text
-Lark message -> durable FIFO turn -> Herdr pane -> TraeX
+Gateway message -> durable FIFO turn -> Herdr pane -> TraeX
      |                                  |
      +-> SQLite workflow state <--- authoritative Herdr observation
               |
-              +-> durable Lark outbox -> CardKit Answer stream
+              +-> durable Gateway outbox -> Feishu CardKit Answer stream
 ```
 
 SQLite stores topic-to-pane bindings, FIFO prompt jobs, run-card projections,
-deduplication keys, a durable Lark outbox, and audit records. The dispatcher
+deduplication keys, a durable Gateway outbox, and audit records. The dispatcher
 uses an in-memory work-conserving pump only for wake-ups, active lanes, and
 bounded concurrency; unsent messages never exist solely in memory. Herdr snapshots
 are authoritative for pane and agent state; Herdr events only wake the bridge

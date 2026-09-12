@@ -138,14 +138,14 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
 
   private launchScan(force = false): void {
     void this.requestScan(force).catch((error) => {
-      this.logger.warn({ event: "lark-outbox-scan-failed", err: safeLogError(error), consecutiveFailures: this.consecutiveScanFailures, outcome: "retry" }, "Lark outbox scan failed; retry scheduled");
+      this.logger.warn({ event: "gateway-outbox-scan-failed", err: safeLogError(error), consecutiveFailures: this.consecutiveScanFailures, outcome: "retry" }, "Gateway outbox scan failed; retry scheduled");
     });
   }
 
   private recoverTransientDeadLetters(): void {
     const cutoff = new Date(Date.now() - 300_000).toISOString();
     for (const reply of this.store.recoverEligibleDeadLetters(cutoff, 100)) {
-      this.logger.info({ event: "lark-outbox-auto-recovered", replyId: reply.id, replyKind: reply.kind, laneKey: reply.laneKey, failureClass: reply.failureClass, autoRecoveryCount: reply.autoRecoveryCount, deadLetteredAt: reply.deadLetteredAt, outcome: "pending" }, "transient Lark outbox dead letter reopened for one recovery round");
+      this.logger.info({ event: "gateway-outbox-auto-recovered", replyId: reply.id, replyKind: reply.kind, laneKey: reply.laneKey, failureClass: reply.failureClass, autoRecoveryCount: reply.autoRecoveryCount, deadLetteredAt: reply.deadLetteredAt, outcome: "pending" }, "transient Gateway outbox dead letter reopened for one recovery round");
     }
   }
 

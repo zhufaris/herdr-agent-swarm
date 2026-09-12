@@ -4,17 +4,11 @@ export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dism
 export type OutboundWorkClass = "live" | "history";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export type DeliveryEffectCertainty = "not-started" | "rejected" | "uncertain";
-export type CardKitRecoveryKind = "closed_answer_stream" | "stale_main_card";
-export type LarkDeliveryOperation =
-  | "create_topic" | "update_card" | "update_cardkit"
-  | "create_streaming_card" | "reply_streaming_card_reference" | "reply_streaming_card"
-  | "stream_card_content" | "finish_streaming_card" | "reply_text" | "reply_card";
-export type LarkDeliveryTarget = "primary_main" | "primary_answer" | "worker_main" | "worker_turn" | "group_thread" | "operation_result";
-export interface DeliveryOperationContext { operation: LarkDeliveryOperation; target: LarkDeliveryTarget }
+export type GatewayRecoveryKind = "closed_answer_stream" | "stale_main_card";
 export interface DeliveryFailureMetadata {
   failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null;
   effectCertainty?: DeliveryEffectCertainty;
-  recoveryKind?: CardKitRecoveryKind;
+  recoveryKind?: GatewayRecoveryKind;
 }
 export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
 export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_terminalized";

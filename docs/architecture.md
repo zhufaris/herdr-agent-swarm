@@ -4,8 +4,8 @@
 
 This document is for an engineer taking ownership of the bridge or diagnosing a
 production session. After reading it, they should be able to identify the
-authority for any observed state and follow a request from Lark through Herdr
-and back to a durable Lark delivery. They should also be able to place a change
+authority for any observed state and follow a request from the configured
+Conversation Gateway through Herdr and back to durable delivery. They should also be able to place a change
 at the correct workflow, port, adapter, or composition seam without weakening
 durability or recovery behavior.
 
@@ -24,20 +24,21 @@ transaction by itself.
 ## Architecture at a glance
 
 The system is a ports-and-adapters application with one production composition
-root. Application workflows depend on consumer-shaped domain ports. Concrete
-Lark, Herdr, and SQLite adapters satisfy those ports at the outside of the
-application. SQLite stores durable workflow facts; Herdr remains authoritative
-for live runtime identity; Lark displays projections.
+root. Application workflows depend on consumer-shaped domain ports. A statically
+registered Conversation Gateway, Herdr, and SQLite adapters satisfy those ports
+at the outside of the application. SQLite stores durable workflow facts; Herdr
+remains authoritative for live runtime identity; the active Gateway displays
+projections. Feishu is the only production Gateway in this milestone.
 
 ```text
 ┌──────────────────────────── External systems ────────────────────────────┐
-│ Lark / CardKit              Herdr / TraeX                  user systemd │
-│ messages and cards          panes, sessions, turns         process owner │
+│ Gateway / Feishu            Herdr / TraeX                  user systemd │
+│ messages and views          panes, sessions, turns         process owner │
 └──────────────┬──────────────────────┬───────────────────────────┬────────┘
                │ SDK / WebSocket      │ CLI / Socket / JSONL      │ lifecycle
                v                      v                           v
 ┌──────────────────────── Infrastructure adapters ────────────────────────┐
-│ Lark adapter · Herdr adapter · PaneHost · TranscriptReader · health     │
+│ Gateway plugin · Herdr adapter · PaneHost · TranscriptReader · health  │
 │ command runner · Agent drivers · worktree manager · SQLite bundle       │
 └─────────────────────────────┬────────────────────────────────────────────┘
                               │ concrete implementations
@@ -51,7 +52,7 @@ for live runtime identity; Lark displays projections.
 ┌──────────────────────┐  ┌──────────────────────┐  ┌────────────────────┐
 │ Ingress / Primary    │  │ Worker / Control     │  │ Projection / Outbox│
 │ routing, acceptance  │  │ instance FIFO, exact│  │ card views, durable│
-│ prompt FIFO, recovery│  │ turn observation     │  │ Lark delivery      │
+│ prompt FIFO, recovery│  │ turn observation     │  │ Gateway delivery   │
 └──────────┬───────────┘  └──────────┬───────────┘  └─────────┬──────────┘
            └─────────────────────────┼────────────────────────┘
                                      │ consumer-shaped ports
@@ -71,15 +72,17 @@ for live runtime identity; Lark displays projections.
 The shortest useful request trace is:
 
 ```text
-Lark input
-  -> authorization and normalization
+Gateway input
+  -> plugin validation and provider-neutral normalization
+  -> authorization
   -> durable inbound record
   -> routing and atomic prompt or command acceptance
   -> FIFO claim
   -> one fenced Herdr / TraeX effect
   -> exact transcript observation
   -> durable view reduction and outbox intent
-  -> ordered Lark delivery
+  -> frozen Gateway plan and Gateway-scoped lane claim
+  -> ordered Gateway delivery
 ```
 
 Every arrow across an external-effect boundary has a durable fact on the SQLite
@@ -103,9 +106,9 @@ createBridgeRuntime
 │
 ├─ RuntimeEventIntegration
 ├─ createInfrastructureRuntime
-│    └─ Lark, Herdr, PaneHost, transcripts, drivers, worktrees
+│    └─ built-in Gateway registry/session, Herdr, PaneHost, transcripts, drivers, worktrees
 ├─ createOutboundRuntime
-│    └─ projections, Answer/Main Card workflows, durable outbox drain
+│    └─ projections, Answer/Main Card workflows, GatewayView, durable outbox drain
 ├─ createPrimaryRuntime
 │    └─ prompt FIFO, exact turn supervision, external-turn observation
 ├─ createWorkerRuntime
@@ -299,7 +302,7 @@ The production implementation uses the following modules and seams.
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
 | `StartupViewConverger` | Rebuilds startup-visible Answer and Main Card state from durable canonical projections | Named `StartupViewProjectionStores`; startup recovery, Answer pages, and Main Cards are explicit stores with no type assertion |
-| `LarkOutboxDispatcher` | Durable Lark delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore`; no direct aggregate mutation |
+| `GatewayOutboxDispatcher` | Durable Gateway delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore` plus one negotiated `GatewayDeliveryPort`; no direct aggregate mutation |
 | `createSqliteStoreBundle` / `SqliteCapabilityGraph` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production code cannot import the broad compatibility facade |
 | `SqliteStoreKernel` / `SqliteBindingStore` | Test and headless-smoke compatibility facades | Non-production adapters over the capability graph; they contain no schema ownership and cannot be imported by production source |
 | `SqliteBindingLifecycleStore` / `SqliteBindingProjectionStore` | Binding lifecycle, reset, cleanup, runtime convergence, and binding-owned projections | Keep lifecycle and projection responsibilities separate while sharing one transaction context |
@@ -326,7 +329,7 @@ responsibility is a business or application concern.
 | workflow wake-up bus | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
 | `BridgeEventBus` | `LifecycleEventPublisher` | Distributes typed lifecycle outcomes to projections; durable inbound work uses a separate notifier and SQLite authority. |
 | `CardProjector` | `ConversationViewProjector` | Reduces lifecycle outcomes into topic and run-card read models, then records delivery intent. |
-| `LarkChannelPublisher` | `LarkOutboxDispatcher` | Drains durable outbox work to Lark with ordering, retries, and dead-letter handling. |
+| legacy channel publisher | `GatewayOutboxDispatcher` | Drains durable outbox work through the active Gateway with ordering, retries, and dead-letter handling. |
 | `BindingStorePort` | capability-focused stores | Prompt acceptance, startup recovery/view convergence, prompt execution, projection, outbox, binding provisioning, runtime reconciliation, operations, and lease ports expose consumer-specific capabilities over one transactional SQLite context. |
 
 `RunCardView`, `TopicViewState`, and Answer-page state are projections or read
@@ -1087,11 +1090,33 @@ unconditional updates. A lost in-process wake-up may delay delivery, but cannot
 lose the desired Main Card state or cause the corresponding TraeX work to run
 again.
 
-## Lark delivery
+## Conversation Gateway delivery
+
+Production selects one built-in Gateway from a compile-time registry. The
+registry does not scan directories, dynamically import packages, or execute a
+module path from configuration. Startup creates one negotiated session with
+separate ingress and delivery ports; its capability profile remains frozen for
+the process lifetime. Existing `LARK_*` configuration continues to configure
+the built-in Feishu plugin.
+
+Core workflows render a bounded `GatewayView` document: heading, Markdown,
+dividers, columns, panels, buttons, forms, inputs, and static selects. Every
+document includes required fallback text. The Feishu plugin owns conversion
+between this document and CardKit. A Gateway without rich views can consume the
+same fallback text without importing or interpreting CardKit. Historical
+provider-materialized payloads remain readable through an explicit legacy
+envelope; new providers must reject that compatibility format.
+
+Before the first claim, the dispatcher asks the active plugin to prepare a
+deterministic delivery plan. SQLite stores the Gateway ID, negotiated profile,
+serialized plan, and SHA-256 plan hash. Identity, plan, and hash become
+immutable once claimed; retries execute the same frozen plan and never render
+again. A released pending row created before this migration may receive exactly
+one plan while both plan fields are null.
 
 All user-visible replies are first represented as SQLite outbox rows with stable
-idempotency keys. The publisher delivers card replies, card updates, streaming
-card creation, stream content, and stream finalization. It marks successful rows
+idempotency keys. The dispatcher executes provider-neutral create, reply,
+replace, stream, finish, and share plans. It marks successful rows
 delivered; transient failures are retried with backoff; repeated failures become
 dead letters that an operator can retry or dismiss.
 
@@ -1116,7 +1141,8 @@ route and, for `canonical-main` mode only, checkpoints the sole Worker Main
 message identity. A `legacy-entry` ACK activates only the route. Claimed target
 identity is immutable; an uncertain external create is not issued again.
 
-Before external delivery, the executor transactionally claims a fresh, due lane
+Lane keys are prefixed with the Gateway ID before entering SQLite, so equal
+provider-local targets cannot collide. Before external delivery, the executor transactionally claims a fresh, due lane
 head. The returned frozen receipt carries the row, snapshot revision, SHA-256
 payload hash, lease fencing token, and a unique attempt ID. Delivery ACK, card
 creation checkpoint, and failure settlement must match that claim. Each retry
@@ -1231,10 +1257,11 @@ recovery or dismissal, not rows whose lane was merely released. The separate
 `deliveryRecoveries` counters retain unresolved/replacement-pending work even
 while a manual retry is pending; these counters do not yet change readiness.
 
-Semantic Lark recovery is authorized at the exact external-call boundary. The
-outbox executor associates each Lark port call with bounded operation and target
-enums; the delivery classifier combines those facts with the normalized business
-code. Only a Primary Main Card `updateCard`/`updateCardKit` rejection with
+Semantic provider recovery is authorized at the exact external-call boundary.
+The Feishu plugin combines its bounded operation and view purpose with the
+normalized business code, then returns provider-neutral failure certainty and
+recovery kind. Core delivery code does not interpret Feishu codes. Only a
+Primary Main Card `updateCard`/`updateCardKit` rejection with
 `230099`, a Primary Main Card `updateCardKit` rejection with `300317`, or a
 Primary Answer `streamCardContent` rejection with `300309` can produce a semantic
 recovery kind. SQLite consumes that explicit kind and never infers recovery from
@@ -1242,6 +1269,12 @@ the raw code. `230028` is a permanent content rejection of the current revision
 and is not automatically retried or rewritten. Nonmatching endpoints remain
 dead-lettered without rebuilding an unrelated card or Answer stream. Timeout and
 reset uncertainty takes precedence and remains blocked for operator inspection.
+
+Physical SQLite names such as `lark_error_code` and
+`lark_delivery_cooldowns` are retained for additive migration and rollback
+compatibility. They are storage details, not current application contracts. New
+core code uses Gateway identity, provider codes, and provider-neutral failure
+semantics.
 
 An accepted delivery ACK also commits matching recovery evidence: the same
 failed row after retry, an explicitly linked Main Card rebuild in its original
