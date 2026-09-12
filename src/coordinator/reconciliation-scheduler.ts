@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { ReconciliationDiagnostics } from "../domain/types.js";
+import type { ReconciliationDiagnostics, ReconciliationPassResult } from "../domain/types.js";
 import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { mergeReconciliationScope, reconciliationCooldownCovers, reconciliationScopeCovers, type ReconciliationScope } from "./reconciliation-scope-policy.js";
@@ -15,7 +15,7 @@ export class ReconciliationScheduler {
   private readonly lastReconciledAt = new Map<string, number>();
   private readonly metrics = new ReconciliationRunMetrics();
 
-  constructor(private readonly options: { configuredWorkspaceIds: ReadonlySet<string>; execute(scope?: ReadonlySet<string>): Promise<ReadonlySet<string>>; logger: Logger }) {}
+  constructor(private readonly options: { configuredWorkspaceIds: ReadonlySet<string>; execute(scope?: ReadonlySet<string>): Promise<ReconciliationPassResult>; logger: Logger }) {}
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
     if (this.stopping) return;
@@ -63,9 +63,10 @@ export class ReconciliationScheduler {
       this.active = requested;
       try {
         await this.metrics.measure(async () => {
-          const reconciled = await this.options.execute(requested === null ? undefined : requested);
+          const result = await this.options.execute(requested === null ? undefined : requested);
           const completedAt = performance.now();
-          for (const workspaceId of reconciled) this.lastReconciledAt.set(workspaceId, completedAt);
+          for (const workspaceId of result.reconciledWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
+          return result;
         });
       } finally { this.active = undefined; }
     }

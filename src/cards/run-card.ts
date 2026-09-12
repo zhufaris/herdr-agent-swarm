@@ -6,7 +6,7 @@ import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 import { callbackButton } from "./cardkit-button.js";
-import { cardSection, lifecycleMarker } from "./card-style.js";
+import { actionRow, cardSection, lifecycleMarker, passiveCardElements, recentItems } from "./card-style.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
 
@@ -33,8 +33,8 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
 };
 
 const MAIN_CARD_PREVIEW_LIMIT = 2_000;
-const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 12;
-const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 6_000;
+const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 6;
+const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 3_000;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";
 
@@ -143,15 +143,17 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
-  const recentActivity = progress.filter((event) => !planKeys.has(event.key)).slice(-8);
-  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最近活动", summary: effectiveProgressSummary(input.progressSummary, progress) }));
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
   if (input.workers.length > 0) {
     elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n${input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
-    for (const worker of input.workers) if (worker.workerMain.messageId) elements.push(callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default"));
+    const workerButtons = input.workers.flatMap((worker) => worker.workerMain.messageId ? [callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default")] : []);
+    const row = actionRow(workerButtons);
+    if (row) elements.push(row);
   }
+  const recentActivity = recentItems(progress.filter((event) => !planKeys.has(event.key)), 5);
+  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最近活动", summary: summarizeProgress(recentActivity), visibleCount: 5 }));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
@@ -163,6 +165,12 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     },
     body: { elements }
   };
+}
+
+export function renderPaneThreadEntryCard(input: TopicViewState): object {
+  const card = renderProjectEntryCard(input) as { body: { elements: object[] }; header: { subtitle: { content: string } } };
+  const passiveElements = passiveCardElements(card.body.elements);
+  return { ...card, header: { ...card.header, subtitle: { tag: "plain_text", content: "HERDR PANE ENTRY · 回复此话题继续交互" } }, body: { elements: [...passiveElements, { tag: "hr" }, { tag: "markdown", content: "回复此话题即可向该 Pane 的 Agent 发送新请求。主状态请以原始 Main Card 为准。" }] } };
 }
 
 export function renderRequestRunCard(input: RunCardView): object {
@@ -191,14 +199,14 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   const content = options.initialContent !== undefined
     ? options.initialContent
     : defaultAnswerContent(input, stepProgress);
-  const elements: object[] = [
-    { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
-    ...renderProgressTimeline(input.progressEvents, input.phase, { summary })
-  ];
-  if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
-  if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  elements.push(...workerActivityElements(input));
-  if (isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
+  const firstPage = pageNumber === 1;
+  const showProgress = firstPage && (input.phase === "queued" || input.phase === "running" || input.phase === "blocked");
+  const elements: object[] = [{ tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) }];
+  if (showProgress) elements.push(...renderProgressTimeline(input.progressEvents, input.phase, { summary }));
+  if (firstPage && input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
+  if (firstPage && input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
+  if (firstPage) elements.push(...workerActivityElements(input));
+  if (firstPage && isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
   elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
   return {
     schema: "2.0", config: {
@@ -242,7 +250,7 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
   const elements = foldFinalAnswerContent(options.initialContent, payloadLimit);
   if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const pageNumber = options.pageNumber ?? 1;
-  const workerElements = workerActivityElements(input);
+  const workerElements = pageNumber === 1 ? workerActivityElements(input) : [];
   return {
     schema: "2.0",
     config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
@@ -260,9 +268,10 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
 }
 
 function workerActivityElements(input: RunCardView): object[] {
-  if (input.workerActivity.length === 0) return [];
-  const elements: object[] = [{ tag: "markdown", content: `**Worker activity**\n${input.workerActivity.map((worker) => `- ${worker.name} · ${worker.latestPhase} · ${worker.latestTaskTitle}${worker.taskCount > 1 ? ` · ${worker.taskCount} tasks` : ""}`).join("\n")}` }];
-  for (const worker of input.workerActivity) if (worker.latestTaskCard.messageId) elements.push(callbackButton(`打开 ${worker.name} Task`, { action: "card_target_open", ...worker.latestTaskCard }, "default"));
+  const workers = input.workerActivity.slice(0, 3);
+  if (workers.length === 0) return [];
+  const elements: object[] = [{ tag: "markdown", content: `${cardSection("🤖", "Worker 动态")}\n${workers.map((worker) => `- ${worker.name} · ${worker.latestPhase} · ${worker.latestTaskTitle}${worker.taskCount > 1 ? ` · ${worker.taskCount} 个任务` : ""}`).join("\n")}` }];
+  for (const worker of workers) if (worker.latestTaskCard.messageId) elements.push(callbackButton(`打开 ${worker.name} Task`, { action: "card_target_open", ...worker.latestTaskCard }, "default"));
   return elements;
 }
 
@@ -331,7 +340,7 @@ export function renderHelpCard(): object {
         "`/swarm steer <文本>`  active 时注入 exact turn，idle 时优先于普通队列执行",
         "`/swarm projects`  打开项目选择卡片",
         "`/swarm spaces`  按 Space 查看全部 Pane",
-        "`/swarm panes`  列出当前群的 active Pane，并将所选主卡发送到当前话题",
+        "`/swarm panes`  列出当前 Space 的 active Pane，并将所选入口卡片发送到群聊",
         "`/swarm sessions`  查看当前群的会话",
         "`/swarm failures`  查看并处理发送失败",
         "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",

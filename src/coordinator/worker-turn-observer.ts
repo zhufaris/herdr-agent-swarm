@@ -3,6 +3,7 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
+import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 
 interface Options {
   store: WorkerTurnObservationStore;
@@ -17,13 +18,13 @@ const FINAL_DRAIN_LIMIT = 8;
 const RECOVERY_DRAIN_LIMIT = 64;
 
 export class WorkerTurnObserver {
-  private readonly headlessChunks = new Map<string, string[]>();
+  private readonly headlessOutput = new Map<string, BoundedTurnOutput>();
   private readonly exactTurns: ExactTurnObserver;
   constructor(private readonly options: Options) { this.exactTurns = new ExactTurnObserver(options.transcriptReader); }
 
   async observe(turnId: string, observation: TraexTranscriptObservation): Promise<void> {
     let turn = this.options.store.getInstanceTurn(turnId);
-    if (!turn || ["completed", "failed", "cancelled"].includes(turn.state)) return;
+    if (!turn || ["completed", "failed", "cancelled"].includes(turn.state)) { this.headlessOutput.delete(turnId); return; }
     const lifecycle = observation.turnLifecycle;
     if (!turn.runtimeTurnId && observation.freshTurnStart === true && lifecycle && observation.turnId === lifecycle.turnId) {
       turn = this.options.store.claimInstanceTurnTranscript({
@@ -35,9 +36,10 @@ export class WorkerTurnObserver {
     let view = this.options.store.loadWorkerTurnCard(turnId);
     const expected = { expectedRuntimeTurnId: turn.runtimeTurnId, expectedRuntimeTurnStartedAt: turn.runtimeTurnStartedAt! };
     const delta = this.safeOutput(observation.answerDelta);
-    const chunks = view ? null : this.headlessChunks.get(turnId) ?? [];
-    if (delta && chunks) { chunks.push(delta); this.headlessChunks.set(turnId, chunks); }
-    const accumulated = this.safeOutput(view ? (delta ? [view.answer, delta].filter(Boolean).join("\n\n") : view.answer) : chunks!.join("\n\n"));
+    const previousOutput = view ? createBoundedTurnOutput(view.answer) : this.headlessOutput.get(turnId) ?? createBoundedTurnOutput();
+    const output = appendTurnOutput(previousOutput, delta);
+    if (!view && output !== previousOutput) this.headlessOutput.set(turnId, output);
+    const accumulated = output.text;
     const occurredAt = new Date().toISOString();
     const progressEvents = observedProgress(observation, occurredAt, (value) => this.safeOutput(value));
     const statusTitle = observation.mainStatus?.statusTitle === undefined ? undefined : this.safeOutput(observation.mainStatus.statusTitle);
@@ -52,7 +54,7 @@ export class WorkerTurnObserver {
       const projected = view
         ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled", change: { type: "cancelled", occurredAt, notice }, render: this.options.presentation.workerTurn })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled" });
-      this.headlessChunks.delete(turnId);
+      this.headlessOutput.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }
       return;
     }
@@ -61,7 +63,7 @@ export class WorkerTurnObserver {
       const projected = view
         ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: this.options.presentation.workerTurn })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed" });
-      this.headlessChunks.delete(turnId);
+      this.headlessOutput.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }
       return;
     }

@@ -4,12 +4,14 @@ import type { PromptRunStore } from "../domain/ports/prompt-run.js";
 import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { abortableWait } from "../runtime/abortable-wait.js";
+import { createBoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 import { transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 
 export type TurnOutputSource =
   | { mode: "unavailable"; reason: string }
-  | { mode: "typed"; cursor: ExactTurnCursor; emitted: boolean; chunks: string[]; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
+  | { mode: "typed"; cursor: ExactTurnCursor; emitted: boolean; output: ReturnType<typeof createBoundedTurnOutput>; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
 
 interface TranscriptObserverOptions {
   store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn">;
@@ -23,7 +25,6 @@ interface TranscriptObserverOptions {
   identityPollMs?: number;
   attachedPollMs?: number;
 }
-
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
 const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
 const FINAL_TRANSCRIPT_DRAIN_LIMIT = 8;
@@ -57,7 +58,7 @@ export class TranscriptObserver {
     try {
       const result = await this.exactTurns.open({ session, boundary: { kind: "latest" } });
       return result.mode === "typed"
-        ? { mode: "typed", cursor: result.cursor, emitted: false, chunks: [] }
+        ? { mode: "typed", cursor: result.cursor, emitted: false, output: createBoundedTurnOutput() }
         : { mode: "unavailable", reason: result.reason };
     } catch (error) {
       this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, unavailableReason: "transcript_validation_failed", outcome: "structured_output_unavailable" }, "could not open typed TraeX transcript");
@@ -102,7 +103,7 @@ export class TranscriptObserver {
       const opened = await this.exactTurns.open({ session: transcriptSessionFor(applied.binding), boundary: { kind: "first" } });
       if (opened.mode !== "typed") return { source, binding: applied.binding };
       this.options.logger.info({ event: "traex-transcript-source-upgraded", bindingId: binding.id, paneId: binding.paneId, outcome: "typed_after_dispatch" }, "acquired first-turn TraeX session identity after prompt dispatch");
-      return { source: { mode: "typed", cursor: opened.cursor, emitted: false, chunks: [] }, binding: applied.binding };
+      return { source: { mode: "typed", cursor: opened.cursor, emitted: false, output: createBoundedTurnOutput() }, binding: applied.binding };
     } catch (error) {
       this.options.logger.warn({ event: "traex-transcript-source-upgrade-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "structured_output_unavailable" }, "could not recover first-turn TraeX transcript identity");
       return { source, binding };
@@ -184,7 +185,7 @@ export class TranscriptObserver {
     if (source.mode !== "typed") return;
     const projection = projectOwnedTranscriptOutput({ state: source, observation });
     source.emitted = projection.state.emitted;
-    source.chunks = [...projection.state.chunks];
+    source.output = projection.state.output;
     if (projection.state.terminalLifecycle) source.terminalLifecycle = projection.state.terminalLifecycle;
   }
 
@@ -193,7 +194,7 @@ export class TranscriptObserver {
   }
 
   private async publish(bindingId: string, promptId: string, observation: TraexTranscriptObservation, startedAt: number): Promise<void> {
-    const projection = projectOwnedTranscriptOutput({ state: { emitted: false, chunks: [] }, observation, ...(Number.isFinite(startedAt) ? { elapsedSeconds: Math.floor((Date.now() - startedAt) / 1_000) } : {}) });
+    const projection = projectOwnedTranscriptOutput({ state: { emitted: false, output: createBoundedTurnOutput() }, observation, ...(Number.isFinite(startedAt) ? { elapsedSeconds: Math.floor((Date.now() - startedAt) / 1_000) } : {}) });
     if (projection.observation) await this.options.publishObservation(bindingId, promptId, projection.observation);
   }
 
@@ -209,12 +210,4 @@ export class TranscriptObserver {
     observed.add(observedTurnId);
     this.options.logger.warn({ event: "transcript-turn-conflict", bindingId: binding.id, promptId, paneId: binding.paneId, acceptedTurnId, observedTurnId, outcome: "ignored" }, "ignored output from a conflicting TraeX transcript turn");
   }
-}
-
-async function abortableWait(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw new Error("aborted");
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); }, { once: true });
-  });
 }

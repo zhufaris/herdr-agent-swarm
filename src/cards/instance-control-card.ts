@@ -42,6 +42,12 @@ export function renderWorkerNewTaskCard(input: { workerName: string; interaction
   ]);
 }
 
+export function renderWorkerThreadAcceptedCard(input: { workerName: string; queuePosition: number; duplicate: boolean }): object {
+  return card(`任务已${input.duplicate ? "受理" : "加入队列"} · ${input.workerName}`, "green", [
+    { tag: "markdown", content: input.duplicate ? "这条消息已受理，不会重复提交 Agent 任务。" : `已创建独立 FIFO 任务 · 当前排队位置 ${input.queuePosition}` }
+  ]);
+}
+
 export function renderInstanceRemovalPlanCard(input: { instance: AgentInstance; workspace: WorkspaceLease; plan: InstanceRemovalPlan; requestedBy: string; conversationKey?: string; bindingId?: string; bindingGeneration?: number }): object {
   const retained = !input.plan.safe;
   const evidence = [

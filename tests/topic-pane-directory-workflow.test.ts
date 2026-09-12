@@ -43,22 +43,22 @@ describe("topic pane directory workflow", () => {
     expect(presentation.topicPanes).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ bindingId: "scoped" }), expect.objectContaining({ bindingId: "same-space" }), expect.objectContaining({ bindingId: "other-project" })]));
   });
 
-  it("revalidates the callback identity and enqueues the main card through the durable outbox", async () => {
+  it("revalidates the callback identity and reserves a group-root card through the durable outbox", async () => {
     const binding = activeBinding("selected");
-    const outbound = { enqueueCard: vi.fn(async () => {}), enqueueCardUpdate: vi.fn(async () => {}) };
+    const reservePaneThreadAlias = vi.fn(() => "reserved" as const);
     const audit = vi.fn();
     const workflow = new DeliveryRecoveryWorkflow({
-      store: { getBinding: () => binding, loadTopicView: () => topic("selected"), audit, dismissDeadLetter: vi.fn(), listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
-      lark: { replyText: vi.fn(), shareThread: vi.fn() }, outbound, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
-      presentation: { mainCard: vi.fn(() => ({ card: "main" })), failures: vi.fn(() => []) }, logger: pino({ enabled: false })
+      store: { getBinding: () => binding, loadTopicView: () => topic("selected"), reservePaneThreadAlias, audit, dismissDeadLetter: vi.fn(), listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
+      lark: { replyText: vi.fn(), shareThread: vi.fn() }, outbound: { enqueueCardUpdate: vi.fn(async () => {}) }, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
+      presentation: { paneEntryCard: vi.fn(() => ({ card: "main-entry" })), failures: vi.fn(() => []) }, logger: pino({ enabled: false })
     });
 
     await expect(workflow.sendPaneCard(action, { bindingId: "selected", bindingGeneration: 3, paneId: "work:p1", sourceMainMessageId: "om-main" })).resolves.toBe("sent");
-    expect(outbound.enqueueCard).toHaveBeenCalledWith("directory-card", "pane-card-send:directory-card:selected:3:om-main", { card: "main" }, "selected");
-    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: "pane.card.send", outcome: "accepted" }));
+    expect(reservePaneThreadAlias).toHaveBeenCalledWith(expect.objectContaining({ publicationKey: "pane-card-send:directory-card:selected:3:om-main", targetChatId: "chat", card: { card: "main-entry" } }));
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: "pane.card.send", outcome: "reserved" }));
 
     await expect(workflow.sendPaneCard(action, { bindingId: "selected", bindingGeneration: 2, paneId: "work:p1", sourceMainMessageId: "om-main" })).resolves.toBe("stale");
-    expect(outbound.enqueueCard).toHaveBeenCalledTimes(1);
+    expect(reservePaneThreadAlias).toHaveBeenCalledTimes(1);
   });
 });
 

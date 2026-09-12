@@ -15,7 +15,10 @@ export function renderInstanceDirectoryCard(input: { project: ProjectConfig; ent
       column(`**${escape(instance.name)}**\nWORKER`, 3),
       column(`\`${instance.agentKind}\`\n${instance.observedState}`, 2),
       column(`queue ${queueDepth} · approvals ${approvalCount}\n${workspace.kind === "git-worktree" ? `\`${escape(workspace.branch ?? "detached")}\`` : workspace.kind}`, 3),
-      { tag: "column", width: "weighted", weight: 2, elements: [callbackButton("详情", { action: "instance_open", instanceId: instance.id, generation: instance.generation, ...bindingContext, ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}) }, "primary", { size: "small" })] }
+      { tag: "column", width: "weighted", weight: 3, elements: [
+        callbackButton("详情", { action: "instance_open", instanceId: instance.id, generation: instance.generation, ...bindingContext, ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}) }, "default", { size: "small" }),
+        callbackButton("发送到群", { action: "worker_thread_send", instanceId: instance.id, generation: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, ...bindingContext, ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}) }, "primary", { size: "small" })
+      ] }
     ]
   }));
   const primary = input.primary ? `当前 Thread · ${input.primary.state} · generation ${input.primary.generation}` : "未绑定 Thread";

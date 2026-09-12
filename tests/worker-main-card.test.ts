@@ -38,7 +38,7 @@ describe("Worker Main card", () => {
     expect(rendered).toContain("Inspect the exact generation fence");
     expect(rendered).toContain("Found a matching runtime turn");
     expect(rendered).toContain("Keep observing");
-    expect(rendered).toContain("2 queued");
+    expect(rendered).toContain("2 条等待");
   });
 
   it("renders the current task in the stable Worker card without Task Card links", () => {
@@ -61,6 +61,15 @@ describe("Worker Main card", () => {
     expect(rendered).toContain("worker_task_interrupt");
     expect(rendered).not.toContain("card_target_open");
     expect(rendered).toContain("worker_new_task_form");
+  });
+
+  it("orders current work and actions before history and runtime evidence", () => {
+    const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: { turnId: "turn-current", title: "Current", phase: "running", durationSeconds: 4, updatedAt: "now", taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null }, requestText: "Inspect", statusTitle: "Working", progressEvents: [], answer: "Partial" }, queueCount: 1, nextTaskTitle: "Next", recentTasks: [{ turnId: "old", title: "Old", phase: "completed", durationSeconds: 2, updatedAt: "before", taskCard: { aggregateKind: "worker-turn", aggregateId: "old", generation: 4, messageId: null } }], occurredAt: "now" });
+    const elements = (renderWorkerMainCard({ ...projected, messageId: "worker-main" }) as { body: { elements: Array<{ tag: string; content?: string }> } }).body.elements;
+    const text = elements.map((element) => element.content ?? JSON.stringify(element));
+    expect(text.findIndex((value) => value.includes("当前任务"))).toBeLessThan(text.findIndex((value) => value.includes("worker_task_instruction_form")));
+    expect(text.findIndex((value) => value.includes("最近任务"))).toBeLessThan(text.findIndex((value) => value.includes("运行环境")));
+    expect(text.at(-1)).toContain("运行环境");
   });
 
   it("keeps the latest terminal result visible and offers an explicit follow-up", () => {

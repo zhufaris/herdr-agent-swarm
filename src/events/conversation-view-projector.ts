@@ -19,11 +19,9 @@ const ANSWER_STREAM_INTERVAL_MS = 500;
 const ANSWER_UPDATE_BUDGET_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 80;
 const MAIN_CARD_UPDATE_INTERVAL_MS = 2_500;
-const TOPIC_VIEW_CACHE_CAPACITY = 256;
 const ANSWER_LENGTH_CACHE_CAPACITY = 512;
 
 export class ConversationViewProjector {
-  private readonly views = new LruMap<string, ReturnType<typeof initialTopicView>>(TOPIC_VIEW_CACHE_CAPACITY);
   private readonly bindingWork = new KeyedSerialWorkQueue<string>();
   private unsubscribe: (() => void) | null = null;
   private unsubscribeStreamCardCreated: (() => void) | null = null;
@@ -76,7 +74,7 @@ export class ConversationViewProjector {
 
   snapshot(): CardUpdateSchedulerDiagnostics { return this.scheduler.diagnostics(); }
   cacheDiagnostics(): { topicViews: number; answerLengths: number } {
-    return { topicViews: this.views.size, answerLengths: this.answerContentLengths.size };
+    return { topicViews: 0, answerLengths: this.answerContentLengths.size };
   }
 
   start(): () => void {
@@ -99,7 +97,6 @@ export class ConversationViewProjector {
     this.unsubscribeStreamCardCreated = null;
     this.unsubscribeMainCardCheckpoint?.();
     this.unsubscribeMainCardCheckpoint = null;
-    this.views.clear();
     this.answerContentLengths.clear();
     this.stopPromise = this.bindingWork.stop().then(() => this.scheduler.stop());
     return this.stopPromise;
@@ -132,10 +129,9 @@ export class ConversationViewProjector {
         }
       }
     }
-    const current = this.views.get(event.bindingId) ?? this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
+    const current = this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
     const next = reduceTopicView(current, event);
     if (next === current) return;
-    this.views.set(event.bindingId, next);
     this.store.saveTopicView(next);
 
     try {
@@ -143,7 +139,6 @@ export class ConversationViewProjector {
         priority: isImmediateMainEvent(event, next.phase) ? "terminal" : isInteractiveMainEvent(event) ? "interactive" : "normal",
         delayMs: isInteractiveMainEvent(event) ? Math.min(1_000, this.mainUpdateDelayMs) : this.mainUpdateDelayMs
       });
-      if (["done", "error", "archived", "orphaned"].includes(next.phase)) this.views.delete(event.bindingId);
     }
     catch (error) {
       this.logger.error({ event: "card-projection-failed", err: safeLogError(error), bindingId: event.bindingId, eventId: event.eventId, bridgeEventType: event.type, outcome: "failed" }, "failed to project Lark card");

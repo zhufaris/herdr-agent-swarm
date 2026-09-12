@@ -1,4 +1,5 @@
 import type { SqliteContext } from "../context.js";
+import { runForeignKeySafeRebuild } from "./foreign-key-safe-rebuild.js";
 
 export class PromptTurnMigrations {
   constructor(private readonly context: SqliteContext) {}
@@ -15,9 +16,7 @@ export class PromptTurnMigrations {
     const transcriptTurnStartedAt = columns.has("transcript_turn_started_at") ? "transcript_turn_started_at" : "NULL";
     const executionOrigin = columns.has("execution_origin") ? "execution_origin" : "'bridge'";
     const observationState = columns.has("observation_state") ? "observation_state" : "CASE WHEN state = 'running' THEN 'attached' WHEN state = 'queued' THEN 'not_started' ELSE 'completed' END";
-    this.context.database.exec(`
-      PRAGMA foreign_keys = OFF;
-      BEGIN IMMEDIATE;
+    runForeignKeySafeRebuild(this.context, "Prompt-state migration", () => this.context.database.exec(`
       CREATE TABLE prompt_jobs_next(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
         actor_open_id TEXT NOT NULL, body TEXT NOT NULL, execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), dispatch_kind TEXT NOT NULL DEFAULT 'turn' CHECK(dispatch_kind IN ('turn','steering')), parent_prompt_id TEXT,
@@ -32,11 +31,7 @@ export class PromptTurnMigrations {
       CREATE INDEX prompt_jobs_queue ON prompt_jobs(binding_id, state, created_at);
       CREATE INDEX prompt_jobs_dispatch ON prompt_jobs(binding_id, dispatch_kind, parent_prompt_id, state, created_at);
       CREATE UNIQUE INDEX prompt_jobs_source_prompt_once ON prompt_jobs(source_prompt_id) WHERE source_prompt_id IS NOT NULL;
-      COMMIT;
-      PRAGMA foreign_keys = ON;
-    `);
-    const violation = this.context.database.prepare("PRAGMA foreign_key_check").get();
-    if (violation) throw new Error(`Prompt-state migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
+    `));
   }
 
   ensurePromptObservationColumn(): void {
@@ -105,9 +100,7 @@ export class PromptTurnMigrations {
     const columns = this.context.database.prepare("PRAGMA table_info(pane_close_requests)").all() as Array<{ name: string }>;
     const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pane_close_requests'").get() as { sql: string } | undefined;
     if (columns.some((column) => column.name === "detail") && schema?.sql.includes("'uncertain'")) return;
-    this.context.database.exec(`
-      PRAGMA foreign_keys = OFF;
-      BEGIN IMMEDIATE;
+    runForeignKeySafeRebuild(this.context, "Pane-close state migration", () => this.context.database.exec(`
       ALTER TABLE pane_close_requests RENAME TO pane_close_requests_legacy;
       CREATE TABLE pane_close_requests(
         id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), pane_id TEXT NOT NULL, actor_open_id TEXT NOT NULL, code_hash TEXT NOT NULL,
@@ -117,9 +110,7 @@ export class PromptTurnMigrations {
       SELECT id, binding_id, pane_id, actor_open_id, code_hash, state, expires_at, consumed_at, created_at, updated_at FROM pane_close_requests_legacy;
       DROP TABLE pane_close_requests_legacy;
       CREATE INDEX pane_close_requests_binding_state ON pane_close_requests(binding_id, state, created_at);
-      COMMIT;
-      PRAGMA foreign_keys = ON;
-    `);
+    `));
   }
 
   ensurePaneControlOperationState(): void {

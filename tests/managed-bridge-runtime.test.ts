@@ -50,6 +50,17 @@ describe("ManagedBridgeRuntime", () => {
     ]);
   });
 
+  it("does not reacquire a lease handed off by production bootstrap", async () => {
+    const { runtimeDependencies, calls } = fixture();
+    const runtime = new ManagedBridgeRuntime(runtimeDependencies, { leaseAlreadyAcquired: true });
+
+    await runtime.start();
+
+    expect(calls).not.toContain("lease:acquire");
+    expect(calls.slice(0, 2)).toEqual(["fence:start", "lease:start"]);
+    await runtime.stop("SIGTERM");
+  });
+
   it("returns the same start promise without starting components twice", async () => {
     const { runtime, calls } = fixture();
 

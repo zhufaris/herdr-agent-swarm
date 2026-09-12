@@ -1,3 +1,4 @@
+import type { OutboxTestDriver } from "./outbox-test-driver.js";
 import { DatabaseSync } from "node:sqlite";
 import type { AcceptInstanceTurnWithCardInput } from "../../src/domain/ports.js";
 import type { AcceptPromptInput } from "../../src/domain/ports/prompt.js";
@@ -76,6 +77,11 @@ export class SqliteStoreKernel implements TurnControlStore {
 
   close(): void { this.graph.context.close(); }
 
+  declare claimOutboundReply: OutboxTestDriver["claimOutboundReply"];
+  declare markOutboundReplyDelivered: OutboxTestDriver["markOutboundReplyDelivered"];
+  declare checkpointOutboundReplyCard: OutboxTestDriver["checkpointOutboundReplyCard"];
+  declare markOutboundReplyFailedWithQuarantine: OutboxTestDriver["markOutboundReplyFailedWithQuarantine"];
+
   getAgentInstance(id: string): AgentInstance | null {
     return this.instances.getAgentInstance(id);
   }
@@ -91,6 +97,11 @@ export class SqliteStoreKernel implements TurnControlStore {
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
     return this.cardContexts.reserveWorkerMainCard(view, rootMessageId, card);
   }
+
+  reserveWorkerSessionThread(input: Parameters<SqliteOutboxStore["reserveWorkerSessionThread"]>[0]): ReturnType<SqliteOutboxStore["reserveWorkerSessionThread"]> { return this.outbox.reserveWorkerSessionThread(input); }
+  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number): ReturnType<SqliteOutboxStore["loadWorkerSessionThread"]> { return this.outbox.loadWorkerSessionThread(workerId, workerSessionGeneration); }
+  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null): ReturnType<SqliteOutboxStore["findWorkerSessionThreadByScope"]> { return this.outbox.findWorkerSessionThreadByScope(chatId, topicId, rootMessageId); }
+  findWorkerSessionThreadRecordByScope(chatId: string, topicId: string | null, rootMessageId: string | null): ReturnType<SqliteOutboxStore["findWorkerSessionThreadRecordByScope"]> { return this.outbox.findWorkerSessionThreadRecordByScope(chatId, topicId, rootMessageId); }
 
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     return this.cardContexts.invalidateCardContexts(targets);
@@ -340,8 +351,10 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null {
-    return this.bindings.findBindingByLarkScope(topicId, rootMessageId);
+    return this.bindings.findBindingByLarkScope(topicId, rootMessageId) ?? this.graph.threadAliases.findBindingByScope(topicId, rootMessageId);
   }
+  isBindingThreadAlias(topicId: string | null, rootMessageId: string | null): boolean { return this.graph.threadAliases.isActiveScope(topicId, rootMessageId); }
+  reservePaneThreadAlias(input: Parameters<SqliteOutboxStore["reservePaneThreadAlias"]>[0]): ReturnType<SqliteOutboxStore["reservePaneThreadAlias"]> { return this.outbox.reservePaneThreadAlias(input); }
 
   findBindingByPane(paneId: string): Binding | null {
     return this.bindings.findBindingByPane(paneId);
@@ -618,7 +631,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.projections.reserveClosedAnswerCardUpdate(input);
   }
 
-  reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome {
+  reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object; source?: string }): AnswerPageReservationOutcome {
     return this.projections.reserveStaticAnswerCardUpdate(input);
   }
 

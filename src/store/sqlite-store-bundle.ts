@@ -12,6 +12,8 @@ import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore, StartupRecoveryStore, StartupViewStore } from "../domain/ports/workflow.js";
 import type { InboundMessageRoutingStore } from "../coordinator/inbound-message-routing-workflow.js";
 import { SqliteCapabilityGraph } from "./sqlite/capability-graph.js";
+import type { SqliteContext } from "./sqlite/context.js";
+import type { SqliteLeaseStore } from "./sqlite/lease-store.js";
 
 export interface SqliteStoreLifecycle {
   activateWriteFence(ownerId: string, fencingToken: number): void;
@@ -66,7 +68,15 @@ export interface SqliteStoreBundle {
 }
 
 export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
-  const modules = new SqliteCapabilityGraph(path).capabilityModules();
+  return createSqliteStoreBundleFromGraph(new SqliteCapabilityGraph(path));
+}
+
+export function createSqliteStoreBundleFromContext(context: SqliteContext, lease: SqliteLeaseStore): SqliteStoreBundle {
+  return createSqliteStoreBundleFromGraph(new SqliteCapabilityGraph(context, lease));
+}
+
+function createSqliteStoreBundleFromGraph(graph: SqliteCapabilityGraph): SqliteStoreBundle {
+  const modules = graph.capabilityModules();
   return {
     lifecycle: modules.lifecycle, lease: modules.lease, health: modules.health, instance: modules.instance, instanceLifecycle: modules.instance, instanceTurns: modules.instance, turnControl: modules.turnControl,
     promptAcceptance: modules.promptAcceptance, promptRun: modules.promptRun, outboundIntent: modules.outbox, outbox: modules.outbox,

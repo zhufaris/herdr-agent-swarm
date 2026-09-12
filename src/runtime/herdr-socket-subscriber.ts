@@ -51,6 +51,7 @@ export class HerdrSocketSubscriber {
   private attempt = 0;
   private buffer = "";
   private dispatching = false;
+  private hintDrain: Promise<void> | null = null;
   private pendingHint: HerdrNativeEventHint | null = null;
   private stableTimer: NodeJS.Timeout | null = null;
   private subscriptionAckTimer: NodeJS.Timeout | null = null;
@@ -108,6 +109,7 @@ export class HerdrSocketSubscriber {
     this.socket = null;
     for (const pending of this.pendingRequests.values()) pending.socket.destroy();
     if (socket && !socket.destroyed) await new Promise<void>((resolve) => { socket.once("close", resolve); socket.destroy(); });
+    await this.hintDrain;
   }
 
   request(method: string, params: object, timeoutMs: number): Promise<unknown> {
@@ -225,6 +227,7 @@ export class HerdrSocketSubscriber {
   }
 
   private receive(chunk: string): void {
+    if (this.stopped) return;
     this.buffer += chunk;
     let cursor = 0;
     let frames = 0;
@@ -299,10 +302,13 @@ export class HerdrSocketSubscriber {
   }
 
   private emit(hint: HerdrNativeEventHint): void {
+    if (this.stopped) return;
     this.pendingHint = mergeHerdrRuntimeHints(this.pendingHint, hint);
     if (this.dispatching) return;
     this.dispatching = true;
-    void this.drainHints();
+    const drain = this.drainHints();
+    this.hintDrain = drain;
+    void drain.finally(() => { if (this.hintDrain === drain) this.hintDrain = null; });
   }
 
   private async drainHints(): Promise<void> {
@@ -315,7 +321,7 @@ export class HerdrSocketSubscriber {
       }
     } finally {
       this.dispatching = false;
-      if (this.pendingHint) {
+      if (this.pendingHint && !this.stopped) {
         const pending = this.pendingHint;
         this.pendingHint = null;
         this.emit(pending);

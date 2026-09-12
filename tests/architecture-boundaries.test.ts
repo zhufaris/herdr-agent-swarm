@@ -40,6 +40,16 @@ describe("application composition boundaries", () => {
     for (const source of modules) expect(source).not.toMatch(/from "\.\/(?:binding-session|prompt-turn|card-outbox|worker|retired-schema)-migrations/);
   });
 
+  it("centralizes foreign-key-disabled table rebuilds in the guarded migration helper", () => {
+    const directory = new URL("../src/store/sqlite/migrations/", import.meta.url);
+    const migrationFiles = readdirSync(directory)
+      .filter((file) => file.endsWith(".ts") && file !== "foreign-key-safe-rebuild.ts");
+    for (const file of migrationFiles) {
+      const source = readFileSync(new URL(file, directory), "utf8");
+      expect(source).not.toMatch(/PRAGMA\s+foreign_keys\s*=\s*OFF/i);
+    }
+  });
+
   it("keeps concrete workflow and adapter construction in the composition factory", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
@@ -67,16 +77,18 @@ describe("application composition boundaries", () => {
     expect(main).toContain("createManagedBridgeRuntime({");
     expect(main).not.toContain("createSqliteStoreBundle");
     expect(main).not.toContain("createBridgeRuntime");
-    expect(lifecycle).toContain("const stores = createSqliteStoreBundle(config.databasePath)");
-    expect(lifecycle).toContain("createBridgeRuntime(config, stores, logger, { codex, claude, pi })");
+    expect(lifecycle).toContain("const bootstrap = openSqliteLeaseBootstrap(config.databasePath)");
+    expect(lifecycle.indexOf("lease.acquire()")).toBeLessThan(lifecycle.indexOf("bootstrap.complete(lease.writeFence())"));
+    expect(lifecycle).not.toContain("createSqliteStoreBundle(config.databasePath)");
+    expect(lifecycle).toContain("createBridgeRuntime(config, completedStores, logger, { codex, claude, pi })");
     expect(main).not.toContain("new SqliteBindingStore");
-    expect(storeBundle).toContain("new SqliteCapabilityGraph(path).capabilityModules()");
+    expect(storeBundle).toContain("createSqliteStoreBundleFromGraph(new SqliteCapabilityGraph(path))");
     expect(storeBundle).not.toContain("SqliteStoreKernel");
     const capabilityGraph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
     expect(kernel).toContain("new SqliteCapabilityGraph(path)");
     expect(kernel).not.toContain("new SqliteContext");
     expect(kernel).not.toContain("new SqliteMigrations");
-    expect(capabilityGraph).toContain("new SqliteContext(path)");
+    expect(capabilityGraph).toContain('typeof pathOrContext === "string" ? new SqliteContext(pathOrContext) : pathOrContext');
     expect(capabilityGraph).toContain("this.migrations.run()");
     expect(capabilityGraph.indexOf("this.migrations.run()")).toBeLessThan(capabilityGraph.indexOf("new SqliteBindingLifecycleStore"));
     const bindingProjection = readFileSync(new URL("../src/store/sqlite/binding-projection-store.ts", import.meta.url), "utf8");
@@ -193,6 +205,7 @@ describe("application composition boundaries", () => {
     const delivery = readFileSync(new URL("../src/store/sqlite/outbox-delivery-store.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("../src/store/sqlite/outbox-recovery-store.ts", import.meta.url), "utf8");
     const retention = readFileSync(new URL("../src/store/sqlite/outbox-retention-store.ts", import.meta.url), "utf8");
+    const aliases = readFileSync(new URL("../src/store/sqlite/binding-thread-alias-store.ts", import.meta.url), "utf8");
     for (const moduleName of ["SqliteOutboxQueueStore", "SqliteOutboxDeliveryStore", "SqliteOutboxRecoveryStore", "SqliteOutboxRetentionStore"]) {
       expect(facade).toContain(`new ${moduleName}`);
     }
@@ -201,6 +214,8 @@ describe("application composition boundaries", () => {
     expect(delivery).toContain("private readonly context: SqliteContext");
     expect(recovery).toContain("private readonly context: SqliteContext");
     expect(retention).toContain("private readonly context: SqliteContext");
+    expect(aliases).toContain("private readonly context: SqliteContext");
+    expect(facade).toContain("SqliteBindingThreadAliasStore");
     expect(recovery).not.toContain("new SqliteOutboxQueueStore");
     expect(recovery).not.toContain("new SqliteOutboxDeliveryStore");
   });
@@ -534,7 +549,7 @@ describe("application composition boundaries", () => {
 
   it("keeps process entrypoint lifecycle-free beyond start and stop", () => {
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-    for (const implementation of ["BridgeRuntimeShutdown", "cleanupStartupFailure", "startHealthServer", "InstanceLeaseController", "createSqliteStoreBundle", "createBridgeRuntime"]) {
+    for (const implementation of ["BridgeRuntimeShutdown", "cleanupStartupFailure", "startHealthServer", "InstanceLeaseController", "openSqliteLeaseBootstrap", "createBridgeRuntime"]) {
       expect(main).not.toContain(implementation);
     }
     expect(main).toContain("await runtime.start()");

@@ -58,6 +58,21 @@ describe("agent driver contract", () => {
     expect(runPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, undefined, undefined, expect.any(Function));
   });
 
+  it.each([
+    ["traex", (herdr: HerdrPort) => new TraexDriver(herdr, "traex", 1_000)],
+    ["codex", (herdr: HerdrPort) => new CodexDriver(herdr, "codex", 1_000, true)],
+    ["claude-code", (herdr: HerdrPort) => new ClaudeCodeDriver(herdr, "claude", 1_000, true)],
+    ["pi", (herdr: HerdrPort) => new PiDriver(herdr, "pi", 1_000, true)]
+  ] as const)("forwards Worker dispatch cancellation through the %s driver", async (_kind, createDriver) => {
+    const runPrompt = vi.fn(async () => "done" as const);
+    const controller = new AbortController();
+    const driver = createDriver({ runPrompt } as unknown as HerdrPort);
+
+    await driver.submit(runtime, "do work", undefined, controller.signal);
+
+    expect(runPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, undefined, controller.signal, expect.any(Function));
+  });
+
   it("forwards structured dispatch hooks without changing receipt semantics", async () => {
     const onDispatched = vi.fn();
     const onObservation = vi.fn();

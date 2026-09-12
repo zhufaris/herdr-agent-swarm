@@ -53,6 +53,48 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("creates a group-root pane entry and atomically activates its thread alias", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "chat", topicId: "canonical-topic", rootMessageId: "canonical-root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "w1:p1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached" });
+    expect(store.reservePaneThreadAlias({ publicationKey: "publish-1", actionMessageId: "directory-card", bindingId: "binding-1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: { schema: "2.0" } })).toBe("reserved");
+    const createTopic = vi.fn(async () => ({ topicId: "alias-topic", rootMessageId: "alias-root" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ createTopic }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(createTopic).toHaveBeenCalledWith({ schema: "2.0" }, "publish-1", "chat");
+    expect(store.findBindingByLarkScope("alias-topic", "alias-root")).toMatchObject({ id: "binding-1" });
+    expect(store.database.prepare("SELECT state, topic_id, root_message_id FROM binding_thread_aliases WHERE publication_key = 'publish-1'").get()).toEqual({ state: "active", topic_id: "alias-topic", root_message_id: "alias-root" });
+    expect(store.reservePaneThreadAlias({ publicationKey: "publish-1", actionMessageId: "directory-card", bindingId: "binding-1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: { schema: "2.0" } })).toBe("duplicate");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.updateBinding("binding-1", { generation: 2 });
+    expect(store.findBindingByLarkScope("alias-topic", "alias-root")).toBeNull();
+    store.close();
+  });
+
+  it("creates a canonical group-root Worker Main Card and emits its session checkpoint", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
+    const worker = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: null }, workspace: { id: "worker-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const view = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, runtimeAttached: false, desiredState: worker.desiredState, parentActive: true, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-11T00:00:00.000Z" });
+    store.saveWorkerMainView(view);
+    store.reserveWorkerSessionThread({ publicationKey: "worker-thread:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "primary-pane", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: { schema: "2.0" } });
+    const createTopic = vi.fn(async () => ({ topicId: "worker-topic", rootMessageId: "worker-root" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ createTopic }), pino({ enabled: false }));
+    const checkpoint = vi.fn();
+    publisher.onWorkerMainCheckpoint(checkpoint);
+
+    await publisher.requestScan(true);
+
+    expect(createTopic).toHaveBeenCalledWith({ schema: "2.0" }, "worker-thread:reviewer:1", "chat");
+    expect(store.loadWorkerSessionThread(worker.id, 1)).toMatchObject({ state: "active", rootMessageId: "worker-root", topicId: "worker-topic" });
+    expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-root", deliveredVersion: view.viewVersion });
+    expect(checkpoint).toHaveBeenCalledWith(worker.id, 1, view.viewVersion);
+    store.close();
+  });
+
   it("still checkpoints a delivered legacy Worker task card and emits a turn-scoped convergence hint", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
@@ -452,7 +494,7 @@ describe("Lark channel publisher", () => {
     await convergence;
 
     expect(store.listAnswerPages("p1")).toEqual(expect.arrayContaining([expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" })]));
-    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 0, outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
+    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 1, outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" })]);
 
     await publisher.requestScan();
@@ -460,6 +502,7 @@ describe("Lark channel publisher", () => {
 
     expect(updateCard).toHaveBeenCalledOnce();
     expect(updateCard.mock.calls[0]![0]).toBe("answer-2");
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 0, deliveryRecoveries: { recovered: 1 } });
     expect(store.listAnswerPages("p1")).toEqual([
       expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" }),
       expect.objectContaining({ pageIndex: 1, state: "active", deliveryMode: "static", messageId: "answer-2" })
@@ -785,6 +828,162 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("does not replay remote success when the local delivery checkpoint fails", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const sent = vi.fn(async () => {});
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard: sent }), pino({ enabled: false }));
+    store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
+    const checkpoint = vi.spyOn(store, "markOutboundReplyDelivered").mockImplementationOnce(() => { throw new Error("disk failure"); });
+    const failed = vi.spyOn(store, "markOutboundReplyFailedWithQuarantine");
+    try {
+      await expect(publisher.requestScan()).rejects.toThrow("outbound_checkpoint_uncertain");
+      checkpoint.mockRestore();
+      await publisher.requestScan(true);
+      expect(sent).toHaveBeenCalledOnce();
+      expect(failed).not.toHaveBeenCalled();
+      expect(store.getOutboundReply("first")).toMatchObject({ state: "pending", attemptCount: 0 });
+      expect(store.claimOutboundReply("first", null)).toBeNull();
+    } finally { checkpoint.mockRestore(); await publisher.stop(); store.close(); }
+  });
+
+  it("waits for sibling deliveries before surfacing one uncertain checkpoint", async () => {
+    let releaseSibling!: () => void;
+    const siblingGate = new Promise<void>((resolve) => { releaseSibling = resolve; });
+    const started: string[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(messageId) { started.push(messageId); if (messageId === "sibling") await siblingGate; }
+    }), pino({ enabled: false }));
+    store.enqueueOutboundReply({ id: "uncertain", idempotencyKey: "uncertain", rootMessageId: "uncertain", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "sibling", idempotencyKey: "sibling", rootMessageId: "sibling", kind: "card_update", payload: "{}" });
+    const checkpoint = vi.spyOn(store, "markOutboundReplyDelivered").mockImplementation((claim, messageId) => {
+      if (claim.reply.id === "uncertain") throw new Error("disk failure");
+      checkpoint.mockRestore();
+      return store.markOutboundReplyDelivered(claim, messageId);
+    });
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(started).toEqual(expect.arrayContaining(["uncertain", "sibling"])));
+      let settled = false;
+      void draining.then(() => { settled = true; }, () => { settled = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      releaseSibling();
+      await expect(draining).rejects.toThrow("outbound_checkpoint_uncertain");
+      expect(publisher.snapshot().activeDeliveries).toBe(0);
+    } finally { checkpoint.mockRestore(); releaseSibling(); await draining.catch(() => {}); await publisher.stop(); store.close(); }
+  });
+
+  it("retains Worker Main in-flight updates while coalescing only unclaimed successors", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const enqueue = (version: number) => store.enqueueOutboundReply({ id: `v${version}`, idempotencyKey: `worker-main:update:reviewer:1:${version}`, workerId: "reviewer", workerSessionGeneration: 1, viewVersion: version, rootMessageId: "main", kind: "card_update", payload: JSON.stringify({ version }) });
+    try {
+      enqueue(1);
+      const claim = store.claimOutboundReply("v1", null)!;
+      enqueue(2);
+      enqueue(3);
+      expect(store.listPendingOutboundReplies().map((row) => row.id)).toEqual(["v1", "v3"]);
+      expect(store.markOutboundReplyDelivered(claim, "main")).toBe(true);
+      expect(store.listPendingOutboundReplies().map((row) => row.id)).toEqual(["v3"]);
+    } finally { store.close(); }
+  });
+
+  it("rejects in-flight key reuse and delivers a distinct successor before acknowledging it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sent: object[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(_messageId, card) { sent.push(card); await gate; }
+    }), pino({ enabled: false }));
+    store.enqueueOutboundReply({ id: "original", idempotencyKey: "snapshot", rootMessageId: "message", kind: "card_update", payload: JSON.stringify({ version: 1 }), viewVersion: 1 });
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(sent).toEqual([{ version: 1 }]));
+      expect(() => store.enqueueOutboundReply({ id: "replacement", idempotencyKey: "snapshot", rootMessageId: "message", kind: "card_update", payload: JSON.stringify({ version: 2 }), viewVersion: 2 })).toThrow("outbound_idempotency_conflict");
+      store.enqueueOutboundReply({ id: "replacement", idempotencyKey: "snapshot:2", rootMessageId: "message", kind: "card_update", payload: JSON.stringify({ version: 2 }), viewVersion: 2 });
+      expect(store.getOutboundReply("replacement")?.state).toBe("pending");
+      release();
+      await draining;
+      expect(sent).toEqual([{ version: 1 }, { version: 2 }]);
+      expect(store.getOutboundReply("original")).toMatchObject({ state: "delivered", viewVersion: 1, payload: JSON.stringify({ version: 1 }) });
+      expect(store.getOutboundReply("replacement")).toMatchObject({ state: "delivered", viewVersion: 2 });
+      expect(store.listPendingOutboundReplies()).toEqual([]);
+    } finally { release(); await draining; await publisher.stop(); store.close(); }
+  });
+
+  it("fills a free delivery slot with late interactive work without waiting for the slow batch", async () => {
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    const started: string[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(messageId) { started.push(messageId); if (messageId === "slow") await slow; },
+      async replyCard() { started.push("interactive"); return { messageId: "interactive-message" }; }
+    }), pino({ enabled: false }));
+    for (const id of ["slow", "fast-1", "fast-2", "fast-3"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: id, kind: "card_update", payload: "{}" });
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(publisher.snapshot().activeDeliveries).toBe(1));
+      store.enqueueOutboundReply({ id: "interactive", idempotencyKey: "interactive", rootMessageId: "root", kind: "card_reply", payload: "{}" });
+      void publisher.requestScan();
+      await vi.waitFor(() => expect(started).toContain("interactive"));
+      expect(publisher.snapshot().activeDeliveries).toBe(1);
+      releaseSlow();
+      await draining;
+    } finally { releaseSlow(); await draining; await publisher.stop(); store.close(); }
+  });
+
+  it("does not claim queued work after stop while active deliveries settle", async () => {
+    const releases = new Map<string, () => void>();
+    const started: string[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(messageId) {
+        started.push(messageId);
+        await new Promise<void>((resolve) => releases.set(messageId, resolve));
+      }
+    }), pino({ enabled: false }));
+    for (const id of ["one", "two", "three", "four", "five"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: id, kind: "card_update", payload: "{}" });
+    const draining = publisher.requestScan();
+    await vi.waitFor(() => expect(started).toHaveLength(4));
+
+    const stopping = publisher.stop();
+    releases.get("one")!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(started).not.toContain("five");
+    for (const id of ["two", "three", "four"]) releases.get(id)!();
+    await Promise.all([draining, stopping]);
+
+    expect(store.getOutboundReply("five")).toMatchObject({ state: "pending" });
+    store.close();
+  });
+
+  it("reserves one of every four dispatches for durable history work when both classes are due", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started: string[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(messageId) { started.push(messageId); await gate; }
+    }), pino({ enabled: false }));
+    for (let index = 0; index < 8; index += 1) store.enqueueOutboundReply({ id: `live-${index}`, idempotencyKey: `live-${index}`, rootMessageId: `live-${index}`, kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "history", idempotencyKey: "history", workClass: "history", rootMessageId: "history", kind: "card_update", payload: "{}" });
+
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(started).toHaveLength(4));
+      expect(started.slice(0, 3)).toEqual(["live-0", "live-1", "live-2"]);
+      expect(started[3]).toBe("history");
+    } finally {
+      release();
+      await draining;
+      await publisher.stop();
+      store.close();
+    }
+  });
+
   it("delivers independent targets concurrently", async () => {
     let releaseSlow!: () => void;
     const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
@@ -849,7 +1048,7 @@ describe("Lark channel publisher", () => {
     const updateCard = vi.fn(async () => {});
     const store = new SqliteBindingStore(":memory:");
     store.enqueueOutboundReply({ id: "stuck", idempotencyKey: "stuck", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
-    vi.spyOn(store, "markOutboundReplyDelivered").mockImplementation(() => {});
+    vi.spyOn(store, "markOutboundReplyDelivered").mockImplementation(() => true);
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard }), pino({ enabled: false }));
 
     await publisher.requestScan();
@@ -1015,13 +1214,13 @@ describe("Lark channel publisher", () => {
     vi.useRealTimers();
   });
 
-  it("supersedes an older failed pending version with the latest view", async () => {
+  it("preserves a previously attempted version ahead of its successor", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.enqueueOutboundReply({ id: "old", idempotencyKey: "run-card:update:p1:task:2", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "task", rootMessageId: "card-1", kind: "card_update", payload: "old" });
     store.markOutboundReplyFailed("old", "temporary");
     store.enqueueOutboundReply({ id: "new", idempotencyKey: "run-card:update:p1:task:3", bindingId: "b1", promptId: "p1", viewVersion: 3, cardRole: "task", rootMessageId: "card-1", kind: "card_update", payload: "new" });
-    expect(store.listPendingOutboundReplies()).toMatchObject([{ id: "new", viewVersion: 3, payload: "new" }]);
+    expect(store.listPendingOutboundReplies()).toMatchObject([{ id: "old", viewVersion: 2, payload: "old", attemptCount: 1 }, { id: "new", viewVersion: 3, payload: "new" }]);
     store.close();
   });
 

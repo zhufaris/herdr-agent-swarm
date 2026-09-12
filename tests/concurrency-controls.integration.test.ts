@@ -204,13 +204,53 @@ describe("coordinator concurrency controls", () => {
     const second = coordinator.handleMessage(message(2));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e2'").get()).toMatchObject({ state: "accepted" });
+    await vi.waitFor(() => expect(replies).toEqual(["m2"]));
 
     releaseFirst();
     await Promise.all([first, second]);
-    await vi.waitFor(() => expect(replies).toEqual(["m1", "m2"]));
-    expect(replies).toEqual(["m1", "m2"]);
+    await vi.waitFor(() => expect(replies).toEqual(["m2", "m1"]));
     expect(store.database.prepare("SELECT state FROM inbound_messages ORDER BY created_at, event_id").all()).toEqual([{ state: "accepted" }, { state: "accepted" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("routes an alias-thread reply to the existing Binding while keeping its Answer in the alias thread", async () => {
+    const herdr = emptyHerdr();
+    const { coordinator, publisher, store } = fixture(herdr);
+    try {
+      await coordinator.start();
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "canonical-topic", rootMessageId: "canonical-root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+      store.reservePaneThreadAlias({ publicationKey: "publish-alias", actionMessageId: "directory-card", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: {} });
+      const creation = store.listPendingOutboundReplies().find((reply) => reply.kind === "group_card_create")!;
+      store.markOutboundReplyDelivered(creation.id, "alias-root", undefined, "alias-topic");
+
+      await coordinator.handleMessage({ eventId: "alias-e1", messageId: "alias-m1", chatId: "chat", topicId: "alias-topic", rootMessageId: "alias-root", actorOpenId: "user", text: "continue here", mentionsBot: false, isRootMessage: false });
+      const prompt = store.listRunCards("b1").find((view) => view.requestText === "continue here")!;
+      expect(prompt).toBeDefined();
+      const answerCreate = store.database.prepare("SELECT prompt_id, kind, root_message_id, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.promptId) as { prompt_id: string; kind: string; root_message_id: string; state: string };
+      expect(answerCreate).toMatchObject({ prompt_id: prompt.promptId, kind: "stream_card_create", root_message_id: "alias-root" });
+      expect(answerCreate.state).not.toBe("dead_letter");
+      expect(store.getBinding("b1")).toMatchObject({ rootMessageId: "canonical-root", topicId: "canonical-topic" });
+    } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
+  });
+
+  it("rejects topology-changing commands from an alias thread", async () => {
+    const cards: object[] = [];
+    const lark = quietLark();
+    lark.replyCard = async (_root, card) => { cards.push(card); return { messageId: "rejection" }; };
+    const { coordinator, publisher, store } = fixture(emptyHerdr(), lark);
+    try {
+      await coordinator.start();
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "canonical-topic", rootMessageId: "canonical-root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+      store.reservePaneThreadAlias({ publicationKey: "publish-alias", actionMessageId: "directory-card", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: {} });
+      const creation = store.listPendingOutboundReplies().find((reply) => reply.kind === "group_card_create")!;
+      store.markOutboundReplyDelivered(creation.id, "alias-root", undefined, "alias-topic");
+
+      await coordinator.handleMessage({ eventId: "alias-reset", messageId: "alias-command", chatId: "chat", topicId: "alias-topic", rootMessageId: "alias-root", actorOpenId: "user", text: "/swarm reset", mentionsBot: false, isRootMessage: false });
+      await vi.waitFor(() => expect(cards.some((card) => JSON.stringify(card).includes("原始 Main Card 话题"))).toBe(true));
+      expect(store.getBinding("b1")).toMatchObject({ generation: 1, paneId: "w1:p1" });
+    } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
   });
 
   it("persists a Lark callback before acknowledging it and consumes it in the background", async () => {

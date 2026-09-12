@@ -30,10 +30,10 @@ export class TraexDriver implements AgentRuntimeDriver {
     await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
   }
 
-  async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks): Promise<DispatchReceipt> {
+  async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt> {
     let dispatched = false;
     try {
-      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, hooks?.onObservation, undefined, async () => { dispatched = true; await hooks?.onDispatched?.(); });
+      await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, hooks?.onObservation, signal, async () => { dispatched = true; await hooks?.onDispatched?.(); });
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;

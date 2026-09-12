@@ -21,7 +21,8 @@ describe("Primary tool gateway", () => {
     directory = await mkdtemp(join(tmpdir(), "primary-tools-framing-"));
     store = new SqliteBindingStore(join(directory, "bridge.db"));
     createPrimary(store);
-    const messaging = { interrupt: vi.fn(() => new Promise(() => undefined)) } as never;
+    let release!: () => void;
+    const messaging = { interrupt: vi.fn(() => new Promise<{ status: "interrupted" }>((resolve) => { release = () => resolve({ status: "interrupted" }); })) } as never;
     const socketPath = join(directory, "tools.sock");
     gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }), [], { idleTimeoutMs: 25 });
     const launch = gateway.issueBinding("binding", 1);
@@ -34,12 +35,41 @@ describe("Primary tool gateway", () => {
     socket.write(`${JSON.stringify(payload)}\n`);
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(messaging.interrupt).toHaveBeenCalledOnce();
+    release();
     socket.destroy();
 
     const idle = createConnection(socketPath);
     await new Promise<void>((resolve, reject) => { idle.once("connect", resolve); idle.once("error", reject); });
     await new Promise<void>((resolve) => idle.once("close", () => resolve()));
     expect(idle.destroyed).toBe(true);
+  });
+
+  it("waits for an accepted handler before reporting the gateway stopped", async () => {
+    directory = await mkdtemp(join(tmpdir(), "primary-tools-shutdown-"));
+    store = new SqliteBindingStore(join(directory, "bridge.db"));
+    createPrimary(store);
+    let release!: () => void;
+    const blocked = new Promise<{ status: "interrupted" }>((resolve) => { release = () => resolve({ status: "interrupted" }); });
+    const messaging = { interrupt: vi.fn(() => blocked) } as never;
+    const socketPath = join(directory, "tools.sock");
+    gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
+    const launch = gateway.issueBinding("binding", 1);
+    await gateway.start();
+    const socket = createConnection(socketPath);
+    await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+    socket.write(`${JSON.stringify({ bindingId: "binding", generation: 1, capability: launch.environment.SWARM_PRIMARY_CAPABILITY, tool: "interruptInstance", arguments: { instanceId: "worker", idempotencyKey: "interrupt" } })}\n`);
+    await vi.waitFor(() => expect(messaging.interrupt).toHaveBeenCalledOnce());
+
+    let stopped = false;
+    const stopping = gateway.stop().then(() => { stopped = true; });
+    await new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(stopped).toBe(false);
+
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+    gateway = undefined;
   });
 
   it("derives the parent turn server-side and rejects forged or stale credentials", async () => {

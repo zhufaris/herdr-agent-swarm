@@ -4,6 +4,7 @@ import { safeLogError } from "./safe-error.js";
 
 export interface HerdrEventRouterOptions {
   invalidateWorkspace(workspaceId: string): void;
+  invalidatePanes(paneIds: readonly string[]): void;
   reconcileBindings(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
   reconcileInstances(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
   observeInstanceTurns(paneIds?: readonly string[]): Promise<void>;
@@ -53,6 +54,7 @@ export class HerdrEventRouter {
   private async route(hint: HerdrRuntimeHint): Promise<void> {
     if (hint.scope === "panes") {
       this.paneHints += 1;
+      this.options.invalidatePanes(hint.paneIds);
       await this.run(hint, [
         this.options.reconcileBindings({ paneIds: hint.paneIds }),
         this.options.reconcileInstances({ paneIds: hint.paneIds }),

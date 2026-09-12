@@ -9,10 +9,12 @@ import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options { projects: readonly ProjectConfig[]; store: InstanceRuntimeReconciliationStore; paneHost: PaneHost; wake(instanceId: string): void; wakeCardContext?: () => void; logger?: Pick<Logger, "warn"> }
 interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
+type PendingReconciliationScope = null | { paneIds: Set<string>; workspaceIds: Set<string> };
 
 export class InstanceRuntimeReconciler {
   private readonly projects: ProjectCatalog;
   private running: Promise<void> | null = null;
+  private pending: PendingReconciliationScope | undefined;
   private timer: NodeJS.Timeout | null = null;
   private stopping = false;
   private completed = false;
@@ -26,20 +28,14 @@ export class InstanceRuntimeReconciler {
   reconcile(): Promise<void> {
     if (this.stopping) return Promise.resolve();
     if (this.running) { this.metrics.markCoalesced(); return this.running; }
-    const run = this.runMeasured();
-    this.running = run;
-    return run.finally(() => { if (this.running === run) this.running = null; });
+    return this.startDrain(null);
   }
 
-  async requestReconciliation(scope?: ReconciliationScope): Promise<void> {
-    if (!scope) return this.reconcile();
-    if (this.stopping) return;
-    if (this.running) { this.metrics.markCoalesced(); await this.running; }
-    if (this.stopping) return;
-    const run = this.runMeasured(scope);
-    this.running = run;
-    try { await run; }
-    finally { if (this.running === run) this.running = null; }
+  requestReconciliation(scope?: ReconciliationScope): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    const requested = normalizeScope(scope);
+    if (this.running) { this.metrics.markCoalesced(); this.pending = mergeScopes(this.pending, requested); return this.running; }
+    return this.startDrain(requested);
   }
   start(intervalMs: number): void {
     if (this.stopping || this.timer) return;
@@ -50,18 +46,31 @@ export class InstanceRuntimeReconciler {
     }, intervalMs);
     this.timer.unref();
   }
-  async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
+  async stop(): Promise<void> { this.stopping = true; this.pending = undefined; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
   snapshot(): ReconciliationDiagnostics & { ready: boolean; lastError: string | null } {
     return { ...this.metrics.snapshot(this.stopping ? "stopping" : this.running ? "running" : "idle"), ready: this.completed && !this.lastError, lastError: this.lastError };
   }
 
-  private async runMeasured(scope?: ReconciliationScope): Promise<void> {
-    await this.metrics.measure(() => this.reconcileOnce(scope));
+  private startDrain(requested: PendingReconciliationScope): Promise<void> {
+    this.pending = mergeScopes(this.pending, requested);
+    const run = this.drain();
+    const tracked = run.finally(() => { if (this.running === tracked) this.running = null; });
+    this.running = tracked;
+    return tracked;
+  }
+
+  private async drain(): Promise<void> {
+    while (!this.stopping && this.pending !== undefined) {
+      const requested = this.pending;
+      this.pending = undefined;
+      await this.metrics.measure(() => this.reconcileOnce(denormalizeScope(requested)));
+    }
   }
 
   private async reconcileOnce(scope?: ReconciliationScope): Promise<void> {
     try {
-      if (scope?.paneIds) {
+      const reconciledInstanceIds = new Set<string>();
+      if (scope?.paneIds?.length) {
         const paneIds = [...new Set(scope.paneIds)];
         const panesById = this.options.paneHost.snapshotPanes
           ? new Map((await this.options.paneHost.snapshotPanes()).map((pane) => [pane.paneId, pane]))
@@ -69,20 +78,20 @@ export class InstanceRuntimeReconciler {
         for (const paneId of paneIds) {
           const instance = this.options.store.findAgentInstanceByPane(paneId);
           if (!instance) continue;
+          reconciledInstanceIds.add(instance.id);
           const project = this.projects.projectById(instance.projectId);
           if (!project) continue;
           const pane = panesById ? panesById.get(paneId) ?? null : await this.options.paneHost.inspectPane(paneId);
           await this.reconcileInstance(instance, project, new Map(pane ? [[paneId, pane]] : []));
         }
-        this.completed = true; this.lastError = null;
-        return;
       }
+      if (scope && !scope.workspaceIds?.length) { this.completed = true; this.lastError = null; return; }
       const workspaceIds = scope?.workspaceIds ? new Set(scope.workspaceIds) : null;
       for (const project of this.options.projects) {
         if (workspaceIds && !workspaceIds.has(project.workspaceId)) continue;
         const panes = await this.options.paneHost.listPanes(project.workspaceId);
         const panesById = new Map(panes.map((pane) => [pane.paneId, pane]));
-        for (const instance of this.options.store.listAgentInstances(project.id)) await this.reconcileInstance(instance, project, panesById);
+        for (const instance of this.options.store.listAgentInstances(project.id)) if (!reconciledInstanceIds.has(instance.id)) await this.reconcileInstance(instance, project, panesById);
       }
       this.completed = true; this.lastError = null;
     } catch (error) { this.lastError = error instanceof Error ? error.message : String(error); throw error; }
@@ -121,6 +130,17 @@ export class InstanceRuntimeReconciler {
   }
 }
 
+function normalizeScope(scope?: ReconciliationScope): PendingReconciliationScope {
+  return scope === undefined ? null : { paneIds: new Set(scope.paneIds ?? []), workspaceIds: new Set(scope.workspaceIds ?? []) };
+}
+function denormalizeScope(scope: PendingReconciliationScope): ReconciliationScope | undefined {
+  return scope === null ? undefined : { ...(scope.paneIds.size ? { paneIds: [...scope.paneIds] } : {}), ...(scope.workspaceIds.size ? { workspaceIds: [...scope.workspaceIds] } : {}) };
+}
+function mergeScopes(current: PendingReconciliationScope | undefined, next: PendingReconciliationScope): PendingReconciliationScope {
+  if (current === null || next === null) return null;
+  if (current === undefined) return { paneIds: new Set(next.paneIds), workspaceIds: new Set(next.workspaceIds) };
+  return { paneIds: new Set([...current.paneIds, ...next.paneIds]), workspaceIds: new Set([...current.workspaceIds, ...next.workspaceIds]) };
+}
 function normalizeState(pane: HerdrPane): ObservedInstanceState {
   if (pane.agentState === "idle" || pane.agentState === "done") return "idle";
   if (pane.agentState === "working") return "working";

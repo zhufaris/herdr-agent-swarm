@@ -92,7 +92,7 @@ export function startHealthServer(options: {
           && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
           && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
           && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))
-          && !(bindingRuntime && "error" in bindingRuntime) && !(instanceRuntime && "error" in instanceRuntime)
+          && !(bindingRuntime && ("error" in bindingRuntime || bindingRuntime.lastOutcome === "failed")) && !(instanceRuntime && "error" in instanceRuntime)
           && !diagnosticCollectionFailed
           && !(sqliteIntegrity && (!("quickCheck" in sqliteIntegrity) || sqliteIntegrity.state === "idle" || sqliteIntegrity.state === "degraded" || sqliteIntegrity.state === "running" && (sqliteIntegrity.quickCheck !== "ok" || sqliteIntegrity.issues.length > 0 || sqliteIntegrity.error !== null))) ? "ok" : "degraded", identity: options.buildIdentity,
         timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: leaseStatus(readiness.components.lease),

@@ -5,6 +5,7 @@ import { HerdrEventRouter } from "../src/runtime/herdr-event-router.js";
 function setup() {
   const calls = {
     invalidateWorkspace: vi.fn(),
+    invalidatePanes: vi.fn(),
     reconcileBindings: vi.fn(async () => undefined),
     reconcileInstances: vi.fn(async () => undefined),
     observeInstanceTurns: vi.fn(async () => undefined),
@@ -19,10 +20,26 @@ describe("HerdrEventRouter", () => {
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
 
     expect(calls.invalidateWorkspace).not.toHaveBeenCalled();
+    expect(calls.invalidatePanes).toHaveBeenCalledWith(["w1:p1"]);
     expect(calls.reconcileBindings).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
     expect(calls.reconcileInstances).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
     expect(calls.observeInstanceTurns).toHaveBeenCalledWith(["w1:p1"]);
     expect(calls.retryRetiredPanes).toHaveBeenCalledWith(["w1:p1"]);
+  });
+
+  it("invalidates pane snapshots before starting any pane-scoped consumer", async () => {
+    const order: string[] = [];
+    const { calls, router } = setup();
+    calls.invalidatePanes.mockImplementation(() => { order.push("invalidate"); });
+    calls.reconcileBindings.mockImplementation(async () => { order.push("bindings"); });
+    calls.reconcileInstances.mockImplementation(async () => { order.push("instances"); });
+    calls.observeInstanceTurns.mockImplementation(async () => { order.push("turns"); });
+    calls.retryRetiredPanes.mockImplementation(async () => { order.push("retired"); });
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
+
+    expect(order[0]).toBe("invalidate");
+    expect(new Set(order.slice(1))).toEqual(new Set(["bindings", "instances", "turns", "retired"]));
   });
 
   it("invalidates and reconciles affected workspaces for topology hints", async () => {

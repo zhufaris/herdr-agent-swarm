@@ -1,7 +1,34 @@
 import type { SqliteContext } from "../context.js";
+import { runForeignKeySafeRebuild } from "./foreign-key-safe-rebuild.js";
 
 export class WorkerMigrations {
   constructor(private readonly context: SqliteContext) {}
+
+  ensureWorkerSessionThreads(): void {
+    const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 35").get();
+    const table = this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_session_threads'").get();
+    if (migrated && table) return;
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS worker_session_threads(
+        id TEXT PRIMARY KEY, publication_key TEXT NOT NULL UNIQUE, worker_id TEXT NOT NULL, worker_session_generation INTEGER NOT NULL,
+        parent_binding_id TEXT NOT NULL, parent_binding_generation INTEGER NOT NULL, parent_pane_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK(mode IN ('canonical-main','legacy-entry')), source_main_message_id TEXT, action_message_id TEXT, topic_id TEXT UNIQUE, root_message_id TEXT UNIQUE,
+        state TEXT NOT NULL CHECK(state IN ('legacy-unpublished','reserving','active','stale')), created_at TEXT NOT NULL, activated_at TEXT, stale_at TEXT, updated_at TEXT NOT NULL,
+        UNIQUE(worker_id, worker_session_generation),
+        CHECK((mode = 'canonical-main' AND source_main_message_id IS NULL) OR (mode = 'legacy-entry' AND (state = 'legacy-unpublished' OR source_main_message_id IS NOT NULL))),
+        CHECK((state IN ('legacy-unpublished','reserving') AND topic_id IS NULL AND root_message_id IS NULL AND activated_at IS NULL) OR (state = 'active' AND topic_id IS NOT NULL AND root_message_id IS NOT NULL AND activated_at IS NOT NULL AND stale_at IS NULL) OR (state = 'stale' AND stale_at IS NOT NULL))
+      );
+      CREATE INDEX IF NOT EXISTS worker_session_threads_parent ON worker_session_threads(parent_binding_id, parent_binding_generation, state);
+    `);
+    const timestamp = now();
+    this.context.database.prepare(`
+      INSERT OR IGNORE INTO worker_session_threads(id, publication_key, worker_id, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id, chat_id, mode, state, created_at, updated_at)
+      SELECT 'legacy-' || worker.id || '-' || worker.worker_session_generation, 'legacy-placement:' || worker.id || ':' || worker.worker_session_generation, worker.id, worker.worker_session_generation, worker.parent_binding_id, worker.parent_binding_generation, worker.parent_pane_id, binding.chat_id, 'legacy-entry', 'legacy-unpublished', ?, ?
+      FROM agent_instances worker JOIN bindings binding ON binding.id = worker.parent_binding_id
+      WHERE worker.role = 'worker' AND worker.worker_session_lifecycle = 'active' AND worker.parent_binding_id IS NOT NULL AND worker.parent_binding_generation IS NOT NULL AND worker.parent_pane_id IS NOT NULL
+    `).run(timestamp, timestamp);
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (35)").run();
+  }
 
   ensureWorkerCardDisplayRequests(): void {
     this.context.database.exec(`
@@ -191,9 +218,7 @@ export class WorkerMigrations {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
       const parentBindingGeneration = columns.has("parent_binding_generation") ? "parent_binding_generation" : "NULL";
       const workerSessionGeneration = columns.has("worker_session_generation") ? "worker_session_generation" : "1";
-      this.context.database.exec(`
-        PRAGMA foreign_keys = OFF;
-        BEGIN IMMEDIATE;
+      runForeignKeySafeRebuild(this.context, "Worker-scope migration", () => this.context.database.exec(`
         CREATE TABLE agent_instances_next(
           id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
         agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_binding_generation INTEGER, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
@@ -214,11 +239,7 @@ export class WorkerMigrations {
         ALTER TABLE agent_instances_next RENAME TO agent_instances;
         CREATE UNIQUE INDEX agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
         CREATE INDEX agent_instances_project_state ON agent_instances(project_id, observed_state, created_at);
-        COMMIT;
-        PRAGMA foreign_keys = ON;
-      `);
-      const violation = this.context.database.prepare("PRAGMA foreign_key_check").get();
-      if (violation) throw new Error(`Worker-scope migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
+      `));
     }
     this.context.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_worker_parent_name ON agent_instances(parent_binding_id, parent_pane_id, name) WHERE role = 'worker' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL");
     this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (16)").run();

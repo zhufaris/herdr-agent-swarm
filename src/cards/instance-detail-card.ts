@@ -34,6 +34,7 @@ export function renderInstanceDetailCard(input: { instance: AgentInstance; works
     });
   }
   const controls = [callbackButton("设为当前目标", { action: "instance_set_target", instanceId: input.instance.id, generation: input.instance.generation, ...context }, "primary")];
+  if (input.instance.role === "worker" && input.bindingId) controls.unshift(callbackButton("发送 Worker 卡片到群", { action: "worker_thread_send", instanceId: input.instance.id, generation: input.instance.generation, workerSessionGeneration: input.instance.workerSessionGeneration, ...context }, "primary"));
   if (input.instance.desiredState === "stopped") controls.push(callbackButton("启动", { action: "instance_start", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
   else controls.push(callbackButton("停止实例", { action: "instance_stop", instanceId: input.instance.id, generation: input.instance.generation, ...context }));
   if (input.capabilities.steering !== "unsupported" && input.instance.observedState === "working") controls.push(callbackButton("Steer", { action: "instance_steer_form", instanceId: input.instance.id, generation: input.instance.generation, ...context }));

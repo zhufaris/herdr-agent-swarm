@@ -172,6 +172,7 @@ export class SqliteInstanceStore {
       this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, instance.id, instance.generation);
       this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, instance.id, instance.generation);
       const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = ?, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(nextGeneration, input.reason, timestamp, instance.id, instance.generation);
+      if (changed.changes === 1) this.database.prepare("UPDATE worker_session_threads SET state = 'stale', stale_at = ?, updated_at = ? WHERE worker_id = ? AND worker_session_generation = ? AND state != 'stale'").run(timestamp, timestamp, instance.id, instance.workerSessionGeneration);
       const terminated = this.invalidateChanged(changed.changes === 1 ? this.getAgentInstance(instance.id) : null, "worker.terminated");
       return terminated ? { instance: terminated, cancelledTurnIds, uncertainTurnIds } : null;
     });
@@ -210,6 +211,8 @@ export class SqliteInstanceStore {
       if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef || instance.pendingRuntimeRef) return false;
       const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
       if (!lease || lease.generation !== input.expectedWorkspaceGeneration) return false;
+      const timestamp = now();
+      this.database.prepare("UPDATE worker_session_threads SET state = 'stale', stale_at = COALESCE(stale_at, ?), updated_at = ? WHERE worker_id = ? AND state != 'stale'").run(timestamp, timestamp, instance.id);
       this.database.prepare("DELETE FROM workspace_leases WHERE id = ? AND generation = ?").run(lease.id, lease.generation);
       return this.database.prepare("DELETE FROM agent_instances WHERE id = ? AND generation = ?").run(instance.id, instance.generation).changes === 1;
     });

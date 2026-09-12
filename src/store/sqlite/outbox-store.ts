@@ -1,3 +1,4 @@
+import type { OutboundDeliveryClaim } from "../../domain/delivery.js";
 import type { AnswerPage, Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, OutboundFailureTransition, OutboundReply, StaleOutboxQuarantineRecovery } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
@@ -8,6 +9,8 @@ import { SqliteOutboxQueueStore, type EnqueueOutboundReplyInput } from "./outbox
 import { SqliteOutboxDeliveryStore } from "./outbox-delivery-store.js";
 import { SqliteOutboxRecoveryStore } from "./outbox-recovery-store.js";
 import { SqliteOutboxRetentionStore } from "./outbox-retention-store.js";
+import { SqliteBindingThreadAliasStore, type ReservePaneThreadAliasInput } from "./binding-thread-alias-store.js";
+import { SqliteWorkerSessionThreadStore, type ReserveWorkerSessionThreadInput } from "./worker-session-thread-store.js";
 
 type Dependencies = {
   getBinding(id: string): Binding | null;
@@ -27,7 +30,7 @@ export class SqliteOutboxStore {
   private readonly recovery: SqliteOutboxRecoveryStore;
   private readonly retention: SqliteOutboxRetentionStore;
 
-  constructor(context: SqliteContext, dependencies: Dependencies) {
+  constructor(context: SqliteContext, dependencies: Dependencies, private readonly threadAliases = new SqliteBindingThreadAliasStore(context), private readonly workerThreads = new SqliteWorkerSessionThreadStore(context)) {
     this.queue = new SqliteOutboxQueueStore(context, dependencies);
     this.delivery = new SqliteOutboxDeliveryStore(context, this.queue, dependencies);
     this.recovery = new SqliteOutboxRecoveryStore(context, this.queue, this.delivery, dependencies);
@@ -39,17 +42,23 @@ export class SqliteOutboxStore {
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean { return this.queue.hasPendingForWorkerTurn(turnId); }
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean { return this.queue.hasPendingAnswerContinuation(promptId, pageIndex); }
   dismissSupersededAnswerStream(replyId: string): boolean { return this.queue.dismissSupersededAnswerStream(replyId); }
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], laneClass?: "interactive"): OutboundReply[] { return this.queue.listLaneHeads(limit, dueAt, excludedLaneKeys, laneClass); }
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], workClass?: import("../../domain/types.js").OutboundWorkClass): OutboundReply[] { return this.queue.listLaneHeads(limit, dueAt, excludedLaneKeys, workClass); }
   getNextOutboundLaneHeadAttemptAt(): string | null { return this.queue.getNextLaneHeadAttemptAt(); }
   refreshOutboxLaneHead(laneKey: string): void { this.queue.refreshLaneHead(laneKey); }
   getOutboundReply(id: string): OutboundReply | null { return this.queue.get(id); }
+  reservePaneThreadAlias(input: ReservePaneThreadAliasInput): "reserved" | "duplicate" | "stale" { return this.threadAliases.reserve(input, this.queue); }
+  reserveWorkerSessionThread(input: ReserveWorkerSessionThreadInput): "reserved" | "duplicate" | "stale" { return this.workerThreads.reserve(input, this.queue); }
+  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number) { return this.workerThreads.loadBySession(workerId, workerSessionGeneration); }
+  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null) { return this.workerThreads.findActiveByScope(chatId, topicId, rootMessageId); }
+  findWorkerSessionThreadRecordByScope(chatId: string, topicId: string | null, rootMessageId: string | null) { return this.workerThreads.findByScope(chatId, topicId, rootMessageId); }
 
-  markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void { this.delivery.markDelivered(id, messageId, cardId); }
-  checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null { return this.delivery.checkpointCard(id, cardId); }
+  claimOutboundReply(id: string, dueAt: string | null): OutboundDeliveryClaim | null { return this.queue.claim(id, dueAt); }
+  markOutboundReplyDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean { return this.delivery.markDelivered(id, messageId, cardId, claim, topicId); }
+  checkpointOutboundReplyCard(id: string, cardId: string, claim?: OutboundDeliveryClaim): OutboundReply | null { return this.delivery.checkpointCard(id, cardId, claim); }
   markOutboundReplyFailed(id: string, error: string, retryDelayMs?: number, metadata?: DeliveryFailureMetadata): OutboundReply | null { return this.delivery.markFailed(id, error, retryDelayMs, metadata); }
   markOutboundReplyDeadLetter(id: string, error: string, metadata?: DeliveryFailureMetadata): OutboundReply | null { return this.delivery.markDeadLetter(id, error, metadata); }
 
-  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null { return this.recovery.markOutboundReplyFailedWithQuarantine(id, error, metadata, retryDelayMs); }
+  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number, claim?: OutboundDeliveryClaim): OutboundFailureTransition | null { return this.recovery.markOutboundReplyFailedWithQuarantine(id, error, metadata, retryDelayMs, claim); }
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] { return this.recovery.recoverEligibleDeadLetters(cutoff, limit); }
   retireUndeliveredWorkerTaskCardIntents(): number { return this.recovery.retireUndeliveredWorkerTaskCardIntents(); }
   recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery { return this.recovery.recoverStaleOutboxQuarantines(); }

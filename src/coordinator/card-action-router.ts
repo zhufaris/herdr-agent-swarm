@@ -33,12 +33,19 @@ interface Options {
 export class CardActionRouter implements CardActionRouterPort {
   private readonly projects: ProjectCatalog;
   private readonly tasks = new ActiveWorkTracker();
+  private stopping = false;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(private readonly options: Options) {
     this.projects = new ProjectCatalog(options.projects);
   }
 
-  async handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
+  handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
+    if (this.stopping) return Promise.resolve(staleAction());
+    return this.tasks.track(this.handleAdmitted(action));
+  }
+
+  private async handleAdmitted(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void> {
     if (action.chatId !== this.options.chatId) return;
     if (!(this.options.allowedOpenIds ?? []).includes(action.operatorOpenId)) return { toast: { type: "error", content: "你没有访问权限。" } };
     const command = parseCardActionCommand(action.value, action.option);
@@ -57,7 +64,7 @@ export class CardActionRouter implements CardActionRouterPort {
         return this.options.deliveryRecovery.openThread(action, command.bindingId);
       case "pane-directory": {
         const outcome = await this.options.deliveryRecovery.sendPaneCard(action, command);
-        return { toast: { type: outcome === "sent" ? "success" : "warning", content: outcome === "sent" ? "已发送该 Pane 的最新卡片。" : "该 Pane 已变化，请刷新目录后重试。" } };
+        return { toast: { type: outcome === "stale" ? "warning" : "success", content: outcome === "sent" ? "已提交该 Pane 卡片，将发送到群聊并创建新话题。" : outcome === "duplicate" ? "该 Pane 卡片已受理；如未显示，请查看 `/swarm failures`。" : "该 Pane 已变化，请刷新目录后重试。" } };
       }
       case "dead-letter":
         return this.options.deliveryRecovery.decideDeadLetter(action, command.replyId, command.decision);
@@ -86,7 +93,11 @@ export class CardActionRouter implements CardActionRouterPort {
     }
   }
 
-  async stop(): Promise<void> { await this.tasks.settle(); }
+  stop(): Promise<void> {
+    this.stopping = true;
+    this.stopPromise ??= this.tasks.settle();
+    return this.stopPromise;
+  }
 
   private track(task: Promise<void>): void {
     this.tasks.track(task);

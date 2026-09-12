@@ -30,8 +30,5 @@ if [ ! -d "$RELEASE" ]; then
   mv "$STAGING" "$RELEASE"
   trap - EXIT
 fi
-LINK="$STATE_DIR/.current.$$"
-ln -s "$RELEASE" "$LINK"
-mv -Tf "$LINK" "$STATE_DIR/current"
-SWARM_ROOT="$RELEASE" SWARM_CONFIG_DIR="$CONFIG_DIR" SWARM_STATE_DIR="$STATE_DIR" node "$RELEASE/dist/cli/service-lifecycle.js" install
+SWARM_ROOT="$RELEASE" SWARM_RELEASE_CANDIDATE="$RELEASE" SWARM_CONFIG_DIR="$CONFIG_DIR" SWARM_STATE_DIR="$STATE_DIR" node "$RELEASE/dist/cli/service-lifecycle.js" install
 echo "Herdr Agent Swarm release installed and enabled. Run npm run swarm:start from the release directory to start it."

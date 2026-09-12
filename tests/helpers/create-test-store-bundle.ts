@@ -1,5 +1,6 @@
 import type { SqliteStoreBundle } from "../../src/store/sqlite-store-bundle.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
+import { createOutboxTestDriver } from "./outbox-test-driver.js";
 
 export interface TestStoreBundle extends SqliteStoreBundle {
   /** Test setup/inspection driver. Workflows should receive a named capability above. */
@@ -10,8 +11,9 @@ export function createTestStoreBundle(path = ":memory:"): TestStoreBundle {
   const driver = new SqliteStoreKernel(path);
   const modules = driver.capabilityModules();
   Object.assign(driver,
-    bindMethods(modules.outbox, ["checkpointOutboundReplyCard", "enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "markOutboundReplyDelivered", "markOutboundReplyFailedWithQuarantine", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
-    bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter"])
+    createOutboxTestDriver(modules.outboxAdmin),
+    bindMethods(modules.outbox, ["enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
+    bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias", "reserveWorkerSessionThread", "loadWorkerSessionThread", "findWorkerSessionThreadByScope", "findWorkerSessionThreadRecordByScope"])
   );
   return {
     ...createCapabilities(driver, modules),

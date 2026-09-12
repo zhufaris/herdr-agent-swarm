@@ -10,12 +10,14 @@ import { InstanceConversationContext } from "./conversation-context.js";
 import { InstanceViewQuery } from "./instance-view-query.js";
 
 export interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: AgentKind; model: string | null; start: boolean }): Promise<CreateWorkerResult> }
+type WorkerCardOnlyAction = { action: "worker_new_task_form" | "worker_new_task_submit" | "worker_task_instruction_form" | "worker_task_instruction_submit" | "worker_task_interrupt" };
 interface WorkerLifecyclePresentation {
   instanceCreate(input: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["instanceCreate"]>[0]): object;
   instanceRemovalPlan(input: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["instanceRemovalPlan"]>[0]): object;
   instanceSteer(input: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["instanceSteer"]>[0]): object;
   workerTurn(view: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["workerTurn"]>[0]): object;
   workerMain(view: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["workerMain"]>[0]): object;
+  workerThreadEntry(view: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["workerThreadEntry"]>[0], generatedAt: string): object;
   mainCard(view: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["mainCard"]>[0]): object;
   answerCard(view: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["answerCard"]>[0], options?: Parameters<import("../../domain/ports/presentation.js").ApplicationPresentation["answerCard"]>[1]): object;
 }
@@ -24,10 +26,10 @@ export class WorkerLifecycleActions {
   private readonly projects: ReadonlySet<string>;
   constructor(private readonly options: {
     projects: readonly ProjectConfig[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow;
-    context: InstanceConversationContext; views: InstanceViewQuery; presentation: WorkerLifecyclePresentation; workerCreation?: WorkerCreationGateway;
+    context: InstanceConversationContext; views: InstanceViewQuery; presentation: WorkerLifecyclePresentation; workerCreation?: WorkerCreationGateway; wakeOutbound?: () => void;
   }) { this.projects = new Set(options.projects.map(({ id }) => id)); }
 
-  async handle(action: IncomingLarkCardAction, command: Exclude<InstanceCardActionCommand, { workerSessionGeneration: number }>): Promise<LarkCardActionResult> {
+  async handle(action: IncomingLarkCardAction, command: Exclude<InstanceCardActionCommand, WorkerCardOnlyAction>): Promise<LarkCardActionResult> {
     if (command.action === "card_target_open") return this.openCardTarget(command, action.chatId);
     const actor = { kind: "human" as const, userId: action.operatorOpenId, channel: "feishu" as const };
     const conversationKey = command.conversationKey ?? action.chatId;
@@ -62,6 +64,17 @@ export class WorkerLifecycleActions {
     if (instance.role !== "worker") return warning("仅支持管理 Worker；当前 Thread 是唯一 Primary。");
     if (bindingContext && bindingContext !== instance.projectId) return warning("实例不属于当前话题项目。");
     if (!this.options.context.contains(instance, conversationKey)) return warning("实例状态已变化，请刷新后重试。");
+    if (command.action === "worker_thread_send") {
+      if (instance.workerSessionGeneration !== command.workerSessionGeneration || !instance.parent) return warning("Worker Session 已变化，请刷新后重试。");
+      const view = this.options.store.loadWorkerMainView(instance.id, instance.workerSessionGeneration);
+      if (!view || view.parentBindingId !== instance.parent.bindingId || view.parentBindingGeneration !== (instance.parent.bindingGeneration ?? 1) || view.parentPaneId !== instance.parent.paneId) return warning("Worker Main 状态尚未就绪或已失效。");
+      const existing = this.options.store.loadWorkerSessionThread(instance.id, instance.workerSessionGeneration);
+      if (existing && existing.state !== "legacy-unpublished") return { toast: { type: existing.state === "stale" ? "warning" : "success", content: existing.state === "active" ? `Worker 对话已存在（${existing.rootMessageId ?? existing.id}）。` : existing.state === "reserving" ? "Worker 对话已受理；如未显示，请查看 `/swarm failures`。" : "Worker 对话已失效，请刷新实例目录。" } };
+      if (!view.messageId) return warning("Worker Main Card 正在创建，请稍后重试。");
+      const result = this.options.store.reserveWorkerSessionThread({ publicationKey: `worker-thread:${instance.id}:${instance.workerSessionGeneration}`, workerId: instance.id, workerSessionGeneration: instance.workerSessionGeneration, parentBindingId: view.parentBindingId, parentBindingGeneration: view.parentBindingGeneration, parentPaneId: view.parentPaneId, targetChatId: action.chatId, mode: "legacy-entry", sourceMainMessageId: view.messageId, actionMessageId: action.messageId, card: this.options.presentation.workerThreadEntry(view, new Date().toISOString()) });
+      if (result === "reserved") this.options.wakeOutbound?.();
+      return { toast: { type: result === "stale" ? "warning" : "success", content: result === "reserved" ? "已提交 Worker 卡片，将发送到群并创建独立对话。" : result === "duplicate" ? "Worker 对话已存在或正在创建。" : "Worker 状态已变化，请刷新实例目录。" } };
+    }
     if (command.action === "instance_open") return { card: this.options.views.detail(instance, conversationKey) };
     if (command.action === "instance_turn_open") {
       const turn = this.options.store.getInstanceTurn(command.turnId); const view = this.options.store.loadWorkerTurnCard(command.turnId);

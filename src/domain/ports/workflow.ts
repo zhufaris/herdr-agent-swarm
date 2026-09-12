@@ -6,6 +6,7 @@ import type { BridgeEvent } from "../events.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { ModelPreference } from "../model-selection.js";
 import type { AcceptPromptInput } from "./prompt.js";
+import type { WorkerSessionThread } from "../worker-session-thread.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
@@ -16,6 +17,9 @@ export interface OperationsQueryStore {
 
 export interface InboundRoutingStore {
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
+  isBindingThreadAlias(topicId: string | null, rootMessageId: string | null): boolean;
+  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null): WorkerSessionThread | null;
+  findWorkerSessionThreadRecordByScope(chatId: string, topicId: string | null, rootMessageId: string | null): WorkerSessionThread | null;
   getBinding(id: string): Binding | null;
   isBridgeMessage(messageId: string): boolean;
   listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[];
@@ -54,6 +58,7 @@ export interface DeliveryRecoveryStore {
   getBinding(id: string): Binding | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   listFailures(chatId: string): FailureSummary[];
+  reservePaneThreadAlias(input: { publicationKey: string; actionMessageId: string; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; targetChatId: string; card: object }): "reserved" | "duplicate" | "stale";
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
 }
 

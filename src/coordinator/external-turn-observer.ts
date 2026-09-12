@@ -13,6 +13,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 
 type ExternalTurnStore = ExternalTurnObservationStore;
 
@@ -31,7 +32,7 @@ interface ExternalTurnObserverOptions {
 
 interface TurnProjectionState {
   pendingStarts: Map<string, string>;
-  promptsByTurn: Map<string, { promptId: string; chunks: string[] }>;
+  promptsByTurn: Map<string, { promptId: string; output: BoundedTurnOutput }>;
 }
 
 interface ObservedBinding extends TurnProjectionState {
@@ -169,7 +170,7 @@ export class ExternalTurnObserver {
       observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map() };
       if (durable?.transcriptTurnId && durable.transcriptTurnStartedAt) {
         observed.pendingStarts.set(durable.transcriptTurnId, durable.transcriptTurnStartedAt);
-        observed.promptsByTurn.set(durable.transcriptTurnId, { promptId: durable.id, chunks: [] });
+        observed.promptsByTurn.set(durable.transcriptTurnId, { promptId: durable.id, output: createBoundedTurnOutput() });
       }
       this.bindings.set(binding.id, observed);
       return;
@@ -235,7 +236,7 @@ export class ExternalTurnObserver {
         observed.pendingStarts.delete(turnId);
         return "completed";
       }
-      owned = { promptId: result.prompt.id, chunks: [] };
+      owned = { promptId: result.prompt.id, output: createBoundedTurnOutput() };
       observed.promptsByTurn.set(turnId, owned);
       if (result.outboxReserved) this.options.outboundWork.wake();
       for (const promptId of result.supersededPromptIds) {
@@ -245,11 +246,14 @@ export class ExternalTurnObserver {
       this.options.logger.info({ event: "external-turn-adopted", bindingId: binding.id, promptId: owned.promptId, paneId: binding.paneId, turnId, adoption: result.outcome, supersededPromptCount: result.supersededPromptIds.length, outcome: "observing" }, "adopted external Herdr turn for Answer Card projection");
     }
     if (!owned) return observation.freshTurnStart ? "pending" : "ignored";
-    if (observation.answerDelta) owned.chunks.push(observation.answerDelta);
-    if (observation.answerDelta || observation.toolActivities?.length || observation.mainStatus) {
+    const previousOutput = owned.output;
+    owned.output = appendTurnOutput(previousOutput, observation.answerDelta);
+    const answerChanged = Boolean(observation.answerDelta) && !previousOutput.truncated;
+    const answerSnapshot = answerChanged ? (owned.output.truncated ? owned.output.text : observation.answerDelta) : "";
+    if (answerChanged || observation.toolActivities?.length || observation.mainStatus) {
       await this.publish(binding.id, "TurnOutputObserved", "herdr", {
         promptId: owned.promptId, observation: {
-          answer: { snapshot: observation.answerDelta, update: "append", toolActivities: observation.toolActivities ?? [] },
+          answer: { snapshot: answerSnapshot, update: answerChanged && owned.output.truncated ? "replace-all" : "append", toolActivities: observation.toolActivities ?? [] },
           main: { ...(observation.mainStatus ? { status: {
             ...(observation.mainStatus.statusTitle ? { statusTitle: observation.mainStatus.statusTitle } : {}),
             ...(observation.mainStatus.planSteps ? { planSteps: observation.mainStatus.planSteps.map((step) => ({ ...step, kind: "step" as const })) } : {}),
@@ -261,7 +265,7 @@ export class ExternalTurnObserver {
     if (lifecycle?.state === "completed") {
       const current = this.options.store.getPrompt(owned.promptId);
       if (current?.state === "running") {
-        const answer = lifecycle.finalAnswer ?? owned.chunks.join("\n\n");
+        const answer = lifecycle.finalAnswer ?? owned.output.text;
         this.options.store.completeTurn({ promptId: owned.promptId, bindingId: binding.id, answer, occurredAt: new Date().toISOString(), outputFingerprint: outputFingerprint(answer), replaceAnswer: Boolean(lifecycle.finalAnswer) });
         await this.publish(binding.id, "TurnCompleted", "herdr", { promptId: owned.promptId, answer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
       }

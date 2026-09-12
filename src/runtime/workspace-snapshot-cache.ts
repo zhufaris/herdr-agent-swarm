@@ -96,6 +96,16 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     this.forgetWorkspacePanes(workspaceId);
   }
 
+  invalidatePanes(paneIds: readonly string[]): void {
+    const workspaceIds = new Set<string>();
+    for (const paneId of paneIds) {
+      const workspaceId = this.paneWorkspaceIds.get(paneId);
+      if (!workspaceId) { this.invalidateAll(); return; }
+      workspaceIds.add(workspaceId);
+    }
+    for (const workspaceId of workspaceIds) this.invalidate(workspaceId);
+  }
+
   status(): WorkspaceCacheStatus {
     const now = this.clock();
     const ages = [...this.snapshots.values()].map((snapshot) => Math.max(0, now - snapshot.capturedAt));

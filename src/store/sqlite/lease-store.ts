@@ -3,8 +3,8 @@ import { mapInstanceLease } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 
 const FENCED_TABLES = [
-  "bindings", "agent_instances", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "worker_card_display_requests", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
-  "outbox_lane_heads", "outbox_lane_quarantines",
+  "bindings", "binding_thread_aliases", "agent_instances", "worker_session_threads", "workspace_leases", "instance_removal_plans", "instance_turns", "worker_turn_cards", "worker_turn_card_pages", "worker_main_views", "card_context_invalidations", "instance_operations", "instance_events", "primary_tool_capabilities", "worker_card_display_requests", "approval_requests", "approval_grants", "conversation_targets", "inbound_messages", "bridge_messages", "prompt_jobs", "outbound_replies",
+  "outbox_lane_heads", "outbox_lane_quarantines", "delivery_recoveries", "answer_delivery_coverage", "answer_recovery_links", "answer_recovery_candidates",
   "project_selections", "card_interactions", "session_operations", "swarm_command_intents", "pane_close_requests", "worker_pane_close_steps", "pane_control_operations", "turn_control_operations", "retired_pane_cleanup_operations", "binding_model_preferences", "audit_log", "lifecycle_events", "topic_views", "run_cards", "answer_pages"
 ] as const;
 
@@ -31,6 +31,14 @@ export class SqliteLeaseStore {
     }
     try {
       this.assertWriteFence();
+      this.context.transaction(() => {
+        const claims = this.context.database.prepare("SELECT id, lane_key FROM outbound_replies WHERE claim_attempt_id IS NOT NULL AND (claimed_fence IS NOT ? OR claimed_owner_id IS NOT ?)").all(fencingToken, ownerId) as Array<{ id: string; lane_key: string }>;
+        for (const claim of claims) {
+          this.context.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, failure_class = 'unknown', error = 'Delivery outcome uncertain after owner loss; inspect before manual retry', dead_lettered_at = ?, updated_at = ? WHERE id = ?").run(new Date().toISOString(), new Date().toISOString(), claim.id);
+          this.context.database.prepare("INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at) VALUES (?, ?, 'immutable', 'unknown', 'active', 'blocked', 'Delivery outcome uncertain after owner loss', ?, ?) ON CONFLICT(lane_key) DO UPDATE SET failed_reply_id = excluded.failed_reply_id, lane_class = excluded.lane_class, failure_class = excluded.failure_class, state = 'active', action = 'blocked', reason = excluded.reason, updated_at = excluded.updated_at, released_at = NULL").run(claim.lane_key, claim.id, new Date().toISOString(), new Date().toISOString());
+          this.context.database.prepare("DELETE FROM outbox_lane_heads WHERE lane_key = ?").run(claim.lane_key);
+        }
+      });
     } catch (error) {
       this.deactivateWriteFence();
       throw error;

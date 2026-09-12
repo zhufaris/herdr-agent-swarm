@@ -1,12 +1,18 @@
 import type { SqliteContext } from "./context.js";
 
-export function createLatestSchema(context: SqliteContext): void {
+export function createInstanceLeaseSchema(context: SqliteContext): void {
   context.database.exec(`
-  CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
   CREATE TABLE IF NOT EXISTS instance_lease(
     singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1), owner_id TEXT NOT NULL, fencing_token INTEGER NOT NULL,
     expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
+  `);
+}
+
+export function createLatestSchema(context: SqliteContext): void {
+  createInstanceLeaseSchema(context);
+  context.database.exec(`
+  CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
   CREATE TABLE IF NOT EXISTS bindings(
     id TEXT PRIMARY KEY, creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
     root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
@@ -16,6 +22,12 @@ export function createLatestSchema(context: SqliteContext): void {
     last_agent_state TEXT NOT NULL CHECK(last_agent_state IN ('idle','working','blocked','done','unknown')),
     last_output_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS binding_thread_aliases(
+    id TEXT PRIMARY KEY, publication_key TEXT NOT NULL UNIQUE, binding_id TEXT NOT NULL REFERENCES bindings(id), binding_generation INTEGER NOT NULL, chat_id TEXT NOT NULL, pane_id TEXT NOT NULL, source_main_message_id TEXT NOT NULL, action_message_id TEXT NOT NULL, topic_id TEXT UNIQUE, root_message_id TEXT UNIQUE,
+    state TEXT NOT NULL CHECK(state IN ('reserving','active','stale')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    CHECK((state = 'reserving' AND topic_id IS NULL AND root_message_id IS NULL) OR (state IN ('active','stale') AND topic_id IS NOT NULL AND root_message_id IS NOT NULL))
+  );
+  CREATE INDEX IF NOT EXISTS binding_thread_aliases_binding ON binding_thread_aliases(binding_id, binding_generation, state);
   CREATE TABLE IF NOT EXISTS agent_instances(
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('primary','worker')),
     agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_binding_generation INTEGER, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
@@ -27,6 +39,16 @@ export function createLatestSchema(context: SqliteContext): void {
   );
   CREATE UNIQUE INDEX IF NOT EXISTS agent_instances_project_primary ON agent_instances(project_id) WHERE role = 'primary';
   CREATE INDEX IF NOT EXISTS agent_instances_project_state ON agent_instances(project_id, observed_state, created_at);
+  CREATE TABLE IF NOT EXISTS worker_session_threads(
+    id TEXT PRIMARY KEY, publication_key TEXT NOT NULL UNIQUE, worker_id TEXT NOT NULL, worker_session_generation INTEGER NOT NULL,
+    parent_binding_id TEXT NOT NULL, parent_binding_generation INTEGER NOT NULL, parent_pane_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('canonical-main','legacy-entry')), source_main_message_id TEXT, action_message_id TEXT, topic_id TEXT UNIQUE, root_message_id TEXT UNIQUE,
+    state TEXT NOT NULL CHECK(state IN ('legacy-unpublished','reserving','active','stale')), created_at TEXT NOT NULL, activated_at TEXT, stale_at TEXT, updated_at TEXT NOT NULL,
+    UNIQUE(worker_id, worker_session_generation),
+    CHECK((mode = 'canonical-main' AND source_main_message_id IS NULL) OR (mode = 'legacy-entry' AND (state = 'legacy-unpublished' OR source_main_message_id IS NOT NULL))),
+    CHECK((state IN ('legacy-unpublished','reserving') AND topic_id IS NULL AND root_message_id IS NULL AND activated_at IS NULL) OR (state = 'active' AND topic_id IS NOT NULL AND root_message_id IS NOT NULL AND activated_at IS NOT NULL AND stale_at IS NULL) OR (state = 'stale' AND stale_at IS NOT NULL))
+  );
+  CREATE INDEX IF NOT EXISTS worker_session_threads_parent ON worker_session_threads(parent_binding_id, parent_binding_generation, state);
   CREATE TABLE IF NOT EXISTS workspace_leases(
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, instance_id TEXT NOT NULL UNIQUE REFERENCES agent_instances(id) ON DELETE RESTRICT,
     kind TEXT NOT NULL CHECK(kind IN ('main-checkout','git-worktree','shared-read-only')), cwd TEXT NOT NULL, branch TEXT, base_commit TEXT NOT NULL,
@@ -124,19 +146,20 @@ export function createLatestSchema(context: SqliteContext): void {
     CHECK((state = 'pending' AND dispatch_prompt_id IS NULL) OR state != 'pending')
   );
   CREATE TABLE IF NOT EXISTS outbound_replies(
-    id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, stream_page_index INTEGER, stream_element_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, intent_kind TEXT, intent_json TEXT, renderer_revision INTEGER,
+    id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, stream_page_index INTEGER, stream_element_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), thread_alias_id TEXT REFERENCES binding_thread_aliases(id), worker_thread_id TEXT REFERENCES worker_session_threads(id), target_chat_id TEXT, work_class TEXT NOT NULL DEFAULT 'live' CHECK(work_class IN ('live','history')), root_message_id TEXT,
+    kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','group_card_create','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, intent_kind TEXT, intent_json TEXT, renderer_revision INTEGER,
     state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
     error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT
+    failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT,
+    CHECK((kind = 'group_card_create' AND root_message_id IS NULL AND target_chat_id IS NOT NULL AND ((thread_alias_id IS NOT NULL AND worker_thread_id IS NULL) OR (thread_alias_id IS NULL AND worker_thread_id IS NOT NULL))) OR (kind != 'group_card_create' AND root_message_id IS NOT NULL AND target_chat_id IS NULL AND thread_alias_id IS NULL AND worker_thread_id IS NULL))
   );
   CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert
   AFTER INSERT ON outbound_replies
   WHEN NEW.intent_json IS NULL
   BEGIN
     UPDATE outbound_replies SET
-      intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END,
-      intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload),
+      intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END,
+      intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload),
       renderer_revision = 1
     WHERE id = NEW.id;
   END;
@@ -144,8 +167,8 @@ export function createLatestSchema(context: SqliteContext): void {
   AFTER UPDATE OF payload ON outbound_replies
   BEGIN
     UPDATE outbound_replies SET
-      intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END,
-      intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload),
+      intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END,
+      intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload),
       renderer_revision = 1
     WHERE id = NEW.id;
   END;

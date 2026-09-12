@@ -5,6 +5,7 @@ import type { CommandIntentStore } from "../../src/domain/ports/swarm-command.js
 import type { SessionOperationStore } from "../../src/domain/ports/workflow.js";
 import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
+import { createOutboxTestDriver } from "./outbox-test-driver.js";
 
 export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & LeaseStore & HealthStore &
   InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & SessionOperationStore & {
@@ -25,8 +26,9 @@ export const SqliteBindingStore: StoreConstructor = class {
     const kernel = new SqliteStoreKernel(path);
     const modules = kernel.capabilityModules();
     return Object.assign(kernel, {
-      ...bindMethods(modules.outbox, ["checkpointOutboundReplyCard", "enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "markOutboundReplyDelivered", "markOutboundReplyFailedWithQuarantine", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
-      ...bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter"]),
+      ...createOutboxTestDriver(modules.outboxAdmin),
+      ...bindMethods(modules.outbox, ["enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
+      ...bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias", "reserveWorkerSessionThread", "loadWorkerSessionThread", "findWorkerSessionThreadByScope", "findWorkerSessionThreadRecordByScope"]),
       ...bindMethods(modules.instance, ["createAgentInstance", "createWorkerAgentInstance", "findAgentInstanceByPane", "listWorkerInstancesByParent", "listAgentInstances", "setPrimaryAgentInstance", "attachAgentInstanceRuntime", "checkpointAgentInstance", "updateAgentInstanceLifecycle", "updateAgentInstanceObservation", "reserveAgentInstanceStop", "finishAgentInstanceStop", "rollbackAgentInstanceStop", "detachAgentInstanceRuntime", "terminateWorkerSession", "getWorkspaceLease", "updateWorkspaceLease", "createInstanceRemovalPlan", "getInstanceRemovalPlan", "consumeInstanceRemovalPlan", "removeAgentInstance", "setBindingPrimaryToolCapability", "verifyBindingPrimaryToolCapability", "hasBindingPrimaryToolCapability", "revokeBindingPrimaryToolCapability", "acceptInstanceOperation", "claimInstanceOperation", "updateInstanceOperation", "getConversationTarget", "setConversationTarget", "projectLegacyBindingAsAgentInstance"]),
       activateWriteFence: modules.lifecycle.activateWriteFence.bind(modules.lifecycle),
       deactivateWriteFence: modules.lifecycle.deactivateWriteFence.bind(modules.lifecycle),

@@ -21,8 +21,8 @@ describe("instance cards", () => {
     expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true }, body: { elements: expect.any(Array) } });
     expect(text).toContain("🎯 reviewer · Task turn:uns");
     expect(text).toContain("**💬 请求**");
-    expect(text).toContain("**📈 进度**");
-    expect(text).toContain("**🔗 承接任务**");
+    expect(text).toContain(phase === "completed" ? "**✅ 结果**" : "**📈 进度**");
+    expect(text).toContain("承接 `parent-turn`");
     expect(text).toContain("parent-turn");
     expect(text).not.toContain("View Worker Main");
     expect(text).not.toContain("card_target_open");

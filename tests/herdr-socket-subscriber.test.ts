@@ -312,6 +312,28 @@ describe("Herdr socket subscriber", () => {
     expect(received.mock.calls[1]?.[0]).toEqual({ kind: "unknown", scope: "workspaces", workspaceIds: ["w2", "w3"], paneIds: ["w2:p2", "w3:p3"] });
   });
 
+  it("waits for admitted hint handlers during stop and ignores post-gate hints", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const received = vi.fn(async () => { if (received.mock.calls.length === 1) await blocked; });
+    const subscriber = new HerdrSocketSubscriber("unused", async () => [], received, pino({ enabled: false }));
+    const receive = (chunk: string) => (subscriber as unknown as { receive(value: string): void }).receive(chunk);
+    receive('{"event":"pane_updated","data":{"workspace_id":"w1","pane_id":"w1:p1"}}\n');
+    receive('{"event":"pane_exited","data":{"workspace_id":"w2","pane_id":"w2:p2"}}\n');
+    expect(received).toHaveBeenCalledTimes(1);
+
+    let stopped = false;
+    const stopping = subscriber.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    receive('{"event":"pane_updated","data":{"workspace_id":"w3","pane_id":"w3:p3"}}\n');
+    release();
+    await stopping;
+
+    expect(received).toHaveBeenCalledTimes(2);
+    expect(received.mock.calls[1]?.[0]).toMatchObject({ workspaceIds: ["w2"] });
+  });
+
   it("refreshes per-Pane Agent subscriptions after a Pane is created", async () => {
     const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-socket-refresh-")), "herdr.sock");
     const requests: string[] = [];

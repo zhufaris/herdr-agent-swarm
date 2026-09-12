@@ -1,8 +1,10 @@
 import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
+import { readFileSync } from "node:fs";
 
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number; method: string; params?: Record<string, unknown> };
 export const MAX_PRIMARY_TOOL_RESPONSE_BYTES = 1024 * 1024;
+export const PRIMARY_TOOLS_VERSION = packageVersion();
 const definitions = [
   tool("list_instances", "List existing agent instances in this Primary's project. Use this before choosing a Worker. This cannot create or retarget instances.", { state: { type: "string", description: "Optional observed-state filter." } }),
   tool("prompt_instance", "Send a new FIFO task to an existing same-project Worker. Use an idempotency key stable for this intended call. This never creates a Worker.", required({ instanceId: stringField("Worker instance ID from list_instances."), task: stringField("Complete task for the Worker."), idempotencyKey: stringField("Stable unique key for this intended submission.") })),
@@ -17,7 +19,7 @@ const methodNames: Record<string, string> = { list_instances: "listInstances", p
 
 export async function handlePrimaryMcpRequest(request: JsonRpcRequest, invoke: (tool: string, args: Record<string, unknown>) => Promise<unknown>): Promise<object | null> {
   if (request.method === "notifications/initialized") return null;
-  if (request.method === "initialize") return result(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "herdr-agent-swarm-primary-tools", version: "0.3.0" }, instructions: "Use these tools only to coordinate existing Workers in this Primary's project. Never create, remove, promote, retarget, merge, push, deploy, or delete through this server." });
+  if (request.method === "initialize") return result(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "herdr-agent-swarm-primary-tools", version: PRIMARY_TOOLS_VERSION }, instructions: "Use these tools only to coordinate existing Workers in this Primary's project. Never create, remove, promote, retarget, merge, push, deploy, or delete through this server." });
   if (request.method === "tools/list") return result(request.id, { tools: definitions });
   if (request.method === "tools/call") {
     const name = typeof request.params?.name === "string" ? request.params.name : "";
@@ -68,6 +70,11 @@ function objectValue(value: unknown): Record<string, unknown> { return value && 
 function result(id: unknown, value: unknown) { return { jsonrpc: "2.0", id: id ?? null, result: value }; }
 function failure(id: unknown, code: number, message: string) { return { jsonrpc: "2.0", id: id ?? null, error: { code, message } }; }
 function actionableError(error: unknown): string { return `${error instanceof Error ? error.message : String(error)}. Inspect the target instance or ask the user to repair its lifecycle; do not create or retarget Workers.`; }
+function packageVersion(): string {
+  const value = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: unknown };
+  if (typeof value.version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.version)) throw new Error("Primary MCP package version is invalid");
+  return value.version;
+}
 function argument(name: string): string | undefined { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; }
 
 if (import.meta.url === `file://${process.argv[1]}`) void main().catch((error) => { process.stderr.write(`${actionableError(error)}\n`); process.exitCode = 1; });

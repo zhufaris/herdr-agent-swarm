@@ -39,7 +39,9 @@ export class InboundRouter implements InboundRouterPort {
 
   async stop(context?: ShutdownContext): Promise<void> {
     await this.options.startupRecovery.stop();
-    await Promise.allSettled([this.options.lark.stop(), this.options.inboundDispatcher.stop(), this.options.cardActionRouter.stop()]);
+    const cardActionsStopped = this.options.cardActionRouter.stop();
+    await this.options.lark.stop();
+    await Promise.allSettled([this.options.inboundDispatcher.stop(), cardActionsStopped]);
     await this.options.swarmCommands.stop();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop()]);
   }

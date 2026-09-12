@@ -61,9 +61,8 @@ export class WorkerCardActions {
     const view = this.options.store.loadWorkerTurnCard(command.turnId);
     const instance = turn ? this.options.store.getAgentInstance(turn.instanceId) : null;
     const binding = instance?.parent ? this.options.store.getBinding(instance.parent.bindingId) : null;
-    const main = instance ? this.options.store.loadWorkerMainView(instance.id, command.workerSessionGeneration) : null;
-    const decision = decideWorkerMainCardOwnership({ chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId: command.sourceCardMessageId, expectedInstanceGeneration: command.generation, expectedWorkerSessionGeneration: command.workerSessionGeneration, expectedTurnId: command.turnId, instance, view: main, binding, requireTaskSubmission: false });
-    return decision.allowed && turn && view && instance && main?.messageId ? { instance, turn, view, sourceCardMessageId: main.messageId, intent: workerTaskInteraction(view.phase).replyIntent } : null;
+    const decision = decideWorkerTaskCardOwnership({ chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId: command.sourceCardMessageId, expectedInstanceGeneration: command.generation, expectedWorkerSessionGeneration: command.workerSessionGeneration, instance, turn, view, binding });
+    return decision.allowed && turn && view && instance && view.messageId ? { instance, turn, view, sourceCardMessageId: view.messageId, intent: workerTaskInteraction(view.phase).replyIntent } : null;
   }
 
   private resolveMain(action: IncomingLarkCardAction, command: WorkerNewTaskCommand): { instance: AgentInstance; view: NonNullable<ReturnType<InstanceStore["loadWorkerMainView"]>> } | null {

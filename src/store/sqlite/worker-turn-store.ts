@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { ControlActor } from "../../domain/commands.js";
+import { InstanceTurnCapacityExceeded } from "../../domain/instance-turn-capacity-error.js";
 import type { InstanceEvent, InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../../domain/instance-turn.js";
 import type { AcceptInstanceTurnWithCardInput } from "../../domain/ports.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
@@ -34,7 +35,7 @@ export class SqliteWorkerTurnStore {
         if (existing.instanceId !== input.instanceId || existing.text !== input.text || existing.kind !== input.kind || existing.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
         return { turn: existing, inserted: false };
       }
-      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new InstanceTurnCapacityExceeded();
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
       const actor = turnActorProvenance(input.actor);
@@ -61,7 +62,7 @@ export class SqliteWorkerTurnStore {
         if (!view) throw new Error("Accepted Worker turn card could not be loaded");
         return { turn: existing, view, inserted: false };
       }
-      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new Error("Target instance queue is full");
+      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new InstanceTurnCapacityExceeded();
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
       if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
       if (input.kind === "turn" && input.parentTurnId !== null) throw new Error("Ordinary Worker turn cannot have a parent");

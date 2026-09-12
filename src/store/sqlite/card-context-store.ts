@@ -9,6 +9,7 @@ import type { TopicViewState } from "../../domain/topic-view.js";
 import { updateTopicWorkerContext } from "../../domain/topic-view.js";
 import { selectWorkerMainView, type WorkerMainProjectionSource } from "../../domain/worker-main-selector.js";
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
+import type { WorkerSessionThread } from "../../domain/worker-session-thread.js";
 import { updateWorkerTurnCardTargets, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { Binding, MainCardReservationOutcome } from "../../domain/types.js";
 import type { SqliteContext } from "./context.js";
@@ -18,7 +19,6 @@ export interface SqliteCardContextStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
   getWorkspaceLease(id: string): WorkspaceLease | null;
   getBinding(id: string): Binding | null;
-  listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[];
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
   saveWorkerTurnCard(view: WorkerTurnCardView): void;
   loadTopicView(bindingId: string): TopicViewState | null;
@@ -27,6 +27,8 @@ export interface SqliteCardContextStoreDependencies {
   saveRunCard(view: RunCardView): RunCardView;
   reserveMainCard(view: TopicViewState, rootMessageId: string | null, card: object): MainCardReservationOutcome;
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
+  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number): WorkerSessionThread | null;
+  reserveWorkerSessionThread(input: { publicationKey: string; workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; targetChatId: string; mode: "canonical-main"; viewVersion: number; card: object }): "reserved" | "duplicate" | "stale";
 }
 
 export class SqliteCardContextStore {
@@ -58,6 +60,7 @@ export class SqliteCardContextStore {
       const saved = this.saveWorkerMainView(view);
       if (!saved) return null;
       const creating = saved.messageId === null;
+      if (creating && this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ? AND (first_claimed_at IS NOT NULL OR attempt_count > 0 OR card_id_checkpoint IS NOT NULL)").get(`worker-main:create:${saved.workerId}:${saved.workerSessionGeneration}`)) return saved;
       this.dependencies.enqueueOutboundReply({
         id: randomUUID(), idempotencyKey: creating ? `worker-main:create:${saved.workerId}:${saved.workerSessionGeneration}` : `worker-main:update:${saved.workerId}:${saved.workerSessionGeneration}:${saved.viewVersion}`,
         bindingId: saved.parentBindingId, workerId: saved.workerId, workerSessionGeneration: saved.workerSessionGeneration, viewVersion: saved.viewVersion,
@@ -130,7 +133,29 @@ export class SqliteCardContextStore {
           : selected;
         const binding = this.dependencies.getBinding(source.parentBindingId);
         if (!binding?.rootMessageId) return this.markStale(invalidation);
-        if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
+        const thread = this.dependencies.loadWorkerSessionThread(next.workerId, next.workerSessionGeneration);
+        if (thread?.mode === "canonical-main") {
+          if (thread.state === "active" && thread.rootMessageId) {
+            if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, thread.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
+          } else if (thread.state === "reserving") {
+            if (next !== previous) this.saveWorkerMainView(next);
+          } else if (thread.rootMessageId) {
+            if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, thread.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
+          } else {
+            if (next !== previous) this.saveWorkerMainView(next);
+            return this.markStale(invalidation);
+          }
+        } else if (!thread && previous === null) {
+          const saved = this.saveWorkerMainView(next);
+          if (!saved) return this.markStale(invalidation);
+          reserved = this.dependencies.reserveWorkerSessionThread({
+            publicationKey: `worker-thread:${next.workerId}:${next.workerSessionGeneration}`, workerId: next.workerId, workerSessionGeneration: next.workerSessionGeneration,
+            parentBindingId: next.parentBindingId, parentBindingGeneration: next.parentBindingGeneration, parentPaneId: next.parentPaneId, targetChatId: binding.chatId,
+            mode: "canonical-main", viewVersion: next.viewVersion, card: renderers.workerMain(next)
+          }) === "reserved";
+        } else if (next !== previous || next.viewVersion > next.deliveredVersion) {
+          this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion;
+        }
       } else if (invalidation.targetKind === "worker-turn") {
         // Legacy Task Cards are immutable historical artifacts. Mark old
         // invalidations converged without creating or patching visible cards.
@@ -194,14 +219,46 @@ export class SqliteCardContextStore {
   }
 
   loadPrimaryWorkerSummaries(bindingId: string, generation: number): PrimaryWorkerSummary[] {
-    const binding = this.dependencies.getBinding(bindingId);
-    if (!binding || binding.generation !== generation || !binding.paneId) return [];
-    return this.dependencies.listWorkerInstancesByParent({ bindingId, paneId: binding.paneId }).filter((worker) => worker.parent?.bindingGeneration === generation).flatMap((worker) => {
-      const source = this.loadWorkerMainProjectionSource(worker.id, worker.workerSessionGeneration ?? 1);
-      const main = this.loadWorkerMainView(worker.id, worker.workerSessionGeneration ?? 1);
-      if (!source) return [];
-      const state = source.currentTask?.phase === "blocked" ? "blocked" as const : source.currentTask?.phase === "running" || source.currentTask?.phase === "preparing" ? "working" as const : source.currentTask?.phase === "queued" || (worker.observedState === "idle" && source.queueCount > 0) ? "queued" as const : worker.observedState;
-      return [{ workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration ?? 1, name: worker.name, state, currentTaskTitle: source.currentTask?.title ?? null, queueCount: source.queueCount, workerMain: { aggregateKind: "worker-session" as const, aggregateId: worker.id, generation: worker.workerSessionGeneration ?? 1, messageId: main?.messageId ?? null }, createdAt: source.createdAt }];
+    const binding = this.database.prepare("SELECT pane_id FROM bindings WHERE id = ? AND generation = ?").get(bindingId, generation) as { pane_id: string | null } | undefined;
+    if (!binding?.pane_id) return [];
+    const rows = this.database.prepare(`
+      WITH candidate_workers AS MATERIALIZED (
+        SELECT * FROM agent_instances INDEXED BY agent_instances_worker_parent_name
+        WHERE role = 'worker' AND worker_session_lifecycle = 'active'
+          AND parent_binding_id = ? AND parent_binding_generation = ? AND parent_pane_id = ?
+      ), ranked_cards AS (
+        SELECT cards.instance_id, cards.worker_session_generation, cards.request_text, cards.phase, cards.created_at, cards.updated_at, cards.turn_id,
+          SUM(CASE WHEN cards.phase = 'queued' THEN 1 ELSE 0 END) OVER (PARTITION BY cards.instance_id, cards.worker_session_generation) AS queue_count,
+          MIN(cards.created_at) OVER (PARTITION BY cards.instance_id, cards.worker_session_generation) AS first_created_at,
+          ROW_NUMBER() OVER (PARTITION BY cards.instance_id, cards.worker_session_generation ORDER BY
+            CASE cards.phase WHEN 'blocked' THEN 0 WHEN 'running' THEN 1 WHEN 'preparing' THEN 2 WHEN 'completed' THEN 3 WHEN 'failed' THEN 3 WHEN 'cancelled' THEN 3 WHEN 'dispatch-uncertain' THEN 3 WHEN 'queued' THEN 4 ELSE 5 END,
+            CASE WHEN cards.phase IN ('blocked','running','preparing') THEN cards.created_at END DESC,
+            CASE WHEN cards.phase IN ('completed','failed','cancelled','dispatch-uncertain') THEN cards.updated_at END DESC,
+            CASE WHEN cards.phase = 'queued' THEN cards.created_at END ASC,
+            CASE WHEN cards.phase = 'queued' THEN cards.turn_id END ASC, cards.turn_id DESC) AS task_rank
+        FROM worker_turn_cards cards
+        JOIN candidate_workers worker ON worker.id = cards.instance_id AND worker.worker_session_generation = cards.worker_session_generation
+      )
+      SELECT worker.id AS worker_id, worker.worker_session_generation, worker.name, worker.observed_state,
+        card.request_text, card.phase, COALESCE(card.queue_count, 0) AS queue_count, card.first_created_at, main.message_id
+      FROM candidate_workers worker
+      LEFT JOIN ranked_cards card ON card.instance_id = worker.id AND card.worker_session_generation = worker.worker_session_generation AND card.task_rank = 1
+      LEFT JOIN worker_main_views main ON main.worker_id = worker.id AND main.worker_session_generation = worker.worker_session_generation
+        AND main.parent_binding_id = worker.parent_binding_id AND main.parent_binding_generation = worker.parent_binding_generation AND main.parent_pane_id = worker.parent_pane_id
+      ORDER BY worker.created_at, worker.id
+    `).all(bindingId, generation, binding.pane_id) as unknown as PrimaryWorkerSummaryRow[];
+    return rows.map((row) => {
+      const queueCount = Number(row.queue_count);
+      const state = row.phase === "blocked" ? "blocked" as const
+        : row.phase === "running" || row.phase === "preparing" ? "working" as const
+        : row.phase === "queued" || (row.observed_state === "idle" && queueCount > 0) ? "queued" as const
+        : row.observed_state as PrimaryWorkerSummary["state"];
+      return {
+        workerId: row.worker_id, workerSessionGeneration: Number(row.worker_session_generation), name: row.name, state,
+        currentTaskTitle: row.request_text === null ? null : summarizeTaskTitle(row.request_text), queueCount,
+        workerMain: { aggregateKind: "worker-session" as const, aggregateId: row.worker_id, generation: Number(row.worker_session_generation), messageId: row.message_id },
+        createdAt: row.first_created_at ?? now()
+      };
     });
   }
 
@@ -209,10 +266,25 @@ export class SqliteCardContextStore {
     const run = this.dependencies.loadRunCard(promptId);
     const binding = run ? this.dependencies.getBinding(run.bindingId) : null;
     if (!run || run.bindingGeneration !== generation || !binding || binding.generation !== generation || !binding.paneId) return [];
-    const rows = this.database.prepare(`SELECT c.* FROM instance_turns t INDEXED BY instance_turns_primary_source JOIN worker_turn_cards c ON c.turn_id = t.id JOIN agent_instances worker ON worker.id = c.instance_id WHERE t.actor_kind = 'thread-primary' AND t.source_parent_prompt_id = ? AND t.source_binding_id = ? AND t.source_binding_generation = ? AND worker.role = 'worker' AND worker.parent_binding_id = ? AND worker.parent_binding_generation = ? AND worker.parent_pane_id = ? AND worker.worker_session_generation = c.worker_session_generation ORDER BY c.updated_at DESC, c.turn_id`).all(promptId, run.bindingId, generation, run.bindingId, generation, binding.paneId) as Array<Record<string, unknown>>;
-    const grouped = new Map<string, WorkerTurnCardView[]>();
-    for (const row of rows) { const view = mapWorkerTurnCard(row); if (view) grouped.set(`${view.instanceId}:${view.workerSessionGeneration}`, [...(grouped.get(`${view.instanceId}:${view.workerSessionGeneration}`) ?? []), view]); }
-    return [...grouped.values()].map((cards) => { const latest = cards[0]!; return { workerId: latest.instanceId, workerSessionGeneration: latest.workerSessionGeneration, name: latest.workerName, latestPhase: latest.phase, taskCount: cards.length, latestTaskTitle: summarizeTaskTitle(latest.requestText), latestTaskCard: { aggregateKind: "worker-turn", aggregateId: latest.turnId, generation: latest.instanceGeneration, messageId: latest.messageId }, updatedAt: latest.updatedAt }; });
+    const rows = this.database.prepare(`
+      WITH ranked_activity AS (
+        SELECT c.instance_id, c.worker_session_generation, c.worker_name, c.phase, c.request_text, c.turn_id, c.instance_generation, c.message_id, c.updated_at,
+          COUNT(*) OVER (PARTITION BY c.instance_id, c.worker_session_generation) AS task_count,
+          ROW_NUMBER() OVER (PARTITION BY c.instance_id, c.worker_session_generation ORDER BY c.updated_at DESC, c.turn_id) AS activity_rank
+        FROM instance_turns t INDEXED BY instance_turns_primary_source
+        JOIN worker_turn_cards c ON c.turn_id = t.id
+        JOIN agent_instances worker ON worker.id = c.instance_id
+        WHERE t.actor_kind = 'thread-primary' AND t.source_parent_prompt_id = ? AND t.source_binding_id = ? AND t.source_binding_generation = ?
+          AND worker.role = 'worker' AND worker.parent_binding_id = ? AND worker.parent_binding_generation = ? AND worker.parent_pane_id = ?
+          AND worker.worker_session_generation = c.worker_session_generation
+      )
+      SELECT * FROM ranked_activity WHERE activity_rank = 1 ORDER BY updated_at DESC, turn_id
+    `).all(promptId, run.bindingId, generation, run.bindingId, generation, binding.paneId) as unknown as PrimaryWorkerActivityRow[];
+    return rows.map((row) => ({
+      workerId: row.instance_id, workerSessionGeneration: Number(row.worker_session_generation), name: row.worker_name,
+      latestPhase: row.phase as WorkerTurnCardView["phase"], taskCount: Number(row.task_count), latestTaskTitle: summarizeTaskTitle(row.request_text),
+      latestTaskCard: { aggregateKind: "worker-turn", aggregateId: row.turn_id, generation: Number(row.instance_generation), messageId: row.message_id }, updatedAt: row.updated_at
+    }));
   }
 
   private markStale(invalidation: CardContextInvalidation): "stale" { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); return "stale"; }
@@ -220,6 +292,8 @@ export class SqliteCardContextStore {
 
 function now(): string { return new Date().toISOString(); }
 interface WorkerTaskSummaryRow { turn_id: string; request_text: string; phase: string; started_at: string | null; finished_at: string | null; message_id: string | null; instance_generation: number; updated_at: string; }
+interface PrimaryWorkerSummaryRow { worker_id: string; worker_session_generation: number; name: string; observed_state: string; request_text: string | null; phase: string | null; queue_count: number; first_created_at: string | null; message_id: string | null }
+interface PrimaryWorkerActivityRow { instance_id: string; worker_session_generation: number; worker_name: string; phase: string; request_text: string; turn_id: string; instance_generation: number; message_id: string | null; updated_at: string; task_count: number }
 function summarizeTaskTitle(text: string): string { return text.trim().split(/\r?\n/, 1)[0]!.slice(0, 120) || "Untitled task"; }
 function durationSeconds(startedAt: string | null, finishedAt: string | null): number | null { const start = startedAt ? Date.parse(startedAt) : NaN; const finish = Date.parse(finishedAt ?? now()); return Number.isFinite(start) && Number.isFinite(finish) ? Math.max(0, Math.floor((finish - start) / 1_000)) : null; }
 function mapCardContextInvalidation(row: Record<string, unknown>): CardContextInvalidation { return { targetKind: String(row.target_kind) as CardContextInvalidation["targetKind"], targetId: String(row.target_id), targetGeneration: Number(row.target_generation), requestedDependencyRevision: Number(row.requested_dependency_revision), projectedDependencyRevision: Number(row.projected_dependency_revision), reason: String(row.reason), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }

@@ -19,7 +19,7 @@ export interface LarkPort {
   start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<LarkCardActionResult | void>): Promise<void>;
   stop(): Promise<void>;
   isReady(): boolean;
-  createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }>;
+  createTopic(card: object, idempotencyKey?: string, targetChatId?: string): Promise<{ topicId: string; rootMessageId: string }>;
   replyText(rootMessageId: string, text: string, idempotencyKey?: string): Promise<{ messageId: string }>;
   replyCard(rootMessageId: string, card: object, idempotencyKey?: string): Promise<{ messageId: string }>;
   replyStreamingCard?(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }>;

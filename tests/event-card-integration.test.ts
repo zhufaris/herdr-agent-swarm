@@ -10,6 +10,10 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 import { primaryPresentation } from "./helpers/presentation.js";
+import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
+import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { applicationPresentation } from "./helpers/presentation.js";
 
 describe("event-driven card projection", () => {
   it("persists the newest Main view immediately and coalesces delivery within the Main budget", async () => {
@@ -54,7 +58,7 @@ describe("event-driven card projection", () => {
     await projector.stop(); store.close(); vi.useRealTimers();
   });
 
-  it("evicts terminal topic views after scheduling their durable projection", async () => {
+  it("keeps Topic Views out of process memory through active and terminal projection", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const bus = new BridgeEventBus();
@@ -63,7 +67,7 @@ describe("event-driven card projection", () => {
     projector.start();
 
     await bus.publish({ eventId: "active", bindingId: "b1", type: "BindingActivated", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { paneId: "w1:p1", tabId: null, topicId: "t1" } });
-    expect(projector.cacheDiagnostics().topicViews).toBe(1);
+    expect(projector.cacheDiagnostics().topicViews).toBe(0);
     await bus.publish({ eventId: "archived", bindingId: "b1", type: "BindingArchived", origin: "bridge", occurredAt: "2026-08-30T00:00:01.000Z", payload: { reason: "done" } });
 
     expect(store.loadTopicView("b1")?.phase).toBe("archived");
@@ -71,6 +75,32 @@ describe("event-driven card projection", () => {
     await projector.stop();
     expect(projector.cacheDiagnostics()).toEqual({ topicViews: 0, answerLengths: 0 });
     store.close();
+  });
+
+  it("reduces lifecycle events over newer durable Worker context instead of a stale process cache", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const bus = new BridgeEventBus();
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
+    projector.start();
+    await bus.publish({ eventId: "created", bindingId: "b1", type: "BindingCreated", origin: "bridge", occurredAt: "2026-09-11T00:00:00.000Z", payload: { title: "Task", workspaceId: "w1", paneId: "w1:p1" } });
+
+    const created = store.createWorkerAgentInstance({ id: "worker", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: null }, workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" })!;
+    const task = createQueuedWorkerTurnCard({ turnId: "worker-turn", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Review durable state", queuePosition: 1, occurredAt: "2026-09-11T00:00:01.000Z" });
+    store.acceptInstanceTurnWithCard({ id: task.turnId, idempotencyKey: task.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: task.requestText, parentTurnId: null, sourceMessageId: "source", view: task, render: renderWorkerTurnCard });
+    const rebuilder = new CardContextRebuilder(store, () => undefined, { debug() {}, error() {} } as never, applicationPresentation);
+    await rebuilder.requestScan();
+    const enriched = store.loadTopicView("b1")!;
+    expect(enriched.workers).toEqual([expect.objectContaining({ workerId: worker.id })]);
+    expect(enriched.workerDependencyRevision).toBeGreaterThan(0);
+
+    await bus.publish({ eventId: "renamed", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-09-11T00:00:02.000Z", payload: { title: "Renamed" } });
+
+    expect(store.loadTopicView("b1")).toMatchObject({ title: "Renamed", workers: [{ workerId: worker.id }], workerDependencyRevision: enriched.workerDependencyRevision, viewVersion: enriched.viewVersion + 1 });
+    await projector.stop(); store.close();
   });
 
   it("routes Answer and Main delivery checkpoints through immediate unified convergence", async () => {

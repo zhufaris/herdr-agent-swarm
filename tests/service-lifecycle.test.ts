@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readSync, realpathSync, renameSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createServer as createUnixServer } from "node:net";
@@ -9,6 +9,95 @@ import { describe, expect, it, vi } from "vitest";
 import { createSetupLifecycleAdapter, inspectServiceLifecycle, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
 
 describe("service lifecycle", () => {
+  it("activates a release only after installing and enabling its unit", async () => {
+    const fixture = createActivationFixture();
+
+    await expect(runServiceLifecycle("install", fixture.environment)).resolves.toBe(0);
+
+    expect(realpathSync(fixture.current)).toBe(fixture.candidate);
+    expect(readFileSync(fixture.unit, "utf8")).toContain(`WorkingDirectory=${fixture.candidate}`);
+    expect(existsSync(fixture.marker)).toBe(false);
+    expect(readFileSync(fixture.calls, "utf8").trim().split("\n")).toEqual([
+      "--user is-active herdr-agent-swarm.service",
+      "--user daemon-reload",
+      "--user enable herdr-agent-swarm.service"
+    ]);
+  });
+
+  it("prunes only after activation while retaining current, previous, and configured inactive releases", async () => {
+    const fixture = createActivationFixture({ previous: true });
+    const releases = join(fixture.state, "releases");
+    const inactive = Array.from({ length: 3 }, (_, index) => join(releases, `${String(index + 1).repeat(64)}-${String(index + 1).repeat(12)}`));
+    for (const [index, path] of inactive.entries()) { mkdirSync(path); const time = new Date(index + 1); utimesSync(path, time, time); }
+
+    await expect(runServiceLifecycle("install", { ...fixture.environment, SWARM_RELEASE_RETENTION: "1" })).resolves.toBe(0);
+
+    expect(existsSync(fixture.candidate)).toBe(true);
+    expect(existsSync(fixture.previous)).toBe(true);
+    expect(inactive.filter(existsSync)).toHaveLength(1);
+  });
+
+  it("restores the previous unit and current release when daemon reload fails", async () => {
+    const fixture = createActivationFixture({ previous: true, failFirstReload: true, priorEnabled: "enabled" });
+    const priorUnit = readFileSync(fixture.unit, "utf8");
+
+    await expect(runServiceLifecycle("install", fixture.environment)).resolves.toBe(7);
+
+    expect(realpathSync(fixture.current)).toBe(fixture.previous);
+    expect(readFileSync(fixture.unit, "utf8")).toBe(priorUnit);
+    expect(existsSync(fixture.marker)).toBe(false);
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user enable herdr-agent-swarm.service\n");
+  });
+
+  it("removes a new unit and leaves current absent when first-install activation fails", async () => {
+    const fixture = createActivationFixture({ failEnable: true });
+
+    await expect(runServiceLifecycle("install", fixture.environment)).resolves.toBe(8);
+
+    expect(existsSync(fixture.current)).toBe(false);
+    expect(existsSync(fixture.unit)).toBe(false);
+    expect(existsSync(fixture.marker)).toBe(false);
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable herdr-agent-swarm.service\n");
+  });
+
+  it("restores a previously disabled unit when enable fails", async () => {
+    const fixture = createActivationFixture({ previous: true, failEnable: true, priorEnabled: "disabled" });
+    const priorUnit = readFileSync(fixture.unit, "utf8");
+
+    await expect(runServiceLifecycle("install", fixture.environment)).resolves.toBe(8);
+
+    expect(realpathSync(fixture.current)).toBe(fixture.previous);
+    expect(readFileSync(fixture.unit, "utf8")).toBe(priorUnit);
+    expect(statSync(fixture.unit).mode & 0o777).toBe(0o640);
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable herdr-agent-swarm.service\n");
+    expect(existsSync(fixture.marker)).toBe(false);
+  });
+
+  it("compensates when the final current-link commit fails", async () => {
+    const fixture = createActivationFixture({ previous: true, priorEnabled: "enabled" });
+    const priorUnit = readFileSync(fixture.unit, "utf8");
+    let attempts = 0;
+
+    await expect(runServiceLifecycle("install", fixture.environment, {
+      renameActivationLink(source, destination) {
+        if (attempts++ === 0) throw new Error("injected current commit failure");
+        return renameSync(source, destination);
+      }
+    })).rejects.toThrow("injected current commit failure");
+
+    expect(realpathSync(fixture.current)).toBe(fixture.previous);
+    expect(readFileSync(fixture.unit, "utf8")).toBe(priorUnit);
+    expect(existsSync(fixture.marker)).toBe(false);
+  });
+
+  it("retains a recovery marker and blocks mutation when compensation fails", async () => {
+    const fixture = createActivationFixture({ previous: true, failEveryReload: true, priorEnabled: "enabled" });
+
+    await expect(runServiceLifecycle("install", fixture.environment)).rejects.toThrow(/rollback failed.*recovery marker retained/);
+    expect(existsSync(fixture.marker)).toBe(true);
+    await expect(runServiceLifecycle("start", fixture.environment)).rejects.toThrow(/incomplete release activation/);
+  });
+
   it("restores a same-user systemd session bus only when the environment omits both session variables", async () => {
     const runtimeBase = mkdtempSync(join(tmpdir(), "agent-swarm-runtime-"));
     const uid = process.getuid!();
@@ -1019,6 +1108,40 @@ function completedStartupStatus(overrides: Record<string, unknown> = {}): Record
     outboxDispatcher: { activeDeliveries: 0 }, sqliteIntegrity: { state: "healthy", quickCheck: "ok" },
     ...overrides
   };
+}
+
+function createActivationFixture(options: { previous?: boolean; failFirstReload?: boolean; failEveryReload?: boolean; failEnable?: boolean; priorEnabled?: "enabled" | "disabled" } = {}) {
+  const base = createFixture({ active: false });
+  const releases = join(base.state, "releases");
+  const hash = "a".repeat(64);
+  const commit = "b".repeat(40);
+  const candidate = join(releases, `${hash}-${commit.slice(0, 12)}`);
+  mkdirSync(join(candidate, "dist"), { recursive: true });
+  writeFileSync(join(candidate, "dist/main.js"), "// candidate\n");
+  writeFileSync(join(candidate, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.4.0", buildId: `sha256:${hash}`, gitCommit: commit }));
+  const current = join(base.state, "current");
+  const unit = join(base.units, "herdr-agent-swarm.service");
+  let previous = "";
+  if (options.previous) {
+    previous = join(releases, `${"c".repeat(64)}-${"d".repeat(12)}`);
+    mkdirSync(previous, { recursive: true });
+    symlinkSync(previous, current);
+    writeFileSync(unit, "previous unit\n", { mode: 0o640 });
+  }
+  const bin = base.environment.PATH!.split(":")[0]!;
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh
+printf '%s\n' "$*" >> ${JSON.stringify(base.calls)}
+if [ "$2" = "is-active" ]; then echo inactive; exit 3; fi
+if [ "$2" = "is-enabled" ]; then echo ${options.priorEnabled ?? "disabled"}; ${options.priorEnabled === "enabled" ? "exit 0" : "exit 1"}; fi
+if [ "$2" = "daemon-reload" ]; then
+  count=$(grep -c 'daemon-reload' ${JSON.stringify(base.calls)})
+  ${options.failEveryReload ? "exit 7" : options.failFirstReload ? '[ "$count" -eq 1 ] && exit 7' : ":"}
+fi
+if [ "$2" = "enable" ] && ${options.failEnable ? "true" : "false"}; then exit 8; fi
+exit 0
+`);
+  chmodSync(join(bin, "systemctl"), 0o755);
+  return { ...base, candidate, previous, current, unit, marker: join(base.state, ".release-activation.json"), environment: { ...base.environment, SWARM_ROOT: candidate, SWARM_RELEASE_CANDIDATE: candidate } };
 }
 
 function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number } = {}) {

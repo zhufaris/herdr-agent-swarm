@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -15,6 +15,7 @@ export interface LifecycleOptions {
   requireReady?: boolean;
   renameLogFile?: (source: string, destination: string) => void;
   readLogChunk?: typeof readSync;
+  renameActivationLink?: typeof renameSync;
 }
 
 export interface LifecycleInspection {
@@ -36,6 +37,10 @@ interface RuntimePaths {
   unitFile: string;
   serviceName: string;
   nodeExecutable: string;
+  releasesDirectory: string;
+  currentLink: string;
+  activationMarker: string;
+  activationUnitBackup: string;
 }
 
 export interface PrivateLogMetadata { kind: "directory" | "file"; uid: number | bigint; nlink: number | bigint }
@@ -69,7 +74,10 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
   const paths = runtimePaths(environment);
   mkdirSync(paths.configDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(paths.stateDirectory, { recursive: true, mode: 0o700 });
-  if (action === "install") return install(paths, environment, options.renameLogFile ?? renameSync);
+  if (["install", "start", "restart"].includes(action) && lstatOptional(paths.activationMarker)) {
+    throw new Error(`incomplete release activation at ${paths.activationMarker}; inspect and repair the unit and current release before retrying`);
+  }
+  if (action === "install") return install(paths, environment, options.renameLogFile ?? renameSync, options.renameActivationLink ?? renameSync);
   if (action === "uninstall") return uninstall(paths, environment);
   if (action === "logs") return printLogs(paths, options.readLogChunk ?? readSync);
   if (action === "status") return printStatus(paths, environment);
@@ -192,7 +200,11 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
     environmentFile: resolve(configDirectory, ".env"),
     entrypoint: resolve(root, "dist/main.js"), buildInfo: resolve(root, "dist/build-info.json"),
     unitFile: resolve(unitDirectory, SERVICE_NAME),
-    nodeExecutable: resolve(environment.NODE_BIN || process.execPath)
+    nodeExecutable: resolve(environment.NODE_BIN || process.execPath),
+    releasesDirectory: resolve(stateDirectory, "releases"),
+    currentLink: resolve(stateDirectory, "current"),
+    activationMarker: resolve(stateDirectory, ".release-activation.json"),
+    activationUnitBackup: resolve(stateDirectory, ".release-activation.unit")
   };
 }
 
@@ -215,18 +227,154 @@ function loadRuntimeEnvironment(paths: RuntimePaths, base: NodeJS.ProcessEnv): N
   return environment;
 }
 
-function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv, renameFile: (source: string, destination: string) => void): number {
+function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv, renameFile: (source: string, destination: string) => void, renameActivationLink: typeof renameSync): number {
   if (!existsSync(paths.entrypoint)) throw new Error(`compiled service entrypoint not found: ${paths.entrypoint}; run npm run build first`);
   const identity = loadBuildIdentity(paths.buildInfo);
   const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
   convergeLogPaths(paths);
   if (unitActivity(paths.serviceName, environment) === "inactive") rotateLogs(paths, renameFile);
+  const candidate = environment.SWARM_RELEASE_CANDIDATE;
+  if (candidate) return activateRelease(paths, environment, identity, runtimeEnvironment, candidate, renameActivationLink);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
   atomicWrite(paths.unitFile, renderUnit(paths, identity, runtimeEnvironment), 0o600);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) result = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
   if (result === 0) process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}\n`);
   return result;
+}
+
+type PriorEnabledState = "enabled" | "disabled" | "absent";
+
+function activateRelease(paths: RuntimePaths, environment: NodeJS.ProcessEnv, identity: BuildIdentity, runtimeEnvironment: NodeJS.ProcessEnv, candidateValue: string, renameActivationLink: typeof renameSync): number {
+  const candidate = validateReleaseCandidate(paths, candidateValue, identity);
+  const keepInactive = releaseRetention(environment);
+  const priorCurrent = readPriorCurrent(paths);
+  const priorUnit = readPriorUnit(paths);
+  const priorEnabled = priorUnit ? readEnabledState(paths.serviceName, environment) : "absent";
+  if (lstatOptional(paths.activationUnitBackup)) throw new Error(`release activation backup already exists: ${paths.activationUnitBackup}`);
+  atomicWrite(paths.activationMarker, JSON.stringify({ version: 1, candidate, priorCurrent, priorUnit: priorUnit ? { backup: paths.activationUnitBackup, mode: priorUnit.mode } : null, priorEnabled, phase: "prepared" }) + "\n", 0o600);
+  try {
+    if (priorUnit) writeFileSync(paths.activationUnitBackup, priorUnit.content, { mode: priorUnit.mode, flag: "wx" });
+    mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
+    atomicWrite(paths.unitFile, renderUnit(paths, identity, runtimeEnvironment), 0o600);
+    let failureCode = delegate("systemctl", ["--user", "daemon-reload"], environment);
+    if (failureCode !== 0) throw new ReleaseActivationCommandError("daemon-reload", failureCode);
+    failureCode = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
+    if (failureCode !== 0) throw new ReleaseActivationCommandError("enable", failureCode);
+    replaceCurrentLink(paths, candidate, renameActivationLink);
+  } catch (error) {
+    try {
+      restoreActivation(paths, environment, priorCurrent, priorUnit, priorEnabled, renameActivationLink);
+      removeActivationEvidence(paths);
+    } catch (rollbackError) {
+      throw new Error(`release activation failed (${safeMessage(error)}); rollback failed (${safeMessage(rollbackError)}); recovery marker retained at ${paths.activationMarker}`);
+    }
+    if (error instanceof ReleaseActivationCommandError) return error.exitCode;
+    throw error;
+  }
+  try { removeActivationEvidence(paths); } catch (error) {
+    throw new Error(`release activation committed but recovery marker cleanup failed (${safeMessage(error)}); inspect ${paths.activationMarker}`);
+  }
+  try { pruneReleases(paths, candidate, priorCurrent, keepInactive); } catch (error) {
+    process.stderr.write(`release activation committed but release pruning failed: ${safeMessage(error)}\n`);
+  }
+  process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}; activated ${candidate}\n`);
+  return 0;
+}
+
+class ReleaseActivationCommandError extends Error {
+  constructor(operation: string, readonly exitCode: number) { super(`${operation} failed with exit code ${exitCode}`); }
+}
+
+function validateReleaseCandidate(paths: RuntimePaths, value: string, identity: BuildIdentity): string {
+  const unresolvedCandidate = resolve(value);
+  if (lstatSync(unresolvedCandidate).isSymbolicLink()) throw new Error("SWARM_RELEASE_CANDIDATE must not be a symlink");
+  const candidate = realpathSync(unresolvedCandidate);
+  const releases = realpathSync(paths.releasesDirectory);
+  const status = lstatSync(candidate);
+  if (!status.isDirectory() || status.isSymbolicLink() || dirname(candidate) !== releases) throw new Error(`SWARM_RELEASE_CANDIDATE must be a direct release directory under ${releases}`);
+  const commit = identity.gitCommit;
+  if (!commit || !/^[a-f0-9]{40}$/.test(commit)) throw new Error("release activation requires a build identity with a Git commit");
+  const expectedName = `${identity.buildId.replace(/^sha256:/, "")}-${commit.slice(0, 12)}`;
+  if (candidate !== resolve(releases, expectedName)) throw new Error(`release candidate identity mismatch: expected ${expectedName}`);
+  if (candidate !== realpathSync(paths.root)) throw new Error("SWARM_RELEASE_CANDIDATE must resolve to SWARM_ROOT");
+  return candidate;
+}
+
+function readPriorCurrent(paths: RuntimePaths): string | null {
+  const status = lstatOptional(paths.currentLink);
+  if (!status) return null;
+  if (!status.isSymbolicLink()) throw new Error(`current release path must be a symlink: ${paths.currentLink}`);
+  const target = realpathSync(paths.currentLink);
+  if (dirname(target) !== realpathSync(paths.releasesDirectory)) throw new Error(`current release must resolve under ${paths.releasesDirectory}`);
+  if (!statSync(target).isDirectory()) throw new Error(`current release must resolve to a directory: ${target}`);
+  return target;
+}
+
+function readPriorUnit(paths: RuntimePaths): { content: string; mode: number } | null {
+  if (!existsSync(paths.unitFile)) return null;
+  const status = lstatSync(paths.unitFile);
+  if (!status.isFile() || status.isSymbolicLink()) throw new Error(`service unit must be a regular file: ${paths.unitFile}`);
+  return { content: readFileSync(paths.unitFile, "utf8"), mode: status.mode & 0o777 };
+}
+
+function readEnabledState(serviceName: string, environment: NodeJS.ProcessEnv): Exclude<PriorEnabledState, "absent"> {
+  const result = spawnSync("systemctl", ["--user", "is-enabled", serviceName], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000 });
+  const state = result.stdout.trim();
+  if (result.status === 0 && ["enabled", "enabled-runtime", "linked", "linked-runtime", "alias"].includes(state)) return "enabled";
+  if (result.status !== 0 && ["disabled", "static", "indirect", "masked", "masked-runtime"].includes(state)) return "disabled";
+  throw new Error(`cannot determine whether ${serviceName} is enabled; refusing release activation`);
+}
+
+function replaceCurrentLink(paths: RuntimePaths, target: string | null, renameLink: typeof renameSync = renameSync): void {
+  const temporary = `${paths.currentLink}.tmp-${process.pid}`;
+  if (lstatOptional(temporary)) unlinkSync(temporary);
+  if (target === null) {
+    if (lstatOptional(paths.currentLink)) unlinkSync(paths.currentLink);
+    return;
+  }
+  symlinkSync(target, temporary);
+  try { renameLink(temporary, paths.currentLink); } catch (error) { unlinkSync(temporary); throw error; }
+}
+
+function restoreActivation(paths: RuntimePaths, environment: NodeJS.ProcessEnv, priorCurrent: string | null, priorUnit: { content: string; mode: number } | null, priorEnabled: PriorEnabledState, renameActivationLink: typeof renameSync): void {
+  replaceCurrentLink(paths, priorCurrent, renameActivationLink);
+  if (priorEnabled !== "enabled") {
+    const disabled = delegate("systemctl", ["--user", "disable", paths.serviceName], environment, true);
+    if (disabled !== 0) throw new Error(`rollback disable failed with exit code ${disabled}`);
+  }
+  if (priorUnit) atomicWrite(paths.unitFile, priorUnit.content, priorUnit.mode);
+  else if (existsSync(paths.unitFile)) unlinkSync(paths.unitFile);
+  const reload = delegate("systemctl", ["--user", "daemon-reload"], environment, true);
+  if (reload !== 0) throw new Error(`rollback daemon-reload failed with exit code ${reload}`);
+  if (priorEnabled === "enabled") {
+    const enabled = delegate("systemctl", ["--user", "enable", paths.serviceName], environment, true);
+    if (enabled !== 0) throw new Error(`rollback enable failed with exit code ${enabled}`);
+  }
+}
+
+function removeActivationEvidence(paths: RuntimePaths): void {
+  if (lstatOptional(paths.activationUnitBackup)) unlinkSync(paths.activationUnitBackup);
+  if (lstatOptional(paths.activationMarker)) unlinkSync(paths.activationMarker);
+}
+
+function releaseRetention(environment: NodeJS.ProcessEnv): number {
+  const value = environment.SWARM_RELEASE_RETENTION ?? "3";
+  if (!/^\d+$/.test(value)) throw new Error("SWARM_RELEASE_RETENTION must be a non-negative integer");
+  return Number(value);
+}
+
+function pruneReleases(paths: RuntimePaths, current: string, previous: string | null, keepInactive: number): void {
+  let kept = 0;
+  const candidates = readdirSync(paths.releasesDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^[a-f0-9]{64}-[a-f0-9]{12}$/.test(entry.name))
+    .map((entry) => resolve(paths.releasesDirectory, entry.name))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+  for (const candidate of candidates) {
+    if (candidate === current || candidate === previous) continue;
+    if (kept++ < keepInactive) continue;
+    rmSync(candidate, { recursive: true });
+  }
 }
 
 function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {

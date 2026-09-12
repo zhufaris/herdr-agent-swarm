@@ -14,6 +14,6 @@ export class ActiveWorkTracker {
   get size(): number { return this.active.size; }
 
   async settle(): Promise<void> {
-    await Promise.allSettled([...this.active]);
+    while (this.active.size > 0) await Promise.allSettled([...this.active]);
   }
 }

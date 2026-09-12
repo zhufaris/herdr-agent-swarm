@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics } from "../domain/types.js";
+import type { ProjectConfig, Binding, HerdrPane, ReconciliationDiagnostics, ReconciliationPassResult } from "../domain/types.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
@@ -97,7 +97,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     await this.reconciliationScheduler.stop();
   }
 
-  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<ReadonlySet<string>> {
+  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<ReconciliationPassResult> {
     const allActiveBindings = this.options.store.listBindingsByState("active");
     const orphanedBindings = this.options.store.listBindingsByState("orphaned");
     const reconciliationWorkspaceIds = new Set(this.configuredWorkspaceIds);
@@ -105,7 +105,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const workspaceIds = requestedWorkspaceIds
       ? [...requestedWorkspaceIds].filter((workspaceId) => reconciliationWorkspaceIds.has(workspaceId))
       : [...reconciliationWorkspaceIds];
-    const panesByWorkspace = await this.snapshots.collect(workspaceIds);
+    const { panesByWorkspace, failures } = await this.snapshots.collect(workspaceIds);
 
     const paneIdsByWorkspace = new Map<string, Set<string>>();
     for (const [workspaceId, workspacePanes] of panesByWorkspace) paneIdsByWorkspace.set(workspaceId, new Set(workspacePanes.map((pane) => pane.paneId)));
@@ -193,7 +193,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       this.converger.prune(livePaneIds);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
-    return new Set(workspaceIds);
+    return { reconciledWorkspaceIds: new Set(panesByWorkspace.keys()), failures };
   }
 
 }

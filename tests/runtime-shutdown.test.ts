@@ -92,7 +92,7 @@ describe("bridge runtime shutdown", () => {
     ]);
   });
 
-  it("continues releasing resources when an earlier stop fails", async () => {
+  it("retains SQLite ownership when a writer stop fails", async () => {
     const calls: string[] = [];
     const errors: string[] = [];
     const runtime = shutdownFixture({
@@ -102,13 +102,33 @@ describe("bridge runtime shutdown", () => {
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
       store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, error(value) { if ("component" in value) errors.push(String(value.component)); } }
+    });
+
+    const first = runtime.shutdown("SIGTERM");
+    const second = runtime.shutdown("SIGINT");
+
+    expect(first).toBe(second);
+    await expect(first).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["coordinator"] });
+    expect(calls).toEqual(["coordinator", "projector", "publisher", "health"]);
+    expect(errors).toEqual(["coordinator"]);
+  });
+
+  it("continues releasing SQLite ownership when only a non-writer stop fails", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const runtime = shutdownFixture({
+      herdrSocketSubscriber: { async stop() { calls.push("subscriber"); throw new Error("subscriber failed"); } },
+      coordinator: { async stop() { calls.push("coordinator"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
       logger: { info() {}, error(value) { errors.push(String(value.component)); } }
     });
 
-    await runtime.shutdown("SIGTERM");
-
-    expect(calls).toEqual(["coordinator", "projector", "publisher", "health", "fence", "lease", "store"]);
-    expect(errors).toEqual(["coordinator"]);
+    await expect(runtime.shutdown("SIGTERM")).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    expect(calls).toEqual(["subscriber", "coordinator", "health", "fence", "lease", "store"]);
+    expect(errors).toEqual(["herdrSocketSubscriber"]);
   });
 
   it("still closes later resources after the coordinator performs bounded cancellation", async () => {
@@ -243,6 +263,30 @@ describe("bridge runtime shutdown", () => {
 
     await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["primaryToolGateway"] });
     settleGateway();
+    await Promise.resolve();
+    vi.useRealTimers();
+  });
+
+  it("reports failed and unsettled writers together without releasing ownership", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let settleCoordinator!: () => void;
+    const coordinator = new Promise<void>((resolve) => { settleCoordinator = resolve; });
+    const runtime = shutdownFixture({
+      primaryToolGateway: { async stop() { throw new Error("gateway failed"); } },
+      coordinator: { async stop() { await coordinator; } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, warn() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
+    });
+
+    const shutdown = runtime.shutdown("SIGTERM");
+    await vi.advanceTimersByTimeAsync(70);
+
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["primaryToolGateway", "coordinator"] });
+    expect(calls).toEqual(["health"]);
+    settleCoordinator();
     await Promise.resolve();
     vi.useRealTimers();
   });

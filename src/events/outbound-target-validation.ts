@@ -15,13 +15,14 @@ export function assertWorkerMainMessageTarget(store: Pick<OutboxStore, "loadWork
 }
 
 export function assertAnswerCardCreateTarget(
-  store: Pick<OutboxStore, "getBinding" | "loadRunCard">, bindingId: string | null, promptId: string | null, rootMessageId: string,
+  store: Pick<OutboxStore, "getBinding" | "isActiveBindingThreadAlias" | "loadRunCard">, bindingId: string | null, promptId: string | null, rootMessageId: string,
   card: object, stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" }
 ): void {
   if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card create target is missing binding or prompt identity");
   const view = store.loadRunCard(promptId);
   const binding = store.getBinding(bindingId);
-  if (!view || view.bindingId !== bindingId || binding?.rootMessageId !== rootMessageId) throw new PermanentDeliveryError(`Answer card create target mismatch for prompt ${promptId}`);
+  const validRoot = binding?.rootMessageId === rootMessageId || store.isActiveBindingThreadAlias(bindingId, rootMessageId);
+  if (!view || view.bindingId !== bindingId || !validRoot) throw new PermanentDeliveryError(`Answer card create target mismatch for prompt ${promptId}`);
   if (!stream) {
     if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0) throw new PermanentDeliveryError(`Initial answer card create is stale for prompt ${promptId}`);
     return;

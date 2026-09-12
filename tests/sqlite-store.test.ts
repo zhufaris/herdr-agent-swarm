@@ -10,6 +10,7 @@ import { renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
+import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 
 let store: SqliteBindingStore | undefined;
@@ -22,6 +23,321 @@ afterEach(() => {
 });
 
 describe("SQLite store", () => {
+  describe("outbound delivery claims", () => {
+    it("claims only a due lane head and rejects stale acknowledgements, failures and checkpoints", () => {
+      store = new SqliteBindingStore(":memory:");
+      for (const id of ["first", "next"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: "message", kind: "card_update", payload: "{}" });
+      expect(store.claimOutboundReply("next", null)).toBeNull();
+      expect(store.claimOutboundReply("first", "2000-01-01T00:00:00.000Z")).toBeNull();
+      const first = store.claimOutboundReply("first", null)!;
+      expect(store.claimOutboundReply("first", null)).toBeNull();
+      expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+      expect(store.markOutboundReplyDelivered("first", "message")).toBe(false);
+      expect(store.checkpointOutboundReplyCard(first, "card")).not.toBeNull();
+      expect(store.markOutboundReplyFailedWithQuarantine(first, "temporary", { failureClass: "transient", httpStatus: 429, larkErrorCode: null })).not.toBeNull();
+      const retry = store.claimOutboundReply("first", null)!;
+      expect(retry.attemptId).not.toBe(first.attemptId);
+      expect(retry.payloadHash).toBe(first.payloadHash);
+      expect(retry.reply.cardIdCheckpoint).toBe("card");
+      expect(store.markOutboundReplyDelivered(first, "wrong-message")).toBe(false);
+      expect(store.checkpointOutboundReplyCard(first, "wrong-card")).toBeNull();
+      expect(store.markOutboundReplyFailedWithQuarantine(first, "late", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toBeNull();
+      expect(store.markOutboundReplyDelivered(retry, "message")).toBe(true);
+      expect(store.markOutboundReplyDelivered(retry, "duplicate")).toBe(false);
+      expect(store.claimOutboundReply("next", null)).not.toBeNull();
+    });
+
+    it("blocks mutation and deletion of an in-flight revision in SQLite", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      const claim = store.claimOutboundReply("first", null)!;
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET payload = '{\"v\":2}' WHERE id = 'first'").run()).toThrow("immutable_outbound_revision");
+      expect(() => store!.database.prepare("DELETE FROM outbound_replies WHERE id = 'first'").run()).toThrow("active_outbound_claim");
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET snapshot_revision = 2 WHERE id = 'first'").run()).toThrow("immutable_outbound_revision");
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET work_class = 'history' WHERE id = 'first'").run()).toThrow("immutable_outbound_revision");
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET first_claimed_at = NULL WHERE id = 'first'").run()).toThrow("immutable_outbound_revision");
+      store.markOutboundReplyFailedWithQuarantine(claim, "retry", { failureClass: "transient", httpStatus: 429, larkErrorCode: null });
+      expect(() => store!.enqueueOutboundReply({ id: "replacement", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
+    });
+
+    it("quarantines an uncertain prior-owner claim after reopening without replaying it", () => {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), "outbox-claim-"));
+      const path = join(temporaryDirectory, "state.sqlite");
+      store = new SqliteBindingStore(path);
+      const firstLease = store.acquireInstanceLease("owner-a", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+      store.activateWriteFence("owner-a", firstLease.fencingToken);
+      store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      const claim = store.claimOutboundReply("first", null)!;
+      store.checkpointOutboundReplyCard(claim, "existing-card");
+      store.database.prepare("INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at) VALUES (?, 'first', 'replaceable_card', 'permanent', 'released', 'released_newer_snapshot', 'old rejection', 'old', 'old', 'old')").run(claim.reply.laneKey);
+      store.close();
+      store = new SqliteBindingStore(path);
+      store.database.prepare("UPDATE instance_lease SET expires_at = '2000-01-01T00:00:00.000Z'").run();
+      const lease = store.acquireInstanceLease("owner-b", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+      store.activateWriteFence("owner-b", lease.fencingToken);
+      expect(store.getOutboundReply("first")).toMatchObject({ state: "dead_letter", failureClass: "unknown", cardIdCheckpoint: "existing-card" });
+      expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+      expect(store.markOutboundReplyDelivered(claim, "late-message")).toBe(false);
+      expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 100)).toEqual([]);
+      expect(store.database.prepare("SELECT count(*) AS count FROM prompt_jobs").get()).toMatchObject({ count: 0 });
+      expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1 });
+      expect(store.database.prepare("SELECT lane_class, failure_class, state, action, released_at FROM outbox_lane_quarantines WHERE lane_key = ?").get(claim.reply.laneKey)).toMatchObject({ lane_class: "immutable", failure_class: "unknown", state: "active", action: "blocked", released_at: null });
+    });
+
+    it("releases a retired in-flight claim without acknowledging its projection", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      const claim = store.claimOutboundReply("first", null)!;
+      store.database.prepare("UPDATE outbound_replies SET state = 'dismissed' WHERE id = 'first'").run();
+      expect(store.markOutboundReplyDelivered(claim, "late-message")).toBe(false);
+      expect(store.getOutboundReply("first")).toMatchObject({ state: "dismissed", deliveredMessageId: null });
+      store.enqueueOutboundReply({ id: "next", idempotencyKey: "next", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      expect(store.claimOutboundReply("next", null)).not.toBeNull();
+    });
+
+    it("rejects writes after losing the instance lease", () => {
+      store = new SqliteBindingStore(":memory:");
+      const lease = store.acquireInstanceLease("owner", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+      store.activateWriteFence("owner", lease.fencingToken);
+      store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      const claim = store.claimOutboundReply("first", null)!;
+      store.database.prepare("UPDATE instance_lease SET fencing_token = fencing_token + 1").run();
+      expect(() => store!.markOutboundReplyDelivered(claim, "message")).toThrow("stale_instance_lease");
+      expect(store.getOutboundReply("first")?.state).toBe("pending");
+    });
+  });
+  describe("durable delivery recovery evidence", () => {
+    it("keeps a failed snapshot unresolved without any successor", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      expect(store.markOutboundReplyFailedWithQuarantine("failed", "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230028" })).toMatchObject({ action: "released_newer_snapshot" });
+      expect(store.listPendingOutboundReplies()).toEqual([]);
+      expect(store.getOutboundReply("failed")).toMatchObject({ state: "dead_letter" });
+      expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 1, outboxQuarantines: { active: 0 } });
+    });
+
+    it("preserves both failures when another failure overwrites the lane quarantine", () => {
+      store = new SqliteBindingStore(":memory:");
+      for (const id of ["first", "second"]) {
+        store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: "message", kind: "card_update", payload: "{}" });
+        store.markOutboundReplyFailedWithQuarantine(id, "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230028" });
+      }
+      expect(store.database.prepare("SELECT failed_reply_id FROM outbox_lane_quarantines").all()).toEqual([{ failed_reply_id: "second" }]);
+      expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 2, unresolvedDeadLetters: 2 });
+      store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      const claim = store.claimOutboundReply("successor", null)!;
+      expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(2);
+      expect(store.markOutboundReplyDelivered(claim, "message")).toBe(true);
+      expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(0);
+      store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
+      expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(0);
+      expect(store.database.prepare("SELECT failed_reply_id, state, resolved_by_reply_id FROM delivery_recoveries ORDER BY failed_reply_id").all()).toEqual([
+        { failed_reply_id: "first", state: "recovered", resolved_by_reply_id: "successor" },
+        { failed_reply_id: "second", state: "recovered", resolved_by_reply_id: "successor" }
+      ]);
+    });
+  });
+
+  describe("binding thread aliases", () => {
+    it("atomically reserves one group-root create and activates the exact alias on ACK", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "canonical-topic", rootMessageId: "canonical-root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached" });
+      const input = { publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: { schema: "2.0" } };
+
+      expect(store.reservePaneThreadAlias(input)).toBe("reserved");
+      expect(store.reservePaneThreadAlias(input)).toBe("duplicate");
+      const [reply] = store.listPendingOutboundReplies();
+      expect(reply).toMatchObject({ kind: "group_card_create", rootMessageId: null, targetChatId: "chat", threadAliasId: expect.any(String), intentKind: "group-card" });
+      const claim = store.claimOutboundReply(reply!.id, null)!;
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET target_chat_id = 'other' WHERE id = ?").run(reply!.id)).toThrow("immutable_outbound_revision");
+      expect(store.markOutboundReplyDelivered(claim, "alias-root", undefined, "alias-topic")).toBe(true);
+      expect(store.findBindingByLarkScope("alias-topic", "alias-root")).toMatchObject({ id: "b1" });
+      expect(store.isBindingThreadAlias("alias-topic", "alias-root")).toBe(true);
+      expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    });
+
+    it("preserves an active alias across reopen and fails closed after generation changes", () => {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), "binding-alias-"));
+      const path = join(temporaryDirectory, "state.sqlite");
+      store = new SqliteBindingStore(path);
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "canonical-topic", rootMessageId: "canonical-root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached" });
+      store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: {} });
+      const reply = store.listPendingOutboundReplies()[0]!;
+      store.markOutboundReplyDelivered(reply.id, "alias-root", undefined, "alias-topic");
+      store.close(); store = new SqliteBindingStore(path);
+      expect(store.findBindingByLarkScope("alias-topic", "alias-root")).toMatchObject({ id: "b1" });
+      store.updateBinding("b1", { generation: 2 });
+      expect(store.findBindingByLarkScope("alias-topic", "alias-root")).toBeNull();
+    });
+  });
+
+  describe("Worker Session threads", () => {
+    function activeWorkerStore(messageId: string | null) {
+      store = new SqliteBindingStore(":memory:");
+      store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
+      store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
+      const worker = store.createWorkerAgentInstance({
+        id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+        parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+        workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base" }
+      }, 4);
+      if (worker.outcome !== "created") throw new Error("expected Worker");
+      const view = { ...createWorkerMainView({
+        workerId: worker.instance.id, workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary",
+        runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: false, desiredState: "running", parentActive: true, paneId: null, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: null, occurredAt: "2026-09-11T00:00:00.000Z"
+      }), messageId, cardId: messageId ? "canonical-card" : null };
+      store.saveWorkerMainView(view);
+      return view;
+    }
+
+    it("reserves and activates one canonical group-root Worker Main Card", () => {
+      const view = activeWorkerStore(null);
+      const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
+      expect(store!.reserveWorkerSessionThread(input)).toBe("reserved");
+      expect(store!.reserveWorkerSessionThread(input)).toBe("duplicate");
+      const [reply] = store!.listPendingOutboundReplies();
+      expect(reply).toMatchObject({ kind: "group_card_create", rootMessageId: null, targetChatId: "chat", threadAliasId: null, workerThreadId: expect.any(String), workerId: "reviewer", workerSessionGeneration: 1, laneKey: "worker-thread:reviewer:1" });
+      const claim = store!.claimOutboundReply(reply!.id, null)!;
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET worker_thread_id = NULL WHERE id = ?").run(reply!.id)).toThrow("immutable_outbound_revision");
+      expect(store!.markOutboundReplyDelivered(claim, "worker-root", "worker-card", "worker-topic")).toBe(true);
+      expect(store!.loadWorkerSessionThread("reviewer", 1)).toMatchObject({ mode: "canonical-main", state: "active", rootMessageId: "worker-root", topicId: "worker-topic" });
+      expect(store!.getOperationalSummary().workerThreads).toMatchObject({ active: 1, reserving: 0, stale: 0, "legacy-unpublished": 0 });
+      expect(store!.findWorkerSessionThreadByScope("chat", "worker-topic", "worker-root")).toMatchObject({ workerId: "reviewer" });
+      expect(store!.loadWorkerMainView("reviewer", 1)).toMatchObject({ messageId: "worker-root", cardId: "worker-card", deliveredVersion: view.viewVersion });
+      expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    });
+
+    it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {
+      const view = activeWorkerStore("canonical-worker-main");
+      const input = { publicationKey: "worker-entry:reviewer:1", actionMessageId: "instances-card", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "legacy-entry" as const, sourceMainMessageId: "canonical-worker-main", card: { schema: "2.0" } };
+      expect(store!.reserveWorkerSessionThread(input)).toBe("reserved");
+      const reply = store!.listPendingOutboundReplies()[0]!;
+      expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(reply.id, null)!, "entry-root", undefined, "entry-topic")).toBe(true);
+      expect(store!.loadWorkerSessionThread("reviewer", 1)).toMatchObject({ mode: "legacy-entry", state: "active", rootMessageId: "entry-root" });
+      expect(store!.loadWorkerMainView("reviewer", 1)).toMatchObject({ messageId: "canonical-worker-main", cardId: "canonical-card", deliveredVersion: view.deliveredVersion });
+      store!.updateBinding("b1", { generation: 2 });
+      expect(store!.findWorkerSessionThreadByScope("chat", "entry-topic", "entry-root")).toBeNull();
+    });
+
+    it("classifies pre-migration Workers without publishing group cards", () => {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), "worker-thread-migration-"));
+      const path = join(temporaryDirectory, "state.sqlite");
+      store = new SqliteBindingStore(path);
+      store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
+      store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
+      store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: null }, workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/reviewer", branch: "reviewer", baseCommit: "base" } }, 4);
+      store.database.exec("DROP TABLE worker_session_threads; DELETE FROM schema_migrations WHERE version = 35");
+      store!.close(); store = undefined;
+
+      store = new SqliteBindingStore(path);
+      expect(store.loadWorkerSessionThread("reviewer", 1)).toMatchObject({ mode: "legacy-entry", state: "legacy-unpublished", rootMessageId: null });
+      expect(store.listPendingOutboundReplies().filter(({ workerThreadId }) => workerThreadId !== null)).toEqual([]);
+      expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version IN (35, 36) ORDER BY version").all()).toEqual([{ version: 35 }, { version: 36 }]);
+    });
+  });
+
+  it("keeps a failed Main rebuild unresolved until its exact replacement is acknowledged", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
+    const failed = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "300317" });
+    const replacement = store.listPendingOutboundReplies()[0]!;
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { replacement_pending: 1 } });
+    const first = store.claimOutboundReply(replacement.id, null)!;
+    store.markOutboundReplyFailedWithQuarantine(first, "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" });
+    expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(2);
+    expect(store.retryDeadLetter(replacement.id, "c1", "admin")).toBe("retried");
+    expect(store.getOperationalSummary().deliveryRecoveries).toMatchObject({ unresolved: 1, replacement_pending: 1 });
+    const retry = store.claimOutboundReply(replacement.id, null)!;
+    expect(store.markOutboundReplyDelivered(first, "stale")).toBe(false);
+    expect(store.markOutboundReplyDelivered(retry, "rebuilt-main")).toBe(true);
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 0, deliveryRecoveries: { recovered: 2 } });
+  });
+
+  it("does not use a Main rebuild receipt to resolve a different binding generation", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
+    const failed = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "300317" });
+    const replacement = store.listPendingOutboundReplies()[0]!;
+    const claim = store.claimOutboundReply(replacement.id, null)!;
+    store.database.prepare("UPDATE bindings SET generation = generation + 1 WHERE id = 'b1'").run();
+    store.markOutboundReplyDelivered(claim, "rebuilt-main");
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { replacement_pending: 1, recovered: 0 } });
+  });
+
+  it("preserves failed receipt evidence across manual retry and authorized dismissal", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", bindingId: "b1", rootMessageId: "root", kind: "text", payload: "message" });
+    store.markOutboundReplyFailedWithQuarantine("failed", "original failure", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_request" });
+    expect(store.dismissDeadLetter("failed", "other-chat", "admin")).toBe("unauthorized");
+    expect(store.getOperationalSummary().deliveryRecoveries.unresolved).toBe(1);
+    expect(store.retryDeadLetter("failed", "c1", "admin")).toBe("retried");
+    expect(store.getOperationalSummary().deliveryRecoveries.unresolved).toBe(1);
+    store.markOutboundReplyFailedWithQuarantine("failed", "second failure", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_request" });
+    expect(store.database.prepare("SELECT reason FROM delivery_recoveries WHERE failed_reply_id = 'failed'").get()).toMatchObject({ reason: "original failure" });
+    expect(store.dismissDeadLetter("failed", "c1", "admin")).toBe("dismissed");
+    store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
+    expect(store.getOperationalSummary().deliveryRecoveries).toMatchObject({ unresolved: 0, dismissed: 1, recovered: 0 });
+  });
+
+  it("does not resolve failures using another target, same version, or unknown effect", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const [id, target, version, failureClass] of [["failed", "target", 2, "permanent"], ["unknown", "unknown-target", 2, "unknown"]] as const) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: target, kind: "card_update", viewVersion: version, payload: "{}" });
+      if (failureClass === "permanent") store.markOutboundReplyFailedWithQuarantine(id, "rejected", { failureClass, httpStatus: 400, larkErrorCode: null });
+      else store.markOutboundReplyDeadLetter(id, "uncertain", { failureClass, httpStatus: null, larkErrorCode: null });
+    }
+    for (const [id, target, version] of [["wrong-target", "another-target", 3], ["same-version", "target", 2], ["unknown-successor", "unknown-target", 3]] as const) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: target, kind: "card_update", viewVersion: version, payload: "{}" });
+      store.markOutboundReplyDelivered(store.claimOutboundReply(id, null)!, target);
+    }
+    expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(2);
+  });
+
+  it("rolls back an acknowledgement when its recovery evidence cannot be committed", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "target", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine("failed", "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
+    store.enqueueOutboundReply({ id: "new", idempotencyKey: "new", rootMessageId: "target", kind: "card_update", payload: "{}" });
+    const claim = store.claimOutboundReply("new", null)!;
+    store.database.exec("CREATE TEMP TRIGGER fail_recovery BEFORE UPDATE ON delivery_recoveries BEGIN SELECT RAISE(ABORT, 'test_recovery_failure'); END");
+    expect(() => store!.markOutboundReplyDelivered(claim, "target")).toThrow("test_recovery_failure");
+    expect(store.getOutboundReply("new")).toMatchObject({ state: "pending", deliveredMessageId: null });
+    expect(store.getOperationalSummary().deliveryRecoveries.unresolved).toBe(1);
+    store.database.exec("DROP TRIGGER fail_recovery");
+    expect(store.markOutboundReplyDelivered(claim, "target")).toBe(true);
+    expect(store.getOperationalSummary().deliveryRecoveries.recovered).toBe(1);
+  });
+
+  it("backfills only proven legacy recovery and preserves its evidence across reopen and retention", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "outbox-recovery-"));
+    const path = join(temporaryDirectory, "state.sqlite");
+    store = new SqliteBindingStore(path);
+    for (const id of ["proven", "unproven"]) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: id, kind: "card_update", payload: "{}" });
+      store.markOutboundReplyFailedWithQuarantine(id, "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" });
+    }
+    store.enqueueOutboundReply({ id: "proof", idempotencyKey: "proof", rootMessageId: "proven", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyDelivered("proof", "proven");
+    store.database.exec("DROP TRIGGER delivery_recoveries_dead_letter; DROP TABLE delivery_recoveries; DELETE FROM schema_migrations WHERE version = 31");
+    store.close();
+    store = new SqliteBindingStore(path);
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { recovered: 1, unresolved: 1 } });
+    store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
+    store.close();
+    store = new SqliteBindingStore(path);
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { recovered: 1, unresolved: 1 } });
+    expect(store.database.prepare("SELECT resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = 'proven'").get()).toMatchObject({ resolved_by_reply_id: "proof", resolved_message_id: "proven" });
+  });
+
   it("atomically accepts an exact human-interruption continuation and consumes its interaction", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
@@ -323,9 +639,19 @@ describe("SQLite store", () => {
     const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 2, occurredAt: "2026-09-05T00:00:01.000Z" });
     for (const view of [running, queued]) store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, render: renderWorkerTurnCard });
     store.transitionInstanceTurnWithProjection({ turnId: running.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-05T00:00:02.000Z" }, render: renderWorkerTurnCard });
+    for (let index = 0; index < 4; index += 1) store.createWorkerAgentInstance({
+      id: `idle-${index}`, projectId: "p1", name: `idle-${index}`, role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: `ws-idle-${index}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 8);
 
     expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running" }, queueCount: 1, nextTaskTitle: "Queued task" });
-    expect(store.loadPrimaryWorkerSummaries("binding-1", 1)).toEqual([expect.objectContaining({ workerId: worker.id, state: "working" })]);
+    const prepare = vi.spyOn(store.database, "prepare");
+    const summaries = store.loadPrimaryWorkerSummaries("binding-1", 1);
+    expect(summaries).toHaveLength(5);
+    expect(summaries).toContainEqual(expect.objectContaining({ workerId: worker.id, state: "working" }));
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(String(prepare.mock.calls[1]?.[0])).toContain("INDEXED BY agent_instances_worker_parent_name");
   });
 
   it("bounds Worker Main history and uses the Worker-session index", () => {
@@ -411,10 +737,17 @@ describe("SQLite store", () => {
     };
 
     const ownedWorkerId = createTask("owned", "binding-1", "primary-pane-1", "binding-1");
+    const ownedWorker = store.getAgentInstance(ownedWorkerId)!;
+    const laterOwnedTask = createQueuedWorkerTurnCard({ turnId: "turn-owned-later", instanceId: ownedWorker.id, instanceGeneration: ownedWorker.generation, workerSessionGeneration: 1, workerName: ownedWorker.name, parentTurnId: null, rootMessageId: "root-binding-1", requestText: "Latest owned task", queuePosition: 2, occurredAt: "2026-09-05T00:00:02.000Z" });
+    store.acceptInstanceTurnWithCard({ id: laterOwnedTask.turnId, idempotencyKey: laterOwnedTask.turnId, actor: { kind: "thread-primary", projectId: "p1", bindingId: "binding-1", bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "p1", instanceId: ownedWorker.id, instanceGeneration: ownedWorker.generation, kind: "turn", text: laterOwnedTask.requestText, parentTurnId: null, sourceMessageId: laterOwnedTask.turnId, view: laterOwnedTask, render: renderWorkerTurnCard });
     createTask("cross-binding", "binding-2", "primary-pane-2", "binding-1");
     createTask("stale-pane", "binding-1", "retired-primary-pane", "binding-1");
 
-    expect(store.loadPrimaryWorkerActivity(answer.promptId, 1)).toEqual([expect.objectContaining({ workerId: ownedWorkerId, taskCount: 1 })]);
+    const prepare = vi.spyOn(store.database, "prepare");
+    expect(store.loadPrimaryWorkerActivity(answer.promptId, 1)).toEqual([expect.objectContaining({ workerId: ownedWorkerId, taskCount: 2, latestTaskTitle: "Latest owned task", latestTaskCard: expect.objectContaining({ aggregateId: "turn-owned-later" }) })]);
+    expect(prepare).toHaveBeenCalledTimes(3);
+    expect(String(prepare.mock.calls[2]?.[0])).toContain("COUNT(*) OVER");
+    expect(String(prepare.mock.calls[2]?.[0])).toContain("INDEXED BY instance_turns_primary_source");
     expect(store.database.prepare("SELECT actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id FROM instance_turns WHERE id = ?").get(`turn-${ownedWorkerId}`)).toEqual({ actor_kind: "thread-primary", source_binding_id: "binding-1", source_binding_generation: 1, source_parent_prompt_id: answer.promptId });
     const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT id FROM instance_turns WHERE actor_kind = 'thread-primary' AND source_parent_prompt_id = ? AND source_binding_id = ? AND source_binding_generation = ?").all(answer.promptId, "binding-1", 1) as Array<{ detail: string }>;
     expect(plan.some(({ detail }) => detail.includes("instance_turns_primary_source"))).toBe(true);
@@ -550,7 +883,7 @@ describe("SQLite store", () => {
     };
 
     expect(accept("first").inserted).toBe(true);
-    expect(() => accept("rejected")).toThrow(/queue is full/);
+    expect(() => accept("rejected")).toThrow(InstanceTurnCapacityExceeded);
     expect(store.getInstanceTurn("rejected")).toBeNull();
     expect(store.loadWorkerTurnCard("rejected")).toBeNull();
     expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toHaveLength(0);
@@ -3252,21 +3585,35 @@ describe("SQLite store", () => {
     store = undefined;
     const database = new DatabaseSync(path);
     database.exec(`
+      DROP TABLE answer_recovery_candidates;
+      DROP TABLE answer_recovery_links;
+      DROP TABLE answer_delivery_coverage;
+      DELETE FROM schema_migrations WHERE version = 32;
       DROP TABLE outbound_replies;
       CREATE TABLE outbound_replies(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT, root_message_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT,
         next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, prompt_id TEXT, view_version INTEGER, selection_id TEXT, card_role TEXT
       );
-      INSERT INTO outbound_replies VALUES ('o1','key',NULL,'root','card_reply','{}','dead_letter',5,'failed',NULL,'now','now','now',NULL,NULL,NULL,NULL);
+      INSERT INTO outbound_replies VALUES ('o1','startup-lite:legacy',NULL,'root','card_reply','{}','dead_letter',5,'failed',NULL,'now','now','now',NULL,NULL,NULL,NULL);
     `);
     database.close();
 
     store = new SqliteBindingStore(path);
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
     expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "reply:o1" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 32").get()).toEqual({ version: 32 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 33").get()).toEqual({ version: 33 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 34").get()).toEqual({ version: 34 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 35").get()).toEqual({ version: 35 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 36").get()).toEqual({ version: 36 });
+    expect(store.database.prepare("SELECT work_class FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ work_class: "history" });
+    expect(store.database.prepare("SELECT target_chat_id, thread_alias_id, worker_thread_id FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ target_chat_id: null, thread_alias_id: null, worker_thread_id: null });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'answer_delivery_coverage_before_claim'").get()).toEqual({ name: "answer_delivery_coverage_before_claim" });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     store.enqueueOutboundReply({ id: "o2", idempotencyKey: "key-2", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
     expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "reply:o2" });
+    expect(store.getOutboundReply("o2")).toMatchObject({ workClass: "live" });
   });
 
   it("adds streaming run-card columns before rebuilding a legacy outbox", () => {
@@ -3278,6 +3625,10 @@ describe("SQLite store", () => {
 
     const database = new DatabaseSync(path);
     database.exec(`
+      DROP TABLE answer_recovery_candidates;
+      DROP TABLE answer_recovery_links;
+      DROP TABLE answer_delivery_coverage;
+      DELETE FROM schema_migrations WHERE version = 32;
       DROP VIEW run_cards_view;
       ALTER TABLE run_cards DROP COLUMN answer_page_start;
       ALTER TABLE run_cards DROP COLUMN answer_page_index;
@@ -3297,6 +3648,8 @@ describe("SQLite store", () => {
 
     expect(() => { store = new SqliteBindingStore(path); }).not.toThrow();
     expect(store!.loadRunCard("missing")).toBeNull();
+    expect(store!.database.prepare("SELECT version FROM schema_migrations WHERE version = 32").get()).toEqual({ version: 32 });
+    expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
   it("does not duplicate the single answer-card create operation", () => {
@@ -3338,6 +3691,10 @@ describe("SQLite store", () => {
       stalled: 0, oldestStalledAgeSeconds: null
     });
     expect(store.getNextOutboundLaneHeadAttemptAt()).toBe(store.listPendingOutboundReplies()[1]!.nextAttemptAt);
+    expect(store.listOutboundLaneHeads(4, null, [], "history")).toEqual([]);
+    store.enqueueOutboundReply({ id: "history", idempotencyKey: "history", workClass: "history", rootMessageId: "history-card", kind: "card_update", payload: "{}" });
+    expect(store.listOutboundLaneHeads(4, null, [], "history").map((reply) => reply.id)).toEqual(["history"]);
+    expect(store.listOutboundLaneHeads(4, null, [], "live").map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
     vi.useRealTimers();
   });
 

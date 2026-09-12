@@ -87,11 +87,12 @@ export class LarkSdkAdapter implements LarkPort {
     else this.logger?.warn(context, message);
   }
 
-  async createTopic(card: object, idempotencyKey?: string): Promise<{ topicId: string; rootMessageId: string }> {
+  async createTopic(card: object, idempotencyKey?: string, targetChatId = this.options.chatId): Promise<{ topicId: string; rootMessageId: string }> {
+    if (targetChatId !== this.options.chatId) throw new Error("Lark group-card target is outside the configured chat");
     const response = await this.client.im.v1.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
-        receive_id: this.options.chatId, msg_type: "interactive", content: JSON.stringify(card),
+        receive_id: targetChatId, msg_type: "interactive", content: JSON.stringify(card),
         ...(idempotencyKey ? { uuid: larkMessageUuid(idempotencyKey) } : {})
       }
     });

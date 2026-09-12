@@ -1,18 +1,22 @@
-import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PromptJob, DeliveryFailureMetadata } from "../types.js";
+import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PromptJob, DeliveryFailureMetadata, OutboundWorkClass } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 
+import type { OutboundDeliveryClaim } from "../delivery.js";
+
 export interface OutboxStore {
-  checkpointOutboundReplyCard(id: string, cardId: string): OutboundReply | null;
-  enqueueOutboundReply(input: Omit<OutboundReply, "laneKey" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "intentKind" | "intentJson" | "rendererRevision" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"]; intentKind?: OutboundReply["intentKind"]; intentJson?: string | null; rendererRevision?: number | null }): OutboundReply;
+  claimOutboundReply(id: string, dueAt: string | null): OutboundDeliveryClaim | null;
+  checkpointOutboundReplyCard(claim: OutboundDeliveryClaim, cardId: string): OutboundReply | null;
+  enqueueOutboundReply(input: Omit<OutboundReply, "laneKey" | "workClass" | "threadAliasId" | "workerThreadId" | "targetChatId" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "intentKind" | "intentJson" | "rendererRevision" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { threadAliasId?: string | null; workerThreadId?: string | null; targetChatId?: string | null; workClass?: OutboundWorkClass; promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"]; intentKind?: OutboundReply["intentKind"]; intentJson?: string | null; rendererRevision?: number | null }): OutboundReply;
   getActiveAnswerPage(promptId: string): AnswerPage | null;
   getBinding(id: string): Binding | null;
+  isActiveBindingThreadAlias(bindingId: string, rootMessageId: string): boolean;
   getNextOutboundLaneHeadAttemptAt(): string | null;
   getPrompt(id: string): PromptJob | null;
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], laneClass?: "interactive"): OutboundReply[];
+  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], workClass?: OutboundWorkClass): OutboundReply[];
   loadRunCard(promptId: string): RunCardView | null;
-  markOutboundReplyDelivered(id: string, messageId: string, cardId?: string): void;
-  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;
+  markOutboundReplyDelivered(claim: OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string): boolean;
+  markOutboundReplyFailedWithQuarantine(claim: OutboundDeliveryClaim, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
   recordBridgeMessage(messageId: string): void;
   dismissSupersededAnswerStream(replyId: string): boolean;

@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { HerdrPane } from "../domain/types.js";
+import type { ReconciliationFailure } from "../runtime/diagnostics.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
@@ -12,7 +13,7 @@ export class HerdrSnapshotCollector {
     return this.herdr.listAllPanes ? this.herdr.listAllPanes() : (await Promise.all(workspaceIds.map((id) => this.herdr.listPanes(id)))).flat();
   }
 
-  async collect(workspaceIds: readonly string[]): Promise<Map<string, HerdrPane[]>> {
+  async collect(workspaceIds: readonly string[]): Promise<{ panesByWorkspace: Map<string, HerdrPane[]>; failures: ReconciliationFailure[] }> {
     const result = new Map<string, HerdrPane[]>();
     if (this.herdr.listAllPanes) {
       try {
@@ -20,11 +21,12 @@ export class HerdrSnapshotCollector {
         const snapshot = await this.herdr.listAllPanes();
         for (const workspaceId of workspaceIds) result.set(workspaceId, []);
         for (const pane of snapshot) if (requested.has(pane.workspaceId)) result.get(pane.workspaceId)!.push(pane);
-        return result;
+        return { panesByWorkspace: result, failures: [] };
       } catch (error) {
         this.logger.warn({ event: "herdr-snapshot-fallback", err: safeLogError(error), workspaceIds, outcome: "fallback" }, "Herdr snapshot unavailable; falling back to workspace pane discovery");
       }
     }
+    const failures: ReconciliationFailure[] = [];
     await Promise.all(workspaceIds.map(async (workspaceId) => {
       try {
         result.set(workspaceId, await this.herdr.listPanes(workspaceId));
@@ -32,10 +34,11 @@ export class HerdrSnapshotCollector {
         if (recovery) this.logger.info({ event: "workspace-reconciliation-recovered", workspaceId, ...recovery, outcome: "recovered" }, "workspace reconciliation recovered");
       } catch (error) {
         const safe = safeLogError(error);
+        failures.push({ workspaceId, message: safe.message.slice(0, 500) });
         const decision = this.workspaceFailureLogs.fail(workspaceId, safe.message);
         if (decision.kind !== "suppressed") this.logger.warn({ event: decision.kind === "summary" ? "workspace-reconciliation-failure-summary" : "workspace-reconciliation-failed", err: safe, workspaceId, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "failed" }, "workspace reconciliation failed");
       }
     }));
-    return result;
+    return { panesByWorkspace: result, failures };
   }
 }

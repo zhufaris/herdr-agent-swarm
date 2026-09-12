@@ -237,8 +237,8 @@ describe("run card", () => {
     const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
 
     expect(liveIndex).toBeGreaterThanOrEqual(0);
-    expect(activityIndex).toBeGreaterThan(liveIndex);
-    expect(previewIndex).toBeGreaterThan(activityIndex);
+    expect(previewIndex).toBeGreaterThan(liveIndex);
+    expect(activityIndex).toBeGreaterThan(previewIndex);
     expect(footerIndex).toBe(elements.length - 1);
     expect(serialized).not.toContain("**📊 状态**");
     expect(serialized.match(/确认部署版本/g)).toHaveLength(1);
@@ -325,7 +325,7 @@ describe("run card", () => {
     expect(progress.length).toBeLessThanOrEqual(220);
   });
 
-  it("shows the three newest tool activities and up to 12 latest answer lines on the project card", () => {
+  it("shows bounded recent activity and up to six latest answer lines on the project card", () => {
     const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
@@ -344,13 +344,12 @@ describe("run card", () => {
     expect(serialized).toContain("🛠️ 修改卡片渲染");
     expect(serialized).toContain("🧪 运行聚焦测试");
     expect(serialized).toContain("🔎 检查调用位置");
-    expect(serialized).not.toContain("读取旧配置");
-    expect(serialized).toContain("更早 1 项已省略");
-    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-12));
+    expect(serialized).toContain("读取旧配置");
+    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-6));
     expect(serialized).not.toContain("**项目任务**");
   });
 
-  it("keeps only the eight newest activity summaries on the project card", () => {
+  it("keeps only the five newest activity summaries on the project card", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",
       recentProgress: Array.from({ length: 10 }, (_, index) => ({
@@ -360,11 +359,10 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     const visibleActivities = [...serialized.matchAll(/activity-(\d+)/g)].map((match) => Number(match[1]));
 
-    expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([8, 9, 10]);
-    expect(serialized).toContain("更早 7 项已省略");
+    expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([6, 7, 8, 9, 10]);
   });
 
-  it("bounds the 12-line project-card preview at 6000 characters", () => {
+  it("bounds the six-line project-card preview at 3000 characters", () => {
     const lines = Array.from({ length: 25 }, (_, index) => `line-${index + 1}: ${String(index % 10).repeat(700)}`);
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running", answer: lines.join("\n")
@@ -373,11 +371,11 @@ describe("run card", () => {
       .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content ?? "";
     const previewBody = latestMessage.split("\n").slice(2).join("\n");
 
-    expect(previewBody).not.toContain("line-13:");
-    expect(previewBody).toContain("line-14:");
+    expect(previewBody).not.toContain("line-19:");
+    expect(previewBody).toContain("line-20:");
     expect(previewBody).toContain("line-25:");
     expect(previewBody).toContain("已省略中间");
-    expect(previewBody.length).toBeLessThanOrEqual(6_000);
+    expect(previewBody.length).toBeLessThanOrEqual(3_000);
   });
 
   it("falls back to the newest formatted activity when the project has no answer prose", () => {
@@ -512,7 +510,7 @@ describe("run card", () => {
     expect(task).not.toContain("执行计划");
     expect(task).not.toContain("Fixed.");
     expect(answer).toContain("Fixed.");
-    expect(answer).toContain("实现双卡更新");
+    expect(answer).not.toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
     expect(panels).toEqual([]);
@@ -600,6 +598,17 @@ describe("run card", () => {
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
     expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });
     expect(JSON.stringify(card)).not.toContain("older page");
+  });
+
+  it("keeps Answer continuation pages focused on metadata and page content", () => {
+    const view = { ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "start" }), phase: "running" as const, progressEvents: [{ key: "step", kind: "step" as const, label: "Do work", state: "active" as const, occurredAt: "now" }], workerActivity: [{ instanceId: "i1", name: "reviewer", latestTurnId: "turn", latestTaskTitle: "Review", latestPhase: "running" as const, taskCount: 1, latestTaskCard: { aggregateKind: "worker-turn" as const, aggregateId: "turn", generation: 1, messageId: "worker-message" } }] };
+    const card = renderRequestAnswerCard(view, { pageNumber: 2, initialContent: "continued answer" });
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain("第 2 页");
+    expect(serialized).toContain("continued answer");
+    expect(serialized).not.toContain("Do work");
+    expect(serialized).not.toContain("Worker 动态");
+    expect(serialized).not.toContain("card_target_open");
   });
 
   it("enables cumulative CardKit streaming without character-by-character playback", () => {

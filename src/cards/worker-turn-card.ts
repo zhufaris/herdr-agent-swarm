@@ -2,7 +2,7 @@ import { workerTurnProgressElementId, workerTurnStreamContent, type WorkerTurnCa
 import { normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
-import { cardSection, lifecycleMarker } from "./card-style.js";
+import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems } from "./card-style.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 
 const STATE = {
@@ -23,32 +23,32 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
   const actionMessageId = page ? page.messageId : view.messageId;
+  const firstPage = pageIndex === 0;
   const showOutput = view.phase === "completed";
   const content = showOutput
     ? page?.state === "active"
       ? "正在整理最终输出…"
       : renderLarkMarkdownPage(workerTurnContent(view), page?.pageStart ?? view.pageStart, 9_000).page || workerTurnStatusContent(view)
     : "";
-  const metadata = [
+  const metadata = compactMetadata([
     `${state.icon} ${state.label}`,
     view.phase === "queued" ? `队列第 ${view.queuePosition} 位` : null,
     `Turn \`${escapeCode(view.turnId)}\``,
-    pageIndex > 0 ? `第 ${pageIndex + 1} 页` : null
-  ].filter(Boolean).join("  ·  " );
-  const elements: object[] = [
-    { tag: "markdown", content: metadata },
-    { tag: "markdown", content: `${cardSection("💬", "请求")}\n\n${truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(view.requestText)), REQUEST_PREVIEW_LIMIT)}` }
-  ];
-  elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view) });
-  if (view.parentTurnId) elements.push({ tag: "markdown", content: `${cardSection("🔗", "承接任务")}  \`${escapeCode(view.parentTurnId)}\`` });
+    pageIndex > 0 ? `第 ${pageIndex + 1} 页` : null,
+    firstPage && view.parentTurnId ? `承接 \`${escapeCode(view.parentTurnId)}\`` : null
+  ]);
+  const elements: object[] = [{ tag: "markdown", content: metadata }];
+  if (firstPage) elements.push({ tag: "markdown", content: `${cardSection("💬", "请求")}\n\n${truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(view.requestText)), REQUEST_PREVIEW_LIMIT)}` });
+  elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view, showOutput && Boolean(content)) });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
-  if (showOutput) elements.push({ tag: "hr" }, { tag: "markdown", element_id: elementId, content });
+  if (showOutput) elements.push({ tag: "markdown", element_id: elementId, content });
   const interaction = workerTaskInteraction(view.phase);
   elements.push({ tag: "markdown", content: options.snapshot ? "📸 这是只读状态快照；如需继续或补充任务，请使用原 Worker Task Card。" : interaction.guidance });
-  if (!options.snapshot && interaction.actionLabel && actionMessageId) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
-    { tag: "column", width: "auto", elements: [callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId }, "primary")] },
-    ...(interaction.canInterrupt ? [{ tag: "column", width: "auto", elements: [callbackButton("停止当前任务", { action: "worker_task_interrupt", turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId }, "danger")] }] : [])
-  ] });
+  if (!options.snapshot && interaction.actionLabel && actionMessageId) {
+    const identity = { turnId: view.turnId, instanceId: view.instanceId, generation: view.instanceGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: actionMessageId };
+    const row = actionRow([callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", ...identity }, "primary"), ...(interaction.canInterrupt ? [callbackButton("停止当前任务", { action: "worker_task_interrupt", ...identity }, "danger")] : [])]);
+    if (row) elements.push(row);
+  }
   const targets = [
     view.workerMain.messageId ? callbackButton("View Worker Main", { action: "card_target_open", ...view.workerMain }, "primary") : null,
     view.primaryAnswer?.messageId ? callbackButton("View Primary Answer", { action: "card_target_open", ...view.primaryAnswer }, "default") : null
@@ -92,9 +92,10 @@ function workerTurnStatusContent(view: WorkerTurnCardView): string {
   return view.phase === "queued" ? "⏳ 任务已进入 Worker FIFO 队列。" : "⏳ 等待 Worker 输出，本卡片会持续更新。";
 }
 
-export function workerTurnProgressContent(view: WorkerTurnCardView): string {
+export function workerTurnProgressContent(view: WorkerTurnCardView, statusOnly = false): string {
   const status = view.statusTitle ? `${cardSection("📈", "进度")}  ${normalizeLarkPreview(redactSecrets(view.statusTitle))}` : cardSection("📈", "进度");
-  const steps = view.progressEvents.map((event) => {
+  if (statusOnly) return `${cardSection("✅", "结果")}  已完成`;
+  const steps = recentItems(view.progressEvents, 3).map((event) => {
     const icon = lifecycleMarker(event.state === "done" ? "completed" : event.state === "active" ? "running" : event.state);
     return `${icon} ${normalizeLarkPreview(redactSecrets(event.label))}`;
   });

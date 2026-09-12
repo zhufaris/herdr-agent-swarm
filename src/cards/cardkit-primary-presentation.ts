@@ -1,12 +1,13 @@
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { answerStreamContent, renderAnswerStreamPage, renderFinalAnswerPage } from "../runtime/answer-stream.js";
-import { renderDisconnectedTopicCard, renderFinalAnswerCard, renderMessageRejectedCard, renderProjectEntryCard, renderRequestAnswerCard } from "./run-card.js";
+import { renderDisconnectedTopicCard, renderFinalAnswerCard, renderMessageRejectedCard, renderPaneThreadEntryCard, renderProjectEntryCard, renderRequestAnswerCard } from "./run-card.js";
 
 export interface CardKitPresentationLimits { payloadLimitChars: number; answerStreamLimitChars: number; }
 
 export function createCardKitPrimaryPresentation(limits: CardKitPresentationLimits): PrimaryPresentation {
   return {
     mainCard: renderProjectEntryCard,
+    paneEntryCard: renderPaneThreadEntryCard,
     answerCard: renderRequestAnswerCard,
     disconnectedTopic: renderDisconnectedTopicCard,
     requestRejected: renderMessageRejectedCard,

@@ -11,16 +11,16 @@ import { safeLogError } from "../runtime/safe-error.js";
 interface Options {
   store: DeliveryRecoveryStore;
   lark: Pick<LarkPort, "replyText" | "shareThread">;
-  outbound: Pick<OutboundIntentPort, "enqueueCard" | "enqueueCardUpdate">;
+  outbound: Pick<OutboundIntentPort, "enqueueCardUpdate">;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
-  presentation: Pick<ApplicationPresentation, "failures" | "mainCard">;
+  presentation: Pick<ApplicationPresentation, "failures" | "paneEntryCard">;
 }
 
 export interface DeliveryRecoveryWorkflowPort {
   openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void>;
   decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void>;
-  sendPaneCard(action: IncomingLarkCardAction, entry: Pick<TopicPaneDirectoryEntry, "bindingId" | "bindingGeneration" | "paneId" | "sourceMainMessageId">): Promise<"sent" | "stale">;
+  sendPaneCard(action: IncomingLarkCardAction, entry: Pick<TopicPaneDirectoryEntry, "bindingId" | "bindingGeneration" | "paneId" | "sourceMainMessageId">): Promise<"sent" | "duplicate" | "stale">;
 }
 
 export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
@@ -51,14 +51,17 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     await outbound.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${replyId}:${outcome}`, this.options.presentation.failures(store.listFailures(action.chatId), notice)[0]!);
   }
 
-  async sendPaneCard(action: IncomingLarkCardAction, entry: Pick<TopicPaneDirectoryEntry, "bindingId" | "bindingGeneration" | "paneId" | "sourceMainMessageId">): Promise<"sent" | "stale"> {
+  async sendPaneCard(action: IncomingLarkCardAction, entry: Pick<TopicPaneDirectoryEntry, "bindingId" | "bindingGeneration" | "paneId" | "sourceMainMessageId">): Promise<"sent" | "duplicate" | "stale"> {
     const binding = this.options.store.getBinding(entry.bindingId);
     if (!binding || binding.chatId !== action.chatId || binding.generation !== entry.bindingGeneration || binding.paneId !== entry.paneId
       || binding.statusMessageId !== entry.sourceMainMessageId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return "stale";
     const view = this.options.store.loadTopicView(binding.id);
     if (!view) return "stale";
-    await this.options.outbound.enqueueCard(action.messageId, `pane-card-send:${action.messageId}:${binding.id}:${binding.generation}:${entry.sourceMainMessageId}`, this.options.presentation.mainCard(view), binding.id);
-    this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: "accepted" });
-    return "sent";
+    const publicationKey = `pane-card-send:${action.messageId}:${binding.id}:${binding.generation}:${entry.sourceMainMessageId}`;
+    const reserved = this.options.store.reservePaneThreadAlias({ publicationKey, actionMessageId: action.messageId, bindingId: binding.id, bindingGeneration: binding.generation, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId, targetChatId: action.chatId, card: this.options.presentation.paneEntryCard(view) });
+    if (reserved === "stale") return "stale";
+    if (reserved === "reserved") this.options.outboundWork.wake();
+    this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: reserved });
+    return reserved === "reserved" ? "sent" : "duplicate";
   }
 }

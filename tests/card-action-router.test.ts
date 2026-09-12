@@ -6,7 +6,7 @@ function harness() {
   const cardInteractions = { handle: vi.fn(async () => ({ toast: { type: "success" as const, content: "session" } })) };
   const instanceInteractions = { handleCardAction: vi.fn(async () => ({ toast: { type: "success" as const, content: "instance" } })) };
   const modelSelection = { selectModel: vi.fn(async () => {}), selectModelMode: vi.fn(async () => {}) };
-  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}), sendPaneCard: vi.fn(async () => "sent" as const) };
+  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}), sendPaneCard: vi.fn(async () => "sent" as "sent" | "duplicate" | "stale") };
   const provisioning = { attach: vi.fn(async () => true), completeSelection: vi.fn(async () => null) };
   const router = new CardActionRouter({
     chatId: "chat", allowedOpenIds: ["user"], adminOpenIds: ["user"],
@@ -15,12 +15,37 @@ function harness() {
     provisioning: provisioning as never, cardInteractions, modelSelection: modelSelection as never, deliveryRecovery, instanceInteractions: instanceInteractions as never,
     logger: { info: vi.fn(), error: vi.fn() }, enqueueInitialPrompt: vi.fn(async () => {}),
   });
+
   return { router, cardInteractions, instanceInteractions, modelSelection, deliveryRecovery, provisioning };
 }
 
 const action = (value: unknown, option?: string) => ({ messageId: "card", chatId: "chat", operatorOpenId: "user", value, ...(option ? { option } : {}) });
 
 describe("card action router", () => {
+  it("waits for every admitted callback and rejects work after the shutdown gate", async () => {
+    const h = harness();
+    let release!: () => void;
+    h.instanceInteractions.handleCardAction.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ toast: { type: "success", content: "done" } }); }));
+    const running = h.router.handle(action(validPayload("instance_start")));
+    await vi.waitFor(() => expect(h.instanceInteractions.handleCardAction).toHaveBeenCalledOnce());
+    let stopped = false;
+    const stopping = h.router.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    await expect(h.router.handle(action(validPayload("instance_stop")))).resolves.toEqual({ toast: { type: "warning", content: "该操作已失效，请刷新卡片后重试。" } });
+    expect(h.instanceInteractions.handleCardAction).toHaveBeenCalledOnce();
+    release();
+    await Promise.all([running, stopping]);
+    expect(stopped).toBe(true);
+  });
+
+  it("reports an idempotently accepted pane publication without promising another thread", async () => {
+    const h = harness();
+    h.deliveryRecovery.sendPaneCard.mockResolvedValueOnce("duplicate");
+    await expect(h.router.handle(action({ action: "pane_card_send", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "success", content: expect.stringContaining("已受理") } });
+  });
+
   it.each([
     ...instanceCardActionNames.map((name) => [name, validPayload(name), undefined, "instance"] as const),
     ...sessionCardActionNames.map((name) => [name, validPayload(name), undefined, "session"] as const),
@@ -78,6 +103,7 @@ function validPayload(action: typeof instanceCardActionNames[number] | typeof se
   if ((sessionCardActionNames as readonly string[]).includes(action)) return { action, ...binding, ...(["open_rename", "open_reattach", "submit_rename", "submit_reattach", "session_stop", "session_model", "session_reset", "session_archive", "session_replace", "session_resume", "session_pane_close"].includes(action) ? { interactionId: "interaction-1" } : {}) };
   if (action === "card_target_open") return { action, aggregateKind: "worker-turn", aggregateId: "turn-1", generation: 1, messageId: "card-1" };
   if (action === "instance_create_form" || action === "instance_create_submit") return { action, projectId: "p1", ...(action.endsWith("submit") ? { requestedBy: "user" } : {}) };
+  if (action === "worker_thread_send") return { action, instanceId: "i1", generation: 1, workerSessionGeneration: 1 };
   if (action.startsWith("worker_new_task_")) return { action, instanceId: "i1", generation: 1, workerSessionGeneration: 1, sourceCardMessageId: "card-1", ...(action.endsWith("submit") ? { interactionId: "interaction-1", requestedBy: "user" } : {}) };
   if (action.startsWith("worker_task_")) return { action, turnId: "turn-1", instanceId: "i1", generation: 1, workerSessionGeneration: 1, sourceCardMessageId: "card-1", ...(action.endsWith("submit") ? { interactionId: "interaction-1", requestedBy: "user", intent: "steer" } : {}) };
   return { action, instanceId: "i1", generation: 1, ...(action === "instance_turn_open" ? { turnId: "turn-1" } : {}), ...(action === "instance_steer_submit" ? { requestedBy: "user" } : {}), ...(action === "instance_confirm_removal" ? { requestedBy: "user", planId: "plan-1" } : {}) };

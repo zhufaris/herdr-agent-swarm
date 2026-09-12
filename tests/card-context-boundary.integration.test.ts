@@ -93,14 +93,15 @@ describe("card context boundaries", () => {
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerId: worker.id, currentTaskTitle: "Review durable boundary" }] });
     expect(store.loadRunCard(answer.promptId)).toMatchObject({ workerActivity: [{ workerId: worker.id, taskCount: 1, latestTaskCard: { messageId: null } }], workerContextFrozenAt: null });
     const workerMainCreate = store.listPendingOutboundReplies().find(({ workerId }) => workerId === worker.id)!;
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(workerMainCreate.id)).toEqual({ lane_key: "worker-main:reviewer:1" });
-    store.markOutboundReplyDelivered(workerMainCreate.id, "worker-main-message", "worker-main-card");
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(workerMainCreate.id)).toEqual({ lane_key: "worker-thread:reviewer:1" });
+    store.markOutboundReplyDelivered(workerMainCreate.id, "worker-main-message", "worker-main-card", "worker-topic");
     await rebuilder.requestScan();
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-main-message", cardId: "worker-main-card" });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerMain: { messageId: "worker-main-message" } }] });
     expect(store.loadWorkerTurnCard(task.turnId)).toMatchObject({ workerMain: { messageId: null }, primaryAnswer: { messageId: null } });
     expect(store.listPendingOutboundReplies().some(({ workerTurnId }) => workerTurnId === task.turnId)).toBe(false);
     const workerMainUpdate = store.listPendingOutboundReplies().find(({ workerId, kind }) => workerId === worker.id && kind === "card_update")!;
+    expect(workerMainUpdate.laneKey).toBe("worker-main:reviewer:1");
     expect(workerMainUpdate.rootMessageId).toBe("worker-main-message");
     expect(workerMainUpdate.payload).toContain("worker_new_task_form");
     expect(workerMainUpdate.payload).toContain("worker-main-message");

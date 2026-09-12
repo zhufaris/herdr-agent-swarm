@@ -26,7 +26,7 @@ export class SqliteOperationsStore {
     const recentInboundFailure = this.context.database.prepare("SELECT event_id, updated_at, error FROM inbound_messages WHERE error IS NOT NULL ORDER BY updated_at DESC, rowid DESC LIMIT 1").get() as { event_id: string; updated_at: string; error: string } | undefined;
     const sessionOperationStates = groupedCounts<SessionOperationState>("session_operations", "state", ["accepted", "running", "succeeded", "rejected", "failed", "uncertain"]);
     const oldestAcceptedSessionOperation = this.context.database.prepare("SELECT MIN(created_at) AS value FROM session_operations WHERE state = 'accepted'").get() as { value: string | null };
-    const unresolvedDeadLetter = "o.state = 'dead_letter' AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.failed_reply_id = o.id AND q.state = 'released' AND q.action IN ('rebuild_answer', 'rebuild_main', 'released_newer_snapshot'))";
+    const unresolvedDeadLetter = "o.state = 'dead_letter' AND NOT EXISTS (SELECT 1 FROM delivery_recoveries recovery WHERE recovery.failed_reply_id = o.id AND recovery.state IN ('recovered', 'dismissed'))";
     const recentDeadLetter = this.context.database.prepare(`SELECT o.id, o.binding_id, o.prompt_id, o.attempt_count, o.updated_at, o.error FROM outbound_replies o WHERE ${unresolvedDeadLetter} ORDER BY o.updated_at DESC, o.rowid DESC LIMIT 1`).get() as { id: string; binding_id: string | null; prompt_id: string | null; attempt_count: number; updated_at: string; error: string | null } | undefined;
     const promptLatency = this.context.database.prepare(`
       WITH recent AS (
@@ -102,7 +102,9 @@ export class SqliteOperationsStore {
         states: sessionOperationStates, oldestAcceptedAt: oldestAcceptedSessionOperation.value,
         oldestAcceptedAgeSeconds: oldestAcceptedSessionOperation.value === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(oldestAcceptedSessionOperation.value)) / 1_000))
       },
+      workerThreads: groupedCounts("worker_session_threads", "state", ["legacy-unpublished", "reserving", "active", "stale"]),
       outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
+      deliveryRecoveries: groupedCounts("delivery_recoveries", "state", ["unresolved", "replacement_pending", "recovered", "dismissed"]),
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),
         nextAttemptAt: laneHealth.next_attempt_at, oldestHeadAt: laneHealth.oldest_head_at,

@@ -45,7 +45,11 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
     if (facts.finalUpdateState === "dead_letter" || facts.finalUpdateState === "dismissed") { this.reserveFinalizedPageCard(view, page); return; }
     const plan = planAnswerPage(view, page, facts, this.planning);
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
-    if (plan.type === "stream-content") outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content });
+    if (plan.type === "stream-content") {
+      const source = this.planning.answerStreamContent(view);
+      const rendered = this.planning.renderAnswerStreamPage(source, page.sourceStart, this.planning.pageLimit);
+      outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content, source: source.slice(page.sourceStart, rendered.nextPageStart ?? source.length) });
+    }
     else if (plan.type === "finish-terminal") outcome = this.store.reserveAnswerFinish({
       promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId!, summary: plan.summary,
       finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart).page })!
@@ -108,11 +112,12 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
 
   private reserveStaticAnswerCard(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>): void {
     if (!page.messageId) return;
-    const content = this.presentation.answerStreamPage(this.presentation.answerStreamContent(view), page.sourceStart).page;
+    const source = this.presentation.answerStreamContent(view);
+    const rendered = this.presentation.answerStreamPage(source, page.sourceStart);
     const card = view.phase === "completed"
-      ? this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: content })
-      : this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, initialContent: content, streaming: false });
-    if (card && this.store.reserveStaticAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, card }) === "reserved") this.wakeOutbound();
+      ? this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: rendered.page })
+      : this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, initialContent: rendered.page, streaming: false });
+    if (card && this.store.reserveStaticAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, card, source: source.slice(page.sourceStart, rendered.nextPageStart ?? source.length) }) === "reserved") this.wakeOutbound();
   }
 
   private reserveStaticAnswerReplacement(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>): void {

@@ -10,7 +10,7 @@ import type { WorkerTurnObserver, WorkerTurnWatch } from "../coordinator/worker-
 export class InstanceWorkScheduler {
   private readonly active = new Set<string>();
   private readonly drains = new Set<Promise<void>>();
-  private readonly inFlight = new Map<string, { turnId: string; generation: number }>();
+  private readonly inFlight = new Map<string, { turnId: string; generation: number; controller: AbortController }>();
   private readonly detachedWatches = new Set<WorkerTurnWatch>();
   private readonly detachedTurns = new Set<string>();
   private stopping = false;
@@ -40,7 +40,8 @@ export class InstanceWorkScheduler {
         const driver = this.options.drivers.get(instance.agentKind);
         if (!driver) { this.transition(turn.id, turn.instanceGeneration, "failed", "turn.failed", { type: "failed", occurredAt: new Date().toISOString(), notice: "Agent adapter unavailable" }, "Agent adapter unavailable"); continue; }
         this.transition(turn.id, turn.instanceGeneration, "dispatching", "turn.dispatching", { type: "preparing", occurredAt: new Date().toISOString() });
-        this.inFlight.set(instanceId, { turnId: turn.id, generation: turn.instanceGeneration });
+        const controller = new AbortController();
+        this.inFlight.set(instanceId, { turnId: turn.id, generation: turn.instanceGeneration, controller });
         let receipt;
         let watch: WorkerTurnWatch | null = null;
         try {
@@ -51,7 +52,7 @@ export class InstanceWorkScheduler {
               this.transition(turn.id, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() });
             },
             onObservation: async () => { /* Runtime state is reconciled separately; trusted output comes from the exact transcript. */ }
-          });
+          }, controller.signal);
         } catch (error) {
           if (this.detachedTurns.has(turn.id)) { await watch?.stop(); return; }
           await watch?.flush();
@@ -102,14 +103,16 @@ export class InstanceWorkScheduler {
     const settled = Promise.allSettled([...this.drains]);
     if (!context) { await settled; await this.stopDetachedWatches(); return; }
     if (context.remainingMs() > 0 && !context.signal.aborted && await settlesWithin(settled, context.remainingMs(), context.signal)) { await this.stopDetachedWatches(); return; }
-    for (const { turnId, generation } of this.inFlight.values()) {
+    for (const { turnId, generation, controller } of this.inFlight.values()) {
       this.detachedTurns.add(turnId);
       const current = this.options.store.getInstanceTurn(turnId);
       if (!current || ["completed", "failed", "cancelled"].includes(current.state)) continue;
       const notice = "Bridge stopped observing an in-flight instance turn; prompt was not replayed";
       this.transition(turnId, generation, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice }, notice);
+      controller.abort(new Error("bridge shutdown deadline exceeded"));
     }
     await this.stopDetachedWatches();
+    await settled;
   }
   private detachWatch(watch: WorkerTurnWatch | null): void {
     if (!watch) return;

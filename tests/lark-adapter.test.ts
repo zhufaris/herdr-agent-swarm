@@ -77,6 +77,15 @@ describe("Lark streaming Answer cards", () => {
     expect(firstUuid).not.toBe(durableKey);
   });
 
+  it("creates a group-root card in an explicit validated chat target", async () => {
+    createMessage.mockResolvedValue({ data: { message_id: "root-2", thread_id: "topic-2" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "configured-chat", botOpenId: "bot" });
+
+    await expect(adapter.createTopic({ schema: "2.0" }, "pane-entry", "configured-chat")).resolves.toEqual({ topicId: "topic-2", rootMessageId: "root-2" });
+    expect(createMessage).toHaveBeenCalledWith({ params: { receive_id_type: "chat_id" }, data: expect.objectContaining({ receive_id: "configured-chat", msg_type: "interactive" }) });
+    await expect(adapter.createTopic({ schema: "2.0" }, "wrong", "other-chat")).rejects.toThrow(/outside the configured chat/);
+  });
+
   it("reports safe CardKit response metadata when creation returns no card id", async () => {
     createCard.mockResolvedValue({
       code: 99991672,

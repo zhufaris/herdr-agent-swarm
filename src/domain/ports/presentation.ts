@@ -18,6 +18,7 @@ import type { InstanceTurnSummary } from "../instance-turn.js";
 
 export interface PrimaryPresentation {
   mainCard(view: TopicViewState): object;
+  paneEntryCard(view: TopicViewState): object;
   answerCard(view: RunCardView, options?: { pageNumber?: number; initialContent?: string; streaming?: boolean }): object;
   disconnectedTopic(reason: "archived" | "unbound"): object;
   requestRejected(message: string): object;
@@ -72,4 +73,7 @@ export interface ApplicationPresentation extends PrimaryPresentation, WorkerPres
   workerTaskInstruction(input: { workerName: string; turnId: string; intent: "steer" | "followup"; interactionId: string; requestedBy: string; sourceCardMessageId: string; instanceId: string; generation: number; workerSessionGeneration: number }): object;
   workerNewTask(input: { workerName: string; interactionId: string; requestedBy: string; sourceCardMessageId: string; instanceId: string; generation: number; workerSessionGeneration: number }): object;
   workerMain(view: WorkerMainView): object;
+  workerStatusSnapshot(view: WorkerMainView, generatedAt: string): object;
+  workerThreadEntry(view: WorkerMainView, generatedAt: string): object;
+  workerThreadAccepted(input: { workerName: string; queuePosition: number; duplicate: boolean }): object;
 }

@@ -130,6 +130,21 @@ describe("workspace snapshot cache", () => {
     expect(cache.status().entries).toBe(0);
   });
 
+  it("invalidates only known pane workspaces and clears all snapshots for an unknown pane", async () => {
+    const cache = new WorkspaceSnapshotCache(adapter({
+      async listPanes(workspaceId) { return [pane(workspaceId, 1)]; }
+    }));
+
+    await cache.listPanes("w1");
+    await cache.listPanes("w2");
+    cache.invalidatePanes(["w1:p1"]);
+    expect(cache.status().entries).toBe(1);
+    expect((await cache.listPanes("w2"))[0]?.label).toBe("v1");
+
+    cache.invalidatePanes(["unknown-pane"]);
+    expect(cache.status().entries).toBe(0);
+  });
+
   it("signals that callers must use workspace fallback when the delegate has no all-pane snapshot", async () => {
     const cache = new WorkspaceSnapshotCache(adapter({ async listPanes(workspaceId) { return [pane(workspaceId, 1)]; } }));
 

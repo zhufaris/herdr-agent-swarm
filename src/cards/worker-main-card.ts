@@ -2,7 +2,7 @@ import { canSubmitWorkerMainTask, type WorkerMainTaskSummary, type WorkerMainVie
 import { normalizeLarkPreview, truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
-import { cardSection, lifecycleMarker } from "./card-style.js";
+import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems } from "./card-style.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 
 const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "排队", preparing: "准备中", running: "执行中", blocked: "阻塞", completed: "完成", failed: "失败", cancelled: "取消", "dispatch-uncertain": "派发不确定" };
@@ -10,25 +10,18 @@ const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovis
 
 export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?: boolean } = {}): object {
   const elements: object[] = [
-    { tag: "markdown", content: `**👤 Owner**  ${safe(view.ownerName)}  ·  **🖥️ Primary pane**  \`${safe(view.parentPaneId)}\`\n**🧾 Session**  ${view.workerSessionGeneration}  ·  **⚙️ Runtime**  ${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}  ·  **Runtime gen**  ${view.runtimeGeneration}` },
-    { tag: "markdown", content: `**📂 Workspace**  ${safe(view.workspace)}${view.branch ? `\n**🌿 Branch**  \`${safe(view.branch)}\`` : ""}${view.model ? `  ·  **🧠 Model**  ${safe(view.model)}` : ""}` },
-    { tag: "hr" },
-    { tag: "markdown", content: currentTaskContent(view.currentTask) }
+    { tag: "markdown", content: compactMetadata([`${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}`, `队列 \`${view.queueCount}\``, view.model ? `模型 \`${safe(view.model)}\`` : null]) },
   ];
-  if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "进度")}  ${safe(view.currentTask.statusTitle)}${progressLines(view.currentTask).join("")}` });
   if (view.currentTask?.notice) elements.push({ tag: "markdown", content: `⚠️ ${safe(view.currentTask.notice)}` });
+  elements.push({ tag: "markdown", content: currentTaskContent(view.currentTask) });
+  if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "进度")}  ${safe(view.currentTask.statusTitle)}${progressLines(view.currentTask).join("")}` });
   if (view.currentTask?.answer) elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("📝", "当前输出")}\n\n${safeOutput(view.currentTask.answer)}` });
-  pushCurrentTaskActions(elements, view, options.snapshot === true);
-  elements.push({ tag: "markdown", content: `**📨 Queue**  ${view.queueCount} queued${view.nextTaskTitle ? `  ·  next: ${safe(view.nextTaskTitle)}` : ""}` });
+  pushActions(elements, view, options.snapshot === true);
+  elements.push({ tag: "markdown", content: `${cardSection("📨", "队列")}\n${view.queueCount} 条等待${view.nextTaskTitle ? `  ·  下一项 ${safe(view.nextTaskTitle)}` : ""}` });
   if (view.recentTasks.length > 0) {
-    elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🕘", "Recent Tasks")}\n${view.recentTasks.map(taskLine).join("\n")}` });
+    elements.push({ tag: "markdown", content: `${cardSection("🕘", "最近任务")}\n${recentItems(view.recentTasks, 5).map(taskLine).join("\n")}` });
   }
-  if (!options.snapshot && view.messageId && canSubmitWorkerMainTask(view)) {
-    elements.push(
-      { tag: "markdown", content: view.currentTask ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。" },
-      callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")
-    );
-  }
+  elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeDetails(view) });
   if (view.frozenAt) elements.push({ tag: "markdown", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` });
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },
@@ -60,29 +53,49 @@ export function renderWorkerStatusSnapshot(view: WorkerMainView, generatedAt: st
   };
 }
 
+export function renderWorkerThreadEntryCard(view: WorkerMainView, generatedAt: string): object {
+  const card = renderWorkerMainCard(view, { snapshot: true }) as {
+    schema: string; config: Record<string, unknown>; header: Record<string, unknown>; body: { elements: object[] };
+  };
+  return {
+    ...card,
+    config: { ...card.config, update_multi: false, summary: { content: `${view.workerName} · Worker 对话入口` } },
+    header: { ...card.header, title: { tag: "plain_text", content: `🤖 Worker 对话 · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: "LEGACY SESSION ENTRY · READ-ONLY" } },
+    body: { elements: [
+      { tag: "markdown", content: `**此入口卡是一次性快照，不会自动更新**  ·  生成于 ${safe(generatedAt)}\n在本 Thread 直接发消息可为该 Worker 创建新任务；使用 \`/status\` 获取最新状态。` },
+      { tag: "hr" },
+      ...card.body.elements
+    ] }
+  };
+}
+
 function currentTaskContent(task: WorkerMainTaskSummary | null): string {
-  return task ? `${cardSection("🎯", "Current Task")}\n${lifecycleMarker(task.phase)} ${safe(task.title)}  ·  ${PHASE_LABEL[task.phase]}${task.durationSeconds === null ? "" : `  ·  ${formatDuration(task.durationSeconds)}`}${task.requestText ? `\n\n${safeOutput(task.requestText)}` : ""}` : `${cardSection("🎯", "Current Task")}\nNo task history`;
+  return task ? `${cardSection("🎯", "当前任务")}\n${lifecycleMarker(task.phase)} ${safe(task.title)}  ·  ${PHASE_LABEL[task.phase]}${task.durationSeconds === null ? "" : `  ·  ${formatDuration(task.durationSeconds)}`}${task.requestText ? `\n\n${safeOutput(task.requestText)}` : ""}` : `${cardSection("🎯", "当前任务")}\n暂无任务记录`;
 }
 
 function taskLine(task: WorkerMainTaskSummary): string {
   return `- ${lifecycleMarker(task.phase)} ${PHASE_LABEL[task.phase]}  ${safe(task.title)}${task.durationSeconds === null ? "" : `  ${formatDuration(task.durationSeconds)}`}`;
 }
 
-function pushCurrentTaskActions(elements: object[], view: WorkerMainView, snapshot: boolean): void {
+function pushActions(elements: object[], view: WorkerMainView, snapshot: boolean): void {
+  if (snapshot || !view.messageId) return;
   const task = view.currentTask;
-  if (snapshot || !task || !view.messageId) return;
-  const interaction = workerTaskInteraction(task.phase);
-  if (!interaction.actionLabel) return;
-  const identity = { turnId: task.turnId, instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId };
-  elements.push({ tag: "markdown", content: interaction.guidance }, { tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
-    { tag: "column", width: "auto", elements: [callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", ...identity }, "primary")] },
-    ...(interaction.canInterrupt ? [{ tag: "column", width: "auto", elements: [callbackButton("停止当前任务", { action: "worker_task_interrupt", ...identity }, "danger")] }] : [])
-  ] });
+  const buttons: object[] = []; const guidance: string[] = [];
+  if (task) {
+    const interaction = workerTaskInteraction(task.phase);
+    const identity = { turnId: task.turnId, instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId };
+    if (interaction.actionLabel) { guidance.push(interaction.guidance); buttons.push(callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", ...identity }, "primary")); }
+    if (interaction.canInterrupt) buttons.push(callbackButton("停止当前任务", { action: "worker_task_interrupt", ...identity }, "danger"));
+  }
+  if (canSubmitWorkerMainTask(view)) { guidance.push(task ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。"); buttons.push(callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")); }
+  const row = actionRow(buttons);
+  if (row) elements.push({ tag: "markdown", content: [...new Set(guidance)].join("\n") }, row);
 }
 
 function progressLines(task: WorkerMainTaskSummary): string[] {
-  return (task.progressEvents ?? []).slice(-5).map((event) => `\n${lifecycleMarker(event.state === "done" ? "completed" : event.state === "active" ? "running" : event.state)} ${safe(event.label)}`);
+  return recentItems(task.progressEvents ?? [], 3).map((event) => `\n${lifecycleMarker(event.state === "done" ? "completed" : event.state === "active" ? "running" : event.state)} ${safe(event.label)}`);
 }
+function runtimeDetails(view: WorkerMainView): string { return [cardSection("🖥️", "运行环境"), compactMetadata([`Owner ${safe(view.ownerName)}`, `Primary \`${safe(view.parentPaneId)}\``, `Session \`${view.workerSessionGeneration}\``, `Runtime \`${view.runtimeGeneration}\``]), `Workspace  ${safe(view.workspace)}${view.branch ? `\nBranch  \`${safe(view.branch)}\`` : ""}`].join("\n"); }
 function safeOutput(value: string): string { return truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(value)), 6_000); }
 
 function safe(value: string): string { return truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(value)), 300); }

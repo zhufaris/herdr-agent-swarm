@@ -2,12 +2,12 @@ import { summarizeProgress, type RunProgressEvent, type RunProgressSummary } fro
 
 type TimelinePhase = string;
 
-const VISIBLE_EVENT_COUNT = 3;
+const DEFAULT_VISIBLE_EVENT_COUNT = 3;
 
-export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string; summary?: RunProgressSummary } = {}): object[] {
+export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string; summary?: RunProgressSummary; visibleCount?: number } = {}): object[] {
   if (!events.length) return [];
   const summary = options.summary ?? summarizeProgress(events);
-  const visible = events.slice(-VISIBLE_EVENT_COUNT);
+  const visible = events.slice(-Math.max(1, options.visibleCount ?? DEFAULT_VISIBLE_EVENT_COUNT));
   const earlierCount = Math.max(0, summary.total - visible.length);
   const elements: object[] = [{ tag: "markdown", content: visible.map(progressLine).join("\n") }];
   if (earlierCount) elements.push({ tag: "markdown", content: `… 更早 ${earlierCount} 项已省略，可在 Herdr pane 查看完整过程。` });

@@ -5,6 +5,7 @@ import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.
 import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { workerPresentation } from "./helpers/presentation.js";
+import { MAX_TURN_OUTPUT_CHARS, TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
 
 const sessionId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
 const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
@@ -122,6 +123,18 @@ describe("WorkerTurnObserver", () => {
 
     expect(store!.getInstanceTurn("turn-1")!.result).toContain("[REDACTED]");
     expect(store!.getInstanceTurn("turn-1")!.result).not.toContain("secret-value");
+  });
+
+  it("bounds accumulated Worker deltas when completion has no authoritative final answer", async () => {
+    const { observer } = setup();
+    await observer.observe("turn-1", { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "x".repeat(32_000), turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
+    for (let index = 0; index < 8; index += 1) await observer.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "y".repeat(32_000) });
+    await observer.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt } });
+
+    const result = store!.getInstanceTurn("turn-1")!.result!;
+    expect(result.length).toBeLessThanOrEqual(MAX_TURN_OUTPUT_CHARS);
+    expect(result.endsWith(TURN_OUTPUT_TRUNCATION_MARKER)).toBe(true);
+    expect(store!.loadWorkerTurnCard("turn-1")!.answer).toBe(result);
   });
 
   it("recovers an exact owned turn from its boundary without submitting again", async () => {

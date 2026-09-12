@@ -3,6 +3,11 @@ import { InstanceRuntimeReconciler } from "../src/coordinator/instance-runtime-r
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import type { HerdrPane, ProjectConfig } from "../src/domain/types.js";
 import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
+import { HerdrEventRouter } from "../src/runtime/herdr-event-router.js";
+import { HerdrPaneHost } from "../src/runtime/herdr/pane-host.js";
+import { WorkspaceSnapshotCache } from "../src/runtime/workspace-snapshot-cache.js";
+import type { HerdrPort } from "../src/domain/ports.js";
+import pino from "pino";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
@@ -54,6 +59,46 @@ describe("instance runtime reconciliation", () => {
     await Promise.all([first, second]);
 
     expect(reconciler.snapshot()).toMatchObject({ state: "idle", runCount: 1, successCount: 1, failureCount: 0, coalescedRequestCount: 1, lastCompletedAt: expect.any(String), lastDurationMs: expect.any(Number), maxDurationMs: expect.any(Number), lastOutcome: "succeeded", ready: true, lastError: null });
+  });
+
+  it("serializes and merges scoped requests queued behind an active full scan", async () => {
+    const target = pane({ agentState: "working" });
+    const { reconciler, paneHost } = setup([target], { bulkSnapshot: true });
+    let release!: () => void;
+    let active = 0;
+    let peak = 0;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(paneHost, "listPanes").mockImplementation(async () => { active += 1; peak = Math.max(peak, active); await blocked; active -= 1; return [target]; });
+    vi.spyOn(paneHost, "snapshotPanes").mockImplementation(async () => { active += 1; peak = Math.max(peak, active); await Promise.resolve(); active -= 1; return [target]; });
+
+    const full = reconciler.reconcile();
+    await vi.waitFor(() => expect(paneHost.listPanes).toHaveBeenCalledOnce());
+    const paneOne = reconciler.requestReconciliation({ paneIds: [target.paneId] });
+    const paneTwo = reconciler.requestReconciliation({ paneIds: ["herdr-w:p2"] });
+    release();
+    await Promise.all([full, paneOne, paneTwo]);
+
+    expect(peak).toBe(1);
+    expect(paneHost.snapshotPanes).toHaveBeenCalledOnce();
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 2, successCount: 2, coalescedRequestCount: 2 });
+  });
+
+  it("does not start queued reconciliation work after stop begins", async () => {
+    const target = pane({ agentState: "working" });
+    const { reconciler, paneHost } = setup([target], { bulkSnapshot: true });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(paneHost, "listPanes").mockImplementation(async () => { await blocked; return [target]; });
+
+    const full = reconciler.reconcile();
+    await vi.waitFor(() => expect(paneHost.listPanes).toHaveBeenCalledOnce());
+    const queued = reconciler.requestReconciliation({ paneIds: [target.paneId] });
+    const stopping = reconciler.stop();
+    release();
+    await Promise.all([full, queued, stopping]);
+
+    expect(paneHost.snapshotPanes).not.toHaveBeenCalled();
+    expect(reconciler.snapshot().state).toBe("stopping");
   });
 
   it("records failed scans and reports stopping while waiting for an active scan", async () => {
@@ -189,6 +234,37 @@ describe("instance runtime reconciliation", () => {
     expect(paneHost.snapshotPanes).toHaveBeenCalledOnce();
     expect(paneHost.inspectPane).not.toHaveBeenCalled();
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+  });
+
+  it("refreshes an idle cache before reconciling a pane-status event and does not wake a busy Worker", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "i1", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: null })!;
+    store.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+    let state: HerdrPane["agentState"] = "idle";
+    const listAllPanes = vi.fn(async () => [pane({ agentState: state })]);
+    const delegate = {
+      async assertWorkspace() {}, async listPanes() { return [pane({ agentState: state })]; }, listAllPanes,
+      async getPane() { return pane({ agentState: state }); }, async observeRuntime() { return { pane: pane({ agentState: state }), traexProcess: true, composerReady: state === "idle", evidenceSource: "structured" as const }; },
+      async createPane() { return pane({ agentState: state }); }, async startTraex() {}, async runPrompt() { return "done" as const; }, async renamePane() {}
+    } satisfies HerdrPort;
+    const cache = new WorkspaceSnapshotCache(delegate);
+    const paneHost = new HerdrPaneHost(cache);
+    const wake = vi.fn();
+    const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost, wake });
+    await cache.listAllPanes();
+    state = "working";
+    const router = new HerdrEventRouter({
+      invalidateWorkspace: (workspaceId) => cache.invalidate(workspaceId), invalidatePanes: (paneIds) => cache.invalidatePanes(paneIds),
+      reconcileBindings: async () => undefined, reconcileInstances: (scope) => reconciler.requestReconciliation(scope),
+      observeInstanceTurns: async () => undefined, retryRetiredPanes: async () => undefined, logger: pino({ enabled: false })
+    });
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["herdr-w"], paneIds: ["herdr-w:p1"] });
+
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+    expect(wake).not.toHaveBeenCalled();
   });
 
   it("contains periodic reconciliation failures and retries on the next interval", async () => {

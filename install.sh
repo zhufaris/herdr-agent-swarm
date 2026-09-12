@@ -37,8 +37,7 @@ node "$ROOT/scripts/check-node-version.mjs"
 npm ci
 npm run build
 STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
-bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR"
-SWARM_RUNTIME_ROOT="$(readlink -f "$STATE_DIR/current")"
+SWARM_RUNTIME_ROOT="$(bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR")"
 CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
 ENV_FILE="$CONFIG_DIR/.env"
 PROJECTS_FILE="$CONFIG_DIR/projects.json"
@@ -58,6 +57,6 @@ if [ "$CONFIGURATION_INCOMPLETE" -eq 1 ]; then
     exit 1
 fi
 
-SWARM_ROOT="$SWARM_RUNTIME_ROOT" SWARM_CONFIG_DIR="$CONFIG_DIR" SWARM_STATE_DIR="$STATE_DIR" \
+SWARM_ROOT="$SWARM_RUNTIME_ROOT" SWARM_RELEASE_CANDIDATE="$SWARM_RUNTIME_ROOT" SWARM_CONFIG_DIR="$CONFIG_DIR" SWARM_STATE_DIR="$STATE_DIR" \
     node "$SWARM_RUNTIME_ROOT/dist/cli/service-lifecycle.js" install
 echo "Herdr Agent Swarm service installed and enabled."

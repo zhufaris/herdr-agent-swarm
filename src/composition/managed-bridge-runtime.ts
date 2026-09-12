@@ -8,7 +8,7 @@ import { InstanceLeaseController } from "../runtime/instance-lease.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { RuntimeLifecycleLedger, type LifecycleCleanupEntry } from "../runtime/lifecycle-ledger.js";
 import { BridgeRuntimeShutdown, closeHealthServer, type BridgeRuntimeShutdownOutcome } from "../runtime/shutdown.js";
-import { createSqliteStoreBundle } from "../store/sqlite-store-bundle.js";
+import { openSqliteLeaseBootstrap } from "../store/sqlite-lease-bootstrap.js";
 import { createBridgeRuntime } from "./create-bridge-runtime.js";
 
 export type RuntimeStopReason = "SIGINT" | "SIGTERM" | "lease-lost" | "startup-failure";
@@ -62,14 +62,21 @@ export async function createManagedBridgeRuntime(options: {
     detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
     detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
   ]);
-  const stores = createSqliteStoreBundle(config.databasePath);
+  const bootstrap = openSqliteLeaseBootstrap(config.databasePath);
+  const lease = new InstanceLeaseController(bootstrap.lease, config.instanceLease, logger);
+  let stores: ReturnType<typeof bootstrap.complete> | null = null;
+  let leaseAcquired = false;
   try {
-    const lease = new InstanceLeaseController(stores.lease, config.instanceLease, logger);
-    const runtime = createBridgeRuntime(config, stores, logger, { codex, claude, pi });
+    lease.acquire();
+    leaseAcquired = true;
+    const completedStores = bootstrap.complete(lease.writeFence());
+    stores = completedStores;
+    if (!lease.renewNow()) throw new Error("Bridge database lease expired during schema migration");
+    const runtime = createBridgeRuntime(config, completedStores, logger, { codex, claude, pi });
     const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, lark, bus, sessionOperations, reconciler, promptRun } = runtime;
     return new ManagedBridgeRuntime({
       reconcileIntervalMs: config.reconcileIntervalMs,
-      store: stores.lifecycle,
+      store: completedStores.lifecycle,
       lease,
       primaryToolGateway,
       sqliteIntegrity,
@@ -77,7 +84,7 @@ export async function createManagedBridgeRuntime(options: {
       instanceTurns,
       instanceWork,
       createHealthServer: () => startHealthServer({
-        ...config.http, store: stores.health, herdr, lark, projects: config.projects, lease,
+        ...config.http, store: completedStores.health, herdr, lark, projects: config.projects, lease,
         workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator,
         inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() },
         sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime,
@@ -89,9 +96,11 @@ export async function createManagedBridgeRuntime(options: {
       coordinator, paneRetention, externalTurns,
       ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}),
       ...(onFatalStop ? { onFatalStop } : {}), logger
-    });
+    }, { leaseAlreadyAcquired: true });
   } catch (error) {
-    stores.lifecycle.close();
+    if (leaseAcquired) lease.release();
+    if (stores) stores.lifecycle.close();
+    else bootstrap.close();
     throw error;
   }
 }
@@ -100,10 +109,16 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<BridgeRuntimeShutdownOutcome> | null = null;
   private readonly lifecycle = new RuntimeLifecycleLedger();
-  private leaseAcquired = false;
   private writeFenceActive = false;
 
-  constructor(private readonly dependencies: ManagedBridgeRuntimeDependencies) {}
+  private leaseAcquired: boolean;
+
+  constructor(
+    private readonly dependencies: ManagedBridgeRuntimeDependencies,
+    options: { leaseAlreadyAcquired?: boolean } = {}
+  ) {
+    this.leaseAcquired = options.leaseAlreadyAcquired ?? false;
+  }
 
   start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
@@ -121,8 +136,10 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
   private async performStart(): Promise<void> {
     const d = this.dependencies;
     try {
-      d.lease.acquire();
-      this.leaseAcquired = true;
+      if (!this.leaseAcquired) {
+        d.lease.acquire();
+        this.leaseAcquired = true;
+      }
       const writeFence = d.lease.writeFence();
       d.store.activateWriteFence(writeFence.ownerId, writeFence.fencingToken);
       this.writeFenceActive = true;

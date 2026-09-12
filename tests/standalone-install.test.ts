@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ describe("standalone installer", () => {
   const installScript = readFileSync("install.sh", "utf8");
   const lifecycleScript = readFileSync("scripts/swarm-service.sh", "utf8");
   const productionBuildScript = readFileSync("scripts/stage-production-runtime.sh", "utf8");
+  const packagedInstallScript = readFileSync("scripts/install-packaged-release.sh", "utf8");
   const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
     engines: { node: string };
     scripts: Record<string, string>;
@@ -76,13 +77,17 @@ describe("standalone installer", () => {
     expect(build).toBeGreaterThan(npmInstall);
     expect(stage).toBeGreaterThan(build);
     expect(lifecycle).toBeGreaterThan(stage);
-    expect(installScript).toContain('SWARM_RUNTIME_ROOT="$(readlink -f "$STATE_DIR/current")"');
+    expect(installScript).toContain('SWARM_RUNTIME_ROOT="$(bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR")"');
+    expect(installScript).toContain('SWARM_RELEASE_CANDIDATE="$SWARM_RUNTIME_ROOT"');
     expect(productionBuildScript).toContain('npm --prefix "$STAGING" ci --omit=dev');
     expect(productionBuildScript).toContain('RELEASE_KEY="$BUILD_ID-$GIT_COMMIT"');
+    expect(productionBuildScript).not.toContain('$STATE_DIR/current');
+    expect(packagedInstallScript).toContain('SWARM_RELEASE_CANDIDATE="$RELEASE"');
+    expect(packagedInstallScript).not.toContain('mv -Tf "$LINK" "$STATE_DIR/current"');
     expect(productionBuildScript).not.toContain('npm --prefix "$ROOT" prune');
   });
 
-  it("retains the active, previous, and a bounded number of production releases", () => {
+  it("stages a candidate without changing the active release or pruning inactive releases", () => {
     const fixture = mkdtempSync(join(tmpdir(), "standalone-retention-"));
     const bin = join(fixture, "bin");
     const state = join(fixture, "state");
@@ -104,8 +109,10 @@ describe("standalone installer", () => {
     });
 
     expect(result.status, result.stderr).toBe(0);
-    const active = result.stdout.trim().split("\n").at(-1)!;
-    expect(readdirSync(releases).sort()).toEqual([names[0]!, names[4]!, active.split("/").at(-1)!].sort());
+    const candidate = result.stdout.trim().split("\n").at(-1)!;
+    expect(existsSync(join(state, "current"))).toBe(true);
+    expect(readlinkSync(join(state, "current"))).toBe(join(releases, names[0]!));
+    expect(readdirSync(releases).sort()).toEqual([...names, candidate.split("/").at(-1)!].sort());
   });
 
   it("guards lifecycle installation until private configuration is complete", () => {
@@ -169,7 +176,7 @@ describe("standalone installer", () => {
     writeFileSync(join(config, "projects.json"), "{}\n");
     executable(join(bin, "npm"), "#!/bin/sh\nprintf 'npm %s\\n' \"$*\" >> \"$INSTALL_CALLS\"\n");
     executable(join(bin, "node"), "#!/bin/sh\nprintf 'node %s\\n' \"$*\" >> \"$INSTALL_CALLS\"\n");
-    executable(join(bin, "bash"), "#!/bin/sh\nprintf 'bash %s\\n' \"$*\" >> \"$INSTALL_CALLS\"\nmkdir -p \"$SWARM_STATE_DIR\"\nln -sfn \"$INSTALL_RUNTIME_ROOT\" \"$SWARM_STATE_DIR/current\"\n");
+    executable(join(bin, "bash"), "#!/bin/sh\nprintf 'bash %s\\n' \"$*\" >> \"$INSTALL_CALLS\"\nprintf '%s\\n' \"$INSTALL_RUNTIME_ROOT\"\n");
 
     const result = spawnSync("/bin/bash", ["install.sh"], {
       encoding: "utf8",

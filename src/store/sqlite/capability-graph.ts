@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { SqliteApprovalStore } from "./approval-store.js";
 import { SqliteBindingLifecycleStore } from "./binding-store.js";
+import { SqliteBindingThreadAliasStore } from "./binding-thread-alias-store.js";
 import { SqliteBindingProjectionStore } from "./binding-projection-store.js";
 import { SqliteBindingSessionCapabilityStore } from "./binding-session-capability-store.js";
 import { SqliteCardContextStore } from "./card-context-store.js";
@@ -25,6 +26,7 @@ import { SqliteSessionOperationStore } from "./session-operation-store.js";
 import { SqliteTurnControlStore } from "./turn-control-store.js";
 import { SqliteWorkerCardDisplayStore } from "./worker-card-display-store.js";
 import { SqliteWorkerTurnStore } from "./worker-turn-store.js";
+import { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
 import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./workflow-stores.js";
 import { SqlitePaneControlCapabilityStore, SqliteTurnControlCapabilityStore } from "./control-capability-store.js";
 import { SqliteDeliveryRecoveryCapabilityStore, SqliteExternalTurnCapabilityStore, SqliteInboundRoutingCapabilityStore, SqliteIngressCapabilityStore, SqliteStartupRecoveryCapabilityStore, SqliteStartupViewCapabilityStore } from "./recovery-capability-store.js";
@@ -47,17 +49,22 @@ export class SqliteCapabilityGraph {
   readonly inboundProjects: SqliteInboundProjectStore;
   readonly paneOperations: SqlitePaneOperationStore;
   readonly bindings: SqliteBindingLifecycleStore;
+  readonly threadAliases: SqliteBindingThreadAliasStore;
   readonly bindingProjections: SqliteBindingProjectionStore;
   readonly instanceOperations: SqliteInstanceOperationStore;
   readonly turnControls: SqliteTurnControlStore;
   readonly workerCardDisplays: SqliteWorkerCardDisplayStore;
+  readonly workerThreads: SqliteWorkerSessionThreadStore;
 
-  constructor(path: string) {
-    this.context = new SqliteContext(path);
+  constructor(pathOrContext: string | SqliteContext, leaseStore?: SqliteLeaseStore) {
+    this.context = typeof pathOrContext === "string" ? new SqliteContext(pathOrContext) : pathOrContext;
     this.database = this.context.database;
+    this.leases = leaseStore ?? new SqliteLeaseStore(this.context);
     this.migrations = new SqliteMigrations(this.context);
     this.migrations.run();
     this.bindings = new SqliteBindingLifecycleStore(this.context, (bindingId, reason) => this.cardContexts.invalidateBindingWorkerContexts(bindingId, reason));
+    this.threadAliases = new SqliteBindingThreadAliasStore(this.context);
+    this.workerThreads = new SqliteWorkerSessionThreadStore(this.context);
     this.operations = new SqliteOperationsStore(this.context);
     this.commandIntents = new SqliteCommandIntentStore(this.context);
     this.sessionOperations = new SqliteSessionOperationStore(this.context, (id) => this.bindings.getBinding(id));
@@ -78,7 +85,7 @@ export class SqliteCapabilityGraph {
       saveRunCard: (view) => this.projections.saveRunCard(view),
       persistBindingPatch: (id, patch) => this.bindings.persistBindingPatch(id, patch),
       invalidateCardContexts: (targets) => this.cardContexts.invalidateCardContexts(targets)
-    });
+    }, this.threadAliases, this.workerThreads);
     this.bindingProjections = new SqliteBindingProjectionStore(this.context, this.bindings, this.projections, {
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
       listRunCardsByPhases: (bindingId, phases) => this.projections.listRunCardsByPhases(bindingId, phases)
@@ -106,7 +113,6 @@ export class SqliteCapabilityGraph {
       getAgentInstance: (id) => this.instances.getAgentInstance(id),
       getWorkspaceLease: (id) => this.instances.getWorkspaceLease(id),
       getBinding: (id) => this.bindings.getBinding(id),
-      listWorkerInstancesByParent: (input) => this.instances.listWorkerInstancesByParent(input),
       loadWorkerTurnCard: (id) => this.workerTurns.loadWorkerTurnCard(id),
       saveWorkerTurnCard: (view) => this.workerTurns.saveWorkerTurnCard(view),
       loadTopicView: (id) => this.projections.loadTopicView(id),
@@ -114,7 +120,9 @@ export class SqliteCapabilityGraph {
       loadRunCard: (id) => this.projections.loadRunCard(id),
       saveRunCard: (view) => this.projections.saveRunCard(view),
       reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
-      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
+      enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
+      loadWorkerSessionThread: (workerId, generation) => this.workerThreads.loadBySession(workerId, generation),
+      reserveWorkerSessionThread: (input) => this.outbox.reserveWorkerSessionThread(input)
     });
     this.workerCardDisplays = new SqliteWorkerCardDisplayStore(this.context, {
       loadWorkerMainProjectionSource: (workerId, generation) => this.cardContexts.loadWorkerMainProjectionSource(workerId, generation),
@@ -137,13 +145,12 @@ export class SqliteCapabilityGraph {
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input)
     });
     this.approvals = new SqliteApprovalStore(this.context);
-    this.leases = new SqliteLeaseStore(this.context);
   }
 
   capabilityModules() {
     const prompt = new SqlitePromptCapabilityStore(this.prompts, this.bindings, this.bindingProjections, this.projections, this.operations);
     const bindingSession = new SqliteBindingSessionCapabilityStore(this.bindings, this.bindingProjections, this.prompts, this.projections, this.inboundProjects, this.paneOperations, this.operations);
-    const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.inboundProjects);
+    const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.threadAliases, this.inboundProjects, this.workerThreads);
     const ingress = new SqliteIngressCapabilityStore(routing, this.prompts, this.bindings, this.bindingProjections, this.projections, this.operations);
     const paneControl = new SqlitePaneControlCapabilityStore(this.paneOperations, this.bindings, this.prompts, this.projections, this.sessionOperations, this.operations);
     return {
@@ -184,8 +191,8 @@ export class SqliteCapabilityGraph {
       startupViews: new SqliteStartupViewCapabilityStore(this.bindings, this.prompts, this.projections, this.outbox),
       deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.projections, this.operations),
       externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.bindings),
-      instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
-      outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
+      instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations, this.outbox),
+      outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.threadAliases, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox
     };
   }

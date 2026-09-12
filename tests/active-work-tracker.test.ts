@@ -14,4 +14,20 @@ describe("ActiveWorkTracker", () => {
     await Promise.all([pending, settled]);
     expect(tracker.size).toBe(0);
   });
+
+  it("keeps settling work registered by an already tracked operation", async () => {
+    const tracker = new ActiveWorkTracker();
+    let releaseChild!: () => void;
+    const parent = tracker.track(Promise.resolve().then(() => {
+      tracker.track(new Promise<void>((resolve) => { releaseChild = resolve; }));
+    }));
+    let settled = false;
+    const draining = tracker.settle().then(() => { settled = true; });
+    await parent;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseChild();
+    await draining;
+    expect(tracker.size).toBe(0);
+  });
 });

@@ -7,6 +7,7 @@ import type { InstanceStore } from "../domain/ports/instance.js";
 import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
 import { PrimaryToolBroker } from "./primary-tool-broker.js";
 import { safeLogError } from "./safe-error.js";
+import { ActiveWorkTracker } from "./active-work-tracker.js";
 import type { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
@@ -24,6 +25,8 @@ export interface PrimaryToolGatewayOptions { idleTimeoutMs?: number; maxConnecti
 export class PrimaryToolGateway {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
+  private readonly handlers = new ActiveWorkTracker();
+  private accepting = false;
 
   constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}, private readonly workerCards?: Pick<WorkerCardDisplayWorkflow, "show">) {}
 
@@ -44,22 +47,29 @@ export class PrimaryToolGateway {
     this.server = server;
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.off("error", reject); resolve(); }); });
     await chmod(this.socketPath, 0o600);
+    this.accepting = true;
   }
 
   async stop(): Promise<void> {
+    this.accepting = false;
     const server = this.server; this.server = null;
     if (server) {
       const closed = new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       for (const socket of this.sockets) socket.destroy();
       await closed;
     }
+    await this.handlers.settle();
     await rm(this.socketPath, { force: true });
   }
 
   private accept(socket: Socket): void {
+    if (!this.accepting) { socket.destroy(); return; }
     const maxConnections = Math.max(1, this.options.maxConnections ?? DEFAULT_MAX_CONNECTIONS);
     if (this.sockets.size >= maxConnections) { socket.destroy(); return; }
     this.sockets.add(socket);
+    socket.on("error", (error) => {
+      this.logger.debug({ event: "primary-tool-socket-error", err: safeLogError(error), outcome: "closed" }, "Primary tool client socket closed with an error");
+    });
     const idleTimer = setTimeout(() => socket.destroy(), Math.max(1, this.options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS));
     idleTimer.unref();
     socket.once("close", () => { clearTimeout(idleTimer); this.sockets.delete(socket); });
@@ -76,9 +86,10 @@ export class PrimaryToolGateway {
       clearTimeout(idleTimer);
       socket.removeListener("data", onData);
       socket.pause();
-      void this.handle(input.slice(0, newline)).then((result) => socket.end(`${JSON.stringify({ ok: true, result })}\n`), (error) => {
+      const handling = this.handlers.track(this.handle(input.slice(0, newline)));
+      void handling.then((result) => { if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: true, result })}\n`); }, (error) => {
         this.logger.warn({ event: "primary-tool-call-failed", err: safeLogError(error), outcome: "rejected" }, "Primary tool call failed");
-        socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
+        if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
       });
     };
     socket.on("data", onData);

@@ -5,10 +5,11 @@ import type { PromptState } from "./prompt.js";
 export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
 export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
-export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
+export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, BindingThreadAlias, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboundWorkClass, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
-export type { InboundDispatcherDiagnostics, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, PromptWorkerDiagnostics, ReconciliationDiagnostics, SessionOperationDispatcherDiagnostics, StartupRecoveryDiagnostics } from "../runtime/diagnostics.js";
+export type { InboundDispatcherDiagnostics, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, PromptWorkerDiagnostics, ReconciliationDiagnostics, ReconciliationFailure, ReconciliationPassResult, SessionOperationDispatcherDiagnostics, StartupRecoveryDiagnostics } from "../runtime/diagnostics.js";
 export type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../adapters/lark-ingress.js";
+export type { WorkerSessionThread, WorkerSessionThreadMode, WorkerSessionThreadState } from "./worker-session-thread.js";
 
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PaneCloseOperationState = "executing" | "uncertain";
@@ -170,6 +171,7 @@ export interface OperationalSummary {
     oldestAcceptedAt: string | null;
     oldestAcceptedAgeSeconds: number | null;
   };
+  workerThreads: Record<import("./worker-session-thread.js").WorkerSessionThreadState, number>;
   outbound: Record<OutboundReplyState, number>;
   pendingOutbox: number;
   deadLetters: number;
@@ -177,6 +179,7 @@ export interface OperationalSummary {
   unresolvedDeadLetters: number;
   unresolvedDeadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
   eligibleDeadLetterRecoveries: number;
+  deliveryRecoveries: Record<"unresolved" | "replacement_pending" | "recovered" | "dismissed", number>;
   oldestPendingAt: string | null;
   outboxLanes: {
     pending: number; eligible: number; blocked: number; nextAttemptAt: string | null;

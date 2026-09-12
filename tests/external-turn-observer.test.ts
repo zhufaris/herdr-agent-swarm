@@ -6,6 +6,7 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
+import { MAX_TURN_OUTPUT_CHARS, TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
 
 describe("ExternalTurnObserver", () => {
   it("opens only the active binding attached to a targeted Pane", async () => {
@@ -184,6 +185,33 @@ describe("ExternalTurnObserver", () => {
     expect(wakePrompt).toHaveBeenCalledWith("b1");
     await observer.stop();
     store.close();
+  });
+
+  it("bounds adopted-turn fallback output and lets a trusted final answer replace it", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const startedAt = "2026-09-11T00:00:00.000Z";
+    const observations: TraexTranscriptObservation[] = [
+      { turnId: "turn-large", freshTurnStart: true, requestText: "large", answerDelta: "x".repeat(40_000), turnLifecycle: { turnId: "turn-large", state: "active", startedAt } },
+      { turnId: "turn-large", answerDelta: "y".repeat(40_000) },
+      { turnId: "turn-large", answerDelta: "z".repeat(40_000) },
+      { turnId: "turn-large", answerDelta: "", turnLifecycle: { turnId: "turn-large", state: "completed", startedAt } },
+      { turnId: "turn-final", freshTurnStart: true, requestText: "authoritative", answerDelta: "a".repeat(40_000), turnLifecycle: { turnId: "turn-final", state: "active", startedAt: "2026-09-11T00:01:00.000Z" } },
+      { turnId: "turn-final", answerDelta: "b".repeat(40_000), turnLifecycle: { turnId: "turn-final", state: "completed", startedAt: "2026-09-11T00:01:00.000Z", finalAnswer: "trusted final" } },
+      { answerDelta: "" }
+    ];
+    let id = 0;
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }) }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => `external-${++id}` });
+
+    await observer.observe(store.getBinding("b1")!);
+    for (let index = 0; index < 7; index += 1) await observer.observe(store.getBinding("b1")!);
+
+    const fallback = store.loadRunCard("external-1")!.answer;
+    expect(fallback.length).toBeLessThanOrEqual(MAX_TURN_OUTPUT_CHARS);
+    expect(fallback.endsWith(TURN_OUTPUT_TRUNCATION_MARKER)).toBe(true);
+    expect(store.loadRunCard("external-2")).toMatchObject({ phase: "completed", answer: "trusted final" });
+    await observer.stop(); store.close();
   });
 
   it("does not reproject a superseding turn after its handed-off cursor completed it", async () => {

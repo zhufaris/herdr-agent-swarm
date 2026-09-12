@@ -62,12 +62,17 @@ export class BridgeRuntimeShutdown {
     }
     if (!context.signal.aborted && context.remainingMs() === 0) { expired = true; abort(new Error("bridge shutdown deadline exceeded")); }
     const writersSettled = Promise.all(writers.map(({ settled }) => settled));
-    if (!await settlesWithin(writersSettled, this.dependencies.abortSettlementMs ?? 1_000)) {
-      if (!context.signal.aborted) { expired = true; abort(new Error("bridge shutdown deadline exceeded")); }
-      const writerNames = writers.filter((writer) => !writer.isSettled()).map(({ component }) => component);
-      logger.error({ event: "bridge-shutdown-writers-unsettled", components: writerNames, outcome: "ownership_retained" }, "write-capable shutdown components did not settle; retaining SQLite ownership");
+    const allWritersSettled = await settlesWithin(writersSettled, this.dependencies.abortSettlementMs ?? 1_000);
+    if (!allWritersSettled && !context.signal.aborted) { expired = true; abort(new Error("bridge shutdown deadline exceeded")); }
+    const unsafeWriterNames = writers
+      .filter((writer) => !writer.isSettled() || failures.includes(writer.component))
+      .map(({ component }) => component);
+    if (unsafeWriterNames.length > 0) {
+      const failedWriters = unsafeWriterNames.filter((component) => failures.includes(component));
+      const unsettledWriters = unsafeWriterNames.filter((component) => !writers.find((writer) => writer.component === component)?.isSettled());
+      logger.error({ event: "bridge-shutdown-writers-unsafe", components: unsafeWriterNames, failedWriters, unsettledWriters, outcome: "ownership_retained" }, "write-capable shutdown components did not stop cleanly; retaining SQLite ownership");
       if (this.deadlineAbortTimer) clearTimeout(this.deadlineAbortTimer);
-      return { outcome: "ownership_retained", unsettledWriters: writerNames };
+      return { outcome: "ownership_retained", unsettledWriters: unsafeWriterNames };
     }
     if (this.deadlineAbortTimer) clearTimeout(this.deadlineAbortTimer);
     await stopSafely("writeFence", async () => { store.deactivateWriteFence(); }, logger);

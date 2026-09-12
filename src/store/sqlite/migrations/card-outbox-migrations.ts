@@ -1,7 +1,9 @@
 import { answerElementId } from "../../../domain/run-card-view.js";
 import { outboundLaneKeySql } from "../../outbox-lanes.js";
 import { canonicalizeAnswerPayload } from "../answer-payload.js";
+import { confirmDeliveryRecoveries } from "../delivery-recovery-evidence.js";
 import type { SqliteContext } from "../context.js";
+import { runForeignKeySafeRebuild } from "./foreign-key-safe-rebuild.js";
 
 export class CardOutboxMigrations {
   constructor(private readonly context: SqliteContext) {}
@@ -94,8 +96,7 @@ export class CardOutboxMigrations {
     if (schema?.sql.includes("'dismissed'") && schema.sql.includes("'stream_card_create'")) return;
     const columns = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
     const workerTurnId = columns.has("worker_turn_id") ? "worker_turn_id" : "NULL";
-    this.context.database.exec(`
-      PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;
+    runForeignKeySafeRebuild(this.context, "Outbound-state migration", () => this.context.database.exec(`
       CREATE TABLE outbound_replies_next(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), root_message_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -103,10 +104,8 @@ export class CardOutboxMigrations {
       INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, worker_turn_id, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at)
       SELECT id, idempotency_key, binding_id, prompt_id, ${workerTurnId}, view_version, card_sequence, selection_id, card_role, target_role, root_message_id, kind, payload, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, ${outboundLaneKeySql(workerTurnId, "NULL", "NULL")}, next_attempt_at, created_at, updated_at FROM outbound_replies;
       DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
-      CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); COMMIT; PRAGMA foreign_keys = ON;
-    `);
-    const violation = this.context.database.prepare("PRAGMA foreign_key_check").get();
-    if (violation) throw new Error(`Outbound-state migration produced a foreign-key violation: ${JSON.stringify(violation)}`);
+      CREATE INDEX outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at);
+    `));
   }
 
   ensureStreamingCardColumns(): void {
@@ -362,6 +361,174 @@ export class CardOutboxMigrations {
     } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
   }
 
+  ensureOutboundClaims(): void {
+    this.context.transaction(() => {
+      const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+      for (const [name, type] of [["claim_attempt_id", "TEXT"], ["claimed_fence", "INTEGER"], ["claimed_owner_id", "TEXT"], ["claimed_at", "TEXT"], ["first_claimed_at", "TEXT"], ["payload_hash", "TEXT"], ["projection_key", "TEXT"], ["snapshot_revision", "INTEGER NOT NULL DEFAULT 1"]]) {
+        if (!names.has(name!)) this.context.database.exec(`ALTER TABLE outbound_replies ADD COLUMN ${name} ${type}`);
+      }
+      const immutableClaim = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_immutable_claim'").get() as { sql: string } | undefined;
+      const groupTargets = names.has("target_chat_id") && names.has("thread_alias_id");
+      const workerTarget = names.has("worker_thread_id");
+      if (immutableClaim && (!immutableClaim.sql.includes("work_class") || groupTargets && !immutableClaim.sql.includes("target_chat_id") || workerTarget && !immutableClaim.sql.includes("worker_thread_id"))) this.context.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
+      const groupTargetColumns = groupTargets ? `target_chat_id, thread_alias_id, ${workerTarget ? "worker_thread_id, " : ""}` : "";
+      const groupTargetChanges = groupTargets ? `NEW.target_chat_id IS NOT OLD.target_chat_id OR NEW.thread_alias_id IS NOT OLD.thread_alias_id OR ${workerTarget ? "NEW.worker_thread_id IS NOT OLD.worker_thread_id OR " : ""}` : "";
+      this.context.database.exec(`
+        CREATE INDEX IF NOT EXISTS outbound_replies_projection_revision ON outbound_replies(projection_key, snapshot_revision DESC);
+        CREATE INDEX IF NOT EXISTS outbound_replies_claims ON outbound_replies(claim_attempt_id) WHERE claim_attempt_id IS NOT NULL;
+        CREATE TRIGGER IF NOT EXISTS outbound_replies_immutable_claim
+        BEFORE UPDATE OF payload, intent_json, intent_kind, renderer_revision, root_message_id, ${groupTargetColumns}kind, view_version, card_sequence, idempotency_key, lane_key, work_class, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, card_role, target_role, selection_id, stream_page_index, stream_element_id, snapshot_revision, first_claimed_at ON outbound_replies
+        WHEN OLD.first_claimed_at IS NOT NULL AND (
+          NEW.payload IS NOT OLD.payload OR NEW.intent_json IS NOT OLD.intent_json OR NEW.intent_kind IS NOT OLD.intent_kind OR NEW.renderer_revision IS NOT OLD.renderer_revision
+          OR NEW.root_message_id IS NOT OLD.root_message_id OR ${groupTargetChanges}NEW.kind IS NOT OLD.kind OR NEW.view_version IS NOT OLD.view_version OR NEW.card_sequence IS NOT OLD.card_sequence
+          OR NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.lane_key IS NOT OLD.lane_key OR NEW.work_class IS NOT OLD.work_class OR NEW.binding_id IS NOT OLD.binding_id OR NEW.prompt_id IS NOT OLD.prompt_id
+          OR NEW.worker_turn_id IS NOT OLD.worker_turn_id OR NEW.worker_id IS NOT OLD.worker_id OR NEW.worker_session_generation IS NOT OLD.worker_session_generation
+          OR NEW.card_role IS NOT OLD.card_role OR NEW.target_role IS NOT OLD.target_role OR NEW.selection_id IS NOT OLD.selection_id
+          OR NEW.stream_page_index IS NOT OLD.stream_page_index OR NEW.stream_element_id IS NOT OLD.stream_element_id
+          OR NEW.snapshot_revision IS NOT OLD.snapshot_revision OR NEW.first_claimed_at IS NOT OLD.first_claimed_at
+        ) BEGIN SELECT RAISE(ABORT, 'immutable_outbound_revision'); END;
+        CREATE TRIGGER IF NOT EXISTS outbound_replies_claim_delete
+        BEFORE DELETE ON outbound_replies WHEN OLD.claim_attempt_id IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'active_outbound_claim'); END;
+      `);
+    });
+  }
+
+  ensureDeliveryRecoveries(): void {
+    if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 31").get()) return;
+    this.context.transaction(() => {
+      this.context.database.exec(`
+        CREATE TABLE delivery_recoveries(
+          failed_reply_id TEXT PRIMARY KEY, snapshot_revision INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('unresolved','replacement_pending','recovered','dismissed')),
+          failure_class TEXT NOT NULL, http_status INTEGER, lark_error_code TEXT, reason TEXT NOT NULL,
+          action TEXT NOT NULL, replacement_reply_id TEXT, resolved_by_reply_id TEXT, resolved_message_id TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT
+        );
+        CREATE INDEX delivery_recoveries_state ON delivery_recoveries(state, created_at);
+        CREATE TRIGGER delivery_recoveries_dead_letter AFTER UPDATE OF state ON outbound_replies
+        WHEN NEW.state = 'dead_letter' AND OLD.state != 'dead_letter'
+        BEGIN
+          INSERT INTO delivery_recoveries(failed_reply_id, snapshot_revision, state, failure_class, http_status, lark_error_code, reason, action, created_at, updated_at)
+          VALUES (NEW.id, NEW.snapshot_revision, 'unresolved', COALESCE(NEW.failure_class, 'unknown'), NEW.http_status, NEW.lark_error_code, substr(COALESCE(NEW.error, 'Unknown failure'), 1, 500), 'blocked', NEW.updated_at, NEW.updated_at)
+          ON CONFLICT(failed_reply_id) DO UPDATE SET state = 'unresolved', action = 'blocked', replacement_reply_id = NULL,
+            resolved_by_reply_id = NULL, resolved_message_id = NULL, resolved_at = NULL, updated_at = excluded.updated_at;
+        END;
+        INSERT INTO delivery_recoveries(failed_reply_id, snapshot_revision, state, failure_class, http_status, lark_error_code, reason, action, created_at, updated_at)
+        SELECT o.id, o.snapshot_revision, 'unresolved', COALESCE(o.failure_class, 'legacy'), o.http_status, o.lark_error_code,
+          substr(COALESCE(o.error, 'Unknown legacy failure'), 1, 500),
+          CASE WHEN o.kind = 'card_update' AND q.action = 'released_newer_snapshot' THEN 'released_newer_snapshot' ELSE 'legacy_unproven' END,
+          COALESCE(o.dead_lettered_at, o.updated_at), o.updated_at
+        FROM outbound_replies o LEFT JOIN outbox_lane_quarantines q ON q.failed_reply_id = o.id
+        WHERE o.state = 'dead_letter';
+      `);
+      const delivered = this.context.database.prepare("SELECT id FROM outbound_replies WHERE state = 'delivered' ORDER BY delivery_order").all() as Array<{ id: string }>;
+      for (const reply of delivered) confirmDeliveryRecoveries(this.context, reply.id);
+      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (31)").run();
+    });
+  }
+
+  ensureAnswerRecoveryEvidence(): void {
+    if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 32").get()) return;
+    this.context.transaction(() => {
+      this.context.database.exec(`
+        CREATE TABLE answer_delivery_coverage(
+          reply_id TEXT PRIMARY KEY REFERENCES outbound_replies(id) ON DELETE CASCADE,
+          prompt_id TEXT NOT NULL, binding_generation INTEGER NOT NULL, page_index INTEGER NOT NULL,
+          source_start INTEGER NOT NULL, source_end INTEGER NOT NULL, source_hash TEXT NOT NULL
+        );
+        CREATE TABLE answer_recovery_links(
+          failed_reply_id TEXT PRIMARY KEY REFERENCES delivery_recoveries(failed_reply_id),
+          prompt_id TEXT NOT NULL, binding_generation INTEGER NOT NULL,
+          source_page_index INTEGER NOT NULL, replacement_page_index INTEGER NOT NULL,
+          source_start INTEGER NOT NULL, source_end INTEGER NOT NULL, source_hash TEXT NOT NULL
+        );
+        CREATE INDEX answer_recovery_links_page ON answer_recovery_links(prompt_id, binding_generation, replacement_page_index);
+        CREATE TABLE answer_recovery_candidates(
+          failed_reply_id TEXT NOT NULL REFERENCES answer_recovery_links(failed_reply_id),
+          reply_id TEXT NOT NULL REFERENCES outbound_replies(id) ON DELETE CASCADE,
+          PRIMARY KEY(failed_reply_id, reply_id)
+        );
+        CREATE INDEX answer_recovery_candidates_reply ON answer_recovery_candidates(reply_id);
+        CREATE TRIGGER answer_delivery_coverage_immutable BEFORE UPDATE ON answer_delivery_coverage
+        BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;
+        CREATE TRIGGER answer_delivery_coverage_before_claim BEFORE INSERT ON answer_delivery_coverage
+        WHEN EXISTS (SELECT 1 FROM outbound_replies WHERE id = NEW.reply_id AND (first_claimed_at IS NOT NULL OR state != 'pending'))
+        BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;
+        CREATE TRIGGER answer_recovery_candidate_before_claim BEFORE INSERT ON answer_recovery_candidates
+        WHEN EXISTS (SELECT 1 FROM outbound_replies WHERE id = NEW.reply_id AND (first_claimed_at IS NOT NULL OR state != 'pending'))
+        BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;
+        INSERT INTO schema_migrations(version) VALUES (32);
+      `);
+    });
+  }
+
+  ensureOutboundWorkClass(): void {
+    const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+    const applied = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 33").get();
+    if (names.has("work_class") && applied) return;
+    if (!names.has("work_class")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN work_class TEXT NOT NULL DEFAULT 'live' CHECK(work_class IN ('live','history'))");
+    this.context.database.exec(`UPDATE outbound_replies SET work_class = 'history' WHERE idempotency_key LIKE 'main-card:rebuild:%' OR idempotency_key LIKE 'answer-static-rebuild:%' OR idempotency_key LIKE 'stream-rebuild:%' OR idempotency_key LIKE 'startup-lite:%' OR idempotency_key LIKE 'startup-lite-content:%'`);
+    this.context.database.exec("CREATE INDEX IF NOT EXISTS outbound_replies_work_class_delivery ON outbound_replies(work_class, state, delivery_order)");
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (33)").run();
+  }
+
+  ensureGroupCardCreates(): void {
+    const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_replies'").get() as { sql: string } | undefined;
+    const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (schema?.sql.includes("'group_card_create'") && names.has("target_chat_id") && names.has("thread_alias_id")) { this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (34)").run(); return; }
+    runForeignKeySafeRebuild(this.context, "Group-card migration", () => this.context.database.exec(`
+      DROP TRIGGER IF EXISTS answer_delivery_coverage_before_claim;
+      DROP TRIGGER IF EXISTS answer_recovery_candidate_before_claim;
+      CREATE TABLE outbound_replies_next(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, stream_page_index INTEGER, stream_element_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), thread_alias_id TEXT REFERENCES binding_thread_aliases(id), target_chat_id TEXT, work_class TEXT NOT NULL DEFAULT 'live' CHECK(work_class IN ('live','history')), root_message_id TEXT,
+        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','group_card_create','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, intent_kind TEXT, intent_json TEXT, renderer_revision INTEGER, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT, claim_attempt_id TEXT, claimed_fence INTEGER, claimed_owner_id TEXT, claimed_at TEXT, first_claimed_at TEXT, payload_hash TEXT, projection_key TEXT, snapshot_revision INTEGER NOT NULL DEFAULT 1,
+        CHECK((kind = 'group_card_create' AND root_message_id IS NULL AND target_chat_id IS NOT NULL AND thread_alias_id IS NOT NULL) OR (kind != 'group_card_create' AND root_message_id IS NOT NULL AND target_chat_id IS NULL AND thread_alias_id IS NULL))
+      );
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, thread_alias_id, target_chat_id, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at, failure_class, http_status, lark_error_code, auto_recovery_count, dead_lettered_at, claim_attempt_id, claimed_fence, claimed_owner_id, claimed_at, first_claimed_at, payload_hash, projection_key, snapshot_revision)
+      SELECT id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, NULL, NULL, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at, failure_class, http_status, lark_error_code, auto_recovery_count, dead_lettered_at, claim_attempt_id, claimed_fence, claimed_owner_id, claimed_at, first_claimed_at, payload_hash, projection_key, snapshot_revision FROM outbound_replies;
+      DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (34);
+    `));
+    this.ensureOutboundDeliveryOrder(); this.ensureOutboundLaneKey(); this.ensureOutboundFailureMetadata(); this.ensureTypedDeliveryIntents(); this.ensureOutboundClaims(); this.ensureDeliveryRecoveryTrigger(); this.ensureQueryIndexes();
+    if (this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'answer_delivery_coverage'").get()) this.context.database.exec(`CREATE TRIGGER IF NOT EXISTS answer_delivery_coverage_before_claim BEFORE INSERT ON answer_delivery_coverage WHEN EXISTS (SELECT 1 FROM outbound_replies WHERE id = NEW.reply_id AND (first_claimed_at IS NOT NULL OR state != 'pending')) BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;`);
+    if (this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'answer_recovery_candidates'").get()) this.context.database.exec(`CREATE TRIGGER IF NOT EXISTS answer_recovery_candidate_before_claim BEFORE INSERT ON answer_recovery_candidates WHEN EXISTS (SELECT 1 FROM outbound_replies WHERE id = NEW.reply_id AND (first_claimed_at IS NOT NULL OR state != 'pending')) BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;`);
+    this.context.database.exec(`CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); CREATE INDEX IF NOT EXISTS outbound_replies_work_class_delivery ON outbound_replies(work_class, state, delivery_order); CREATE INDEX IF NOT EXISTS outbound_replies_worker_pending ON outbound_replies(worker_turn_id, state) WHERE worker_turn_id IS NOT NULL; CREATE INDEX IF NOT EXISTS outbound_replies_worker_stream ON outbound_replies(worker_turn_id, kind, stream_page_index, selection_id, delivery_order DESC) WHERE worker_turn_id IS NOT NULL AND state IN ('pending','delivered','dead_letter');`);
+    this.ensureOutboxLaneHeads();
+  }
+
+  ensureWorkerThreadTargets(): void {
+    const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_replies'").get() as { sql: string } | undefined;
+    const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (names.has("worker_thread_id") && schema?.sql.includes("worker_thread_id IS NOT NULL")) {
+      this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (36)").run();
+      this.ensureOutboundClaims();
+      return;
+    }
+    runForeignKeySafeRebuild(this.context, "Worker-thread outbox migration", () => this.context.database.exec(`
+      DROP TRIGGER IF EXISTS answer_delivery_coverage_before_claim;
+      DROP TRIGGER IF EXISTS answer_recovery_candidate_before_claim;
+      CREATE TABLE outbound_replies_next(
+        id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, stream_page_index INTEGER, stream_element_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), thread_alias_id TEXT REFERENCES binding_thread_aliases(id), worker_thread_id TEXT REFERENCES worker_session_threads(id), target_chat_id TEXT, work_class TEXT NOT NULL DEFAULT 'live' CHECK(work_class IN ('live','history')), root_message_id TEXT,
+        kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','group_card_create','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, intent_kind TEXT, intent_json TEXT, renderer_revision INTEGER, state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0, error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT, claim_attempt_id TEXT, claimed_fence INTEGER, claimed_owner_id TEXT, claimed_at TEXT, first_claimed_at TEXT, payload_hash TEXT, projection_key TEXT, snapshot_revision INTEGER NOT NULL DEFAULT 1,
+        CHECK((kind = 'group_card_create' AND root_message_id IS NULL AND target_chat_id IS NOT NULL AND ((thread_alias_id IS NOT NULL AND worker_thread_id IS NULL) OR (thread_alias_id IS NULL AND worker_thread_id IS NOT NULL))) OR (kind != 'group_card_create' AND root_message_id IS NOT NULL AND target_chat_id IS NULL AND thread_alias_id IS NULL AND worker_thread_id IS NULL))
+      );
+      INSERT INTO outbound_replies_next(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, thread_alias_id, worker_thread_id, target_chat_id, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at, failure_class, http_status, lark_error_code, auto_recovery_count, dead_lettered_at, claim_attempt_id, claimed_fence, claimed_owner_id, claimed_at, first_claimed_at, payload_hash, projection_key, snapshot_revision)
+      SELECT id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, thread_alias_id, NULL, target_chat_id, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, state, attempt_count, error, delivered_message_id, card_id_checkpoint, delivery_order, lane_key, next_attempt_at, created_at, updated_at, failure_class, http_status, lark_error_code, auto_recovery_count, dead_lettered_at, claim_attempt_id, claimed_fence, claimed_owner_id, claimed_at, first_claimed_at, payload_hash, projection_key, snapshot_revision FROM outbound_replies;
+      DROP TABLE outbound_replies; ALTER TABLE outbound_replies_next RENAME TO outbound_replies;
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (36);
+    `));
+    this.ensureOutboundDeliveryOrder(); this.ensureOutboundLaneKey(); this.ensureOutboundFailureMetadata(); this.ensureTypedDeliveryIntents(); this.ensureOutboundClaims(); this.ensureDeliveryRecoveryTrigger(); this.ensureQueryIndexes();
+    if (this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'answer_delivery_coverage'").get()) this.context.database.exec(`CREATE TRIGGER IF NOT EXISTS answer_delivery_coverage_before_claim BEFORE INSERT ON answer_delivery_coverage WHEN EXISTS (SELECT 1 FROM outbound_replies WHERE id = NEW.reply_id AND (first_claimed_at IS NOT NULL OR state != 'pending')) BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;`);
+    if (this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'answer_recovery_candidates'").get()) this.context.database.exec(`CREATE TRIGGER IF NOT EXISTS answer_recovery_candidate_before_claim BEFORE INSERT ON answer_recovery_candidates WHEN EXISTS (SELECT 1 FROM outbound_replies WHERE id = NEW.reply_id AND (first_claimed_at IS NOT NULL OR state != 'pending')) BEGIN SELECT RAISE(ABORT, 'immutable_answer_coverage'); END;`);
+    this.context.database.exec(`CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, next_attempt_at, created_at); CREATE INDEX IF NOT EXISTS outbound_replies_work_class_delivery ON outbound_replies(work_class, state, delivery_order); CREATE INDEX IF NOT EXISTS outbound_replies_worker_pending ON outbound_replies(worker_turn_id, state) WHERE worker_turn_id IS NOT NULL; CREATE INDEX IF NOT EXISTS outbound_replies_worker_stream ON outbound_replies(worker_turn_id, kind, stream_page_index, selection_id, delivery_order DESC) WHERE worker_turn_id IS NOT NULL AND state IN ('pending','delivered','dead_letter');`);
+    this.ensureOutboxLaneHeads();
+  }
+
+  private ensureDeliveryRecoveryTrigger(): void {
+    this.context.database.exec(`CREATE TRIGGER IF NOT EXISTS delivery_recoveries_dead_letter AFTER UPDATE OF state ON outbound_replies WHEN NEW.state = 'dead_letter' AND OLD.state != 'dead_letter' BEGIN INSERT INTO delivery_recoveries(failed_reply_id, snapshot_revision, state, failure_class, http_status, lark_error_code, reason, action, created_at, updated_at) VALUES (NEW.id, NEW.snapshot_revision, 'unresolved', COALESCE(NEW.failure_class, 'unknown'), NEW.http_status, NEW.lark_error_code, substr(COALESCE(NEW.error, 'Unknown failure'), 1, 500), 'blocked', NEW.updated_at, NEW.updated_at) ON CONFLICT(failed_reply_id) DO UPDATE SET state = 'unresolved', action = 'blocked', replacement_reply_id = NULL, resolved_by_reply_id = NULL, resolved_message_id = NULL, resolved_at = NULL, updated_at = excluded.updated_at; END;`);
+  }
+
   ensureOutboundFailureMetadata(): void {
     const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!names.has("failure_class")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown'))");
@@ -485,10 +652,10 @@ export class CardOutboxMigrations {
     if (!names.has("renderer_revision")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN renderer_revision INTEGER");
     this.context.database.exec(`
       CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert AFTER INSERT ON outbound_replies WHEN NEW.intent_json IS NULL BEGIN
-        UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload), renderer_revision = 1 WHERE id = NEW.id;
+        UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload), renderer_revision = 1 WHERE id = NEW.id;
       END;
       CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_payload_update AFTER UPDATE OF payload ON outbound_replies BEGIN
-        UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload), renderer_revision = 1 WHERE id = NEW.id;
+        UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload), renderer_revision = 1 WHERE id = NEW.id;
       END;
     `);
     this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (29)").run();

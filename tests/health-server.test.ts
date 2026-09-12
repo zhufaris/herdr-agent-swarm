@@ -62,6 +62,22 @@ describe("health server", () => {
     expect(body.reconciliation.bindingRuntime.error).toHaveLength(500);
   });
 
+  it("degrades status for a failed Binding reconciliation pass without changing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      bindingRuntime: { snapshot: () => ({ ...reconciliationSnapshot, lastOutcome: "failed" as const, lastFailures: [{ workspaceId: "w1", message: "discovery unavailable" }] }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" }, reconciliation: { bindingRuntime: { lastOutcome: "failed", lastFailures: [{ workspaceId: "w1" }] } }
+    });
+  });
+
   it("reports every readiness component and exposes a safe operational status", async () => {
     store = new SqliteBindingStore(":memory:");
     const projects = [{ id: "missing", displayName: "Missing", description: "Missing", workspaceId: "w1", cwd: "/definitely/missing/project" }];

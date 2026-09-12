@@ -378,6 +378,31 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("retries a failed workspace immediately while keeping successful workspaces in cooldown", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const listPanes = vi.fn(async (workspaceId: string) => {
+      if (workspaceId === "w1" && listPanes.mock.calls.filter(([id]) => id === "w1").length === 1) throw new Error("offline");
+      return [];
+    });
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [
+        { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+        { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
+      ],
+      store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
+    });
+
+    await reconciler.requestReconciliation(["w1", "w2"]);
+    await reconciler.requestReconciliation(["w2"]);
+    await reconciler.requestReconciliation(["w1"]);
+
+    expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(["w1", "w2", "w1"]);
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 2, successCount: 1, failureCount: 1, coalescedRequestCount: 1, lastOutcome: "succeeded", lastFailures: [] });
+    store.close();
+  });
+
   it("records a failed physical reconciliation without swallowing the error", async () => {
     const store = new SqliteBindingStore(":memory:");
     vi.spyOn(store, "listBindingsByState").mockImplementation(() => { throw new Error("scan failed"); });
@@ -398,11 +423,38 @@ describe("HerdrRuntimeReconciler", () => {
     const reconciler = fixture(store, { listPanes } as unknown as HerdrPort, undefined, logger);
 
     await reconciler.reconcile();
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 1, successCount: 0, failureCount: 1, lastOutcome: "failed", lastFailures: [{ workspaceId: "w1", message: "offline" }] });
     await reconciler.reconcile();
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 2, successCount: 0, failureCount: 2, lastOutcome: "failed" });
     await reconciler.reconcile();
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 3, successCount: 1, failureCount: 2, lastOutcome: "succeeded", lastFailures: [] });
 
     expect(warnings.filter((value) => (value as { event?: string }).event === "workspace-reconciliation-failed")).toHaveLength(1);
     expect(infos.filter((value) => (value as { event?: string }).event === "workspace-reconciliation-recovered")).toHaveLength(1);
+    store.close();
+  });
+
+  it("converges healthy workspaces while reporting a partial discovery failure", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const listPanes = vi.fn(async (workspaceId: string) => {
+      if (workspaceId === "w1") throw new Error("workspace one offline");
+      return [];
+    });
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [
+        { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+        { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
+      ],
+      store, herdr: { listPanes } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
+    });
+
+    await expect(reconciler.reconcile()).resolves.toBeUndefined();
+
+    expect(listPanes).toHaveBeenCalledWith("w1");
+    expect(listPanes).toHaveBeenCalledWith("w2");
+    expect(reconciler.snapshot()).toMatchObject({ successCount: 0, failureCount: 1, lastOutcome: "failed", lastFailures: [{ workspaceId: "w1", message: "workspace one offline" }] });
     store.close();
   });
 

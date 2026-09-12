@@ -464,13 +464,14 @@ describe("instance messaging", () => {
     expect(scheduler.snapshot()).toMatchObject({ activeDispatchWorkers: 0, lastFailure: "driver crashed" });
   });
 
-  it("detaches an in-flight driver at the shutdown deadline without later writes", async () => {
+  it("cancels an in-flight driver at the shutdown deadline and waits for its drain", async () => {
     const { create, workflow, scheduler, driver } = setup();
     const worker = create("worker");
-    let release!: () => void;
-    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+    let release!: () => void; let receivedSignal: AbortSignal | undefined;
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks, signal) => {
+      receivedSignal = signal;
       await hooks?.onDispatched?.();
-      await new Promise<void>((resolve) => { release = resolve; });
+      await new Promise<void>((resolve) => { release = resolve; signal?.addEventListener("abort", () => resolve(), { once: true }); });
       return { status: "confirmed-delivered" };
     });
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" }, source: { messageId: "m1", rootMessageId: "root-1" } });
@@ -480,10 +481,38 @@ describe("instance messaging", () => {
     const stopped = scheduler.stop({ signal: controller.signal, deadlineAt: Date.now(), remainingMs: () => 0 });
     controller.abort();
     await expect(stopped).resolves.toBeUndefined();
+    expect(receivedSignal?.aborted).toBe(true);
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "dispatch-uncertain" });
     release();
     await new Promise((resolve) => setImmediate(resolve));
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
+  });
+
+  it("keeps shutdown pending when a custom driver ignores cancellation", async () => {
+    const { create, workflow, scheduler, driver } = setup();
+    const worker = create("worker");
+    let release!: () => void; let receivedSignal: AbortSignal | undefined;
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks, signal) => {
+      receivedSignal = signal;
+      await hooks?.onDispatched?.();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { status: "confirmed-delivered" };
+    });
+    await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" }, source: { messageId: "m1", rootMessageId: "root-1" } });
+    scheduler.wake(worker.id);
+    await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running" }));
+    const controller = new AbortController();
+    let stopped = false;
+    const stopping = scheduler.stop({ signal: controller.signal, deadlineAt: Date.now(), remainingMs: () => 0 }).then(() => { stopped = true; });
+    controller.abort();
+    await Promise.resolve();
+
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(stopped).toBe(false);
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
   });
 });

@@ -5,7 +5,7 @@ export const instanceCardActionNames = [
   "card_target_open", "instance_create_form", "instance_create_submit", "instance_open", "instance_turn_open",
   "instance_set_target", "instance_start", "instance_stop", "instance_interrupt", "instance_steer_form",
   "instance_steer_submit", "instance_plan_removal", "instance_confirm_removal", "worker_new_task_form",
-  "worker_new_task_submit", "worker_task_instruction_form", "worker_task_instruction_submit", "worker_task_interrupt",
+  "worker_new_task_submit", "worker_task_instruction_form", "worker_task_instruction_submit", "worker_task_interrupt", "worker_thread_send",
 ] as const;
 
 export const sessionCardActionNames = [
@@ -23,6 +23,7 @@ interface SessionBindingContext { bindingId: string; bindingGeneration: number |
 interface InstanceIdentity extends BindingCardContext { instanceId: string; generation: number }
 interface WorkerMainIdentity { instanceId: string; generation: number; workerSessionGeneration: number; sourceCardMessageId: string }
 interface WorkerTaskIdentity extends WorkerMainIdentity { turnId: string }
+interface WorkerThreadIdentity extends InstanceIdentity { workerSessionGeneration: number }
 type ActionVariants<Action extends string, Fields = object> = Action extends string ? { kind: "session"; action: Action } & Fields : never;
 type InstanceActionVariants<Action extends string, Fields> = Action extends string ? { kind: "instance"; action: Action } & Fields : never;
 
@@ -46,6 +47,7 @@ export type InstanceCardActionCommand =
   | ({ kind: "instance"; action: "instance_turn_open"; turnId: string } & InstanceIdentity)
   | ({ kind: "instance"; action: "instance_steer_submit"; requestedBy: string } & InstanceIdentity)
   | ({ kind: "instance"; action: "instance_confirm_removal"; planId: string; requestedBy: string } & InstanceIdentity)
+  | ({ kind: "instance"; action: "worker_thread_send" } & WorkerThreadIdentity)
   | ({ kind: "instance"; action: "worker_new_task_form" } & WorkerMainIdentity)
   | ({ kind: "instance"; action: "worker_new_task_submit"; interactionId: string; requestedBy: string } & WorkerMainIdentity)
   | ({ kind: "instance"; action: "worker_task_instruction_form" | "worker_task_interrupt" } & WorkerTaskIdentity)
@@ -129,6 +131,7 @@ function parseInstance(action: string, item: Record<string, unknown>): InstanceC
   if (action === "worker_task_instruction_submit") { const interactionId = interaction(item.interactionId); const requestedBy = string(item.requestedBy); const intent = item.intent === "steer" || item.intent === "followup" ? item.intent : null; return task && interactionId && requestedBy && intent ? { kind: "instance", action, interactionId, requestedBy, intent, ...task } : null; }
   const identity = instanceIdentity(item, binding);
   if (!identity) return null;
+  if (action === "worker_thread_send") { const workerSessionGeneration = integer(item.workerSessionGeneration); return workerSessionGeneration !== null ? { kind: "instance", action, workerSessionGeneration, ...identity } : null; }
   if (action === "instance_turn_open") { const turnId = string(item.turnId); return turnId ? { kind: "instance", action, turnId, ...identity } : null; }
   if (action === "instance_steer_submit") { const requestedBy = string(item.requestedBy); return requestedBy ? { kind: "instance", action, requestedBy, ...identity } : null; }
   if (action === "instance_confirm_removal") { const requestedBy = string(item.requestedBy); const planId = string(item.planId); return requestedBy && planId ? { kind: "instance", action, requestedBy, planId, ...identity } : null; }

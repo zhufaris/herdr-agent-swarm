@@ -1,3 +1,4 @@
+import type { OutboundDeliveryClaim } from "../../domain/delivery.js";
 import { randomUUID } from "node:crypto";
 import type { AnswerPage, Binding, DeadLetterActionOutcome, DeliveryFailureMetadata, OutboundFailureTransition, OutboundReply, OutboxLaneClass, StaleOutboxQuarantineRecovery } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
@@ -27,10 +28,12 @@ export class SqliteOutboxRecoveryStore {
     }
   ) {}
 
-  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null {
+  markOutboundReplyFailedWithQuarantine(id: string, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number, claim?: OutboundDeliveryClaim): OutboundFailureTransition | null {
     return this.context.transaction(() => {
+      if (!this.queue.matchesClaim(id, claim)) return null;
       const before = this.queue.get(id);
       if (!before) return null;
+      if (claim && before.state !== "pending") { this.queue.releaseClaim(id); return null; }
       if (before.state === "dead_letter") {
         const existing = this.context.database.prepare("SELECT lane_class, action FROM outbox_lane_quarantines WHERE lane_key = ? AND failed_reply_id = ?").get(before.laneKey, id) as { lane_class: OutboxLaneClass; action: OutboundFailureTransition["action"] } | undefined;
         if (existing) return { state: before.state, action: existing.action, laneClass: existing.lane_class, promptId: before.promptId, reply: before };
@@ -39,14 +42,15 @@ export class SqliteOutboxRecoveryStore {
       const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && (metadata.recoveryKind === "stale_main_card" || metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
       const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && (metadata.recoveryKind === "closed_answer_stream" || metadata.larkErrorCode === "300309");
       const failed = metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream
-        ? this.delivery.markDeadLetter(id, error, metadata)
-        : this.delivery.markFailed(id, error, retryDelayMs, metadata);
+        ? this.delivery.markDeadLetter(id, error, metadata, claim)
+        : this.delivery.markFailed(id, error, retryDelayMs, metadata, claim);
       if (!failed) return null;
       const laneClass = outboundLaneClass(failed);
       if (failed.state !== "dead_letter" || (metadata.failureClass === "transient" && failed.autoRecoveryCount === 0)) return { state: failed.state, action: "retry", laneClass, promptId: failed.promptId, reply: failed };
       const timestamp = now();
       let action: OutboundFailureTransition["action"] = "blocked";
       let quarantineState: "active" | "released" = "active";
+      let replacementReplyId: string | null = null;
       if (closedAnswerStream && failed.promptId) {
         const pageIndex = streamContentPageIndex(failed.payload);
         if (pageIndex === null) throw new Error(`Closed Answer stream ${failed.id} has invalid page metadata`);
@@ -60,13 +64,14 @@ export class SqliteOutboxRecoveryStore {
         const binding = this.dependencies.getBinding(failed.bindingId);
         if (!binding) throw new Error(`Binding not found: ${failed.bindingId}`);
         if (replacement && binding.rootMessageId) {
-          this.context.database.prepare(`DELETE FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_update' AND state = 'pending'`).run(failed.bindingId);
-          this.queue.enqueue({ id: randomUUID(), idempotencyKey: `main-card:rebuild:${failed.bindingId}:${replacement.view_version}`, bindingId: failed.bindingId, viewVersion: replacement.view_version, targetRole: "session_status", rootMessageId: binding.rootMessageId, kind: "card_reply", payload: replacement.payload });
+          this.context.database.prepare(`DELETE FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_update' AND state = 'pending' AND first_claimed_at IS NULL`).run(failed.bindingId);
+          replacementReplyId = this.queue.enqueue({ id: randomUUID(), idempotencyKey: `main-card:rebuild:${failed.bindingId}:${replacement.view_version}`, workClass: "history", bindingId: failed.bindingId, viewVersion: replacement.view_version, targetRole: "session_status", rootMessageId: binding.rootMessageId, kind: "card_reply", payload: replacement.payload }).id;
           action = "rebuild_main"; quarantineState = "released";
         }
       } else if (laneClass === "main_card" || laneClass === "replaceable_card") {
         action = "released_newer_snapshot"; quarantineState = "released";
       }
+      this.context.database.prepare("UPDATE delivery_recoveries SET action = ?, replacement_reply_id = ?, state = ?, updated_at = ? WHERE failed_reply_id = ? AND state IN ('unresolved','replacement_pending')").run(action, replacementReplyId, replacementReplyId ? "replacement_pending" : "unresolved", timestamp, id);
       const laneKey = failed.laneKey;
       this.context.database.prepare(`INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(lane_key) DO UPDATE SET failed_reply_id = excluded.failed_reply_id, lane_class = excluded.lane_class, failure_class = excluded.failure_class, state = excluded.state, action = excluded.action, reason = excluded.reason, updated_at = excluded.updated_at, released_at = excluded.released_at`).run(laneKey, id, laneClass, metadata.failureClass, quarantineState, action, boundedOutboxError(error), timestamp, timestamp, quarantineState === "released" ? timestamp : null);
       if (quarantineState === "released") this.queue.refreshLaneHead(laneKey);
@@ -99,7 +104,7 @@ export class SqliteOutboxRecoveryStore {
           AND kind = 'stream_card_create'
           AND idempotency_key = 'worker-turn:create:' || worker_turn_id || ':0'
           AND state = 'pending'
-          AND attempt_count = 0
+          AND attempt_count = 0 AND first_claimed_at IS NULL
           AND delivered_message_id IS NULL
           AND card_id_checkpoint IS NULL
       `).all() as Array<{ id: string; worker_turn_id: string; lane_key: string }>;
@@ -142,7 +147,7 @@ export class SqliteOutboxRecoveryStore {
         const failed = this.queue.get(row.id);
         if (!failed) continue;
         const replacement = this.queue.enqueue({
-          id: randomUUID(), idempotencyKey: `startup-lite:${row.id}`, bindingId: failed.bindingId, promptId: failed.promptId,
+          id: randomUUID(), idempotencyKey: `startup-lite:${row.id}`, workClass: "history", bindingId: failed.bindingId, promptId: failed.promptId,
           viewVersion: failed.viewVersion, cardRole: failed.cardRole, rootMessageId: failed.rootMessageId, kind: "stream_card_create",
           payload: lightweightAnswerCardPayload(failed.payload)
         });
@@ -225,7 +230,7 @@ export class SqliteOutboxRecoveryStore {
         this.context.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?")
           .run(sequence, timestamp, promptId, page.pageIndex);
         const replacement = this.queue.enqueue({
-          id: randomUUID(), idempotencyKey: `startup-lite-content:${failedContent.id}`, bindingId: view.bindingId, promptId, viewVersion: sequence, cardRole: "answer",
+          id: randomUUID(), idempotencyKey: `startup-lite-content:${failedContent.id}`, workClass: "history", bindingId: view.bindingId, promptId, viewVersion: sequence, cardRole: "answer",
           rootMessageId: page.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: page.pageIndex, elementId: page.elementId, content: rendered.page, sequence, sourceEnd })
         });
         this.context.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 2, updated_at = ? WHERE id = ? AND state = 'pending'").run(timestamp, replacement.id);
@@ -289,6 +294,7 @@ export class SqliteOutboxRecoveryStore {
         const nextState = action === "retry" ? "pending" : "dismissed";
         this.context.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, attempt_count = CASE WHEN ? = 'pending' THEN 0 ELSE attempt_count END, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, nextState, now(), now(), id);
         if (lane) { this.context.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', action = ?, released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'").run(action === "retry" ? "manual_retry" : "manual_dismiss", now(), now(), lane.lane_key, id); this.queue.refreshLaneHead(lane.lane_key); }
+        this.context.database.prepare("UPDATE delivery_recoveries SET state = ?, action = ?, replacement_reply_id = NULL, resolved_by_reply_id = NULL, resolved_message_id = NULL, resolved_at = ?, updated_at = ? WHERE failed_reply_id = ?").run(action === "retry" ? "unresolved" : "dismissed", action === "retry" ? "manual_retry" : "manual_dismiss", action === "retry" ? null : now(), now(), id);
         outcome = action === "retry" ? "retried" : "dismissed";
       }
       this.context.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES (?, ?, ?, ?, ?)").run(actorOpenId, `outbound.${action}`, id, outcome, now());

@@ -1,12 +1,16 @@
 import type { Logger } from "pino";
 import type { LarkPort } from "../domain/ports/external.js";
 import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports/outbox.js";
-import type { OutboxDispatcherDiagnostics } from "../domain/types.js";
+import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
-import { OutboundDeliveryExecutor } from "./outbound-delivery-executor.js";
+import { OutboundDeliveryExecutor, type OutboundDeliveryOutcome } from "./outbound-delivery-executor.js";
+
+type ActiveDeliveryCompletion =
+  | { reply: OutboundReply; result: OutboundDeliveryOutcome; error?: never }
+  | { reply: OutboundReply; result?: never; error: unknown };
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
@@ -23,6 +27,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private safetyTimer: ReturnType<typeof setInterval> | null = null;
   private scanRequested = false;
   private forceRequested = false;
+  private scanRequestRevision = 0;
+  private scanWake: (() => void) | null = null;
   private readonly delivery: OutboundDeliveryExecutor;
   private lastScanAt: string | null = null;
   private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
@@ -98,6 +104,8 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     if (this.stopping) return;
     this.scanRequested = true;
     this.forceRequested ||= force;
+    this.scanRequestRevision += 1;
+    this.scanWake?.();
     if (this.draining) return this.draining;
     this.draining = this.runRequestedScans().finally(() => {
       this.draining = null;
@@ -153,35 +161,71 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
   private async drainPending(force: boolean): Promise<"idle" | "delivered" | "failed"> {
     const blockedTargets = new Set<string>();
     const attemptedReplyIds = new Set<string>();
+    const active = new Map<string, Promise<ActiveDeliveryCompletion>>();
     let deliveryCount = 0;
+    let dispatchOrdinal = 0;
     let outcome: "idle" | "delivered" | "failed" = "idle";
+    let observedScanRevision = this.scanRequestRevision;
+    let fatalError: unknown;
+    let fatal = false;
     while (true) {
-      if (this.stopping) return outcome;
-      const batchLimit = Math.min(LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES, LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN - deliveryCount);
-      const dueAt = force ? null : new Date().toISOString();
-      const interactive = this.store.listOutboundLaneHeads(Math.min(2, batchLimit), dueAt, [...blockedTargets], "interactive");
-      const selectedLaneKeys = [...blockedTargets, ...interactive.map((reply) => reply.laneKey)];
-      const oldest = this.store.listOutboundLaneHeads(batchLimit - interactive.length, dueAt, selectedLaneKeys);
-      const batch = [...interactive, ...oldest];
-      if (batch.length === 0) return outcome;
-      const repeated = batch.filter((reply) => attemptedReplyIds.has(reply.id));
-      for (const reply of repeated) blockedTargets.add(reply.laneKey);
-      const deliverable = batch.filter((reply) => !attemptedReplyIds.has(reply.id));
-      if (deliverable.length === 0) continue;
-      for (const reply of deliverable) attemptedReplyIds.add(reply.id);
-      const results = await Promise.all(deliverable.map((reply) => this.trackHandler(this.delivery.deliver(reply))));
-      const completedAt = new Date().toISOString();
-      deliverable.forEach((reply, index) => {
-        if (results[index] === "failed") { blockedTargets.add(reply.laneKey); this.lastDeliveryFailureAt = completedAt; }
-        else this.lastDeliveryAt = completedAt;
-      });
-      deliveryCount += deliverable.length;
-      if (results.includes("failed")) outcome = "failed";
-      else if (outcome === "idle" && results.includes("delivered")) outcome = "delivered";
-      if (deliveryCount >= LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN) {
+      if (this.stopping && active.size === 0) { if (fatal) throw fatalError; return outcome; }
+      const available = Math.min(
+        fatal || this.stopping ? 0 : LarkOutboxDispatcher.MAX_CONCURRENT_DELIVERIES - active.size,
+        LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN - deliveryCount
+      );
+      if (available > 0) {
+        const dueAt = force ? null : new Date().toISOString();
+        const selected: OutboundReply[] = [];
+        for (let slot = 0; slot < available; slot += 1) {
+          const excluded = [...blockedTargets, ...active.keys(), ...selected.map((reply) => reply.laneKey)];
+          const preferred = dispatchOrdinal % 4 === 3 ? "history" : "live";
+          const reply = this.store.listOutboundLaneHeads(1, dueAt, excluded, preferred)[0]
+            ?? this.store.listOutboundLaneHeads(1, dueAt, excluded, preferred === "live" ? "history" : "live")[0];
+          if (!reply) break;
+          selected.push(reply);
+          dispatchOrdinal += 1;
+        }
+        for (const reply of selected) {
+          if (attemptedReplyIds.has(reply.id)) { blockedTargets.add(reply.laneKey); continue; }
+          attemptedReplyIds.add(reply.id);
+          deliveryCount += 1;
+          active.set(reply.laneKey, this.trackHandler(this.delivery.deliver(reply, dueAt)).then(
+            (result): ActiveDeliveryCompletion => ({ reply, result }),
+            (error): ActiveDeliveryCompletion => ({ reply, error })
+          ));
+        }
+        if (selected.length > 0) continue;
+      }
+      if (active.size === 0) {
+        if (fatal) throw fatalError;
+        if (deliveryCount < LarkOutboxDispatcher.MAX_DELIVERIES_PER_SCAN) return outcome;
         this.scanRequested = true;
         await new Promise<void>((resolve) => setImmediate(resolve));
         return outcome;
+      }
+      if (this.scanRequestRevision !== observedScanRevision) {
+        observedScanRevision = this.scanRequestRevision;
+        continue;
+      }
+      let wake!: () => void;
+      const wakeSignal = new Promise<null>((resolve) => { wake = () => resolve(null); });
+      this.scanWake = wake;
+      if (this.scanRequestRevision !== observedScanRevision) wake();
+      let completed: ActiveDeliveryCompletion | null;
+      try { completed = await Promise.race([...active.values(), wakeSignal]); }
+      finally { if (this.scanWake === wake) this.scanWake = null; }
+      if (!completed) { observedScanRevision = this.scanRequestRevision; continue; }
+      active.delete(completed.reply.laneKey);
+      if ("error" in completed) { fatal = true; fatalError = completed.error; continue; }
+      const completedAt = new Date().toISOString();
+      if (completed.result === "failed") {
+        blockedTargets.add(completed.reply.laneKey);
+        this.lastDeliveryFailureAt = completedAt;
+        outcome = "failed";
+      } else {
+        this.lastDeliveryAt = completedAt;
+        if (outcome === "idle") outcome = "delivered";
       }
     }
   }

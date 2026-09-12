@@ -8,7 +8,7 @@ export function renderTopicPaneDirectoryCard(entries: TopicPaneDirectoryEntry[])
   const elements: object[] = visible.length
     ? visible.flatMap((entry) => [
       { tag: "markdown", content: "**" + escapeMarkdown(entry.title) + "**  ·  " + escapeMarkdown(entry.spaceName) + "\nPane `" + escapeCode(entry.paneId) + "` · " + escapeMarkdown(entry.agentState) },
-      callbackButton("发送卡片", { action: "pane_card_send", bindingId: entry.bindingId, bindingGeneration: entry.bindingGeneration, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId }, "primary"),
+      callbackButton("发送卡片到群", { action: "pane_card_send", bindingId: entry.bindingId, bindingGeneration: entry.bindingGeneration, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId }, "primary"),
       { tag: "hr" }
     ]).slice(0, -1)
     : [{ tag: "markdown", content: "当前群中没有可发送的 active Pane 卡片。" }];

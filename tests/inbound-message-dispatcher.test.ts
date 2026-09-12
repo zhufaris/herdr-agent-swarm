@@ -1,9 +1,12 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { InboundMessageDispatcher } from "../src/coordinator/inbound-message-dispatcher.js";
+import { InboundMessageRoutingWorkflow } from "../src/coordinator/inbound-message-routing-workflow.js";
+import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
 import { PermanentInboundMessageRejection } from "../src/domain/permanent-inbound-message-rejection.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
+import { primaryPresentation } from "./helpers/presentation.js";
 
 const authorizationMessage = {
   eventId: "event-1", messageId: "message-1", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "message-1",
@@ -61,6 +64,40 @@ describe("InboundMessageDispatcher durable FIFO", () => {
       expect(store.database.prepare("SELECT event_id, state, error FROM inbound_messages ORDER BY event_id").all()).toEqual([
         { event_id: "instances", state: "accepted", error: null },
         { event_id: "stopped-worker", state: "accepted", error: null }
+      ]);
+      expect(dispatcher.snapshot()).toMatchObject({ state: "idle", retryAttempt: 0, nextRetryAt: null });
+    } finally {
+      await dispatcher.stop();
+      store.close();
+    }
+  });
+
+  it("terminally rejects a full Worker queue and continues with later durable input", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const inboundWork = new InProcessInboundWorkNotifier();
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const instanceInteractions = {
+      handleOrdinaryMessage: vi.fn(async () => { throw new InstanceTurnCapacityExceeded(); }),
+      handleCommand: vi.fn(async () => undefined)
+    };
+    const routing = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } }, store, outbound, instanceInteractions,
+      presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    inboundWork.subscribe(({ payload }) => routing.handle(payload));
+    const dispatcher = new InboundMessageDispatcher({ chatId: "chat", allowedOpenIds: ["operator"], store, inboundWork, logger: pino({ enabled: false }) });
+
+    try {
+      store.recordInboundMessage(message("full-worker", "send to selected worker"));
+      store.recordInboundMessage(message("instances", "/instances"));
+      dispatcher.start();
+      await dispatcher.drain();
+
+      expect(outbound.enqueueCard).toHaveBeenCalledWith("full-worker-message", "rejected:full-worker-message", expect.any(Object));
+      expect(instanceInteractions.handleCommand).toHaveBeenCalledOnce();
+      expect(store.database.prepare("SELECT event_id, state, error FROM inbound_messages ORDER BY created_at, event_id").all()).toEqual([
+        { event_id: "full-worker", state: "accepted", error: null },
+        { event_id: "instances", state: "accepted", error: null }
       ]);
       expect(dispatcher.snapshot()).toMatchObject({ state: "idle", retryAttempt: 0, nextRetryAt: null });
     } finally {

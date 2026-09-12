@@ -1,5 +1,7 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { OutboundDeliveryClaim } from "../../domain/delivery.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, OutboundReply } from "../../domain/types.js";
+import type { Binding, OutboundReply, OutboundWorkClass } from "../../domain/types.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import { encodeDeliveryIntent } from "../../domain/delivery-intent.js";
@@ -28,28 +30,41 @@ export class SqliteOutboxQueueStore {
     const intentKind = input.intentKind ?? encoded.intentKind;
     const intentJson = input.intentJson ?? encoded.intentJson;
     const rendererRevision = input.rendererRevision ?? encoded.rendererRevision;
+    const workClass = input.workClass ?? "live";
+    const rootMessageId = input.rootMessageId ?? null;
+    const targetChatId = input.targetChatId ?? null;
+    const threadAliasId = input.threadAliasId ?? null;
+    const workerThreadId = input.workerThreadId ?? null;
     return this.context.transaction(() => {
-      if (input.kind === "card_update" && input.bindingId && !input.promptId) {
+      const existing = this.getByKey(input.idempotencyKey);
+      if (existing) {
+        if (existing.workClass !== workClass) throw new Error("outbound_idempotency_conflict");
+        const same = existing.payload === input.payload && existing.intentJson === intentJson && existing.rendererRevision === rendererRevision && existing.rootMessageId === rootMessageId && existing.targetChatId === targetChatId && existing.threadAliasId === threadAliasId && existing.workerThreadId === workerThreadId && existing.kind === input.kind && existing.viewVersion === (input.viewVersion ?? null) && existing.cardSequence === (input.cardSequence ?? null);
+        if (same || existing.state !== "pending") return existing;
+        if (this.wasClaimed(existing.id)) throw new Error("outbound_idempotency_conflict");
+      }
+      if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId) {
         this.context.database.prepare(`
           DELETE FROM outbound_replies
           WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
             AND lane_key = ? AND kind = 'card_update' AND state = 'pending'
+            AND first_claimed_at IS NULL AND attempt_count = 0 AND card_id_checkpoint IS NULL AND projection_key IS NULL
             AND delivery_order > (
               SELECT MIN(delivery_order) FROM outbound_replies
               WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
                 AND lane_key = ? AND kind = 'card_update' AND state = 'pending'
             )
-        `).run(input.bindingId, input.rootMessageId, laneKey, input.bindingId, input.rootMessageId, laneKey);
+        `).run(input.bindingId, rootMessageId, laneKey, input.bindingId, rootMessageId, laneKey);
       }
       if (input.kind === "card_update" && input.workerId && input.workerSessionGeneration !== undefined && input.workerSessionGeneration !== null && input.viewVersion !== undefined && input.viewVersion !== null) {
-        this.context.database.prepare("DELETE FROM outbound_replies WHERE worker_id = ? AND worker_session_generation = ? AND kind = 'card_update' AND state = 'pending' AND COALESCE(view_version, 0) < ?").run(input.workerId, input.workerSessionGeneration, input.viewVersion);
+        this.context.database.prepare("DELETE FROM outbound_replies WHERE worker_id = ? AND worker_session_generation = ? AND kind = 'card_update' AND state = 'pending' AND first_claimed_at IS NULL AND attempt_count = 0 AND card_id_checkpoint IS NULL AND projection_key IS NULL AND COALESCE(view_version, 0) < ?").run(input.workerId, input.workerSessionGeneration, input.viewVersion);
       }
-      if (input.kind === "card_update" && input.promptId && input.viewVersion !== undefined && input.viewVersion !== null) {
-        this.context.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND card_role IS ? AND COALESCE(view_version, 0) < ?").run(input.promptId, input.rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
+      if (input.kind === "card_update" && input.promptId && rootMessageId && input.viewVersion !== undefined && input.viewVersion !== null) {
+        this.context.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND first_claimed_at IS NULL AND attempt_count = 0 AND card_id_checkpoint IS NULL AND projection_key IS NULL AND card_role IS ? AND COALESCE(view_version, 0) < ?").run(input.promptId, rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
       this.context.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, thread_alias_id, worker_thread_id, target_chat_id, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
         ON CONFLICT(idempotency_key) DO UPDATE SET
           payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
           view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
@@ -60,7 +75,7 @@ export class SqliteOutboxQueueStore {
           intent_json = CASE WHEN outbound_replies.state = 'pending' THEN excluded.intent_json ELSE outbound_replies.intent_json END,
           renderer_revision = CASE WHEN outbound_replies.state = 'pending' THEN excluded.renderer_revision ELSE outbound_replies.renderer_revision END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, input.rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, threadAliasId, workerThreadId, targetChatId, workClass, rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
       const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
       if (input.kind === "stream_card_create" && input.promptId) {
@@ -83,6 +98,39 @@ export class SqliteOutboxQueueStore {
     });
   }
 
+  getByKey(key: string): OutboundReply | null {
+    const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(key) as OutboundReplyRow | undefined;
+    return row ? mapOutboundReply(row) : null;
+  }
+
+  wasClaimed(id: string): boolean {
+    return this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE id = ? AND (first_claimed_at IS NOT NULL OR attempt_count > 0 OR card_id_checkpoint IS NOT NULL)").get(id) !== undefined;
+  }
+
+  claim(id: string, dueAt: string | null): OutboundDeliveryClaim | null {
+    return this.context.transaction(() => {
+      const row = this.context.database.prepare(`SELECT o.* FROM outbound_replies o JOIN outbox_lane_heads h ON h.reply_id = o.id WHERE o.id = ? AND o.state = 'pending' AND o.claim_attempt_id IS NULL AND (? IS NULL OR o.next_attempt_at <= ?) AND NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = o.lane_key AND active.claim_attempt_id IS NOT NULL)`).get(id, dueAt, dueAt) as OutboundReplyRow | undefined;
+      if (!row) return null;
+      const hasFence = this.context.database.prepare("SELECT 1 FROM sqlite_temp_master WHERE name = 'bridge_write_fence'").get();
+      const fence = hasFence ? this.context.database.prepare("SELECT owner_id, fencing_token FROM temp.bridge_write_fence").get() as { owner_id: string; fencing_token: number } : null;
+      const reply = mapOutboundReply(row);
+      const attemptId = randomUUID();
+      const payloadHash = createHash("sha256").update(JSON.stringify([reply.idempotencyKey, reply.rootMessageId, reply.targetChatId, reply.threadAliasId, reply.workerThreadId, reply.kind, reply.payload, reply.intentKind, reply.intentJson, reply.rendererRevision, reply.viewVersion, reply.cardSequence, reply.workClass])).digest("hex");
+      this.context.database.prepare("UPDATE outbound_replies SET claim_attempt_id = ?, claimed_fence = ?, claimed_owner_id = ?, claimed_at = ?, first_claimed_at = COALESCE(first_claimed_at, ?), payload_hash = ? WHERE id = ?").run(attemptId, fence?.fencing_token ?? null, fence?.owner_id ?? null, now(), now(), payloadHash, id);
+      return Object.freeze({ reply: Object.freeze(reply), attemptId, fencingToken: fence?.fencing_token ?? null, payloadHash, snapshotRevision: Number(row.snapshot_revision) });
+    });
+  }
+
+  matchesClaim(id: string, claim?: OutboundDeliveryClaim): boolean {
+    if (!claim) return this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE id = ? AND claim_attempt_id IS NULL").get(id) !== undefined;
+    if (claim.reply.id !== id) return false;
+    return this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE id = ? AND claim_attempt_id = ? AND claimed_fence IS ? AND payload_hash = ? AND snapshot_revision = ?").get(id, claim.attemptId, claim.fencingToken, claim.payloadHash, claim.snapshotRevision) !== undefined;
+  }
+
+  releaseClaim(id: string): void {
+    this.context.database.prepare("UPDATE outbound_replies SET claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL WHERE id = ?").run(id);
+  }
+
   listPending(): OutboundReply[] {
     return (this.context.database.prepare("SELECT * FROM outbound_replies WHERE state = 'pending' ORDER BY delivery_order").all() as OutboundReplyRow[]).map(mapOutboundReply);
   }
@@ -96,25 +144,24 @@ export class SqliteOutboxQueueStore {
   }
 
   dismissSupersededAnswerStream(replyId: string): boolean {
-    const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Answer stream superseded by a continuation page', updated_at = ? WHERE id = ? AND state = 'pending' AND kind IN ('stream_content', 'stream_finish') AND prompt_id IS NOT NULL AND EXISTS (SELECT 1 FROM run_cards WHERE run_cards.prompt_id = outbound_replies.prompt_id AND run_cards.answer_page_index > 0 AND run_cards.answer_card_id IS NOT NULL AND run_cards.answer_card_id != outbound_replies.root_message_id)`).run(now(), replyId);
+    const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Answer stream superseded by a continuation page', updated_at = ? WHERE id = ? AND state = 'pending' AND claim_attempt_id IS NULL AND kind IN ('stream_content', 'stream_finish') AND prompt_id IS NOT NULL AND EXISTS (SELECT 1 FROM run_cards WHERE run_cards.prompt_id = outbound_replies.prompt_id AND run_cards.answer_page_index > 0 AND run_cards.answer_card_id IS NOT NULL AND run_cards.answer_card_id != outbound_replies.root_message_id)`).run(now(), replyId);
     return Number(updated.changes) === 1;
   }
 
-  listLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], laneClass?: "interactive"): OutboundReply[] {
+  listLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], workClass?: OutboundWorkClass): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     const exclusions = excludedLaneKeys.length > 0 ? `AND h.lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
     const due = dueAt === null ? "" : "AND h.next_attempt_at <= ?";
-    const laneFilter = laneClass === "interactive"
-      ? "AND o.kind IN ('stream_card_create', 'stream_content', 'stream_finish', 'card_reply', 'text')"
-      : "";
+    const classFilter = workClass ? "AND o.work_class = ?" : "";
     const parameters: SqlValue[] = [...excludedLaneKeys];
     if (dueAt !== null) parameters.push(dueAt);
+    if (workClass) parameters.push(workClass);
     parameters.push(limit);
-    return (this.context.database.prepare(`SELECT o.* FROM outbox_lane_heads h JOIN outbound_replies o ON o.id = h.reply_id WHERE 1 = 1 ${exclusions} ${due} ${laneFilter} ORDER BY h.delivery_order LIMIT ?`).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
+    return (this.context.database.prepare(`SELECT o.* FROM outbox_lane_heads h JOIN outbound_replies o ON o.id = h.reply_id WHERE o.claim_attempt_id IS NULL AND NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = o.lane_key AND active.claim_attempt_id IS NOT NULL) ${exclusions} ${due} ${classFilter} ORDER BY h.delivery_order LIMIT ?`).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
   getNextLaneHeadAttemptAt(): string | null {
-    const row = this.context.database.prepare("SELECT MIN(next_attempt_at) AS next_attempt_at FROM outbox_lane_heads").get() as { next_attempt_at: string | null };
+    const row = this.context.database.prepare("SELECT MIN(h.next_attempt_at) AS next_attempt_at FROM outbox_lane_heads h WHERE NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = h.lane_key AND active.claim_attempt_id IS NOT NULL)").get() as { next_attempt_at: string | null };
     return row.next_attempt_at;
   }
 

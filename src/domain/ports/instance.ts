@@ -10,6 +10,7 @@ import type { PrimaryWorkerActivitySummary, PrimaryWorkerSummary } from "../card
 import type { WorkerMainProjectionSource } from "../worker-main-selector.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { RunCardView } from "../run-card-view.js";
+import type { WorkerSessionThread, WorkerSessionThreadMode } from "../worker-session-thread.js";
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
@@ -87,6 +88,9 @@ export interface InstanceStore {
   updateInstanceOperation(input: { id: string; expectedGeneration: number; state: InstanceOperation["state"]; result: string }): InstanceOperation | null;
   getConversationTarget(chatId: string): { projectId: string; target: import("../agent-instance.js").InstanceTarget } | null;
   setConversationTarget(input: { chatId: string; projectId: string; target: import("../agent-instance.js").InstanceTarget }): void;
+  reserveWorkerSessionThread(input: { publicationKey: string; workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; targetChatId: string; mode: WorkerSessionThreadMode; sourceMainMessageId?: string | null; actionMessageId?: string | null; viewVersion?: number | null; card: object }): "reserved" | "duplicate" | "stale";
+  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number): WorkerSessionThread | null;
+  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null): WorkerSessionThread | null;
   projectLegacyBindingAsAgentInstance(bindingId: string): AgentInstance | null;
 }
 

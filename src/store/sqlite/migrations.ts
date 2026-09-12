@@ -93,6 +93,7 @@ export class SqliteMigrations {
     this.prompt.ensureTurnControlOperations();
     this.prompt.ensureSwarmCommandIntents();
     this.worker.ensureWorkerCardDisplayRequests();
+    this.worker.ensureWorkerSessionThreads();
     if (runCardViewNeedsRebuild) this.cards.recreateRunCardsView();
     this.cards.ensureQueryIndexes();
     const answerTargetMigration = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
@@ -122,6 +123,12 @@ export class SqliteMigrations {
         this.context.database.exec("COMMIT");
       } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
     }
+    this.cards.ensureOutboundWorkClass();
+    this.cards.ensureOutboundClaims();
+    this.cards.ensureDeliveryRecoveries();
+    this.cards.ensureAnswerRecoveryEvidence();
+    this.cards.ensureGroupCardCreates();
+    this.cards.ensureWorkerThreadTargets();
   }
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {

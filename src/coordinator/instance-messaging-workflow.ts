@@ -52,24 +52,25 @@ export class InstanceMessagingWorkflow {
     }
   }
 
-  async interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string }): Promise<InterruptReceipt> {
+  async interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; resultTargetMessageId?: string }): Promise<InterruptReceipt & { durableResult?: boolean }> {
     const target = this.authorize(input.actor, undefined, input.targetInstanceId);
     if (input.targetTurnId) {
       const turn = this.options.store.getInstanceTurn(input.targetTurnId);
       const active = this.options.store.getActiveInstanceTurn(target.id, target.generation);
-      if (!turn || turn.instanceId !== target.id || turn.instanceGeneration !== target.generation || turn.state !== "running" || active?.id !== turn.id) return { status: "not-active" };
+      if (!turn || turn.instanceId !== target.id || turn.instanceGeneration !== target.generation || turn.state !== "running" || active?.id !== turn.id) return { status: "not-active", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
     }
     try {
-      const outcome = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey });
-      if (outcome.mode === "priority") return { status: "failed", reason: "Interrupt unexpectedly resolved to a priority turn" };
+      const outcome = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
+      if (outcome.mode === "priority") return { status: "failed", reason: "Interrupt unexpectedly resolved to a priority turn", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
       const { operation } = outcome;
-      return turnControlInterruptReceipt(operation.state, operation.result);
+      return { ...turnControlInterruptReceipt(operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      if (/no exact active runtime turn|not active/i.test(reason)) return { status: "not-active", reason };
-      if (/unsupported/i.test(reason)) return { status: "unsupported", reason };
-      if (/blocked/i.test(reason)) return { status: "blocked", reason };
-      return { status: "failed", reason };
+      const durable = input.resultTargetMessageId ? { durableResult: false as const } : {};
+      if (/no exact active runtime turn|not active/i.test(reason)) return { status: "not-active", reason, ...durable };
+      if (/unsupported/i.test(reason)) return { status: "unsupported", reason, ...durable };
+      if (/blocked/i.test(reason)) return { status: "blocked", reason, ...durable };
+      return { status: "failed", reason, ...durable };
     }
   }
 

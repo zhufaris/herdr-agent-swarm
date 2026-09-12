@@ -1,19 +1,26 @@
 import type { DeliveryRecoveryStore, ExternalTurnObservationStore, InboundRoutingStore, StartupRecoveryStore, StartupViewStore } from "../../domain/ports/workflow.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
+import type { SqliteBindingThreadAliasStore } from "./binding-thread-alias-store.js";
 import type { SqliteInboundProjectStore } from "./inbound-project-store.js";
 import type { SqliteOperationsStore } from "./operations-store.js";
 import type { SqliteOutboxStore } from "./outbox-store.js";
 import { SqlitePromptCapabilityStore } from "./prompt-capability-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
+import type { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
 
 export class SqliteInboundRoutingCapabilityStore implements InboundRoutingStore {
   constructor(
     private readonly bindings: SqliteBindingLifecycleStore,
-    private readonly inboundProjects: SqliteInboundProjectStore
+    private readonly aliases: SqliteBindingThreadAliasStore,
+    private readonly inboundProjects: SqliteInboundProjectStore,
+    private readonly workerThreads: SqliteWorkerSessionThreadStore
   ) {}
 
-  findBindingByLarkScope: InboundRoutingStore["findBindingByLarkScope"] = (topicId, rootMessageId) => this.bindings.findBindingByLarkScope(topicId, rootMessageId);
+  findBindingByLarkScope: InboundRoutingStore["findBindingByLarkScope"] = (topicId, rootMessageId) => this.bindings.findBindingByLarkScope(topicId, rootMessageId) ?? this.aliases.findBindingByScope(topicId, rootMessageId);
+  isBindingThreadAlias: InboundRoutingStore["isBindingThreadAlias"] = (topicId, rootMessageId) => this.aliases.isActiveScope(topicId, rootMessageId);
+  findWorkerSessionThreadByScope: InboundRoutingStore["findWorkerSessionThreadByScope"] = (chatId, topicId, rootMessageId) => this.workerThreads.findActiveByScope(chatId, topicId, rootMessageId);
+  findWorkerSessionThreadRecordByScope: InboundRoutingStore["findWorkerSessionThreadRecordByScope"] = (chatId, topicId, rootMessageId) => this.workerThreads.findByScope(chatId, topicId, rootMessageId);
   getBinding: InboundRoutingStore["getBinding"] = (id) => this.bindings.getBinding(id);
   isBridgeMessage: InboundRoutingStore["isBridgeMessage"] = (id) => this.inboundProjects.isBridgeMessage(id);
   listCompletedProjectSelectionsWithInitialPrompt: InboundRoutingStore["listCompletedProjectSelectionsWithInitialPrompt"] = () => this.inboundProjects.listCompletedProjectSelectionsWithInitialPrompt();
@@ -28,6 +35,9 @@ export class SqliteIngressCapabilityStore extends SqlitePromptCapabilityStore im
   ) { super(...promptDependencies); }
 
   findBindingByLarkScope: InboundRoutingStore["findBindingByLarkScope"] = (topicId, rootMessageId) => this.routing.findBindingByLarkScope(topicId, rootMessageId);
+  isBindingThreadAlias: InboundRoutingStore["isBindingThreadAlias"] = (topicId, rootMessageId) => this.routing.isBindingThreadAlias(topicId, rootMessageId);
+  findWorkerSessionThreadByScope: InboundRoutingStore["findWorkerSessionThreadByScope"] = (chatId, topicId, rootMessageId) => this.routing.findWorkerSessionThreadByScope(chatId, topicId, rootMessageId);
+  findWorkerSessionThreadRecordByScope: InboundRoutingStore["findWorkerSessionThreadRecordByScope"] = (chatId, topicId, rootMessageId) => this.routing.findWorkerSessionThreadRecordByScope(chatId, topicId, rootMessageId);
   override getBinding: InboundRoutingStore["getBinding"] = (id) => this.routing.getBinding(id);
   isBridgeMessage: InboundRoutingStore["isBridgeMessage"] = (id) => this.routing.isBridgeMessage(id);
   listCompletedProjectSelectionsWithInitialPrompt: InboundRoutingStore["listCompletedProjectSelectionsWithInitialPrompt"] = () => this.routing.listCompletedProjectSelectionsWithInitialPrompt();
@@ -75,6 +85,7 @@ export class SqliteDeliveryRecoveryCapabilityStore implements DeliveryRecoverySt
   getBinding: DeliveryRecoveryStore["getBinding"] = (id) => this.bindings.getBinding(id);
   loadTopicView: DeliveryRecoveryStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
   listFailures: DeliveryRecoveryStore["listFailures"] = (chatId) => this.bindings.listFailures(chatId);
+  reservePaneThreadAlias: DeliveryRecoveryStore["reservePaneThreadAlias"] = (input) => this.outbox.reservePaneThreadAlias(input);
   retryDeadLetter: DeliveryRecoveryStore["retryDeadLetter"] = (id, chatId, actorOpenId) => this.outbox.retryDeadLetter(id, chatId, actorOpenId);
 }
 

@@ -3,12 +3,19 @@ import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { callPrimaryToolGateway, handlePrimaryMcpRequest, MAX_PRIMARY_TOOL_RESPONSE_BYTES } from "../src/cli/primary-tools-mcp.js";
+import { callPrimaryToolGateway, handlePrimaryMcpRequest, MAX_PRIMARY_TOOL_RESPONSE_BYTES, PRIMARY_TOOLS_VERSION } from "../src/cli/primary-tools-mcp.js";
+import packageJson from "../package.json" with { type: "json" };
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => { await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("Primary tools MCP surface", () => {
+  it("advertises the release version during initialization", async () => {
+    const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, vi.fn());
+    expect(PRIMARY_TOOLS_VERSION).toBe(packageJson.version);
+    expect(response).toMatchObject({ result: { serverInfo: { name: "herdr-agent-swarm-primary-tools", version: packageJson.version } } });
+  });
+
   it("advertises only the fixed non-topology tools with model-facing guidance", async () => {
     const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string; description: string }> } };
     expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "show_worker_cards", "steer_instance", "wait_instance"].sort());

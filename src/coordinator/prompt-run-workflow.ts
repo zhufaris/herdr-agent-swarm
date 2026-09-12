@@ -12,6 +12,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { abortableWait } from "../runtime/abortable-wait.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { PromptRunRegistry } from "./prompt-run-registry.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
@@ -312,7 +313,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
           ? decideDetachedTurnTerminalOutcome(prompt, owned.observation, observation.traexProcess)
           : { kind: "pending" as const };
         if (terminal.kind === "completed") {
-          const sourceAnswer = terminal.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.chunks.join("\n\n") : "");
+          const sourceAnswer = terminal.finalAnswer ?? (outputSource.mode === "typed" ? outputSource.output.text : "");
           const finalAnswer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
           const settled = this.options.store.settleDetachedPrompt({
             promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(),
@@ -389,15 +390,6 @@ function waitForSettlementOrAbort(promise: Promise<unknown>, signal: AbortSignal
     const cleanup = () => signal.removeEventListener("abort", onAbort);
     signal.addEventListener("abort", onAbort, { once: true });
     void promise.then(() => { cleanup(); resolve(); }, () => { cleanup(); resolve(); });
-  });
-}
-
-function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.reject(new Error("observer detached"));
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
-    const onAbort = () => { clearTimeout(timer); reject(new Error("observer detached")); };
-    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 

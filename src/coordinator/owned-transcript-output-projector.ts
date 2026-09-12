@@ -1,9 +1,10 @@
 import type { TurnOutputObservation } from "../domain/events.js";
 import type { TraexTranscriptObservation } from "../domain/ports/external.js";
+import { appendTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 
 export interface OwnedTranscriptOutputState {
   emitted: boolean;
-  chunks: readonly string[];
+  output: BoundedTurnOutput;
   terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]>;
 }
 
@@ -26,9 +27,10 @@ export function projectOwnedTranscriptOutput(input: {
   const terminalLifecycle = lifecycle?.state === "completed" || lifecycle?.state === "aborted"
     ? lifecycle
     : input.state.terminalLifecycle;
-  const chunks = input.observation.answerDelta
-    ? [...input.state.chunks, input.observation.answerDelta]
-    : input.state.chunks;
+  const output = appendTurnOutput(input.state.output, input.observation.answerDelta);
+  const answerChanged = Boolean(input.observation.answerDelta) && !input.state.output.truncated;
+  const answerSnapshot = answerChanged ? (output.truncated ? output.text : input.observation.answerDelta) : "";
+  const answerUpdate = answerChanged && output.truncated ? "replace-all" as const : "append" as const;
   const emitted = input.state.emitted || Boolean(input.observation.answerDelta);
   const mainStatus = input.observation.mainStatus && input.elapsedSeconds !== undefined
     ? {
@@ -38,11 +40,11 @@ export function projectOwnedTranscriptOutput(input: {
       ...(input.observation.mainStatus.tokenCount !== undefined ? { tokenCount: input.observation.mainStatus.tokenCount } : {})
     }
     : undefined;
-  const observation = input.observation.answerDelta || input.observation.toolActivities?.length || mainStatus
+  const observation = answerChanged || input.observation.toolActivities?.length || mainStatus
     ? {
-      answer: { snapshot: input.observation.answerDelta, update: "append" as const, toolActivities: input.observation.toolActivities ?? [] },
+      answer: { snapshot: answerSnapshot, update: answerUpdate, toolActivities: input.observation.toolActivities ?? [] },
       main: { ...(mainStatus ? { status: mainStatus } : {}) }
     }
     : undefined;
-  return { state: { emitted, chunks, ...(terminalLifecycle ? { terminalLifecycle } : {}) }, ...(observation ? { observation } : {}) };
+  return { state: { emitted, output, ...(terminalLifecycle ? { terminalLifecycle } : {}) }, ...(observation ? { observation } : {}) };
 }
