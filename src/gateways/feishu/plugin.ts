@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { LarkSdkAdapter } from "../../adapters/lark-adapter.js";
 import type { LarkPort } from "../../domain/ports/external.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../../domain/types.js";
-import { GATEWAY_PROTOCOL_VERSION, type ConversationGatewayPlugin, type GatewayDeliveryContext, type GatewayDeliveryIntent, type GatewayDeliveryReceipt, type GatewayExternalRef, type GatewayIngressResponse, type GatewaySession, type NegotiatedGatewayProfile, type PreparedGatewayDelivery } from "../contract/plugin.js";
+import { GATEWAY_PROTOCOL_VERSION, GatewayDeliveryError, type ConversationGatewayPlugin, type GatewayDeliveryContext, type GatewayDeliveryIntent, type GatewayDeliveryReceipt, type GatewayExternalRef, type GatewayIngressResponse, type GatewaySession, type NegotiatedGatewayProfile, type PreparedGatewayDelivery } from "../contract/plugin.js";
 import { performFeishuDelivery } from "./errors.js";
 
 export interface FeishuGatewayConfig {
@@ -55,7 +55,7 @@ class FeishuGatewayDelivery {
     return Object.freeze({ protocolVersion: GATEWAY_PROTOCOL_VERSION, gatewayId: this.gatewayId, profileId: this.profile.id, rendererRevision: this.profile.rendererRevision, operation: intent.kind, intent: structuredClone(intent) });
   }
   async execute(plan: PreparedGatewayDelivery, context: GatewayDeliveryContext): Promise<GatewayDeliveryReceipt> {
-    if (plan.gatewayId !== this.gatewayId || plan.profileId !== this.profile.id || plan.protocolVersion !== GATEWAY_PROTOCOL_VERSION) throw new Error("Feishu Gateway delivery plan identity mismatch");
+    if (plan.gatewayId !== this.gatewayId || plan.profileId !== this.profile.id || plan.protocolVersion !== GATEWAY_PROTOCOL_VERSION) throw new GatewayDeliveryError({ failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: "Feishu Gateway delivery plan identity mismatch" });
     const intent = plan.intent;
     if (intent.kind === "conversation.create") {
       const receipt = await performFeishuDelivery(intent, "create_topic", () => this.transport.createTopic(intent.view, intent.idempotencyKey, intent.conversationId));
@@ -86,12 +86,12 @@ class FeishuGatewayDelivery {
       return { refs: [ref(this.gatewayId, "message", receipt.messageId), ...(receipt.cardId ? [ref(this.gatewayId, "surface", receipt.cardId)] : [])] };
     }
     if (intent.kind === "stream.append") {
-      if (!this.transport.streamCardContent) throw new Error("Feishu Gateway does not support stream append");
+      if (!this.transport.streamCardContent) throw new GatewayDeliveryError({ failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: "Feishu Gateway does not support stream append" });
       await performFeishuDelivery(intent, "stream_card_content", () => this.transport.streamCardContent!(intent.surfaceId, intent.slot, intent.content, intent.sequence));
       return { refs: [] };
     }
     if (intent.kind === "stream.finish") {
-      if (!this.transport.finishStreamingCard) throw new Error("Feishu Gateway does not support stream finish");
+      if (!this.transport.finishStreamingCard) throw new GatewayDeliveryError({ failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: "Feishu Gateway does not support stream finish" });
       await performFeishuDelivery(intent, "finish_streaming_card", () => this.transport.finishStreamingCard!(intent.surfaceId, intent.sequence, intent.summary));
       return { refs: [] };
     }

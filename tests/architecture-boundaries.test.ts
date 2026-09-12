@@ -183,7 +183,7 @@ describe("application composition boundaries", () => {
     expect(factory).not.toMatch(/new (?:BridgeEventBus|InProcessPromptWorkScheduler|InProcessInboundWorkNotifier|InProcessOutboundWorkNotifier|WorkWakeupHub)/);
     expect(outbound).toContain("outboundWork: OutboundWorkNotifier");
     expect(outbound).not.toContain("new InProcessOutboundWorkNotifier");
-    const dispatcher = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/events/gateway-outbox-dispatcher.ts", import.meta.url), "utf8");
     expect(dispatcher).toContain("private readonly work: OutboundWorkNotifier,");
     expect(dispatcher).not.toContain("InProcessOutboundWorkNotifier");
     for (const file of ["create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
@@ -200,7 +200,7 @@ describe("application composition boundaries", () => {
   });
 
   it("separates outbound drain scheduling from single-reply delivery", () => {
-    const drain = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const drain = readFileSync(new URL("../src/events/gateway-outbox-dispatcher.ts", import.meta.url), "utf8");
     const delivery = readFileSync(new URL("../src/events/outbound-delivery-executor.ts", import.meta.url), "utf8");
     expect(drain).toContain("new OutboundDeliveryExecutor(store, gateway, logger)");
     expect(drain).not.toContain("outbound-intent-materializer");
@@ -209,7 +209,8 @@ describe("application composition boundaries", () => {
     expect(delivery).toContain("prepareOutboundGatewayIntent");
     expect(delivery).toContain("GatewayDeliveryPort");
     expect(delivery).not.toContain("LarkPort");
-    expect(delivery).toContain("classifyDeliveryError");
+    expect(delivery).toContain("classifyCoreDeliveryFailure");
+    expect(delivery).not.toContain("delivery-error-classifier");
     expect(delivery).toContain("markOutboundReplyDelivered");
   });
 
@@ -554,9 +555,9 @@ describe("application composition boundaries", () => {
     expect(dispatcher).not.toContain("BridgeEventBus");
   });
 
-  it("keeps outbound intent persistence separate from Lark delivery", () => {
+  it("keeps outbound intent persistence separate from Gateway delivery", () => {
     const writer = readFileSync(new URL("../src/events/outbound-intent-writer.ts", import.meta.url), "utf8");
-    const dispatcher = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/events/gateway-outbox-dispatcher.ts", import.meta.url), "utf8");
     const coordinators = ["inbound-router.ts", "binding-provisioning-workflow.ts", "model-selection-workflow.ts", "pane-control-workflow.ts", "pane-closure-workflow.ts", "session-administration-workflow.ts", "operations-query-workflow.ts", "delivery-recovery-workflow.ts", "prompt-run-workflow.ts", "herdr-runtime-reconciler.ts"]
       .map((file) => readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8"))
       .join("\n");

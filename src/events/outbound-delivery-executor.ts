@@ -4,9 +4,8 @@ import type { OutboxStore } from "../domain/ports/outbox.js";
 import type { OutboundReply } from "../domain/types.js";
 import { GatewayDeliveryError, type GatewayDeliveryPort, type GatewayDeliveryReceipt, type GatewayExternalRef } from "../gateways/contract/plugin.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { classifyDeliveryError } from "./delivery-error-classifier.js";
-import { DeliveryOperationError } from "./delivery-operation-error.js";
 import { prepareOutboundGatewayIntent } from "./outbound-gateway-intent.js";
+import { PermanentDeliveryError } from "./outbound-target-validation.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 
 export type OutboundDeliveryOutcome = "delivered" | "failed";
@@ -99,13 +98,12 @@ export class OutboundDeliveryExecutor {
   private fail(claim: OutboundDeliveryClaim, error: unknown): OutboundDeliveryOutcome {
     const reply = claim.reply;
     const gatewayFailure = error instanceof GatewayDeliveryError ? error.failure : null;
-    const legacy = gatewayFailure ? null : classifyDeliveryError(error);
-    const classified = gatewayFailure ?? { failureClass: legacy!.failureClass, effectCertainty: legacy!.effectCertainty, httpStatus: legacy!.httpStatus, providerCode: legacy!.larkErrorCode, safeMessage: legacy!.message, ...(legacy!.retryDelayMs === undefined ? {} : { retryAfterMs: legacy!.retryDelayMs }), ...(legacy!.recoveryKind === undefined ? {} : { recoveryKind: legacy!.recoveryKind }), ...(legacy!.operationContext ? { providerOperation: legacy!.operationContext.operation } : {}) };
+    const classified = gatewayFailure ?? classifyCoreDeliveryFailure(error);
     const metadata = { failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, larkErrorCode: classified.providerCode, ...(classified.recoveryKind === undefined ? {} : { recoveryKind: classified.recoveryKind }) };
     const transition = this.store.markOutboundReplyFailedWithQuarantine(claim, classified.safeMessage, metadata, classified.retryAfterMs);
     if (!transition) { this.logger.warn({ event: "gateway-outbox-stale-receipt", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, outcome: "ignored" }, "ignored a stale Gateway delivery receipt"); return "failed"; }
     const failed = transition.reply;
-    const context = { event: failed.state === "dead_letter" ? "gateway-outbox-dead-lettered" : "gateway-outbox-retry-scheduled", err: safeLogError(error instanceof GatewayDeliveryError ? error.cause ?? error : error instanceof DeliveryOperationError ? error.cause : error), gatewayId: reply.gatewayId, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed.attemptCount, nextAttemptAt: failed.nextAttemptAt, failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, providerCode: classified.providerCode, deliveryOperation: classified.providerOperation, deliveryTarget: preparedPurpose(reply), autoRecoveryCount: failed.autoRecoveryCount, laneClass: transition.laneClass, quarantineAction: transition.action, outcome: failed.state === "dead_letter" ? "dead_letter" : "retry" };
+    const context = { event: failed.state === "dead_letter" ? "gateway-outbox-dead-lettered" : "gateway-outbox-retry-scheduled", err: safeLogError(error instanceof GatewayDeliveryError ? error.cause ?? error : error), gatewayId: reply.gatewayId, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed.attemptCount, nextAttemptAt: failed.nextAttemptAt, failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, providerCode: classified.providerCode, deliveryOperation: classified.providerOperation, deliveryTarget: preparedPurpose(reply), autoRecoveryCount: failed.autoRecoveryCount, laneClass: transition.laneClass, quarantineAction: transition.action, outcome: failed.state === "dead_letter" ? "dead_letter" : "retry" };
     if (failed.state === "dead_letter") this.logger.error(context, classified.failureClass === "permanent" ? "Gateway outbox reply was permanently rejected" : "Gateway outbox reply exhausted retries");
     else this.logger.warn(context, "Gateway outbox reply delivery failed; retry scheduled");
     if (transition.action === "rebuild_answer" && transition.promptId) this.notify("answer", this.answerCheckpoints, (listener) => listener(transition.promptId!, failed.viewVersion ?? 0), reply);
@@ -128,4 +126,9 @@ function preparedPurpose(reply: OutboundReply): string {
   if (reply.workerTurnId) return "worker-turn"; if (reply.workerId) return "worker-main"; if (reply.targetRole === "session_status") return "primary-main"; if (reply.cardRole === "answer") return "primary-answer"; return "operation-result";
 }
 class DeliveryCheckpointError extends Error {}
+function classifyCoreDeliveryFailure(error: unknown): import("../gateways/contract/plugin.js").GatewayFailure {
+  const safe = safeLogError(error);
+  if (error instanceof PermanentDeliveryError) return { failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: safe.message };
+  return { failureClass: "unknown", effectCertainty: "uncertain", providerCode: null, httpStatus: null, safeMessage: safe.message };
+}
 function subscribe<Listener>(listeners: Set<Listener>, listener: Listener): () => void { listeners.add(listener); return () => listeners.delete(listener); }
