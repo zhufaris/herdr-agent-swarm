@@ -290,7 +290,7 @@ The production implementation uses the following modules and seams.
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
-| `PromptRunWorkflow` | FIFO turn execution and detached recovery | `PromptRunStore`, `HerdrPort`, `TraexControlPort`, and `PromptWorkScheduler` |
+| `PromptRunWorkflow` | FIFO turn execution and detached recovery | Separate `PromptDispatchStore`, `PromptRecoveryStore`, and `PromptSessionStore` capabilities plus `HerdrPort`, `TraexControlPort`, and `PromptWorkScheduler` |
 | `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
@@ -306,7 +306,8 @@ The production implementation uses the following modules and seams.
 | `createSqliteStoreBundle` / `SqliteCapabilityGraph` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production code cannot import the broad compatibility facade |
 | `SqliteStoreKernel` / `SqliteBindingStore` | Test and headless-smoke compatibility facades | Non-production adapters over the capability graph; they contain no schema ownership and cannot be imported by production source |
 | `SqliteBindingLifecycleStore` / `SqliteBindingProjectionStore` | Binding lifecycle, reset, cleanup, runtime convergence, and binding-owned projections | Keep lifecycle and projection responsibilities separate while sharing one transaction context |
-| `SqlitePromptStore` / `SqliteWorkerTurnStore` / `SqliteTurnControlStore` | Prompt, Worker-turn, and exact-turn control aggregates | Deep aggregate operations preserve cross-table state, projection, event, invalidation, and outbox transactions |
+| `SqlitePromptAcceptanceStore` / `SqlitePromptDispatchStore` / `SqlitePromptRecoveryStore` / `SqliteExternalTurnAdoptionStore` | Primary Prompt admission, exact dispatch, no-replay recovery, and Herdr-originated ownership | Each deep module owns one protocol while sharing the same context for cross-table Prompt, projection, invalidation, and outbox transactions |
+| `SqlitePromptStore` / `SqliteWorkerTurnStore` / `SqliteTurnControlStore` | Primary queue feedback and control helpers, Worker turns, and exact-turn control | Adjacent capabilities remain separate from the Prompt execution protocols while preserving atomic aggregate operations |
 | `SqliteInstanceStore` / `SqliteInstanceOperationStore` | Agent instance, workspace lease, conversation target, and instance-operation persistence | Instance identity and generation fences remain inside capability operations |
 | `SqliteProjectionStore` / `SqliteCardContextStore` / `SqliteOutboxStore` | Card projections/pages, invalidation state, and durable delivery lifecycle | Internal transaction-participating seams over the shared context |
 | `SqliteInboundProjectStore` / `SqlitePaneOperationStore` | Durable inbound/project selection and pane operation capabilities | Workflow-specific atomic transitions, not table repositories |
@@ -375,7 +376,7 @@ All production bundle entries are named capabilities;
 none route through `SqliteStoreKernel`. Cross-table operations remain in focused
 prompt, binding-session, control, recovery, instance, and outbox aggregate modules
 that share the same context and preserve their outer transaction. Each workflow receives only
-the domain port it consumes, such as `PromptRunStore`, `InstanceLifecycleStore`, `InstanceTurnStore`,
+the domain port it consumes, such as `PromptDispatchStore`, `PromptRecoveryStore`, `PromptSessionStore`, `InstanceLifecycleStore`, `InstanceTurnStore`,
 `OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
 facade type. A test-only `SqliteBindingStore` compatibility helper remains for
 migration-fixture inspection, but production code does not expose that name. New
