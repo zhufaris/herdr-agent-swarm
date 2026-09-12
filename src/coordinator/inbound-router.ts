@@ -1,4 +1,4 @@
-import type { LarkPort } from "../domain/ports/external.js";
+import type { GatewayIngressPort } from "../gateways/contract/plugin.js";
 import type { InboundDispatcherDiagnostics, IncomingLarkCardAction, IncomingLarkMessage, StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { CardActionRouterPort } from "./card-action-router.js";
@@ -20,7 +20,7 @@ export interface InboundRouterPort {
 }
 
 export interface InboundRouterOptions {
-  lark: Pick<LarkPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
+  gatewayIngress: Pick<GatewayIngressPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {
@@ -40,7 +40,7 @@ export class InboundRouter implements InboundRouterPort {
   async stop(context?: ShutdownContext): Promise<void> {
     await this.options.startupRecovery.stop();
     const cardActionsStopped = this.options.cardActionRouter.stop();
-    await this.options.lark.stop();
+    await this.options.gatewayIngress.stop();
     await Promise.allSettled([this.options.inboundDispatcher.stop(), cardActionsStopped]);
     await this.options.swarmCommands.stop();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop()]);

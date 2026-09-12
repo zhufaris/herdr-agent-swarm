@@ -7,7 +7,7 @@ describe("InboundRouter shutdown", () => {
     let releaseCallbacks!: () => void;
     const callbacks = new Promise<void>((resolve) => { releaseCallbacks = resolve; });
     const router = new InboundRouter({
-      lark: { async stop() { calls.push("lark"); } },
+      gatewayIngress: { async stop() { calls.push("gateway"); } },
       startupRecovery: { async start() {}, async stop() { calls.push("startup"); }, snapshot: () => ({}) },
       inboundDispatcher: { async stop() { calls.push("messages"); }, snapshot: () => ({}) },
       cardActionRouter: { async handle() {}, stop() { calls.push("card-gate"); return callbacks.then(() => { calls.push("callbacks-drained"); }); } },
@@ -20,7 +20,7 @@ describe("InboundRouter shutdown", () => {
 
     let stopped = false;
     const stopping = router.stop().then(() => { stopped = true; });
-    await vi.waitFor(() => expect(calls).toEqual(["startup", "card-gate", "lark", "messages"]));
+    await vi.waitFor(() => expect(calls).toEqual(["startup", "card-gate", "gateway", "messages"]));
     expect(stopped).toBe(false);
     expect(calls).not.toContain("commands");
 

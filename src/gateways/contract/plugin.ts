@@ -67,7 +67,8 @@ export type GatewayInboundEvent =
     }
   | {
       schemaVersion: 1; kind: "interaction.invoked"; eventKey: string; occurredAt: string; address: GatewayConversationAddress;
-      sourceMessage: GatewayExternalRef<"message">; actor: GatewayExternalRef<"actor">; interactionRef: string; values: Readonly<Record<string, string>>;
+      sourceMessage: GatewayExternalRef<"message">; actor: GatewayExternalRef<"actor">; interactionRef: string;
+      commandPayload: unknown; option: string | null; values: Readonly<Record<string, string>>;
     };
 
 export type GatewayIngressResponse = void | { toast?: { level: "success" | "warning" | "error"; text: string }; replaceView?: unknown };

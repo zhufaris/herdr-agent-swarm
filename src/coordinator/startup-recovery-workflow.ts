@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import { projectSpaceName, type BridgeConfig } from "../config.js";
-import type { LarkPort } from "../domain/ports/external.js";
+import type { GatewayIngressPort, GatewayIngressSink } from "../gateways/contract/plugin.js";
 import type { StartupRecoveryStore } from "../domain/ports/workflow.js";
 import type { StartupRecoveryDiagnostics } from "../domain/types.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
@@ -26,7 +26,7 @@ export interface StartupRecoveryWorkflowPort {
 }
 
 export interface StartupRecoveryWorkflowOptions {
-  config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; lark: Pick<LarkPort, "start" | "stop">; logger: Logger; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
+  config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; gatewayIngress: GatewayIngressPort; gatewaySink: GatewayIngressSink; logger: Logger; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "recover">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; messageRouting: InboundMessageRoutingWorkflowPort;
 }
 
@@ -39,7 +39,7 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   constructor(private readonly options: StartupRecoveryWorkflowOptions) {}
 
   async start(): Promise<void> {
-    const { config, store, herdr, lark, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews, inboundDispatcher } = this.options;
+    const { config, store, herdr, gatewayIngress, gatewaySink, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews, inboundDispatcher } = this.options;
     this.diagnostics = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
@@ -59,7 +59,7 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     await this.runStage("runtime-reconciliation", () => reconciler.reconcile());
     promptRun.start(); this.options.sessionOperations.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);
     this.stopInboundSubscription = inboundWork.subscribe((event) => this.options.messageRouting.handle(event.payload));
-    await lark.start((message) => inboundDispatcher.receiveMessage(message), (action) => this.options.cardActionRouter.handle(action));
+    await gatewayIngress.start(gatewaySink);
     await this.runStage("provisioning", () => provisioning.recover());
     await this.runStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
     inboundDispatcher.start(); await inboundDispatcher.drain();

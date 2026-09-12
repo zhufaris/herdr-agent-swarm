@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
-import type { HerdrPort, LarkPort } from "../domain/ports/external.js";
+import type { HerdrPort } from "../domain/ports/external.js";
+import type { GatewaySession, GatewayStatus } from "../gateways/contract/plugin.js";
 import type { HealthStore } from "../domain/ports/health.js";
 import type { HerdrCircuitBreakerStatus, InboundDispatcherDiagnostics, InstanceLeaseStatus, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, ProjectConfig, PromptWorkerDiagnostics, ReconciliationDiagnostics, SessionOperationDispatcherDiagnostics, SqliteIntegrityDiagnostics, StartupRecoveryDiagnostics, WorkspaceCacheStatus } from "../domain/types.js";
 import { validateProjectDirectories } from "../config.js";
@@ -15,7 +16,7 @@ type HerdrReadiness = ComponentState & { workspaces: Array<{ workspaceId: string
 interface Readiness {
   status: "ready" | "not_ready";
   components: {
-    database: ComponentState; projects: ComponentState; lark: ComponentState;
+    database: ComponentState; projects: ComponentState; gateway: ComponentState; lark: ComponentState;
     lease: InstanceLeaseStatus & { ok: boolean };
     herdr: HerdrReadiness;
     instanceRuntime?: ComponentState;
@@ -23,7 +24,7 @@ interface Readiness {
 }
 
 export function startHealthServer(options: {
-  host: string; port: number; store: HealthStore; herdr: HerdrPort; lark: LarkPort; projects: readonly ProjectConfig[];
+  host: string; port: number; store: HealthStore; herdr: HerdrPort; gateway?: Pick<GatewaySession, "snapshot">; /** @deprecated test compatibility */ lark?: { isReady(): boolean }; projects: readonly ProjectConfig[];
   lease: { snapshot(): InstanceLeaseStatus };
   workspaceCache?: { status(): WorkspaceCacheStatus };
   herdrCircuitBreaker?: { status(): HerdrCircuitBreakerStatus };
@@ -137,13 +138,16 @@ class ReadinessCache<T> {
   }
 }
 
-function inspectReadiness(options: { store: HealthStore; lark: LarkPort; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics> } }, herdr: HerdrReadiness): { readiness: Readiness; instanceRuntime: ({ ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics>) | DiagnosticFailure | undefined } {
+function inspectReadiness(options: { store: HealthStore; gateway?: Pick<GatewaySession, "snapshot">; lark?: { isReady(): boolean }; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics> } }, herdr: HerdrReadiness): { readiness: Readiness; instanceRuntime: ({ ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics>) | DiagnosticFailure | undefined } {
   const database = check(() => options.store.listBindings());
   const projects = check(() => validateProjectDirectories(options.projects));
-  const larkResult = collectDiagnostic(() => options.lark.isReady());
-  const lark = isDiagnosticError(larkResult)
-    ? { ok: false, error: larkResult.error }
-    : larkResult ? { ok: true } : { ok: false, error: "Lark WebSocket is not connected" };
+  const gatewayResult = collectDiagnostic<GatewayStatus | boolean>(() => options.gateway?.snapshot() ?? options.lark?.isReady() ?? false);
+  const gateway = isDiagnosticError(gatewayResult)
+    ? { ok: false, error: gatewayResult.error }
+    : typeof gatewayResult === "boolean"
+      ? gatewayResult ? { ok: true } : { ok: false, error: "Conversation Gateway ingress is not connected" }
+      : gatewayResult.ingress.ready && gatewayResult.delivery.ready ? { ok: true } : { ok: false, error: gatewayResult.ingress.detail ?? gatewayResult.delivery.detail ?? "Conversation Gateway is not ready" };
+  const lark = gateway;
   const leaseResult = collectDiagnostic<InstanceLeaseStatus>(() => options.lease.snapshot());
   const lease = isDiagnosticError(leaseResult)
     ? { ok: false, held: false, ownerSuffix: "", fencingToken: null, expiresAt: null, lastRenewedAt: null, error: leaseResult.error }
@@ -152,7 +156,7 @@ function inspectReadiness(options: { store: HealthStore; lark: LarkPort; project
   const instanceRuntimeComponent = isDiagnosticError(instanceRuntime)
     ? { ok: false, error: instanceRuntime.error }
     : instanceRuntime ? { ok: instanceRuntime.ready, ...(instanceRuntime.ready ? {} : { error: instanceRuntime.lastError ?? "Instance runtime reconciliation has not completed" }) } : undefined;
-  const components = { database, projects, herdr, lark, lease, ...(instanceRuntimeComponent ? { instanceRuntime: instanceRuntimeComponent } : {}) };
+  const components = { database, projects, herdr, gateway, lark, lease, ...(instanceRuntimeComponent ? { instanceRuntime: instanceRuntimeComponent } : {}) };
   return { readiness: { status: Object.values(components).every((component) => component.ok) ? "ready" : "not_ready", components }, instanceRuntime };
 }
 

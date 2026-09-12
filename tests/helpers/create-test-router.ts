@@ -35,6 +35,8 @@ import { OutboundIntentWriter } from "../../src/events/outbound-intent-writer.js
 import { InProcessOutboundWorkNotifier } from "../../src/events/outbound-work-notifier.js";
 import { InProcessPromptWorkScheduler, type PromptWorkScheduler } from "../../src/events/prompt-work-scheduler.js";
 import type { SqliteBindingStore } from "./sqlite-binding-store.js";
+import { createFeishuGatewayPlugin } from "../../src/gateways/feishu/plugin.js";
+import { createCompatibilityGatewayIngressSink } from "../../src/gateways/compatibility-ingress.js";
 
 export function createTestRouter(
   config: BridgeConfig,
@@ -102,7 +104,9 @@ export function createTestRouter(
     config, stores: { startupViews: store, answerPages: store, mainCards: store },
     outbound: writer, outboundWork, presentation: cardKitPrimaryPresentation, logger
   });
-  const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, lark, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
-  const router = new InboundRouter({ lark, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
+  const gateway = createFeishuGatewayPlugin({ createTransport: () => lark }).create({ gatewayId: config.gateway?.id ?? "feishu:primary", ...config.lark }, { logger });
+  const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundDispatcher.receiveMessage(message), handleAction: (action) => cardActionRouter.handle(action) });
+  const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
+  const router = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
   return router;
 }

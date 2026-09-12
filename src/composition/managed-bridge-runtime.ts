@@ -84,7 +84,7 @@ export async function createManagedBridgeRuntime(options: {
       instanceTurns,
       instanceWork,
       createHealthServer: () => startHealthServer({
-        ...config.http, store: completedStores.health, herdr, lark, projects: config.projects, lease,
+        ...config.http, store: completedStores.health, herdr, gateway: runtime.gateway, projects: config.projects, lease,
         workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator,
         inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() },
         sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime,

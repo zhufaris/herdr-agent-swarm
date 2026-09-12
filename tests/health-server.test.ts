@@ -15,6 +15,20 @@ describe("health server", () => {
   const buildIdentity = { serviceId: "herdr-agent-swarm" as const, version: "0.2.0", buildId: "sha256:test-build", gitCommit: null };
   const reconciliationSnapshot = { state: "idle" as const, runCount: 3, successCount: 2, failureCount: 1, coalescedRequestCount: 4, lastStartedAt: "2026-08-29T00:00:00.000Z", lastCompletedAt: "2026-08-29T00:00:00.025Z", lastDurationMs: 25, maxDurationMs: 40, lastOutcome: "succeeded" as const };
 
+  it("uses the configured Conversation Gateway status as the readiness authority", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      gateway: { snapshot: () => ({ gatewayId: "feishu:primary", kind: "feishu", profileId: "feishu-cardkit-v1", ingress: { ready: true }, delivery: { ready: true }, degradations: [] }) },
+      herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+
+    const ready = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/ready`);
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toMatchObject({ components: { gateway: { ok: true }, lark: { ok: true } } });
+  });
+
   it("reports card convergence scheduler diagnostics without changing readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     const cardConvergence = { pending: 2, pendingByFamily: { answer: 1, main: 1, unknown: 0 }, inFlight: 1, coalesced: 7, failures: 1, oldestPendingAgeMs: 850, lastSuccessfulFlushAt: "2026-08-30T00:00:00.000Z" };
