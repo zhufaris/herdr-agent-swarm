@@ -5,7 +5,7 @@ import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { abortableWait } from "../runtime/abortable-wait.js";
-import { createBoundedTurnOutput } from "../runtime/bounded-turn-output.js";
+import { appendTurnOutput, createBoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 import { transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 
@@ -14,7 +14,7 @@ export type TurnOutputSource =
   | { mode: "typed"; cursor: ExactTurnCursor; emitted: boolean; output: ReturnType<typeof createBoundedTurnOutput>; terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]> };
 
 interface TranscriptObserverOptions {
-  store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn">;
+  store: Pick<PromptRunStore, "getBinding" | "getPrompt" | "claimPromptTranscriptTurn" | "loadRunCard">;
   reader?: TraexTranscriptReaderPort;
   herdr: Pick<HerdrPort, "observeRuntime">;
   adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;
@@ -28,6 +28,7 @@ interface TranscriptObserverOptions {
 const FIRST_TURN_TRANSCRIPT_IDENTITY_GRACE_MS = 3_000;
 const TRANSCRIPT_IDENTITY_MAX_POLL_MS = 500;
 const FINAL_TRANSCRIPT_DRAIN_LIMIT = 8;
+const DETACHED_REPLAY_DRAIN_LIMIT = 256;
 const MAX_TRANSCRIPT_CONFLICT_PROMPTS = 256;
 const MAX_TRANSCRIPT_CONFLICT_TURNS_PER_PROMPT = 16;
 
@@ -63,6 +64,42 @@ export class TranscriptObserver {
     } catch (error) {
       this.options.logger.warn({ event: "traex-transcript-open-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, unavailableReason: "transcript_validation_failed", outcome: "structured_output_unavailable" }, "could not open typed TraeX transcript");
       return { mode: "unavailable", reason: "transcript_validation_failed" };
+    }
+  }
+
+  async openDetached(binding: Binding, prompt: PromptJob): Promise<TurnOutputSource> {
+    const persistedAnswer = this.options.store.loadRunCard(prompt.id)?.answer ?? "";
+    const fallback = async () => {
+      const source = await this.open(binding);
+      if (source.mode === "typed") { source.output = createBoundedTurnOutput(persistedAnswer); source.emitted = Boolean(persistedAnswer); }
+      return source;
+    };
+    if (!this.exactTurns || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return fallback();
+    try {
+      const opened = await this.exactTurns.open({
+        session: transcriptSessionFor(binding),
+        boundary: { kind: "at", turnId: prompt.transcriptTurnId, startedAt: prompt.transcriptTurnStartedAt },
+        expected: { turnId: prompt.transcriptTurnId, startedAt: prompt.transcriptTurnStartedAt }
+      });
+      if (opened.mode !== "typed") return fallback();
+      const source: TurnOutputSource = { mode: "typed", cursor: opened.cursor, emitted: Boolean(persistedAnswer), output: createBoundedTurnOutput(persistedAnswer) };
+      let replayedAnswer = createBoundedTurnOutput();
+      let latestMainStatus: TraexTranscriptObservation["mainStatus"];
+      await opened.cursor.drain({ limit: DETACHED_REPLAY_DRAIN_LIMIT, onObservation: async (observation) => {
+        replayedAnswer = appendTurnOutput(replayedAnswer, observation.answerDelta);
+        if (observation.mainStatus) latestMainStatus = mergeMainStatus(latestMainStatus, observation.mainStatus);
+        if (observation.turnLifecycle?.state === "completed" || observation.turnLifecycle?.state === "aborted") source.terminalLifecycle = observation.turnLifecycle;
+        return "continue" as const;
+      } });
+      if (!replayedAnswer.truncated && replayedAnswer.text.startsWith(persistedAnswer) && replayedAnswer.text.length > persistedAnswer.length) {
+        const suffix = replayedAnswer.text.slice(persistedAnswer.length).trimStart();
+        if (suffix) { source.output = replayedAnswer; await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: suffix }, Date.parse(prompt.transcriptTurnStartedAt)); }
+      }
+      if (latestMainStatus) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: "", mainStatus: latestMainStatus }, Date.parse(prompt.transcriptTurnStartedAt));
+      return source;
+    } catch (error) {
+      this.options.logger.warn({ event: "detached-transcript-replay-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId: binding.paneId, outcome: "live_tail_only" }, "could not replay detached transcript state; continuing from the live tail");
+      return fallback();
     }
   }
 
@@ -210,4 +247,12 @@ export class TranscriptObserver {
     observed.add(observedTurnId);
     this.options.logger.warn({ event: "transcript-turn-conflict", bindingId: binding.id, promptId, paneId: binding.paneId, acceptedTurnId, observedTurnId, outcome: "ignored" }, "ignored output from a conflicting TraeX transcript turn");
   }
+}
+
+function mergeMainStatus(current: TraexTranscriptObservation["mainStatus"], update: NonNullable<TraexTranscriptObservation["mainStatus"]>): NonNullable<TraexTranscriptObservation["mainStatus"]> {
+  return {
+    ...(update.statusTitle !== undefined ? { statusTitle: update.statusTitle } : current?.statusTitle !== undefined ? { statusTitle: current.statusTitle } : {}),
+    ...(update.planSteps !== undefined ? { planSteps: update.planSteps } : current?.planSteps !== undefined ? { planSteps: current.planSteps } : {}),
+    ...(update.tokenCount !== undefined ? { tokenCount: update.tokenCount } : current?.tokenCount !== undefined ? { tokenCount: current.tokenCount } : {})
+  };
 }

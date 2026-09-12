@@ -40,6 +40,11 @@ route all observed transcript lifecycle through the existing `BridgeEventBus`,
   history creates no prompt or outbox work.
 - Parse legacy `user_message`, current `history_mutation` user messages, and
   current `item_completed/UserMessage` records with message-ID deduplication.
+- Reopen exact-owned detached turns from their persisted boundary after restart,
+  restore the latest Main status, and append only a provable missing Answer
+  suffix while retaining the durable RunCard answer as baseline.
+- Bound exact-turn lookup to the final 64 MiB of large transcripts and discard
+  only the partial record at the beginning of that scan window.
 - Append a direct turn after baseline, deliver repeated pane hints, and assert one
   `executionOrigin='herdr'` prompt with exact transcript identity.
 - Assert duplicate hints do not create duplicate prompts or card intents.

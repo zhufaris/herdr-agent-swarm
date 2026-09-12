@@ -131,6 +131,14 @@ history. Instead:
   time still fence adoption;
 - the next transcript append or periodic scan handles later records.
 
+An exact-owned detached prompt uses a separate restart path: SQLite's persisted
+turn ID and start time fence a bounded lookup in the final 64 MiB, even when the
+whole transcript is larger. Replay restores the latest Main status snapshot,
+including `update_plan` task steps written before restart. The persisted RunCard
+answer remains the baseline and replay may publish only a strict missing suffix;
+otherwise historical Answer text is discarded. Failure to locate the exact turn
+falls back to an EOF cursor and never resubmits the prompt.
+
 This imports only the uniquely active turn and never completed history. If its
 start falls outside the bounded scan window, the cursor stays at EOF instead of
 guessing. A future explicit completed-history import would require a separate

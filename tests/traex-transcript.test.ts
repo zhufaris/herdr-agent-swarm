@@ -1,4 +1,4 @@
-import { appendFile, chmod, cp, mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, chmod, cp, mkdir, mkdtemp, readFile, rename, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,6 +126,20 @@ describe("TraexTranscriptReader", () => {
 
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAtTurn(session(), turnId, "2026-08-29T20:28:24.000Z"));
     await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnId, turnLifecycle: { state: "completed", finalAnswer: "answer" } });
+  });
+
+  it("finds an exact turn in the bounded tail of a transcript larger than the recovery window", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await truncate(path, 65 * 1024 * 1024);
+    await appendFile(path, [
+      "\n",
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "user-tail", role: "user", content: [{ type: "input_text", text: "tail request" }] }])
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openAtTurn(session(), turnId, "2026-08-29T20:28:24.000Z"));
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({ turnId, freshTurnStart: true, requestText: "tail request" });
   });
 
   it("recognizes completion when TraeX records a null last agent message", async () => {

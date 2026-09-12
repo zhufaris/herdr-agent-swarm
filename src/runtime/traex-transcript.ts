@@ -175,8 +175,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       const path = await this.resolveTranscriptPath(session.value);
       if (!path) return { mode: "unavailable", reason: "transcript_not_found" };
       const file = await stat(path);
-      if (file.size > MAX_RECOVERY_SCAN_BYTES) return { mode: "unavailable", reason: "transcript_validation_failed" };
-      const boundary = await findTurnStartBoundary(path, file.size, turnId, startedAt);
+      const boundary = await findTurnStartBoundary(path, file.size, turnId, startedAt, Math.max(0, file.size - MAX_RECOVERY_SCAN_BYTES));
       if (boundary === "missing") return { mode: "unavailable", reason: "turn_boundary_not_found" };
       const baseline = await latestTranscriptBaseline(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars);
       return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, boundary, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, undefined) };
@@ -486,14 +485,15 @@ async function findCompletedTurnBoundary(path: string, end: number, turnId: stri
   }
 }
 
-async function findTurnStartBoundary(path: string, end: number, turnId: string, startedAt: string): Promise<number | "missing"> {
+async function findTurnStartBoundary(path: string, end: number, turnId: string, startedAt: string, start = 0): Promise<number | "missing"> {
   const expectedStartedAt = Date.parse(startedAt);
   if (!Number.isFinite(expectedStartedAt)) return "missing";
   const handle = await open(path, "r");
   try {
-    let readOffset = 0;
+    let readOffset = start;
     let carry = Buffer.alloc(0);
-    let carryOffset = 0;
+    let carryOffset = start;
+    let skipPartialFirstRecord = start > 0;
     while (readOffset < end) {
       const length = Math.min(RECOVERY_SCAN_CHUNK_BYTES, end - readOffset);
       const chunk = Buffer.allocUnsafe(length);
@@ -505,13 +505,14 @@ async function findTurnStartBoundary(path: string, end: number, turnId: string, 
       while (true) {
         const newline = source.indexOf(0x0a, recordStart);
         if (newline < 0) break;
+        if (skipPartialFirstRecord) { skipPartialFirstRecord = false; recordStart = newline + 1; continue; }
         const envelope = parseEnvelope(source.subarray(recordStart, newline + 1).toString("utf8").trimEnd());
         const started = envelope?.type === "event_msg" ? taskStartedEventSchema.safeParse(envelope.payload) : null;
         if (started?.success && started.data.turn_id === turnId && eventTime(started.data.started_at) === startedAt) return sourceOffset + recordStart;
         recordStart = newline + 1;
       }
-      carry = source.subarray(recordStart);
-      carryOffset = sourceOffset + recordStart;
+      carry = skipPartialFirstRecord ? Buffer.alloc(0) : source.subarray(recordStart);
+      carryOffset = skipPartialFirstRecord ? readOffset + bytesRead : sourceOffset + recordStart;
       if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX recovery record exceeds bounded size");
       readOffset += bytesRead;
     }

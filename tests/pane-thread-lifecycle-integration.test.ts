@@ -410,28 +410,33 @@ describe("pane/thread lifecycle integration", () => {
     const lifecycleStartedAt = turnStartedAt;
     let answerDelta = "";
     let toolActivities: Array<{ key: string; kind: "read"; label: string; state: "active" | "done" }> = [];
+    const replay = [
+      { turnId: "turn-1", freshTurnStart: true, requestText: "first", answerDelta: "LEGACY_UNPROVEN_ANSWER_SENTINEL", mainStatus: { planSteps: [{ key: "plan:0", label: "Recovered plan", state: "active" as const }] }, turnLifecycle: { turnId: "turn-1", state: "active" as const, startedAt: lifecycleStartedAt } },
+      { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active" as const, startedAt: lifecycleStartedAt } }
+    ];
+    const readObservation = async () => {
+      const historical = replay.shift();
+      if (historical) return historical;
+      const nextDelta = answerDelta;
+      answerDelta = "";
+      const nextToolActivities = toolActivities;
+      toolActivities = [];
+      return { turnId: "turn-1", answerDelta: nextDelta, ...(nextToolActivities.length ? { toolActivities: nextToolActivities } : {}), turnLifecycle: {
+        turnId: "turn-1", state: lifecycleState, startedAt: lifecycleStartedAt,
+        ...(lifecycleState === "completed" ? { finalAnswer: "Recovered answer" } : {})
+      } };
+    };
     const transcriptReader = {
-      async open() {
-        return { mode: "typed" as const, cursor: {
-          async readDelta() { return ""; },
-          async readObservation() {
-            const nextDelta = answerDelta;
-            answerDelta = "";
-            const nextToolActivities = toolActivities;
-            toolActivities = [];
-            return { turnId: "turn-1", answerDelta: nextDelta, ...(nextToolActivities.length ? { toolActivities: nextToolActivities } : {}), turnLifecycle: {
-              turnId: "turn-1", state: lifecycleState, startedAt: lifecycleStartedAt,
-              ...(lifecycleState === "completed" ? { finalAnswer: "Recovered answer" } : {})
-            } };
-          }
-        } };
-      }
+      async openAtTurn() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, readObservation } }; },
+      async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, readObservation } }; }
     };
     const secondRuntime = runtime(store, herdr, lark, 30_000, transcriptReader);
     await secondRuntime.coordinator.start();
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(submitted).toEqual(["first"]);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: firstPrompt.id, state: "running", observationState: "detached" }]);
+    await vi.waitFor(() => expect(store.loadTopicView("b1")?.liveStatus?.planSteps).toMatchObject([{ key: "plan:0", label: "Recovered plan", state: "active" }]));
+    expect(store.loadRunCard(firstPrompt.id)!.answer).toBe("LEGACY_UNPROVEN_ANSWER_SENTINEL");
 
     answerDelta = "Live detached JSONL update";
     toolActivities = [{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }];

@@ -295,7 +295,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (!binding?.paneId || binding.state !== "active") return;
     const paneId = binding.paneId;
     const abortController = this.registry.attachTurn(binding.id, prompt.id, paneId, binding.lastAgentState);
-    const outputSource = await this.transcriptObserver.open(binding);
+    const outputSource = await this.transcriptObserver.openDetached(binding, prompt);
     try {
       await this.observeDetachedTurnWithSource(prompt, binding, outputSource, abortController);
     } finally {

@@ -1007,15 +1007,27 @@ only the latest active turn within its bounded scan window; it never imports
 completed history. Lost or failed hints retain the periodic observer scan as the
 convergence path.
 
+After a service restart, a detached prompt that already owns an exact transcript
+turn ID and start time reopens that turn instead of establishing a new EOF
+baseline. Exact-turn lookup scans only the final 64 MiB of a larger transcript
+and ignores the partial record at the beginning of that bounded window. The
+replay keeps the durable RunCard answer as its baseline, appends transcript text
+only when the replay proves a strict missing suffix, and independently publishes
+the latest Main status snapshot. This restores plan steps and phase text written
+before the restart without duplicating Answer content or replaying a prompt. If
+the exact boundary is unavailable, observation falls back to the live EOF tail.
+
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;
 ordinary prompts use `agent prompt --wait`, and
 interrupts use `agent send-keys`. Runtime text steering is unsupported and fails
 fast without invoking a transport or converting active work into another prompt. Terminal text
 never becomes Answer content, either live or during detached restart recovery.
-Because persisted RunCard text does not carry durable source provenance,
-detached recovery replaces it with the bounded, redacted transcript completion
-answer, or the fixed safe notice when that completion carries no answer.
+Typed detached recovery retains the persisted RunCard answer and may append only
+a bounded, redacted suffix whose replayed canonical text begins with that exact
+answer. Unprovable historical transcript text is ignored; a later canonical
+completion still supplies the final answer or the fixed safe notice when no
+typed answer exists.
 
 Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A
