@@ -334,6 +334,12 @@ models. They are not domain entities alongside `Binding` and `Prompt`, nor are
 they execution concepts like `Turn` or exact-turn control. Their renderers and reducers
 belong to the presentation and projection side of the application, while
 durable storage for them remains an infrastructure concern.
+Primary Main and Answer Worker summaries are dedicated set-based SQLite read
+models. Main summary loading uses a constant number of queries and window-ranked
+task state rather than repeatedly loading each full Worker Main projection;
+Answer activity aggregates task count and latest-card identity in SQL, so old
+task history is not materialized in JavaScript. Existing domain selectors remain
+responsible for the visible eight-Worker limit and presentation ordering.
 
 `MainCardWorkflow` is the single live, startup, and delivery-checkpoint
 convergence path for the topic's Main Card. `TopicViewState.viewVersion` is the
@@ -356,10 +362,13 @@ and the fenced instance lease. Atomic acceptance and claim transitions must rema
 when ports are narrowed; splitting a large store interface must not split a
 workflow transaction.
 
-The production composition root creates one `SqliteStoreBundle`. The bundle
-constructs one internal `SqliteCapabilityGraph`, which creates exactly one
-`SqliteContext`, one `DatabaseSync` connection, runs migrations, and constructs
-every capability module. All production bundle entries are named capabilities;
+The production composition root first opens one lease bootstrap over one
+`SqliteContext` and `DatabaseSync` connection. That bootstrap creates only the
+idempotent `instance_lease` table. After the process acquires the durable lease,
+the bootstrap runs business-schema migrations and constructs one internal
+`SqliteCapabilityGraph` over the same connection. A contender that cannot acquire
+the lease closes its bootstrap without inspecting or mutating business schema.
+All production bundle entries are named capabilities;
 none route through `SqliteStoreKernel`. Cross-table operations remain in focused
 prompt, binding-session, control, recovery, instance, and outbox aggregate modules
 that share the same context and preserve their outer transaction. Each workflow receives only
@@ -577,7 +586,10 @@ canonical turn start time all match. Restart recovery reopens that transcript
 boundary for observation and never calls the submission boundary again.
 
 One stable Worker Main Card is updated on the
-`worker-main:<workerId>:<workerSessionGeneration>` lane. It shows the current
+`worker-main:<workerId>:<workerSessionGeneration>` lane. For new Worker Session
+generations, its initial create is a durable group-root effect on
+`worker-thread:<workerId>:<workerSessionGeneration>`; the returned root becomes
+both the sole Main Card target and the fixed Worker interaction thread. It shows the current
 request, lifecycle, bounded progress/output, queue state, and recent terminal
 history. Completion remains visible until a newer task becomes current. SQLite
 retains the full sanitized canonical result and internal turn projection; no new
@@ -609,6 +621,16 @@ revisions, so a lost wake-up cannot lose a refresh. Replaceable snapshots use
 `primary-main:<bindingId>:<bindingGeneration>`, and
 `primary-answer:<promptId>:<bindingGeneration>` lanes. The persisted `lane_key` is
 the delivery and quarantine authority; retrying a card can never repeat Agent work.
+
+`worker_session_threads` is a separate routing aggregate from
+`binding_thread_aliases`. It binds one Lark root to the exact Worker ID, Worker
+Session generation, parent Binding generation, and parent pane. Ordinary text in
+an active Worker thread creates a new turn in the existing per-Worker FIFO;
+thread-local `/steer` and `/stop` reload and fence the exact active turn. The
+route never depends on Worker name or `conversation_targets`. Existing Worker
+Sessions are classified as `legacy-unpublished` during upgrade without any Lark
+write. An explicit `/instances` action may turn that marker into one passive
+entry root while leaving the already delivered canonical Main Card untouched.
 
 Direct replies use the normalized Lark `parent_id`, not the topic root or selected
 Worker. A reply to the exact active card is rejected while runtime steering is
@@ -837,6 +859,15 @@ durable scans remain the safety net for lost hints.
 Periodic reconciliation remains required. A missed native Socket event may
 delay an update, but must not change the final converged state.
 
+Workspace discovery is failure-isolated but not reported as success. A physical
+Binding reconciliation pass continues converging every workspace whose snapshot
+was obtained, applies the existing bounded degradation policy to unavailable
+workspaces, and returns structured partial failures to its scheduler. Only
+successful workspace IDs enter the event cooldown. Any failed workspace makes the
+latest pass outcome failed and exposes a bounded `lastFailures` list in `/status`;
+a later complete pass clears it. `/ready` continues to use its direct short-lived
+workspace probes rather than stale reconciliation diagnostics.
+
 ## Answer streaming and pagination
 
 Every new prompt owns an Answer CardKit entity and run-card entry. Explicit native
@@ -1043,15 +1074,93 @@ card creation, stream content, and stream finalization. It marks successful rows
 delivered; transient failures are retried with backoff; repeated failures become
 dead letters that an operator can retry or dismiss.
 
+`/swarm panes` may reserve a `group_card_create` intent for a selected active
+pane. Unlike a reply intent, it carries a validated chat target and durable
+thread-alias identity while leaving `root_message_id` null. Its accepted ACK
+atomically records the returned group root/thread IDs and activates the alias.
+The published card is a passive Main Card snapshot; canonical Main Card
+convergence continues to update only the Binding's original status card.
+
+An active alias resolves to its exact Binding generation and pane. Ordinary
+replies use the alias root for their Answer Card while sharing the Binding's
+existing Prompt FIFO and Agent session. Alias lookup fails closed after a
+generation, pane, lifecycle, or attachment change. Topology-changing commands
+are rejected from alias threads and must be run from the canonical topic. The
+alias table and group-create intent are lease-fenced; no route exists only in
+memory.
+
+Worker Session roots use the same `group_card_create` transport with a mutually
+exclusive `worker_thread_id` target. The delivery ACK transaction activates the
+route and, for `canonical-main` mode only, checkpoints the sole Worker Main
+message identity. A `legacy-entry` ACK activates only the route. Claimed target
+identity is immutable; an uncertain external create is not issued again.
+
+Before external delivery, the executor transactionally claims a fresh, due lane
+head. The returned frozen receipt carries the row, snapshot revision, SHA-256
+payload hash, lease fencing token, and a unique attempt ID. Delivery ACK, card
+creation checkpoint, and failure settlement must match that claim. Each retry
+gets a new attempt ID; late receipts cannot settle a later attempt or advance its
+projection. Successful checkpoint hints are emitted only after SQLite accepts
+the ACK. Retired in-flight rows retain their claim until settlement, and their
+late ACK can release the claim but cannot advance the retired projection.
+
+After the first claim, SQLite guards the payload, target identity, intent,
+sequence, revision, and first-claim timestamp against mutation. An active claim
+also prevents row deletion and further dispatch in its lane. Coalescing only
+removes eligible successors that were never claimed, attempted, or card-ID
+checkpointed; numbered Answer projection revisions are retained separately.
+Changed input under an already attempted pending idempotency key is rejected as
+`outbound_idempotency_conflict` rather than replacing the in-flight payload.
+
+Static, closed, and final Answer snapshots compare serialized visible payloads.
+Unchanged content does not reopen delivered, dismissed, or rejected rows, even
+when the view version increases. Changed content appends a numbered successor;
+A-to-B-to-A creates three revisions. Failed static replacement creates are not
+automatically reopened by convergence. Frozen pages do not reserve new final
+updates. Retention preserves the latest numbered projection revision as the
+current deduplication checkpoint; an independent projection checkpoint table and
+incremental startup candidate scan are not yet implemented.
+
+If an external request succeeds but its local ACK or card-ID checkpoint fails,
+the executor reports `outbound_checkpoint_uncertain` and does not turn that
+uncertainty into an ordinary retry. An unsettled claim keeps its lane blocked.
+When a new lease owner activates its write fence, persisted claims belonging to
+a different owner or fence become unknown dead letters with active, blocked
+quarantines. Their payloads and existing card-ID checkpoints remain intact for
+inspection and authorized recovery. Because the claim alone does not prove
+whether HTTP began, even a crash immediately after claim is treated
+conservatively. This is not an exactly-once guarantee: endpoint-specific
+transport uncertainty and idempotency policies remain follow-up work, and the
+existing classifier still governs external request failures. None of these
+recovery paths replays a TraeX prompt.
+
 Order is important inside one CardKit element because sequences must increase.
 The publisher assigns every outbox row a durable delivery order and drains only
 the head of each target lane. Updates to one card and operations in one Answer
 stream are serial within their target lane, including retries. Independent
 `card_reply` and `text` rows each use their own durable reply lane because they
-create separate Lark messages and have no cross-reply ordering dependency. Up to
-four independent lanes may make progress concurrently, so a failed reply cannot
-block later replies to the same topic. A failed or future-due head blocks only
-its own lane. Lark requests use a dedicated bounded timeout; HTTP 429 responses
+create separate Lark messages and have no cross-reply completion-order
+dependency. Up to four independent lanes may make progress concurrently, so a
+blocked first reply does not prevent a later independent reply from completing.
+A failed or future-due head blocks only its own lane.
+
+SQLite remains the queue authority. Every row persists its `live` or `history`
+work class; normal user-visible projection work is live, while explicit Main or
+Answer recovery rebuilds are history. The dispatcher keeps only ephemeral
+active-lane, wake-up, and concurrency-slot state. Its work-conserving pump fills
+a slot as soon as one delivery settles or a wake-up announces new durable work;
+it does not wait for a fixed batch to finish. When both classes are due, dispatch
+selection follows a fixed three-live-to-one-history cycle. If one class is empty,
+the other borrows every available slot. This bounds history starvation without
+cancelling work already in flight. The class is part of a claimed revision's
+immutable identity and is reconstructed from SQLite after restart.
+
+The pump stops claiming new rows during shutdown and waits for already started
+effects. If one external effect succeeds but its local checkpoint becomes
+uncertain, the scan likewise stops claiming, waits for sibling effects to
+settle, and then reports the error. This preserves the global concurrency bound
+across the next scan. Every 100 claims the dispatcher yields and schedules
+another scan. Lark requests use a dedicated bounded timeout; HTTP 429 responses
 honor a bounded `Retry-After`, and other transient failures use jittered
 exponential backoff. Existing shared reply lanes are migrated transactionally;
 dead-letter audit and quarantine state remain attached to the failed reply, and
@@ -1067,6 +1176,61 @@ text, and unknown work remain blocked until an operator retries or dismisses the
 failed head. The dead letter, quarantine decision, successor changes, and lane
 head update are committed in one SQLite transaction.
 
+### Recovery evidence versus lane release
+
+`delivery_recoveries` keeps one durable obligation per failed outbox revision,
+independent of the replaceable lane-quarantine pointer. Entering dead-letter
+state records the initial failure in the same SQLite transaction. Releasing a
+lane, reserving a rebuild, or retrying a failed row does not mean delivery
+recovered. `unresolvedDeadLetters` excludes only obligations with recorded
+recovery or dismissal, not rows whose lane was merely released. The separate
+`deliveryRecoveries` counters retain unresolved/replacement-pending work even
+while a manual retry is pending; these counters do not yet change readiness.
+
+An accepted delivery ACK also commits matching recovery evidence: the same
+failed row after retry, an explicitly linked Main Card rebuild in its original
+binding generation, or a later card update with matching target, lane, owning
+identities, roles, and a newer view/revision. Versionless legacy updates use
+strict delivery order within the same identity and target. The record retains
+the successful reply ID, message ID, and confirmation time after outbox history
+is pruned. Failed rebuilds create their own obligation without resolving the
+original. Authorized dismissal is recorded separately from recovery; retries
+preserve the original failure evidence.
+
+Migration 31 backfills legacy dead letters conservatively. A released-snapshot
+quarantine plus a matching delivered successor can prove recovery; missing or
+ambiguous evidence remains unresolved. Unknown effects and cross-Answer-page
+rebuilds are not inferred from lane release or card creation. The ledger is not
+a per-attempt event log.
+
+For a closed Primary Answer stream replaced by one static page, migration 32
+adds explicit content-coverage evidence. Before claiming a stream update or a
+new static snapshot, the reservation transaction records its canonical source
+range and SHA-256 hash. Ranges use the source-aware renderer's actual page
+boundary, not rendered Markdown length. Coverage cannot be updated or attached
+after a claim. Reserving the replacement page also links the failed revision to
+that page and its create intent in the same transaction.
+
+A replacement create ACK alone leaves the obligation `replacement_pending`.
+Only an accepted static `card_update` ACK can resolve it: the recorded candidate
+must begin at the same source offset, cover the entire failed range, and match
+its canonical prefix hash. The delivered update and replacement create must
+identify the same page message, Prompt, and current binding generation. Appended
+content is allowed; shortened or rewritten failed content is not proof. These
+facts are committed with delivery settlement, so stale attempt receipts cannot
+resolve recovery. This records accepted delivery, not a read receipt from a
+human or a separate inspection of Lark's visible card.
+
+Unresolved obligations retain their failed outbox rows and replacement creates
+through history pruning. After resolution, normal pruning may remove those
+rows; the ledger retains the successful reply/message/time and the recovery
+link retains the failed source range/hash. Restart does not guess coverage for
+legacy rows that lack it. This bounded path does not implement multi-page
+coverage unions, multi-hop replacement chains, changed-source reconciliation,
+or Worker Answer coverage. Those cases, recovery-ledger retention, candidate
+rescans, and current-versus-historical health classification remain follow-up
+work; missing proof stays unresolved.
+
 ## Process lifecycle and diagnostics
 
 The supported production owner is `herdr-agent-swarm.service`, installed and
@@ -1079,6 +1243,14 @@ configuration is valid, `./install.sh` builds and stages the immutable release
 and enables the unit without starting it; `npm run swarm:start` performs the
 explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
 `npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
+Staging creates an inactive candidate and does not change `current`. The install
+lifecycle validates that candidate, snapshots the prior unit and enabled state,
+reloads and enables the candidate-pinned unit, and atomically switches `current`
+only as the final activation commit. A caught pre-commit failure restores the old
+unit and enabled state. An interrupted activation or failed compensation leaves a
+private `.release-activation.json` marker; later install, start, and restart
+commands fail closed until the operator reconciles that evidence. Release pruning
+runs only after activation and retains the current and previous releases.
 
 Inside the process, `ManagedBridgeRuntime` starts components in explicit phases:
 ownership and fencing; recovery preparation and integrity checks; the health

@@ -25,7 +25,9 @@ Lark message -> durable FIFO turn -> Herdr pane -> TraeX
 ```
 
 SQLite stores topic-to-pane bindings, FIFO prompt jobs, run-card projections,
-deduplication keys, a durable Lark outbox, and audit records. Herdr snapshots
+deduplication keys, a durable Lark outbox, and audit records. The dispatcher
+uses an in-memory work-conserving pump only for wake-ups, active lanes, and
+bounded concurrency; unsent messages never exist solely in memory. Herdr snapshots
 are authoritative for pane and agent state; Herdr events only wake the bridge
 for reconciliation. An interrupted running prompt is not replayed after a
 restart; it remains detached while the bridge observes the existing Herdr turn.
@@ -46,6 +48,8 @@ For the reliability model and exact behavioral
 constraints, see [Architecture](docs/architecture.md). For a maintainer-oriented
 map of the domain model, major modules, and end-to-end flows, see
 [Architecture reference](docs/architecture-reference.md).
+For the reliability roadmap and verification record, see
+[Architecture stability design](docs/architecture-stability-design.md) (delivery claims, Answer snapshot revisions, and recovery evidence implemented locally; remaining stages pending).
 Completed milestone evidence and historical implementation records are retained
 in the [documentation archive](docs/archive/superpowers/).
 
@@ -221,11 +225,11 @@ same directory, and verify the download before extracting it:
 
 ```bash
 sha256sum --check SHA256SUMS
-tar -xzf herdr-agent-swarm-0.3.0-linux-x64.tar.gz
-cd herdr-agent-swarm-0.3.0-linux-x64
+tar -xzf herdr-agent-swarm-0.4.0-linux-x64.tar.gz
+cd herdr-agent-swarm-0.4.0-linux-x64
 ```
 
-Replace `0.3.0` with the downloaded release version. For a first installation,
+Replace `0.4.0` with the downloaded release version. For a first installation,
 run the packaged setup entry point and review the generated private
 configuration:
 
@@ -480,7 +484,9 @@ Use `/swarm spaces` to list every configured space and all of its live Herdr
 panes, including panes that are not running TraeX. Eligible unbound TraeX panes
 can be claimed from the card, while a same-group bound pane can open its topic.
 Use `/swarm panes` in a bound topic to list that Space's active attached
-Primary panes and send a selected pane's latest Main Card into that topic.
+Primary panes. “发送卡片到群” publishes a selected pane's latest Main Card as
+a new group root; replies in the resulting thread enter that pane's existing
+Primary FIFO.
 Use `/swarm sessions` for the current group's session inventory and `/swarm
 failures` for actionable failures. Only failed Lark delivery can be retried; an
 already-dispatched TraeX prompt is never replayed automatically.
@@ -611,11 +617,15 @@ Available commands:
 ```
 
 The short commands operate the standalone multi-agent directory. Select a
-project with `/project`, create Workers from `/instances`, and choose a stable
-target from a Worker detail card. Ordinary messages then go to that Worker, or
-through the current thread's binding prompt FIFO when the symbolic Primary
-target is active. Worker creation, stopping, and safe removal actions are
-explicit human card actions.
+project with `/project` and create Workers from `/instances`. Each new Worker
+Session gets one group-root Worker Main Card and an independent thread. Ordinary
+text in that thread creates FIFO work for its fixed Worker; `/status`,
+`/steer <text>`, and `/stop` inspect or control its exact current turn. Existing
+pre-upgrade Workers can publish one passive compatibility entry from
+`/instances` without moving or duplicating their live Main Card. The older
+selected-target behavior remains for unbound conversations, while Primary
+threads keep their own binding FIFO. Worker creation, stopping, and safe removal
+actions remain explicit human card actions.
 
 Run the non-mutating adapter preflight with:
 
@@ -642,10 +652,13 @@ binding or starting TraeX.
 The read-only `panes` command is Space-scoped when invoked in a bound topic: it
 lists only active, attached Primary bindings in that topic's workspace and
 configured Space with a current Main Card. An unbound group entry remains
-chat-scoped. A selected card is revalidated against
-the binding generation, pane, and Main Card identity before a durable outbox
-reply sends a fresh Main Card into the current topic; it never forwards or
-mutates the source topic and never sends TraeX input.
+chat-scoped. A selected card is revalidated against the binding generation,
+pane, and Main Card identity before the durable outbox publishes a new group
+root. Replies in the new thread route to the selected Binding's existing Primary
+FIFO, while Answer Cards remain in that new thread. The entry card is a static
+snapshot; it never forwards or mutates the source topic, becomes a second live
+Main Card, or sends TraeX input. Session/topology-changing commands must still
+be executed from the original Main Card topic.
 The `attach` command accepts an exact pane ID or a unique exact pane label and
 creates a normal project topic for an existing TraeX pane
 in the exact configured space without creating, renaming, restarting, or writing

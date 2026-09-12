@@ -99,6 +99,10 @@ Run `./install.sh` after source changes to build and stage an immutable release;
 then use `npm run swarm:restart` when the active-work safety gate permits it. The
 managed unit verifies the expected generated build identity. Do not manually edit
 generated `dist/` output. Installation enables the unit but does not start it.
+Candidate staging does not move `${SWARM_STATE_DIR}/current`; lifecycle
+installation commits that link only after unit reload and enable succeed. If a
+failed compensation leaves `.release-activation.json`, inspect and reconcile the
+unit and `current` target before retrying install, start, or restart.
 The canonical unit appends stdout and stderr to
 `${SWARM_STATE_DIR}/logs/service.log`; the lifecycle keeps `logs/` private at
 `0700` and the log at `0600`. Logs rotate at 16 MiB while the unit is stopped,

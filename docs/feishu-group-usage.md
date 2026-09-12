@@ -59,6 +59,24 @@ Worker turn，但不会新增飞书卡片；同一张 Worker Main Card 会持续
 结构化进度、受限长度的输出、排队数量和最近五条终态任务。完整输出和历史仍保存在 SQLite，
 不会因为卡片合并而丢失。
 
+新创建的 Worker session 会把这张唯一的 Worker Main Card 直接发送到群中，作为该
+Worker 的独立 Thread 根。可以在 `/instances` 目录或 Worker 详情中点击“发送 Worker
+卡片到群”：新 session 已有 Thread 时只返回已有状态，不会重复创建；升级前已经在
+Primary Thread 中投递 Main Card 的旧 session 会按需创建一张只读入口快照，原 Main Card
+继续留在原处并保持唯一实时投影。升级本身不会批量向群里发卡。
+
+在有效的 Worker Thread 中：
+
+- 普通消息创建一条发给该 Worker 的独立 FIFO 任务；
+- `/status` 返回该 Worker 的最新持久状态快照；
+- `/steer <文本>` 只补充当前精确 active turn，不会在空闲时变成新任务；
+- `/stop` 只中断当前精确 active turn，不停止 Worker，也不取消排队任务。
+
+Worker Thread 固定到 `workerId + workerSessionGeneration` 以及所属 Primary
+generation/pane，不读取“当前目标”。Worker 或 Primary 换代后旧 Thread 会明确拒绝消息，
+不会把内容转给同名 Worker、替代 Primary 或其他已选择实例。项目、实例和 pane 拓扑管理
+命令仍需回到所属 Primary Thread 执行。
+
 Primary 工具 `show_worker_cards` 用于把某个 Worker 的当前状态重新展示到话题中。每次调用
 只发送一张合并后的只读快照，卡片会标注生成时间和“不会自动更新”；它不是新的 Worker
 Main Card，也不会订阅后续状态。需要持续状态或执行卡片操作时，应点击快照中的入口打开
@@ -93,9 +111,10 @@ follow-up，也不会把 follow-up 改成 steer。Worker Main 的“发起新任
 Worker Main Card 上的任务结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
 TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。
 
-在实例详情卡选择“设为当前目标”后，普通消息会持续发给该实例；若目标为 symbolic
+在旧式未绑定会话中，实例详情卡的“设为当前目标”仍可保留兼容行为；若目标为 symbolic
 Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
-目标会失效，必须刷新后重新选择。Primary 可直接调用同项目中已存在的 Worker，不需要
+目标会失效，必须刷新后重新选择。日常交互优先使用固定 Worker Session Thread，避免
+依赖可变目标。Primary 可直接调用同项目中已存在的 Worker，不需要
 逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
 触发 Primary turn。Primary 通过内置 Worker 工具发起的新任务和 follow-up 也会在当前飞书
 话题更新稳定的 Worker Main Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
@@ -233,11 +252,14 @@ TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执�
 
 在已绑定话题中，只列出当前 Space 内已连接且仍为 active 的 Primary Pane；未绑定的
 群入口仍列出当前群全部符合条件的 Pane。每一项显示
-任务标题、Space、Pane ID 和观测到的 Agent 状态；点击“发送卡片”会把该 Pane **当前**
-Primary Main Card 作为一张新卡片发送到点击按钮所在的话题。
+任务标题、Space、Pane ID 和观测到的 Agent 状态；点击“发送卡片到群”会把该 Pane
+**当前** Primary Main Card 快照作为一条新的群根消息发送。回复这张卡片形成的新话题，
+普通消息会进入该 Pane 原有 Primary 的同一个 FIFO，Answer Card 也留在这个新话题中。
 
 目录不会显示其他群、已归档、orphaned、detached、未绑定的 Pane，也不会转发原话题、
-修改原主卡或向 TraeX 发送输入。点击时 Bridge 会再次校验群、binding generation、Pane
+修改原主卡或向 TraeX 发送输入。入口卡片不会持续同步主卡，也不提供 reset、close、
+attach、replace、Worker 目标切换等会话/拓扑操作；这些操作必须回到原始主卡话题执行。
+点击时 Bridge 会再次校验群、binding generation、Pane
 和主卡身份；任一项变化时会提示刷新目录后重试。卡片投递由 durable outbox 处理，
 重试不会重放 TraeX 任务。
 

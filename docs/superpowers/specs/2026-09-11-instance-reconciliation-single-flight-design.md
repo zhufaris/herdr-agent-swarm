@@ -15,8 +15,9 @@ loop can start a physical pass or replace the active scope.
 
 The internal scope supports independent pane and workspace sets. Pending requests
 union their sets; a full reconciliation is represented by a sentinel and absorbs
-all narrower work. A request already covered by the active pass shares the current
-drain without adding redundant pending work.
+all narrower pending work. Requests that arrive during an active pass always enter
+the pending merge because the active snapshot may predate their triggering event;
+they share the current drain promise while retaining one follow-up pass.
 
 One pass may contain both pane and workspace scope. It snapshots targeted panes
 once, reconciles their attached instances, then reconciles requested workspaces

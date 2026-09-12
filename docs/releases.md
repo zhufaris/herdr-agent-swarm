@@ -47,9 +47,9 @@ GitHub Release:
 
 ```bash
 release_dir="$(mktemp -d)"
-npm run release:package -- --output "$release_dir" --tag v0.3.0
+npm run release:package -- --output "$release_dir" --tag v0.4.0
 (cd "$release_dir" && sha256sum --check SHA256SUMS)
 ```
 
-Use the current `package.json` version in place of `v0.3.0`. This command writes
+Use the current `package.json` version in place of `v0.4.0`. This command writes
 only to the explicit output directory and does not install or restart the service.
