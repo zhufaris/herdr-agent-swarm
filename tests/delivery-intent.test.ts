@@ -4,7 +4,7 @@ import { materializeOutboundReply } from "../src/events/outbound-intent-material
 import type { OutboundReply } from "../src/domain/types.js";
 
 function reply(patch: Partial<OutboundReply> = {}): OutboundReply {
-  return { id: "r1", idempotencyKey: "k1", bindingId: null, promptId: null, workerTurnId: null, workerId: null, workerSessionGeneration: null, viewVersion: null, cardSequence: null, selectionId: null, cardRole: null, targetRole: null, threadAliasId: null, workerThreadId: null, targetChatId: null, laneKey: "message:m1", workClass: "live", rootMessageId: "m1", kind: "card_reply", payload: '{"legacy":true}', intentKind: null, intentJson: null, rendererRevision: null, state: "pending", attemptCount: 0, error: null, deliveredMessageId: null, cardIdCheckpoint: null, failureClass: null, httpStatus: null, larkErrorCode: null, autoRecoveryCount: 0, deadLetteredAt: null, nextAttemptAt: "now", createdAt: "now", updatedAt: "now", ...patch };
+  return { id: "r1", idempotencyKey: "k1", bindingId: null, promptId: null, workerTurnId: null, workerId: null, workerSessionGeneration: null, viewVersion: null, cardSequence: null, selectionId: null, cardRole: null, targetRole: null, threadAliasId: null, workerThreadId: null, targetChatId: null, laneKey: "message:m1", workClass: "live", rootMessageId: "m1", kind: "card_reply", payload: '{"legacy":true}', intentKind: null, intentJson: null, rendererRevision: null, state: "pending", attemptCount: 0, error: null, deliveredMessageId: null, cardIdCheckpoint: null, failureClass: null, effectCertainty: null, httpStatus: null, larkErrorCode: null, autoRecoveryCount: 0, deadLetteredAt: null, nextAttemptAt: "now", createdAt: "now", updatedAt: "now", ...patch };
 }
 
 describe("durable delivery intent", () => {

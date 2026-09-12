@@ -41,25 +41,29 @@ export class SqliteOutboxRecoveryStore {
       if (before.state !== "pending") return null;
       const staleMainCard = before.kind === "card_update" && before.targetRole === "session_status" && (metadata.recoveryKind === "stale_main_card" || metadata.larkErrorCode === "230099" || metadata.larkErrorCode === "300317");
       const closedAnswerStream = before.cardRole === "answer" && before.kind === "stream_content" && (metadata.recoveryKind === "closed_answer_stream" || metadata.larkErrorCode === "300309");
-      const failed = metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream
-        ? this.delivery.markDeadLetter(id, error, metadata, claim)
+      const effectCertainty = normalizedEffectCertainty(metadata);
+      const uncertainEffect = effectCertainty === "uncertain";
+      const settledMetadata = { ...metadata, effectCertainty, ...(uncertainEffect ? { failureClass: "unknown" as const } : {}) };
+      const settledError = uncertainEffect ? `Delivery outcome uncertain; the external effect may have completed. Inspect before manual retry: ${error}` : error;
+      const failed = uncertainEffect || metadata.failureClass === "permanent" || staleMainCard || closedAnswerStream
+        ? this.delivery.markDeadLetter(id, settledError, settledMetadata, claim)
         : this.delivery.markFailed(id, error, retryDelayMs, metadata, claim);
       if (!failed) return null;
       const laneClass = outboundLaneClass(failed);
-      if (failed.state !== "dead_letter" || (metadata.failureClass === "transient" && failed.autoRecoveryCount === 0)) return { state: failed.state, action: "retry", laneClass, promptId: failed.promptId, reply: failed };
+      if (failed.state !== "dead_letter" || (settledMetadata.failureClass === "transient" && failed.autoRecoveryCount === 0)) return { state: failed.state, action: "retry", laneClass, promptId: failed.promptId, reply: failed };
       const timestamp = now();
       let action: OutboundFailureTransition["action"] = "blocked";
       let quarantineState: "active" | "released" = "active";
       let replacementReplyId: string | null = null;
-      if (closedAnswerStream && failed.promptId) {
+      if (!uncertainEffect && closedAnswerStream && failed.promptId) {
         const pageIndex = streamContentPageIndex(failed.payload);
         if (pageIndex === null) throw new Error(`Closed Answer stream ${failed.id} has invalid page metadata`);
         this.context.database.prepare(`UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND card_id = ?`).run(timestamp, failed.promptId, pageIndex, failed.rootMessageId);
         this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Dismissed after Lark closed the Answer stream', updated_at = ? WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, failed.laneKey, this.outboundDeliveryOrder(id));
         action = "rebuild_answer"; quarantineState = "released";
-      } else if (laneClass === "answer_stream" && failed.promptId) {
+      } else if (!uncertainEffect && laneClass === "answer_stream" && failed.promptId) {
         this.context.database.prepare(`UPDATE outbound_replies SET state = 'dismissed', error = 'Isolated after an earlier Answer stream failure', updated_at = ? WHERE lane_key = ? AND state = 'pending' AND delivery_order > ? AND kind IN ('stream_content','stream_finish')`).run(timestamp, failed.laneKey, this.outboundDeliveryOrder(id));
-      } else if (laneClass === "main_card" && staleMainCard && failed.bindingId) {
+      } else if (!uncertainEffect && laneClass === "main_card" && staleMainCard && failed.bindingId) {
         const replacement = this.context.database.prepare(`SELECT payload, COALESCE(view_version, 0) AS view_version FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND (id = ? OR state = 'pending') ORDER BY COALESCE(view_version, 0) DESC, delivery_order DESC LIMIT 1`).get(failed.bindingId, id) as { payload: string; view_version: number } | undefined;
         const binding = this.dependencies.getBinding(failed.bindingId);
         if (!binding) throw new Error(`Binding not found: ${failed.bindingId}`);
@@ -68,7 +72,7 @@ export class SqliteOutboxRecoveryStore {
           replacementReplyId = this.queue.enqueue({ id: randomUUID(), idempotencyKey: `main-card:rebuild:${failed.bindingId}:${replacement.view_version}`, workClass: "history", bindingId: failed.bindingId, viewVersion: replacement.view_version, targetRole: "session_status", rootMessageId: binding.rootMessageId, kind: "card_reply", payload: replacement.payload }).id;
           action = "rebuild_main"; quarantineState = "released";
         }
-      } else if (laneClass === "main_card" || laneClass === "replaceable_card") {
+      } else if (!uncertainEffect && (laneClass === "main_card" || laneClass === "replaceable_card")) {
         action = "released_newer_snapshot"; quarantineState = "released";
       }
       this.context.database.prepare("UPDATE delivery_recoveries SET action = ?, replacement_reply_id = ?, state = ?, updated_at = ? WHERE failed_reply_id = ? AND state IN ('unresolved','replacement_pending')").run(action, replacementReplyId, replacementReplyId ? "replacement_pending" : "unresolved", timestamp, id);
@@ -83,7 +87,7 @@ export class SqliteOutboxRecoveryStore {
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     return this.context.transaction(() => {
-      const rows = this.context.database.prepare(`SELECT o.id FROM outbound_replies o WHERE o.state = 'dead_letter' AND o.failure_class = 'transient' AND o.auto_recovery_count = 0 AND o.dead_lettered_at IS NOT NULL AND o.dead_lettered_at <= ? AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = o.lane_key AND q.state = 'active') ORDER BY o.dead_lettered_at, o.delivery_order LIMIT ?`).all(cutoff, limit) as Array<{ id: string }>;
+      const rows = this.context.database.prepare(`SELECT o.id FROM outbound_replies o WHERE o.state = 'dead_letter' AND o.failure_class = 'transient' AND COALESCE(o.effect_certainty, 'uncertain') != 'uncertain' AND o.auto_recovery_count = 0 AND o.dead_lettered_at IS NOT NULL AND o.dead_lettered_at <= ? AND NOT EXISTS (SELECT 1 FROM outbox_lane_quarantines q WHERE q.lane_key = o.lane_key AND q.state = 'active') ORDER BY o.dead_lettered_at, o.delivery_order LIMIT ?`).all(cutoff, limit) as Array<{ id: string }>;
       const recovered: OutboundReply[] = [];
       for (const row of rows) {
         const timestamp = now();
@@ -292,7 +296,7 @@ export class SqliteOutboxRecoveryStore {
       if (!row) outcome = "missing"; else if (row.chat_id !== chatId) outcome = "unauthorized"; else if (row.state !== "dead_letter") outcome = "stale"; else {
         const lane = this.context.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(id) as { lane_key: string } | undefined;
         const nextState = action === "retry" ? "pending" : "dismissed";
-        this.context.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, attempt_count = CASE WHEN ? = 'pending' THEN 0 ELSE attempt_count END, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, nextState, now(), now(), id);
+        this.context.database.prepare("UPDATE outbound_replies SET state = ?, error = NULL, failure_class = NULL, effect_certainty = CASE WHEN ? = 'pending' THEN effect_certainty ELSE NULL END, http_status = NULL, lark_error_code = NULL, attempt_count = CASE WHEN ? = 'pending' THEN 0 ELSE attempt_count END, next_attempt_at = ?, updated_at = ? WHERE id = ? AND state = 'dead_letter'").run(nextState, nextState, nextState, now(), now(), id);
         if (lane) { this.context.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', action = ?, released_at = ?, updated_at = ? WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'").run(action === "retry" ? "manual_retry" : "manual_dismiss", now(), now(), lane.lane_key, id); this.queue.refreshLaneHead(lane.lane_key); }
         this.context.database.prepare("UPDATE delivery_recoveries SET state = ?, action = ?, replacement_reply_id = NULL, resolved_by_reply_id = NULL, resolved_message_id = NULL, resolved_at = ?, updated_at = ? WHERE failed_reply_id = ?").run(action === "retry" ? "unresolved" : "dismissed", action === "retry" ? "manual_retry" : "manual_dismiss", action === "retry" ? null : now(), now(), id);
         outcome = action === "retry" ? "retried" : "dismissed";
@@ -311,6 +315,11 @@ export class SqliteOutboxRecoveryStore {
 }
 
 function now(): string { return new Date().toISOString(); }
+function normalizedEffectCertainty(metadata: DeliveryFailureMetadata): import("../../domain/delivery.js").DeliveryEffectCertainty {
+  if (metadata.effectCertainty) return metadata.effectCertainty;
+  if (metadata.httpStatus !== null || metadata.larkErrorCode !== null || metadata.failureClass === "permanent") return "rejected";
+  return metadata.failureClass === "transient" ? "not-started" : "uncertain";
+}
 function outboundLaneClass(reply: OutboundReply): OutboxLaneClass {
   if (reply.cardRole === "answer" && reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish")) return "answer_stream";
   if (reply.targetRole === "session_status" && reply.kind === "card_update") return "main_card";

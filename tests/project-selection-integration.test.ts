@@ -47,7 +47,7 @@ describe("project selection flow", () => {
   it("keeps a failed immediate selector delivery durable for retry", async () => {
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
-      async replyText() { return { messageId: "text" }; }, async replyCard() { throw new Error("temporary Lark failure"); }, async updateCard() {}
+      async replyText() { return { messageId: "text" }; }, async replyCard() { throw Object.assign(new Error("temporary Lark failure"), { response: { status: 503 } }); }, async updateCard() {}
     };
     const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} } as HerdrPort;
     const store = new SqliteBindingStore(":memory:");

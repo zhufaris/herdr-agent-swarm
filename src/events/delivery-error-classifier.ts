@@ -1,13 +1,13 @@
-import type { DeliveryFailureMetadata } from "../domain/types.js";
+import type { DeliveryEffectCertainty, DeliveryFailureMetadata } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { PermanentDeliveryError } from "./outbound-target-validation.js";
 
-export interface ClassifiedDeliveryFailure extends DeliveryFailureMetadata { message: string; retryDelayMs?: number }
+export interface ClassifiedDeliveryFailure extends Omit<DeliveryFailureMetadata, "effectCertainty"> { effectCertainty: DeliveryEffectCertainty; message: string; retryDelayMs?: number }
 
 // CardKit documents these as invalid parameters, a missing entity, or an
 // expired entity. Repeating the same durable intent cannot repair the target.
 const PERMANENT_LARK_CODES = new Set(["10002", "200740", "200750"]);
-const TRANSIENT_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "ERR_NETWORK"]);
+const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT"]);
 const CARDKIT_RECOVERY_KINDS = new Map([
   ["300309", "closed_answer_stream"],
   ["300317", "stale_main_card"]
@@ -21,10 +21,14 @@ export function classifyDeliveryError(error: unknown, currentTime = Date.now()):
   const recoveryKind = larkErrorCode === "300309" || larkErrorCode === "300317" ? CARDKIT_RECOVERY_KINDS.get(larkErrorCode) : undefined;
   const timeout = error instanceof Error && (error.name === "AbortError" || /timeout|timed out/i.test(error.message));
   let failureClass: DeliveryFailureMetadata["failureClass"] = "unknown";
+  let effectCertainty: DeliveryEffectCertainty = "uncertain";
+  if (error instanceof PermanentDeliveryError || httpStatus !== null || larkErrorCode !== null) effectCertainty = "rejected";
+  else if (code !== null && PRE_CONNECT_CODES.has(code)) effectCertainty = "not-started";
   if (error instanceof PermanentDeliveryError || recoveryKind !== undefined || larkErrorCode !== null && PERMANENT_LARK_CODES.has(larkErrorCode)) failureClass = "permanent";
-  else if (httpStatus === 429 || httpStatus !== null && httpStatus >= 500 || timeout || code !== null && TRANSIENT_CODES.has(code)) failureClass = "transient";
+  else if (httpStatus === 429 || httpStatus !== null && httpStatus >= 500 || effectCertainty === "not-started") failureClass = "transient";
+  else if (timeout || effectCertainty === "uncertain") failureClass = "unknown";
   const retryDelayMs = httpStatus === 429 ? retryAfterDelayMs(error, currentTime) : undefined;
-  return { failureClass, httpStatus, larkErrorCode, message: safe.message, ...(recoveryKind === undefined ? {} : { recoveryKind }), ...(retryDelayMs === undefined ? {} : { retryDelayMs }) };
+  return { failureClass, effectCertainty, httpStatus, larkErrorCode, message: safe.message, ...(recoveryKind === undefined ? {} : { recoveryKind }), ...(retryDelayMs === undefined ? {} : { retryDelayMs }) };
 }
 
 function retryAfterDelayMs(error: unknown, currentTime: number): number | undefined {

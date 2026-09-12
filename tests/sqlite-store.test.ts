@@ -60,6 +60,37 @@ describe("SQLite store", () => {
       expect(() => store!.enqueueOutboundReply({ id: "replacement", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
     });
 
+    it("quarantines an uncertain effect and requires explicit manual retry", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+      store.enqueueOutboundReply({ id: "uncertain", idempotencyKey: "uncertain", bindingId: "b1", rootMessageId: "root", kind: "card_reply", payload: "{}" });
+      const claim = store.claimOutboundReply("uncertain", null)!;
+
+      expect(store.markOutboundReplyFailedWithQuarantine(claim, "headers timeout", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null })).toMatchObject({
+        state: "dead_letter", action: "blocked", reply: { effectCertainty: "uncertain" }
+      });
+      expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 100)).toEqual([]);
+      expect(store.getOperationalSummary()).toMatchObject({ uncertainDeliveryEffects: 1, eligibleDeadLetterRecoveries: 0, outboxQuarantines: { active: 1 } });
+
+      expect(store.retryDeadLetter("uncertain", "c1", "admin")).toBe("retried");
+      expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "pending", effectCertainty: "uncertain" });
+      const retried = store.claimOutboundReply("uncertain", null)!;
+      expect(store.markOutboundReplyDelivered(retried, "message")).toBe(true);
+      expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "delivered", effectCertainty: null });
+    });
+
+    it("ignores an uncertain receipt from an earlier delivery attempt", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
+      const first = store.claimOutboundReply("first", null)!;
+      store.markOutboundReplyFailedWithQuarantine(first, "connect refused", { failureClass: "transient", effectCertainty: "not-started", httpStatus: null, larkErrorCode: null });
+      const second = store.claimOutboundReply("first", null)!;
+
+      expect(store.markOutboundReplyFailedWithQuarantine(first, "late timeout", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null })).toBeNull();
+      expect(store.getOutboundReply("first")).toMatchObject({ state: "pending", effectCertainty: "not-started" });
+      expect(store.markOutboundReplyDelivered(second, "message")).toBe(true);
+    });
+
     it("quarantines an uncertain prior-owner claim after reopening without replaying it", () => {
       temporaryDirectory = mkdtempSync(join(tmpdir(), "outbox-claim-"));
       const path = join(temporaryDirectory, "state.sqlite");
@@ -4253,6 +4284,25 @@ describe("SQLite store", () => {
 
     expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toEqual([]);
     expect(store.getOperationalSummary()).toMatchObject({ deadLettersByClass: { transient: 0, permanent: 0, unknown: 1, legacy: 1 } });
+  });
+
+  it("backfills legacy dead-letter effect certainty conservatively", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-effect-certainty-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    for (const id of ["response", "transport"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: "card", kind: "card_update", payload: "{}" });
+    store.database.exec(`
+      UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'unknown', effect_certainty = NULL, http_status = 400 WHERE id = 'response';
+      UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'unknown', effect_certainty = NULL, http_status = NULL, lark_error_code = NULL WHERE id = 'transport';
+      DELETE FROM schema_migrations WHERE version = 37;
+    `);
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT id, effect_certainty FROM outbound_replies WHERE id IN ('response','transport') ORDER BY id").all()).toEqual([
+      { id: "response", effect_certainty: "rejected" },
+      { id: "transport", effect_certainty: "uncertain" }
+    ]);
+    expect(store.database.prepare("SELECT 1 AS applied FROM schema_migrations WHERE version = 37").get()).toEqual({ applied: 1 });
   });
 
   it("prunes only old delivered or dismissed outbox history in a bounded batch", () => {

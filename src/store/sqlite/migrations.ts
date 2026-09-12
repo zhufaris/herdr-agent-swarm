@@ -129,6 +129,7 @@ export class SqliteMigrations {
     this.cards.ensureAnswerRecoveryEvidence();
     this.cards.ensureGroupCardCreates();
     this.cards.ensureWorkerThreadTargets();
+    this.cards.ensureOutboundEffectCertainty();
   }
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {

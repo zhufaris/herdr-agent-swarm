@@ -34,7 +34,7 @@ export class SqliteOutboxDeliveryStore {
         if (claim) this.queue.releaseClaim(id);
         return false;
       }
-      const delivered = this.context.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'pending'").run(messageId, now(), id);
+      const delivered = this.context.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = ?, error = NULL, failure_class = NULL, effect_certainty = NULL, http_status = NULL, lark_error_code = NULL, dead_lettered_at = NULL, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'pending'").run(messageId, now(), id);
       if (delivered.changes !== 1) return false;
       this.queue.releaseClaim(id);
       if (row.kind === "group_card_create" && row.thread_alias_id) {
@@ -144,7 +144,8 @@ export class SqliteOutboxDeliveryStore {
       const attempts = Number(row.attempt_count) + 1;
       const timestamp = now();
       const deadLetteredAt = attempts >= 5 ? timestamp : null;
-      const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, next_attempt_at = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'`).run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
+      const certainty = deliveryEffectCertainty(metadata);
+      const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, next_attempt_at = ?, failure_class = ?, effect_certainty = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'`).run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", certainty, metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
       return updated.changes === 1 ? this.queue.get(id) : null;
     });
   }
@@ -153,7 +154,7 @@ export class SqliteOutboxDeliveryStore {
     return this.context.transaction(() => {
       if (!this.queue.matchesClaim(id, claim)) return null;
       const timestamp = now();
-      const updated = this.context.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, error = ?, failure_class = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'pending'").run(boundedError(error), metadata?.failureClass ?? "permanent", metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
+      const updated = this.context.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, error = ?, failure_class = ?, effect_certainty = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = 'pending'").run(boundedError(error), metadata?.failureClass ?? "permanent", deliveryEffectCertainty(metadata), metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, timestamp, timestamp, id);
       return updated.changes === 1 ? this.queue.get(id) : null;
     });
   }
@@ -173,6 +174,11 @@ function retryAt(attempt: number, explicitDelayMs?: number): string {
   return new Date(Date.now() + delay).toISOString();
 }
 function now(): string { return new Date().toISOString(); }
+function deliveryEffectCertainty(metadata?: DeliveryFailureMetadata): import("../../domain/delivery.js").DeliveryEffectCertainty {
+  if (metadata?.effectCertainty) return metadata.effectCertainty;
+  if (metadata?.httpStatus !== null && metadata?.httpStatus !== undefined || metadata?.larkErrorCode !== null && metadata?.larkErrorCode !== undefined || metadata?.failureClass === "permanent") return "rejected";
+  return metadata?.failureClass === "transient" ? "not-started" : "uncertain";
+}
 function streamCardState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
   try {
     const decoded = JSON.parse(payload) as { stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown } };

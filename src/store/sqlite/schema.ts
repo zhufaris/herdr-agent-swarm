@@ -150,7 +150,7 @@ export function createLatestSchema(context: SqliteContext): void {
     kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','group_card_create','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, intent_kind TEXT, intent_json TEXT, renderer_revision INTEGER,
     state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
     error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-    failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT,
+    failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), effect_certainty TEXT CHECK(effect_certainty IN ('not-started','rejected','uncertain')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT,
     CHECK((kind = 'group_card_create' AND root_message_id IS NULL AND target_chat_id IS NOT NULL AND ((thread_alias_id IS NOT NULL AND worker_thread_id IS NULL) OR (thread_alias_id IS NULL AND worker_thread_id IS NOT NULL))) OR (kind != 'group_card_create' AND root_message_id IS NOT NULL AND target_chat_id IS NULL AND thread_alias_id IS NULL AND worker_thread_id IS NULL))
   );
   CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert

@@ -69,7 +69,8 @@ export class SqliteOperationsStore {
     const unresolvedFailureRows = this.context.database.prepare(`SELECT o.failure_class, COUNT(*) AS count FROM outbound_replies o WHERE ${unresolvedDeadLetter} GROUP BY o.failure_class`).all() as Array<{ failure_class: DeliveryFailureClass | null; count: number }>;
     for (const row of unresolvedFailureRows) unresolvedDeadLettersByClass[row.failure_class ?? "legacy"] = Number(row.count);
     const unresolvedDeadLetters = unresolvedFailureRows.reduce((total, row) => total + Number(row.count), 0);
-    const eligibleRecoveries = this.context.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' AND failure_class = 'transient' AND auto_recovery_count = 0 AND dead_lettered_at IS NOT NULL AND dead_lettered_at <= ?").get(new Date(Date.parse(observedAt) - 300_000).toISOString()) as { count: number };
+    const eligibleRecoveries = this.context.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' AND failure_class = 'transient' AND COALESCE(effect_certainty, 'uncertain') != 'uncertain' AND auto_recovery_count = 0 AND dead_lettered_at IS NOT NULL AND dead_lettered_at <= ?").get(new Date(Date.parse(observedAt) - 300_000).toISOString()) as { count: number };
+    const uncertainDeliveryEffects = this.context.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' AND effect_certainty = 'uncertain'").get() as { count: number };
     const quarantineStates = groupedCounts<"active" | "released">("outbox_lane_quarantines", "state", ["active", "released"]);
     const quarantinesByLaneClass = groupedCounts<OutboxLaneClass>("outbox_lane_quarantines", "lane_class", ["answer_stream", "main_card", "replaceable_card", "immutable"]);
     const quarantinesByFailureClass = groupedCounts<DeliveryFailureClass>("outbox_lane_quarantines", "failure_class", ["transient", "permanent", "unknown"]);
@@ -103,7 +104,7 @@ export class SqliteOperationsStore {
         oldestAcceptedAgeSeconds: oldestAcceptedSessionOperation.value === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(oldestAcceptedSessionOperation.value)) / 1_000))
       },
       workerThreads: groupedCounts("worker_session_threads", "state", ["legacy-unpublished", "reserving", "active", "stale"]),
-      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
+      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, uncertainDeliveryEffects: Number(uncertainDeliveryEffects.count), eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       deliveryRecoveries: groupedCounts("delivery_recoveries", "state", ["unresolved", "replacement_pending", "recovered", "dismissed"]),
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),

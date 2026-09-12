@@ -539,6 +539,18 @@ export class CardOutboxMigrations {
     this.context.database.exec("CREATE INDEX IF NOT EXISTS outbound_replies_auto_recovery ON outbound_replies(state, failure_class, auto_recovery_count, dead_lettered_at)");
   }
 
+  ensureOutboundEffectCertainty(): void {
+    const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!names.has("effect_certainty")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN effect_certainty TEXT CHECK(effect_certainty IN ('not-started','rejected','uncertain'))");
+    this.context.database.prepare(`
+      UPDATE outbound_replies
+      SET effect_certainty = CASE WHEN http_status IS NOT NULL OR lark_error_code IS NOT NULL THEN 'rejected' ELSE 'uncertain' END
+      WHERE state = 'dead_letter' AND effect_certainty IS NULL
+    `).run();
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (37)").run();
+    this.context.database.exec("CREATE INDEX IF NOT EXISTS outbound_replies_effect_certainty ON outbound_replies(state, effect_certainty, dead_lettered_at)");
+  }
+
   ensureDualRequestCardColumns(): void {
     const columns = this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));

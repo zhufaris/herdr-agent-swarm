@@ -232,7 +232,7 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 ### 8.3 剩余工作与部署边界
 
 - [x] 完成首个 P0 投递冻结/确认切片及部分阶段 B 的 Answer 幂等快照；源码架构说明和 README 已同步。
-- [ ] 补齐阶段 A 的端点特定不确定外部效果协议和完整故障窗口验收；当前分类器对外部超时等失败仍沿用既有重试策略，不能宣称 exactly-once。
+- [x] 阶段 A 的外部效果不确定性首片：请求/响应超时、连接重置和缺少 pre-send 证据的 transport 失败进入 durable uncertain quarantine，不再自动重试；DNS、连接拒绝和 connect timeout 仍可重试。端点特定查询/调和仍未实现，不能宣称 exactly-once。
 - [ ] 阶段 B：独立 projection checkpoint、target incarnation、增量启动候选、renderer 升级和规模测试。
 - [x] 阶段 C 首片：独立 recovery ledger、同目标快照和明确 Main rebuild 的成功证据，修复 R4/R5。
 - [x] 阶段 C 次片：关闭的 Primary Answer stream 到单个静态替代页的内容覆盖证明，见第 8.5 节。

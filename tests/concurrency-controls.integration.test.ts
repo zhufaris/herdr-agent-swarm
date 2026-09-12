@@ -333,7 +333,7 @@ describe("coordinator concurrency controls", () => {
       async updateCard() {},
       async createStreamingCard() { return { cardId: "cardkit-1" }; },
       async replyStreamingCardReference() {
-        if (failReply) { failReply = false; throw new Error("temporary"); }
+        if (failReply) { failReply = false; throw Object.assign(new Error("temporary"), { response: { status: 503 } }); }
         return { messageId: "answer-1" };
       },
       async streamCardContent() {},

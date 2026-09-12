@@ -402,7 +402,7 @@ describe("Lark channel publisher", () => {
   it("keeps a failed card pending and delivers it during a later drain", async () => {
     let fail = true;
     const cards: object[] = [];
-    const lark = fakeLark({ async replyCard(_root, card) { if (fail) throw new Error("temporary"); cards.push(card); return { messageId: "card-1" }; } });
+    const lark = fakeLark({ async replyCard(_root, card) { if (fail) throw Object.assign(new Error("temporary"), { response: { status: 503 } }); cards.push(card); return { messageId: "card-1" }; } });
     const store = new SqliteBindingStore(":memory:");
     const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     publisher.start();
@@ -418,7 +418,7 @@ describe("Lark channel publisher", () => {
 
   it("retries a failed final folded Answer Card update without recreating the answer", async () => {
     let fail = true;
-    const updateCard = vi.fn(async () => { if (fail) throw new Error("temporary"); });
+    const updateCard = vi.fn(async () => { if (fail) throw Object.assign(new Error("temporary"), { response: { status: 503 } }); });
     const store = new SqliteBindingStore(":memory:");
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard }), pino({ enabled: false }));
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -444,7 +444,7 @@ describe("Lark channel publisher", () => {
   it("signals the projector after a continuation card succeeds on retry", async () => {
     let fail = true;
     const created = vi.fn(async () => {
-      if (fail) throw new Error("temporary");
+      if (fail) throw Object.assign(new Error("temporary"), { response: { status: 503 } });
       return { messageId: "answer-2", cardId: "cardkit-2" };
     });
     const store = new SqliteBindingStore(":memory:");
@@ -547,7 +547,10 @@ describe("Lark channel publisher", () => {
     expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
 
     const create = vi.fn(async () => ({ messageId: "answer-13", cardId: "cardkit-13" }));
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyStreamingCard: create }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      replyStreamingCard: create,
+      async streamCardContent() { throw Object.assign(new Error("content temporarily unavailable"), { response: { status: 503 } }); }
+    }), pino({ enabled: false }));
     const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
     let convergence = Promise.resolve();
     publisher.onAnswerCheckpoint((promptId) => { convergence = workflow.converge(promptId); });
@@ -586,7 +589,7 @@ describe("Lark channel publisher", () => {
     let failReply = true;
     const create = vi.fn(async () => ({ cardId: "cardkit-1" }));
     const reply = vi.fn(async (_root: string, cardId: string, idempotencyKey: string) => {
-      if (failReply) throw new Error("temporary");
+      if (failReply) throw Object.assign(new Error("temporary"), { response: { status: 503 } });
       return { messageId: `message-for-${cardId}-${idempotencyKey}` };
     });
     const store = new SqliteBindingStore(":memory:");
@@ -607,13 +610,13 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("uses one logical message when the first idempotent reply times out after remote acceptance", async () => {
+  it("does not retry an idempotent reply whose remote outcome is uncertain", async () => {
     const logicalMessages = new Map<string, string>();
     let firstAttempt = true;
     const reply = vi.fn(async (_root: string, _cardId: string, idempotencyKey: string) => {
       const messageId = logicalMessages.get(idempotencyKey) ?? `message-${logicalMessages.size + 1}`;
       logicalMessages.set(idempotencyKey, messageId);
-      if (firstAttempt) { firstAttempt = false; throw new Error("timeout after acceptance"); }
+      if (firstAttempt) { firstAttempt = false; throw Object.assign(new Error("timeout after acceptance"), { code: "ETIMEDOUT" }); }
       return { messageId };
     });
     const store = new SqliteBindingStore(":memory:");
@@ -628,9 +631,11 @@ describe("Lark channel publisher", () => {
     await publisher.requestScan();
     await publisher.requestScan(true);
 
-    expect(reply.mock.calls.map((call) => call[2])).toEqual(["run-card:create:p1:answer", "run-card:create:p1:answer"]);
+    expect(reply.mock.calls.map((call) => call[2])).toEqual(["run-card:create:p1:answer"]);
     expect(logicalMessages).toEqual(new Map([["run-card:create:p1:answer", "message-1"]]));
-    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "message-1", answerCardId: "cardkit-1" });
+    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: null, answerCardId: null });
+    expect(store.database.prepare("SELECT state, failure_class, effect_certainty FROM outbound_replies WHERE prompt_id = ?").get("p1")).toEqual({ state: "dead_letter", failure_class: "unknown", effect_certainty: "uncertain" });
+    expect(store.getOperationalSummary()).toMatchObject({ uncertainDeliveryEffects: 1, eligibleDeadLetterRecoveries: 0, outboxQuarantines: { active: 1 } });
     store.close();
   });
 
@@ -681,7 +686,7 @@ describe("Lark channel publisher", () => {
     const error = vi.fn();
     const debug = vi.fn();
     const logger = { warn, error, debug } as unknown as Logger;
-    const lark = fakeLark({ async replyCard() { throw new Error("network unavailable"); } });
+    const lark = fakeLark({ async replyCard() { throw Object.assign(new Error("network unavailable"), { response: { status: 503 } }); } });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const publisher = new LarkOutboxDispatcher(store, lark, logger);
@@ -1091,7 +1096,7 @@ describe("Lark channel publisher", () => {
     const delivered: string[] = [];
     const lark = fakeLark({
       async streamCardContent() {
-        if (failContent) throw new Error("temporary");
+        if (failContent) throw Object.assign(new Error("temporary"), { response: { status: 503 } });
         delivered.push("content");
       },
       async finishStreamingCard() { delivered.push("finish"); }
@@ -1176,7 +1181,7 @@ describe("Lark channel publisher", () => {
     let attempt = 0;
     const lark = fakeLark({ async replyCard() {
       attempt += 1;
-      if (attempt === 1) throw new Error("temporary");
+      if (attempt === 1) throw Object.assign(new Error("temporary"), { response: { status: 503 } });
       return { messageId: "card-1" };
     } });
     const store = new SqliteBindingStore(":memory:");

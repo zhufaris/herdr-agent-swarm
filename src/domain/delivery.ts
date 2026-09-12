@@ -3,9 +3,11 @@ import type { DeliveryIntentKind } from "./delivery-intent.js";
 export type OutboundReplyState = "pending" | "delivered" | "dead_letter" | "dismissed";
 export type OutboundWorkClass = "live" | "history";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
+export type DeliveryEffectCertainty = "not-started" | "rejected" | "uncertain";
 export type CardKitRecoveryKind = "closed_answer_stream" | "stale_main_card";
 export interface DeliveryFailureMetadata {
   failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null;
+  effectCertainty?: DeliveryEffectCertainty;
   recoveryKind?: CardKitRecoveryKind;
 }
 export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
@@ -26,7 +28,7 @@ export interface OutboundReply {
   workClass: OutboundWorkClass;
   rootMessageId: string | null; kind: OutboundReplyKind; payload: string; intentKind: DeliveryIntentKind | null; intentJson: string | null;
   rendererRevision: number | null; state: OutboundReplyState; attemptCount: number; error: string | null;
-  deliveredMessageId: string | null; cardIdCheckpoint: string | null; failureClass: DeliveryFailureClass | null;
+  deliveredMessageId: string | null; cardIdCheckpoint: string | null; failureClass: DeliveryFailureClass | null; effectCertainty: DeliveryEffectCertainty | null;
   httpStatus: number | null; larkErrorCode: string | null; autoRecoveryCount: number; deadLetteredAt: string | null;
   nextAttemptAt: string; createdAt: string; updatedAt: string;
 }

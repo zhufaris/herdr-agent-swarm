@@ -1134,15 +1134,22 @@ incremental startup candidate scan are not yet implemented.
 If an external request succeeds but its local ACK or card-ID checkpoint fails,
 the executor reports `outbound_checkpoint_uncertain` and does not turn that
 uncertainty into an ordinary retry. An unsettled claim keeps its lane blocked.
+Transport failures also carry a durable effect-certainty classification. DNS,
+connection refusal, and explicit connect timeout prove the request did not start
+and remain eligible for ordinary retry. HTTP/Lark responses are definite
+rejections and retain their existing semantic handling. Request or headers
+timeouts, connection resets, and transport failures without pre-send proof are
+stored as `uncertain` unknown dead letters with a blocked quarantine; they are
+never automatically reopened, though an authorized operator may explicitly
+retry or dismiss them.
 When a new lease owner activates its write fence, persisted claims belonging to
 a different owner or fence become unknown dead letters with active, blocked
 quarantines. Their payloads and existing card-ID checkpoints remain intact for
 inspection and authorized recovery. Because the claim alone does not prove
 whether HTTP began, even a crash immediately after claim is treated
 conservatively. This is not an exactly-once guarantee: endpoint-specific
-transport uncertainty and idempotency policies remain follow-up work, and the
-existing classifier still governs external request failures. None of these
-recovery paths replays a TraeX prompt.
+endpoint-specific reconciliation and idempotency policies remain follow-up work.
+None of these recovery paths replays a TraeX prompt.
 
 Order is important inside one CardKit element because sequences must increase.
 The publisher assigns every outbox row a durable delivery order and drains only

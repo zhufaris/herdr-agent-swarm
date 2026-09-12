@@ -5,7 +5,7 @@ import type { PromptState } from "./prompt.js";
 export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
 export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority } from "./prompt.js";
 export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
-export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, BindingThreadAlias, DeadLetterActionOutcome, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboundWorkClass, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
+export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, BindingThreadAlias, DeadLetterActionOutcome, DeliveryEffectCertainty, DeliveryFailureClass, DeliveryFailureMetadata, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboundWorkClass, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
 export type { InboundDispatcherDiagnostics, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, PromptWorkerDiagnostics, ReconciliationDiagnostics, ReconciliationFailure, ReconciliationPassResult, SessionOperationDispatcherDiagnostics, StartupRecoveryDiagnostics } from "../runtime/diagnostics.js";
 export type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../adapters/lark-ingress.js";
@@ -178,6 +178,7 @@ export interface OperationalSummary {
   deadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
   unresolvedDeadLetters: number;
   unresolvedDeadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
+  uncertainDeliveryEffects: number;
   eligibleDeadLetterRecoveries: number;
   deliveryRecoveries: Record<"unresolved" | "replacement_pending" | "recovered" | "dismissed", number>;
   oldestPendingAt: string | null;
