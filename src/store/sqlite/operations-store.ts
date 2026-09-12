@@ -63,6 +63,28 @@ export class SqliteOperationsStore {
       FROM outbox_lane_heads h
       JOIN outbound_replies o ON o.id = h.reply_id
     `).get(observedAt, observedAt, observedAt, observedAt, stalledBefore, observedAt, stalledBefore) as { pending: number; eligible: number | null; blocked: number | null; next_attempt_at: string | null; oldest_head_at: string | null; stalled: number | null; oldest_stalled_at: string | null };
+    const outboxWorkRow = this.context.database.prepare(`
+      SELECT
+        SUM(CASE WHEN o.claim_attempt_id IS NULL AND h.reply_id IS NOT NULL AND o.next_attempt_at <= ? AND ? = 0 THEN 1 ELSE 0 END) AS ready,
+        SUM(CASE WHEN o.claim_attempt_id IS NOT NULL THEN 1 ELSE 0 END) AS in_flight,
+        SUM(CASE WHEN o.claim_attempt_id IS NULL AND h.reply_id IS NOT NULL AND o.next_attempt_at > ? THEN 1 ELSE 0 END) AS retry_wait,
+        SUM(CASE WHEN o.claim_attempt_id IS NULL AND h.reply_id IS NOT NULL AND o.next_attempt_at <= ? AND ? = 1 THEN 1 ELSE 0 END) AS cooldown_wait,
+        SUM(CASE WHEN o.claim_attempt_id IS NULL AND h.reply_id IS NULL THEN 1 ELSE 0 END) AS waiting_behind_lane,
+        MIN(CASE WHEN o.claim_attempt_id IS NOT NULL THEN o.claimed_at END) AS oldest_in_flight_at
+      FROM outbound_replies o
+      LEFT JOIN outbox_lane_heads h ON h.reply_id = o.id
+      WHERE o.state = 'pending'
+    `).get(observedAt, larkDeliveryCooldown.active ? 1 : 0, observedAt, observedAt, larkDeliveryCooldown.active ? 1 : 0) as {
+      ready: number | null; in_flight: number | null; retry_wait: number | null; cooldown_wait: number | null;
+      waiting_behind_lane: number | null; oldest_in_flight_at: string | null;
+    };
+    const oldestInFlightAge = outboxWorkRow.oldest_in_flight_at === null ? null : Date.parse(observedAt) - Date.parse(outboxWorkRow.oldest_in_flight_at);
+    const outboxWork = {
+      ready: Number(outboxWorkRow.ready ?? 0), inFlight: Number(outboxWorkRow.in_flight ?? 0), retryWait: Number(outboxWorkRow.retry_wait ?? 0),
+      cooldownWait: Number(outboxWorkRow.cooldown_wait ?? 0), waitingBehindLane: Number(outboxWorkRow.waiting_behind_lane ?? 0),
+      oldestInFlightAt: outboxWorkRow.oldest_in_flight_at,
+      oldestInFlightAgeSeconds: oldestInFlightAge !== null && Number.isFinite(oldestInFlightAge) ? Math.max(0, Math.floor(oldestInFlightAge / 1_000)) : null
+    };
     const outbound = groupedCounts<OutboundReplyState>("outbound_replies", "state", ["pending", "delivered", "dead_letter", "dismissed"]);
     const deadLettersByClass = { transient: 0, permanent: 0, unknown: 0, legacy: 0 };
     const failureRows = this.context.database.prepare("SELECT failure_class, COUNT(*) AS count FROM outbound_replies WHERE state = 'dead_letter' GROUP BY failure_class").all() as Array<{ failure_class: DeliveryFailureClass | null; count: number }>;
@@ -106,7 +128,7 @@ export class SqliteOperationsStore {
         oldestAcceptedAgeSeconds: oldestAcceptedSessionOperation.value === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(oldestAcceptedSessionOperation.value)) / 1_000))
       },
       workerThreads: groupedCounts("worker_session_threads", "state", ["legacy-unpublished", "reserving", "active", "stale"]),
-      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, uncertainDeliveryEffects: Number(uncertainDeliveryEffects.count), larkDeliveryCooldown, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
+      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, uncertainDeliveryEffects: Number(uncertainDeliveryEffects.count), larkDeliveryCooldown, outboxWork, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       deliveryRecoveries: groupedCounts("delivery_recoveries", "state", ["unresolved", "replacement_pending", "recovered", "dismissed"]),
       outboxLanes: {
         pending: Number(laneHealth.pending), eligible: larkDeliveryCooldown.active ? 0 : Number(laneHealth.eligible ?? 0),

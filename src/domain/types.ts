@@ -159,6 +159,11 @@ export interface LarkDeliveryCooldownSummary {
   lastHttpStatus: number | null; lastLarkErrorCode: string | null; lastReason: string | null;
 }
 
+export interface OutboxWorkSummary {
+  ready: number; inFlight: number; retryWait: number; cooldownWait: number; waitingBehindLane: number;
+  oldestInFlightAt: string | null; oldestInFlightAgeSeconds: number | null;
+}
+
 export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;
@@ -185,6 +190,7 @@ export interface OperationalSummary {
   unresolvedDeadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
   uncertainDeliveryEffects: number;
   larkDeliveryCooldown: LarkDeliveryCooldownSummary;
+  outboxWork: OutboxWorkSummary;
   eligibleDeadLetterRecoveries: number;
   deliveryRecoveries: Record<"unresolved" | "replacement_pending" | "recovered" | "dismissed", number>;
   oldestPendingAt: string | null;

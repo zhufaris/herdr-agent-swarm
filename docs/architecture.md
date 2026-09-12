@@ -1363,6 +1363,14 @@ contradictory lease or reconciliation snapshots.
 class, plus due lane heads that have made no progress for five minutes. An
 active quarantine or stalled head degrades status without changing readiness,
 so one broken Lark target remains visible without stopping unrelated work.
+Pending Lark work is also reported as an exhaustive durable partition:
+`ready`, `inFlight`, `retryWait`, `cooldownWait`, and `waitingBehindLane`. Their
+sum equals `pendingOutbox`. The durable `inFlight` count comes from SQLite claim
+identity and may legitimately differ momentarily from the dispatcher's
+process-local `activeDeliveries`; diagnostics expose the difference but never use
+one to repair the other. Normal in-flight or waiting work does not itself degrade
+status. The oldest claim timestamp and age are informational and do not create a
+new timeout policy.
 The same endpoint reports the Herdr circuit state, bounded last failure, recovery
 time, and rejection/failure counters. Open and half-open states degrade status.
 It also reports each startup recovery stage with its bounded duration and error;

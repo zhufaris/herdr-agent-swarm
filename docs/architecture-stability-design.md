@@ -238,7 +238,7 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 - [x] 阶段 C 次片：关闭的 Primary Answer stream 到单个静态替代页的内容覆盖证明，见第 8.5 节。
 - [ ] 阶段 C 剩余：跨多页覆盖合并、多代替代链、变更源内容的协调、Worker 覆盖证明、候选重扫、ledger 保留策略及 current/historical 健康分类。
 - [x] 阶段 D：移除整批 Promise.all 屏障、公平补位、持久化 live/history 工作分类与 3:1 配额，修复 R6，见第 8.6 节。
-- [ ] 阶段 E：端点错误语义与跨 lane app quota cooldown 已完成；语义恢复要求精确 Lark 调用和 durable target，SQLite 不再从裸错误码推断，`230028` 当前 revision 首次拒绝即终止。独立 in-flight 指标和性能测量仍待完成（uncertain effect 计数已实现）。
+- [ ] 阶段 E：端点错误语义、跨 lane app quota cooldown、独立 durable in-flight/retry/cooldown/lane-wait 指标已完成；语义恢复要求精确 Lark 调用和 durable target，SQLite 不再从裸错误码推断，`230028` 当前 revision 首次拒绝即终止。性能与规模测量仍待完成（uncertain effect 计数已实现）。
 - [x] 用户已授权并完成本地提交；发布与第 7 节在线验证仍需另行授权。
 
 卡片设计/可读性/稳定性优化和 instances 多 Agent 易用性优化已记为后续待办，先各自形成方案再实施；不扩入当前稳定性切片。当前本地完成状态不代表上线批准。
@@ -318,3 +318,11 @@ migration 38 新增单行 `lark_delivery_cooldowns`，在精确 claim 的 HTTP 4
 `/status` 报告 active、deadline、remaining time、trigger count 和安全错误摘要；active cooldown 将 status 标记 degraded，但 `/ready` 仍表示服务可持久接收工作。cooldown 只影响 Lark outbox，不改变 Herdr、Prompt 或 Worker 状态机。实现未假设 message/CardKit/topic 具有独立额度。
 
 最终验证：quota、lease、SQLite、dispatcher、health 和错误分类专项 6 个文件、380 项测试通过；`npm test` 167 个文件、2,137 项测试全部通过；`architecture:check` 检查 304 个源码文件，`npm run typecheck`、`npm run build` 与 `git diff --check` 通过。build identity：`sha256:5c7401e4be3a9b13f8c27a5d0540a47485a9eeb15d7063b210cac21a64c1a294`。未安装、重启、部署或写入真实 Lark。
+
+### 8.11 Durable outbox work diagnostics（2026-09-12）
+
+`OperationalSummary.outboxWork` 将每条 pending outbox row 互斥地归为 ready、inFlight、retryWait、cooldownWait 或 waitingBehindLane；五类之和恒等于 `pendingOutbox`。分类由 SQLite 的 claim、lane head、row deadline 与 app cooldown 事实一次聚合得出，不新增状态、迁移、索引或写操作。row backoff 优先于 cooldown；active quarantine 下没有 lane head 的 pending row 属于 waitingBehindLane。
+
+durable `inFlight` 与 dispatcher 的进程内 `activeDeliveries` 保持独立，供运维判断进程状态与持久 claim 是否漂移，但不互相修复。最早 claim 的时间和非负年龄只用于观察，不新增超时阈值；异常 legacy timestamp 返回 null age。正常 pending 分区不改变 `/status` 或 `/ready`，active cooldown、quarantine 和 stalled lane 继续沿用既有降级规则。
+
+最终验证：SQLite、health、dispatcher、service lifecycle 与 operations 专项 5 个文件、433 项测试通过；`npm test` 167 个文件、2,141 项测试全部通过；`architecture:check` 检查 304 个源码文件，`npm run typecheck`、`npm run build` 与 `git diff --check` 通过。build identity：`sha256:971242a82890612c4430bbd8fe2bceeabedb14624474265c831158c462acf35a`。未安装、重启、部署或写入真实 Lark。

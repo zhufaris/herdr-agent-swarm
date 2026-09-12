@@ -4251,6 +4251,69 @@ describe("SQLite store", () => {
       pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null,
       oldestHeadAt: null, oldestHeadAgeSeconds: null, stalled: 0, oldestStalledAgeSeconds: null
     });
+    expect(store.getOperationalSummary().outboxWork).toEqual({
+      ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0,
+      oldestInFlightAt: null, oldestInFlightAgeSeconds: null
+    });
+  });
+
+  it("partitions pending outbox work into exclusive durable classes", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:10:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "ready", idempotencyKey: "ready", rootMessageId: "ready-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "claimed", idempotencyKey: "claimed", rootMessageId: "claimed-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "retry", idempotencyKey: "retry", rootMessageId: "retry-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "retry-successor", idempotencyKey: "retry-successor", rootMessageId: "retry-card", kind: "card_update", payload: "{}" });
+    vi.setSystemTime(new Date("2026-09-12T00:09:50.000Z"));
+    const claim = store.claimOutboundReply("claimed", null)!;
+    vi.setSystemTime(new Date("2026-09-12T00:10:00.000Z"));
+    store.database.prepare("UPDATE outbound_replies SET next_attempt_at = ? WHERE id = 'retry'").run("2026-09-12T00:11:00.000Z");
+
+    const summary = store.getOperationalSummary();
+    expect(summary.outboxWork).toEqual({
+      ready: 1, inFlight: 1, retryWait: 1, cooldownWait: 0, waitingBehindLane: 1,
+      oldestInFlightAt: "2026-09-12T00:09:50.000Z", oldestInFlightAgeSeconds: 10
+    });
+    expect(Object.values(summary.outboxWork).slice(0, 5).reduce((total, count) => total + Number(count), 0)).toBe(summary.pendingOutbox);
+    expect(store.markOutboundReplyDelivered(claim, "message")).toBe(true);
+    expect(store.getOperationalSummary().outboxWork).toMatchObject({ inFlight: 0, ready: 1, retryWait: 1, waitingBehindLane: 1 });
+    vi.useRealTimers();
+  });
+
+  it("retains a malformed legacy claim timestamp without throwing or inventing an age", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "claimed", idempotencyKey: "claimed", rootMessageId: "card", kind: "card_update", payload: "{}" });
+    expect(store.claimOutboundReply("claimed", null)).not.toBeNull();
+    store.database.prepare("UPDATE outbound_replies SET claimed_at = 'legacy-invalid' WHERE id = 'claimed'").run();
+
+    expect(store.getOperationalSummary().outboxWork).toMatchObject({
+      inFlight: 1, oldestInFlightAt: "legacy-invalid", oldestInFlightAgeSeconds: null
+    });
+  });
+
+  it("distinguishes row retry wait from app cooldown wait and restores ready work at expiry", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", rootMessageId: "limited-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "due", idempotencyKey: "due", rootMessageId: "due-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "backoff", idempotencyKey: "backoff", rootMessageId: "backoff-card", kind: "card_update", payload: "{}" });
+    const limited = store.claimOutboundReply("limited", null)!;
+    store.markOutboundReplyFailedWithQuarantine(limited, "rate limited", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: null }, 5_000);
+    store.database.prepare("UPDATE outbound_replies SET next_attempt_at = ? WHERE id = 'backoff'").run("2026-09-12T00:00:10.000Z");
+
+    let summary = store.getOperationalSummary();
+    expect(summary.outboxWork).toEqual({
+      ready: 0, inFlight: 0, retryWait: 2, cooldownWait: 1, waitingBehindLane: 0, oldestInFlightAt: null, oldestInFlightAgeSeconds: null
+    });
+    expect(summary.outboxWork.ready + summary.outboxWork.inFlight + summary.outboxWork.retryWait + summary.outboxWork.cooldownWait + summary.outboxWork.waitingBehindLane).toBe(summary.pendingOutbox);
+
+    vi.setSystemTime(new Date("2026-09-12T00:00:05.000Z"));
+    summary = store.getOperationalSummary();
+    expect(summary.outboxWork).toMatchObject({ ready: 2, inFlight: 0, retryWait: 1, cooldownWait: 0, waitingBehindLane: 0 });
+    expect(summary.outboxWork.ready + summary.outboxWork.inFlight + summary.outboxWork.retryWait + summary.outboxWork.cooldownWait + summary.outboxWork.waitingBehindLane).toBe(summary.pendingOutbox);
+    vi.useRealTimers();
   });
 
   it("preserves Answer lane insertion order across reopen and VACUUM", () => {

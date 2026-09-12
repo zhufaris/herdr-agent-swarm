@@ -372,6 +372,30 @@ describe("health server", () => {
     });
   });
 
+  it("reports durable in-flight Lark work without degrading status or readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), pendingOutbox: 1, outboxWork: {
+      ready: 0, inFlight: 1, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0,
+      oldestInFlightAt: "2026-09-12T00:00:00.000Z", oldestInFlightAgeSeconds: 2
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch("http://127.0.0.1:" + port + "/ready")).status).toBe(200);
+    expect(await (await fetch("http://127.0.0.1:" + port + "/status")).json()).toMatchObject({
+      status: "ok", readiness: { status: "ready" }, operational: { pendingOutbox: 1, outboxWork: {
+        ready: 0, inFlight: 1, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0,
+        oldestInFlightAt: "2026-09-12T00:00:00.000Z", oldestInFlightAgeSeconds: 2
+      } }
+    });
+  });
+
   it("keeps status healthy when delivery failures are historical rather than current work", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);
