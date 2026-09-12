@@ -245,6 +245,8 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 
 Herdr 直接发起的 Primary turn 现已纳入事件驱动双投影收敛：pane hint 先完成 Binding identity reconcile，再显式唤醒 Primary external-turn observer；canonical transcript 生成的生命周期事件同时驱动 Main Card 与对应 Answer Card。首次 EOF baseline 不回放历史，周期扫描继续提供丢失 hint 的兜底。
 
+Startup view convergence 新生成的 Main/Answer 修复 intent 统一标记为 `history`，正常交互和 Herdr/Lark 实时 turn 仍保持 `live`。因此重启后即使存在大量历史卡片修复，3:1 outbox 公平调度也会让新 Answer 在首批可用槽位内投递；重启前已持久化 intent 的 work class 不被改写。
+
 最终验证：event router、external-turn observer、runtime reconcile、discovery、card projection、startup/shutdown 与架构边界专项 9 个文件、149 项测试通过；`npm test` 167 个文件、2,144 项测试全部通过；`architecture:check` 检查 304 个源码文件，`npm run typecheck`、`npm run build` 与 `git diff --check` 通过。build identity：`sha256:bf401c8d8659ca3e5671fd0e63e9080afc8abb7629c793cce897aab13b9cbc04`。未安装、重启、部署或写入真实 Lark。
 
 ### 8.4 恢复证据切片（2026-09-11）

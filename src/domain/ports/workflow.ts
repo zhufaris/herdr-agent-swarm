@@ -1,4 +1,4 @@
-import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, IncomingLarkMessage, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, StaleOutboxQuarantineRecovery } from "../types.js";
+import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, IncomingLarkMessage, OutboundWorkClass, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, StaleOutboxQuarantineRecovery } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
@@ -29,7 +29,7 @@ export interface StartupRecoveryStore {
 }
 
 export interface StartupViewStore {
-  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void;
+  ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void;
   listBindings(): Binding[];
   listRunCards(bindingId: string): RunCardView[];
   loadTopicView(bindingId: string): TopicViewState | null;

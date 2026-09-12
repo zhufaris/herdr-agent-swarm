@@ -40,9 +40,10 @@ export class SqliteOutboxQueueStore {
     return this.context.transaction(() => {
       const existing = this.getByKey(input.idempotencyKey);
       if (existing) {
-        if (existing.workClass !== workClass) throw new Error("outbound_idempotency_conflict");
         const same = existing.payload === input.payload && existing.intentJson === intentJson && existing.rendererRevision === rendererRevision && existing.rootMessageId === rootMessageId && existing.targetChatId === targetChatId && existing.threadAliasId === threadAliasId && existing.workerThreadId === workerThreadId && existing.kind === input.kind && existing.viewVersion === (input.viewVersion ?? null) && existing.cardSequence === (input.cardSequence ?? null);
-        if (same || existing.state !== "pending") return existing;
+        if (same) return existing;
+        if (existing.workClass !== workClass) throw new Error("outbound_idempotency_conflict");
+        if (existing.state !== "pending") return existing;
         if (this.wasClaimed(existing.id)) throw new Error("outbound_idempotency_conflict");
       }
       if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId) {

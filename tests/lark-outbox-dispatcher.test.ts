@@ -13,6 +13,7 @@ import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { StartupViewConverger } from "../src/coordinator/startup-view-converger.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
@@ -1172,6 +1173,53 @@ describe("Lark channel publisher", () => {
     expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-message", cardId: "answer-card" });
     expect(store.listPendingOutboundReplies()).toEqual([]);
     store.close();
+  });
+
+  it("delivers a live Answer in the first batch after startup convergence creates historical card work", async () => {
+    let releaseHistory!: () => void;
+    const historyGate = new Promise<void>((resolve) => { releaseHistory = resolve; });
+    const started: string[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    for (let index = 0; index < 8; index += 1) {
+      const bindingId = `history-binding-${index}`;
+      const promptId = `history-prompt-${index}`;
+      store.createPendingBinding({ bindingId, id: bindingId, projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: `topic-${index}`, rootMessageId: `root-${index}`, title: `History ${index}` });
+      store.updateBinding(bindingId, { paneId: `wH:p${index}`, statusMessageId: `main-${index}`, state: "active", lifecycle: "active", attachment: "attached" });
+      store.saveTopicView({ ...initialTopicView(bindingId), title: `History ${index}`, workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: `wH:p${index}`, phase: "done", viewVersion: 2, deliveredVersion: 1 });
+      const queued = createQueuedRunCard({ promptId, bindingId, title: `History ${index}`, workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: `wH:p${index}`, requestText: "old", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId, larkMessageId: `history-message-${index}`, actorOpenId: "u1", body: "old" }, view: queued, rootMessageId: `root-${index}`, answerCard: {} });
+      const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId)!;
+      store.markOutboundReplyDelivered(create.id, `answer-message-${index}`, `answer-card-${index}`);
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, phase: "completed", answer: "durable history", answerSegments: ["durable history"], viewVersion: 3, answerDeliveredVersion: 1 });
+    }
+    const startup = new StartupViewConverger({
+      config: { projects: [{ id: "bridge", displayName: "Bridge", spaceName: "herdr-lark-bridge", description: "Bridge", workspaceId: "wH", cwd: "/work/bridge" }] } as never,
+      stores: { startupViews: store, answerPages: store, mainCards: store },
+      outbound: { enqueueRunCardUpdate: vi.fn() } as unknown as OutboundIntentPort,
+      outboundWork: { wake: () => {}, subscribe: () => () => {} },
+      presentation: primaryPresentation
+    });
+    await startup.converge();
+
+    store.createPendingBinding({ id: "live-binding", workspaceId: "wH", chatId: "chat", topicId: "live-topic", rootMessageId: "live-root", title: "Live" });
+    const liveView = createQueuedRunCard({ promptId: "live-prompt", bindingId: "live-binding", title: "Live", workspaceId: "wH", paneId: "wH:live", requestText: "now", queuePosition: 1, occurredAt: "2026-09-12T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "live-prompt", bindingId: "live-binding", larkMessageId: "live-message", actorOpenId: "u1", body: "now" }, view: liveView, rootMessageId: "live-root", answerCard: {} });
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(messageId) { started.push(messageId); await historyGate; },
+      async streamCardContent(cardId) { started.push(cardId); await historyGate; },
+      async replyStreamingCard(rootMessageId) { started.push(rootMessageId); return { messageId: "live-answer-message", cardId: "live-answer-card" }; }
+    }), pino({ enabled: false }));
+
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(started).toContain("live-root"));
+      expect(started.indexOf("live-root")).toBeLessThan(4);
+    } finally {
+      releaseHistory();
+      await draining;
+      await publisher.stop();
+      store.close();
+    }
   });
 
   it("stops a scan when a delivered lane head does not advance", async () => {

@@ -48,7 +48,9 @@ describe("MainCardWorkflow", () => {
     await workflow.project({ ...initialTopicView("b1"), title: "Newest", viewVersion: 2, deliveredVersion: 1 });
 
     expect(store.loadTopicView("b1")).toMatchObject({ title: "Newest", viewVersion: 2, deliveredVersion: 1 });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "main-1", viewVersion: 2, targetRole: "session_status" })]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      kind: "card_update", rootMessageId: "main-1", viewVersion: 2, targetRole: "session_status", workClass: "live"
+    })]);
     expect(wake).toHaveBeenCalledOnce();
     await Promise.all([workflow.converge("b1"), workflow.converge("b1")]);
     expect(store.listPendingOutboundReplies()).toHaveLength(1);

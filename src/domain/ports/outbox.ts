@@ -36,7 +36,7 @@ export interface OutboundIntentStore {
 export interface OutboundIntentPort {
   enqueueCard(rootMessageId: string, idempotencyKey: string, card: object, bindingId?: string | null, targetRole?: OutboundReply["targetRole"]): Promise<void>;
   enqueueCardUpdate(bindingId: string | null, messageId: string, eventId: string, card: object): Promise<void>;
-  enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object): Promise<void>;
+  enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object, workClass?: OutboundWorkClass): Promise<void>;
   enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void>;
   enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void>;

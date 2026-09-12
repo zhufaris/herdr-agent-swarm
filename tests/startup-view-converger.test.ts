@@ -86,7 +86,9 @@ describe("StartupViewConverger", () => {
       title: "herdr-lark-bridge / task-ab12", spaceName: "herdr-lark-bridge", paneId: "wH:p2H"
     });
     expect(enqueueCardUpdate).not.toHaveBeenCalled();
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", bindingId: "b1", viewVersion: 1, targetRole: "session_status" })]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      kind: "card_update", bindingId: "b1", viewVersion: 1, targetRole: "session_status", workClass: "history"
+    })]);
     store.close();
   });
 
@@ -150,9 +152,9 @@ describe("StartupViewConverger", () => {
 
     const pending = store.listPendingOutboundReplies();
     const answer = pending.find((reply) => reply.promptId === "p1");
-    expect(answer).toMatchObject({ kind: "stream_content", promptId: "p1", rootMessageId: "answer-card", viewVersion: 1 });
+    expect(answer).toMatchObject({ kind: "stream_content", promptId: "p1", rootMessageId: "answer-card", viewVersion: 1, workClass: "history" });
     expect(JSON.parse(answer!.payload)).toMatchObject({ content: expect.stringContaining("durable answer"), sequence: 1, pageIndex: 0 });
-    expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", bindingId: "b1", targetRole: "session_status" }));
+    expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", bindingId: "b1", targetRole: "session_status", workClass: "history" }));
     store.close();
   });
 

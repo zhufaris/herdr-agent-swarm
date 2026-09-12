@@ -1,4 +1,4 @@
-import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, MainCardReservationOutcome } from "../types.js";
+import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, MainCardReservationOutcome, OutboundWorkClass } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { InstanceStore } from "./instance.js";
@@ -10,21 +10,21 @@ export interface AnswerPageStore {
   getBinding(id: string): Binding | null;
   listAnswerPages(promptId: string): AnswerPage[];
   loadRunCard(promptId: string): RunCardView | null;
-  reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string }): AnswerPageReservationOutcome;
-  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
-  reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object }): AnswerPageReservationOutcome;
-  reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
-  reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome;
-  reserveClosedAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object }): AnswerPageReservationOutcome;
-  reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object; source?: string }): AnswerPageReservationOutcome;
-  reserveStaticAnswerReplacement(input: { promptId: string; previousPageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
+  reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveClosedAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveStaticAnswerCardUpdate(input: { promptId: string; pageIndex: number; messageId: string; card: object; source?: string; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveStaticAnswerReplacement(input: { promptId: string; previousPageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
 }
 
 export interface MainCardStore {
   getBinding(id: string): Binding | null;
   getModelPreference(bindingId: string): ModelPreference | null;
   loadTopicView(bindingId: string): TopicViewState | null;
-  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome;
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass): MainCardReservationOutcome;
   saveTopicView(view: TopicViewState): void;
 }
 

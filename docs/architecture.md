@@ -1174,7 +1174,11 @@ A failed or future-due head blocks only its own lane.
 
 SQLite remains the queue authority. Every row persists its `live` or `history`
 work class; normal user-visible projection work is live, while explicit Main or
-Answer recovery rebuilds are history. The dispatcher keeps only ephemeral
+Answer recovery rebuilds are history. Startup view convergence also marks every
+newly reserved Main or Answer repair as history, so a restart cannot place a
+large recovery batch ahead of current interactive cards. An intent already
+persisted before restart keeps its original class because work class is part of
+the immutable claimed revision. The dispatcher keeps only ephemeral
 active-lane, wake-up, and concurrency-slot state. Its work-conserving pump fills
 a slot as soon as one delivery settles or a wake-up announces new durable work;
 it does not wait for a fixed batch to finish. When both classes are due, dispatch

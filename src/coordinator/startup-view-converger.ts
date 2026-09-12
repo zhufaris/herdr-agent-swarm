@@ -85,16 +85,16 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       for (const view of runCards) {
         const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title;
         const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
-        if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current)); this.outboundWork.wake(); }
-        if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current));
-        else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId);
+        if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current), "history"); this.outboundWork.wake(); }
+        if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
+        else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId, "history");
       }
       const activeRun = runCards.find((view) => view.phase === "running" || view.phase === "blocked")
         ?? (reconciledTopicView.activePromptId ? runCards.find((view) => view.promptId === reconciledTopicView.activePromptId) : null);
       const latestRun = activeRun ?? runCards.at(-1);
       const terminal = binding.lifecycle === "draining" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed";
       const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
-      await this.mainCardWorkflow.project(finalTopic);
+      await this.mainCardWorkflow.project(finalTopic, "history");
   }
 
   private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }

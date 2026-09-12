@@ -4,7 +4,7 @@ import type { AcceptInstanceTurnWithCardInput } from "../../src/domain/ports.js"
 import type { AcceptPromptInput } from "../../src/domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../../src/domain/ports/workflow.js";
 import type { TurnControlStore } from "../../src/domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../src/domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundTargetRole, OutboundWorkClass, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../src/domain/types.js";
 import type { TopicViewState } from "../../src/domain/topic-view.js";
 import type { RunCardView } from "../../src/domain/run-card-view.js";
 import type { BridgeEvent } from "../../src/domain/events.js";
@@ -516,8 +516,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.prompts.acceptInterruptedContinuation(input);
   }
 
-  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
-    this.prompts.ensureAnswerCard(promptId, rootMessageId, card);
+  ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void {
+    this.prompts.ensureAnswerCard(promptId, rootMessageId, card, workClass);
   }
 
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob; model: { name: string; revision: number } | null } | null {
@@ -574,8 +574,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.projections.loadTopicView(bindingId);
   }
 
-  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object): MainCardReservationOutcome {
-    return this.projections.reserveMainCard(view, rootMessageId, card);
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass): MainCardReservationOutcome {
+    return this.projections.reserveMainCard(view, rootMessageId, card, workClass);
   }
 
   saveRunCard(view: RunCardView): RunCardView {

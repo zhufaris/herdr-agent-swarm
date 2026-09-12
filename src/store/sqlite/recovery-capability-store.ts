@@ -57,7 +57,7 @@ export class SqliteStartupViewCapabilityStore implements StartupViewStore {
     private readonly outbox: SqliteOutboxStore
   ) {}
 
-  ensureAnswerCard: StartupViewStore["ensureAnswerCard"] = (promptId, rootMessageId, card) => this.prompts.ensureAnswerCard(promptId, rootMessageId, card);
+  ensureAnswerCard: StartupViewStore["ensureAnswerCard"] = (promptId, rootMessageId, card, workClass) => this.prompts.ensureAnswerCard(promptId, rootMessageId, card, workClass);
   listBindings: StartupViewStore["listBindings"] = () => this.bindings.listBindings();
   listRunCards: StartupViewStore["listRunCards"] = (id) => this.projections.listRunCards(id);
   loadTopicView: StartupViewStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);

@@ -60,6 +60,15 @@ describe("SQLite store", () => {
       expect(() => store!.enqueueOutboundReply({ id: "replacement", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
     });
 
+    it("reuses an identical pre-startup live intent without rewriting its work class", () => {
+      store = new SqliteBindingStore(":memory:");
+      const live = store.enqueueOutboundReply({ id: "live", idempotencyKey: "same-effect", rootMessageId: "message", kind: "card_update", payload: "{}" });
+
+      expect(store.enqueueOutboundReply({ id: "history", idempotencyKey: "same-effect", workClass: "history", rootMessageId: "message", kind: "card_update", payload: "{}" })).toEqual(live);
+      expect(store.getOutboundReply("live")).toMatchObject({ workClass: "live", state: "pending" });
+      expect(() => store!.enqueueOutboundReply({ id: "changed", idempotencyKey: "same-effect", workClass: "history", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
+    });
+
     it("quarantines an uncertain effect and requires explicit manual retry", () => {
       store = new SqliteBindingStore(":memory:");
       store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

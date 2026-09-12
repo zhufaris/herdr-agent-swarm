@@ -4,7 +4,7 @@ import type { PromptAcceptanceEffect, PromptAcceptanceReceipt } from "../../doma
 import { createBridgeEvent } from "../../domain/create-bridge-event.js";
 import type { AdoptExternalTurnInput } from "../../domain/ports/workflow.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { Binding, DurablePromptWorkScan, ExternalTurnAdoption, OutboundReply, OutboundWorkClass, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../domain/types.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
 import { acceptModelSelection } from "../../domain/model-selection.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
@@ -120,13 +120,13 @@ export class SqlitePromptStore {
     });
   }
 
-  ensureAnswerCard(promptId: string, rootMessageId: string, card: object): void {
+  ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void {
     const view = this.projections.loadRunCard(promptId);
     if (!view || view.answerMessageId) return;
-    const existing = this.context.database.prepare("SELECT view_version FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`) as { view_version: number | null } | undefined;
+    const existing = this.context.database.prepare("SELECT view_version, work_class FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`) as { view_version: number | null; work_class: OutboundWorkClass } | undefined;
     if (existing && (existing.view_version ?? 0) >= view.viewVersion) return;
     const prompt = this.requirePrompt(promptId);
-    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.bindingId, promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.bindingId, promptId, viewVersion: view.viewVersion, cardRole: "answer", ...(existing ? { workClass: existing.work_class } : workClass ? { workClass } : {}), rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
   }
 
   getModelPreference(bindingId: string): ModelPreference | null {

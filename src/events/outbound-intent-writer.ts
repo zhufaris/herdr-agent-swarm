@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { OutboundIntentPort, OutboundIntentStore } from "../domain/ports/outbox.js";
+import type { OutboundWorkClass } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { assertAnswerCardTarget, assertAnswerStreamTarget } from "./outbound-target-validation.js";
 
@@ -16,8 +17,8 @@ export class OutboundIntentWriter implements OutboundIntentPort {
     this.work.wake();
   }
 
-  async enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object): Promise<void> {
-    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${promptId}:${cardRole}:${viewVersion}`, bindingId, promptId, viewVersion, cardRole, rootMessageId: messageId, kind: "card_update", payload: JSON.stringify(card) });
+  async enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "task" | "answer", card: object, workClass?: OutboundWorkClass): Promise<void> {
+    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${promptId}:${cardRole}:${viewVersion}`, bindingId, promptId, viewVersion, cardRole, ...outboundWorkClass(workClass), rootMessageId: messageId, kind: "card_update", payload: JSON.stringify(card) });
     this.work.wake();
   }
 
@@ -37,4 +38,8 @@ export class OutboundIntentWriter implements OutboundIntentPort {
     this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${promptId}:${cardId}:${sequence}`, bindingId, promptId, viewVersion: sequence, cardRole: "answer", rootMessageId: cardId, kind: "stream_finish", payload: JSON.stringify({ summary, sequence }) });
     this.work.wake();
   }
+}
+
+function outboundWorkClass(workClass: OutboundWorkClass | undefined): { workClass?: OutboundWorkClass } {
+  return workClass ? { workClass } : {};
 }
