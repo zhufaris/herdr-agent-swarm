@@ -20,7 +20,7 @@ export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
   | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose"
   | "paneRetention" | "sessionOperations" | "cardInteraction" | "runtimeReconciliation"
   | "inboundRouting" | "commandIntents" | "instance" | "workerSessionThreads"
-  | "inboundDispatch" | "inboundMessages" | "startupRecovery" | "startupViews"
+  | "inboundDispatch" | "promptAcceptance" | "startupRecovery" | "startupViews"
   | "answerPages" | "mainCards">;
 
 export function createApplicationRuntime(options: {

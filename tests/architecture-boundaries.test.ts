@@ -126,12 +126,12 @@ describe("application composition boundaries", () => {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
-    for (const capability of ["turnControl", "paneControl", "paneClose", "inboundRouting", "deliveryRecovery", "cardInteraction", "externalTurns", "modelSelection", "inboundMessages", "startupRecovery"]) {
+    for (const capability of ["turnControl", "paneControl", "paneClose", "inboundRouting", "deliveryRecovery", "cardInteraction", "externalTurns", "modelSelection", "startupRecovery"]) {
       expect(storeBundle).toContain(`${capability}: modules.${capability}`);
       expect(storeBundle).not.toMatch(new RegExp(`${capability}:\\s*store`));
     }
     expect(storeBundle).toContain("startupViews: modules.startupViews");
-    expect(storeBundle).not.toMatch(/readonly (?:turnControl|commandIntents|inboundMessages|startupRecovery):[^;]*&/);
+    expect(storeBundle).not.toMatch(/readonly (?:turnControl|commandIntents|startupRecovery):[^;]*&/);
     const promptAcceptance = readFileSync(new URL("../src/domain/ports/prompt-acceptance.ts", import.meta.url), "utf8");
     expect(promptAcceptance).not.toMatch(/recoverLegacyElementIdDeadLetters|recoverUnsupportedWorkerCardCreates|convergeWorkerTaskCardRenderer|recoverStaleOutboxQuarantines|listRunCards|loadTopicView|reserveMainCard/);
     expect(readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8")).not.toContain("createApprovalRequest");
@@ -342,6 +342,19 @@ describe("application composition boundaries", () => {
     expect(bundle).toContain("readonly promptRecovery: PromptRecoveryStore");
     expect(bundle).toContain("readonly promptSession: PromptSessionStore");
     expect(bundle).not.toContain("readonly promptRun: PromptRunStore");
+  });
+
+  it("gives inbound message routing separate routing and prompt acceptance ports", () => {
+    const workflow = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const recoveryCapabilities = readFileSync(new URL("../src/store/sqlite/recovery-capability-store.ts", import.meta.url), "utf8");
+    const bundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    expect(workflow).not.toContain("interface InboundMessageRoutingStore");
+    expect(workflow).toContain("stores: { routing:");
+    expect(workflow).toContain("promptAcceptance: PromptAcceptanceStore");
+    expect(recoveryCapabilities).not.toContain("SqliteIngressCapabilityStore");
+    expect(bundle).not.toContain("inboundMessages");
+    expect(graph).not.toContain("inboundMessages:");
   });
 
   it("executes prompt acceptance effects only from a committed typed receipt", () => {

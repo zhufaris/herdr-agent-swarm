@@ -31,7 +31,7 @@ function createCapabilities(store: SqliteStoreKernel, modules = store.capability
     paneClose: store, inboundRouting: store, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
     sessionOperations: modules.sessionOperations, modelSelection: store, sessionAdministration: store,
-    paneRetention: store, commandIntents: modules.commandIntents, inboundMessages: store,
+    paneRetention: store, commandIntents: modules.commandIntents,
     startupRecovery: store, startupViews: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay, workerSessionThreads: modules.workerSessionThreads
   };
 }

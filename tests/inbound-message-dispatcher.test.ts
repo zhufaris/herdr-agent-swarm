@@ -81,7 +81,7 @@ describe("InboundMessageDispatcher durable FIFO", () => {
       handleCommand: vi.fn(async () => undefined)
     };
     const routing = new InboundMessageRoutingWorkflow({
-      config: { projects: [], lark: { adminOpenIds: [] } }, store, outbound, instanceInteractions,
+      config: { projects: [], lark: { adminOpenIds: [] } }, stores: { routing: store, promptAcceptance: store }, outbound, instanceInteractions,
       presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     inboundWork.subscribe(({ payload }) => routing.handle(payload));

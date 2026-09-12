@@ -12,7 +12,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleCommand: vi.fn(), handleOrdinaryMessage: vi.fn() };
     const swarmCommands = { handle: vi.fn() };
     const workflow = new InboundMessageRoutingWorkflow({
-      config: { projects: [], lark: { adminOpenIds: [] } }, store, instanceInteractions, workerSessionThreads, swarmCommands, presentation: primaryPresentation, logger: pino({ enabled: false })
+      config: { projects: [], lark: { adminOpenIds: [] } }, stores: inboundStores(store), instanceInteractions, workerSessionThreads, swarmCommands, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "worker-event", messageId: "worker-message", parentMessageId: null, chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "/status", mentionsBot: true, isRootMessage: false };
 
@@ -29,7 +29,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const workerSessionThreads = { handleMessage: vi.fn(async () => ({ handled: true as const, disposition: "rejected" as const })) };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn() };
     const provisioning = { selectProject: vi.fn() };
-    const workflow = new InboundMessageRoutingWorkflow({ config: { projects: [], lark: { adminOpenIds: [] } }, store, outbound, instanceInteractions, workerSessionThreads, provisioning, presentation: primaryPresentation, logger: pino({ enabled: false }) } as never);
+    const workflow = new InboundMessageRoutingWorkflow({ config: { projects: [], lark: { adminOpenIds: [] } }, stores: inboundStores(store), outbound, instanceInteractions, workerSessionThreads, provisioning, presentation: primaryPresentation, logger: pino({ enabled: false }) } as never);
     const message = { eventId: "stale-event", messageId: "stale-message", parentMessageId: null, chatId: "chat", topicId: "old-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
 
     await workflow.handle(message);
@@ -51,7 +51,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => true) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-worker-reply", messageId: "message-worker-reply", parentMessageId: "worker-task-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
 
@@ -70,7 +70,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-primary-reply", messageId: "message-primary-reply", parentMessageId: "primary-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue primary", mentionsBot: true, isRootMessage: false };
 
@@ -89,7 +89,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      store, instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = {
       eventId: "event-flattened-card-reply", messageId: "text-created-from-task-card-reply",
@@ -108,7 +108,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleCommand: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) }),
       outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "/to test continue", mentionsBot: false, isRootMessage: true };
@@ -124,7 +124,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => { throw new InstanceTurnCapacityExceeded(); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) }),
       outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-full", messageId: "message-full", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "send to worker", mentionsBot: false, isRootMessage: true };
@@ -141,7 +141,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => { throw new InstanceTurnCapacityExceeded(); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) }),
       outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-full", messageId: "message-full", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "send to worker", mentionsBot: false, isRootMessage: true };
@@ -149,3 +149,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     await expect(workflow.handle(message)).rejects.toBe(reservationFailure);
   });
 });
+
+function inboundStores(store: Record<string, unknown>) {
+  return { routing: store, promptAcceptance: store } as never;
+}

@@ -10,7 +10,6 @@ import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.j
 import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore, StartupRecoveryStore, StartupViewStore } from "../domain/ports/workflow.js";
-import type { InboundMessageRoutingStore } from "../coordinator/inbound-message-routing-workflow.js";
 import { SqliteCapabilityGraph } from "./sqlite/capability-graph.js";
 import type { SqliteContext } from "./sqlite/context.js";
 import type { SqliteLeaseStore } from "./sqlite/lease-store.js";
@@ -63,7 +62,6 @@ export interface SqliteStoreBundle {
   readonly sessionAdministration: SessionAdministrationStore;
   readonly paneRetention: PaneRetentionStore;
   readonly commandIntents: CommandIntentWorkflowStore;
-  readonly inboundMessages: InboundMessageRoutingStore;
   readonly startupRecovery: StartupRecoveryStore;
   readonly startupViews: StartupViewStore;
   readonly retention: SqliteRetentionStore;
@@ -90,7 +88,7 @@ function createSqliteStoreBundleFromGraph(graph: SqliteCapabilityGraph): SqliteS
     paneClose: modules.paneClose, inboundRouting: modules.inboundRouting, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
     deliveryRecovery: modules.deliveryRecovery, cardInteraction: modules.cardInteraction, externalTurns: modules.externalTurns,
     sessionOperations: modules.sessionOperations, modelSelection: modules.modelSelection, sessionAdministration: modules.sessionAdministration,
-    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, inboundMessages: modules.inboundMessages,
+    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents,
     startupRecovery: modules.startupRecovery, startupViews: modules.startupViews, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay, workerSessionThreads: modules.workerSessionThreads
   };
 }

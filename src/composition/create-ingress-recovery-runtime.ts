@@ -18,7 +18,7 @@ import type { createPrimaryRuntime } from "./create-primary-runtime.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 import { createCompatibilityGatewayIngressSink } from "../gateways/compatibility-ingress.js";
 
-export type IngressRecoveryStores = Pick<SqliteStoreBundle, "inboundDispatch" | "inboundMessages" | "inboundRouting" | "startupRecovery" | "startupViews" | "answerPages" | "mainCards">;
+export type IngressRecoveryStores = Pick<SqliteStoreBundle, "inboundDispatch" | "promptAcceptance" | "inboundRouting" | "startupRecovery" | "startupViews" | "answerPages" | "mainCards">;
 
 export function createIngressRecoveryRuntime(options: {
   config: BridgeConfig; stores: IngressRecoveryStores; logger: Logger; bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
@@ -36,7 +36,7 @@ export function createIngressRecoveryRuntime(options: {
     outbound, outboundWork, presentation: presentation.primary, logger
   });
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, inboundWork, logger });
-  const messageRouting = new InboundMessageRoutingWorkflow({ config, store: stores.inboundMessages, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions, workerSessionThreads });
+  const messageRouting = new InboundMessageRoutingWorkflow({ config, stores: { routing: stores.inboundRouting, promptAcceptance: stores.promptAcceptance }, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions, workerSessionThreads });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery: bindingSession.deliveryRecovery, instanceInteractions, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
   const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundDispatcher.receiveMessage(message), handleAction: (action) => cardActionRouter.handle(action) });
   const startupRecovery = new StartupRecoveryWorkflow({ config, store: stores.startupRecovery, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
