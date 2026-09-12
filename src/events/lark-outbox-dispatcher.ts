@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { LarkPort } from "../domain/ports/external.js";
+import type { GatewayDeliveryPort } from "../gateways/contract/plugin.js";
 import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports/outbox.js";
 import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -40,11 +40,11 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
 
   constructor(
     private readonly store: OutboxStore,
-    lark: LarkPort,
+    gateway: GatewayDeliveryPort,
     private readonly logger: Logger,
     private readonly work: OutboundWorkNotifier,
     private readonly safetyScanIntervalMs = 30_000
-  ) { this.delivery = new OutboundDeliveryExecutor(store, lark, logger); }
+  ) { this.delivery = new OutboundDeliveryExecutor(store, gateway, logger); }
 
   start(): () => void {
     if (this.unsubscribe) return this.unsubscribe;

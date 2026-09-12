@@ -53,6 +53,7 @@ export class SqliteOutboxStore {
   getOutboundReply(id: string): OutboundReply | null { return this.queue.get(id); }
   reservePaneThreadAlias(input: ReservePaneThreadAliasInput): "reserved" | "duplicate" | "stale" { return this.threadAliases.reserve(input, this.queue); }
 
+  prepareOutboundGatewayPlan(id: string, input: { gatewayId: string; gatewayProfileId: string; gatewayPlanJson: string }): OutboundReply | null { return this.queue.prepareGatewayPlan(id, input); }
   claimOutboundReply(id: string, dueAt: string | null): OutboundDeliveryClaim | null { return this.queue.claim(id, dueAt); }
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean { return this.delivery.markDelivered(id, messageId, cardId, claim, topicId); }
   checkpointOutboundReplyCard(id: string, cardId: string, claim?: OutboundDeliveryClaim): OutboundReply | null { return this.delivery.checkpointCard(id, cardId, claim); }

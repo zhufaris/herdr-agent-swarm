@@ -22,6 +22,7 @@ export class SqliteOutboxCapabilityStore implements OutboxStore {
     private readonly cardContexts: SqliteCardContextStore
   ) {}
 
+  prepareOutboundGatewayPlan(id: string, input: { gatewayId: string; gatewayProfileId: string; gatewayPlanJson: string }): OutboundReply | null { return this.outbox.prepareOutboundGatewayPlan(id, input); }
   claimOutboundReply(id: string, dueAt: string | null): OutboundDeliveryClaim | null { return this.outbox.claimOutboundReply(id, dueAt); }
   checkpointOutboundReplyCard(claim: OutboundDeliveryClaim, cardId: string): OutboundReply | null { return this.outbox.checkpointOutboundReplyCard(claim.reply.id, cardId, claim); }
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0]): OutboundReply { return this.outbox.enqueueOutboundReply(input); }

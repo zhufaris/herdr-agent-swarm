@@ -4,6 +4,7 @@ import type { SqliteOutboxStore } from "../../src/store/sqlite/outbox-store.js";
 
 export function createOutboxTestDriver(outbox: SqliteOutboxStore) {
   return {
+    prepareOutboundGatewayPlan: (id: string, input: { gatewayId: string; gatewayProfileId: string; gatewayPlanJson: string }) => outbox.prepareOutboundGatewayPlan(id, input),
     claimOutboundReply: (id: string, dueAt: string | null) => outbox.claimOutboundReply(id, dueAt),
     markOutboundReplyDelivered(target: string | OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string) {
       return typeof target === "string" ? outbox.markOutboundReplyDelivered(target, messageId, cardId, undefined, topicId) : outbox.markOutboundReplyDelivered(target.reply.id, messageId, cardId, target, topicId);

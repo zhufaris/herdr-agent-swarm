@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
-import type { LarkPort } from "../domain/ports/external.js";
+import type { GatewaySession } from "../gateways/contract/plugin.js";
 import type { LifecycleEventPublisher, LifecycleEventSubscriber } from "../events/bridge-event-bus.js";
 import { CardContextRebuilder } from "../events/card-context-rebuilder.js";
 import { ConversationViewProjector } from "../events/conversation-view-projector.js";
@@ -18,9 +18,9 @@ import type { ApplicationPresentation, PrimaryPresentation } from "../domain/por
 
 export type OutboundRuntimeStores = Pick<SqliteStoreBundle, "outboundIntent" | "outbox" | "answerPages" | "mainCards" | "projection" | "queueFeedback" | "cardContext" | "retention">;
 
-export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, lark: LarkPort, bus: LifecycleEventPublisher & LifecycleEventSubscriber, outboundWork: OutboundWorkNotifier, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: cardKitPrimaryPresentation, application: cardKitApplicationPresentation }) {
+export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, gateway: GatewaySession, bus: LifecycleEventPublisher & LifecycleEventSubscriber, outboundWork: OutboundWorkNotifier, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: cardKitPrimaryPresentation, application: cardKitApplicationPresentation }) {
   const outbound = new OutboundIntentWriter(stores.outboundIntent, outboundWork);
-  const channelPublisher = new LarkOutboxDispatcher(stores.outbox, lark, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
+  const channelPublisher = new LarkOutboxDispatcher(stores.outbox, gateway.delivery, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
   const answerPages = new AnswerPageWorkflow(stores.answerPages, () => outboundWork.wake(), presentation.primary, logger, { pageLimit: config.runtimeTuning.cards.answerPageLimitChars, answerStreamContent: presentation.primary.answerStreamContent, renderAnswerStreamPage: presentation.primary.answerStreamPage });
   const mainCards = new MainCardWorkflow(stores.mainCards, () => outboundWork.wake(), presentation.primary, logger);
   const projector = new ConversationViewProjector(bus, stores.projection, outbound, channelPublisher, logger, presentation.primary, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cards.updateDebounceMs });

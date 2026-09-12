@@ -19,3 +19,8 @@ export function outboundLaneKey(input: { id?: string; cardRole?: RequestCardRole
   if (input.targetRole === "session_status" && input.bindingId && input.bindingGeneration) return `primary-main:${input.bindingId}:${input.bindingGeneration}`;
   return `message:${input.rootMessageId}`;
 }
+
+export function gatewayScopedOutboundLaneKey(gatewayId: string, logicalLaneKey: string): string {
+  if (!gatewayId || !logicalLaneKey) throw new Error("Gateway and logical lane identities are required");
+  return `gateway:${gatewayId}:${logicalLaneKey}`;
+}

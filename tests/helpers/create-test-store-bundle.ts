@@ -12,7 +12,7 @@ export function createTestStoreBundle(path = ":memory:"): TestStoreBundle {
   const modules = driver.capabilityModules();
   Object.assign(driver,
     createOutboxTestDriver(modules.outboxAdmin),
-    bindMethods(modules.outbox, ["enqueueOutboundReply", "getActiveAnswerPage", "getLarkDeliveryCooldown", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
+    bindMethods(modules.outbox, ["enqueueOutboundReply", "prepareOutboundGatewayPlan", "getActiveAnswerPage", "getLarkDeliveryCooldown", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
     bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias"])
   );
   return {

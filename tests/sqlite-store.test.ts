@@ -60,6 +60,19 @@ describe("SQLite store", () => {
       expect(() => store!.enqueueOutboundReply({ id: "replacement", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
     });
 
+    it("freezes a Gateway plan onto a released legacy claim exactly once", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.enqueueOutboundReply({ id: "legacy", idempotencyKey: "legacy", rootMessageId: "message", kind: "card_reply", payload: "{}" });
+      const claim = store.claimOutboundReply("legacy", null)!;
+      expect(store.prepareOutboundGatewayPlan("legacy", { gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: '{"operation":"message.reply.view"}' })).toBeNull();
+      expect(store.markOutboundReplyFailedWithQuarantine(claim, "retry", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: null }, 1_000)).not.toBeNull();
+
+      const prepared = store.prepareOutboundGatewayPlan("legacy", { gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: '{"operation":"message.reply.view"}' });
+      expect(prepared).toMatchObject({ gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: '{"operation":"message.reply.view"}', gatewayPlanHash: expect.any(String) });
+      expect(store.prepareOutboundGatewayPlan("legacy", { gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: '{"operation":"message.reply.view"}' })).toEqual(prepared);
+      expect(() => store!.prepareOutboundGatewayPlan("legacy", { gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: '{"operation":"message.reply.text"}' })).toThrow("outbound_gateway_plan_conflict");
+    });
+
     it("reuses an identical pre-startup live intent without rewriting its work class", () => {
       store = new SqliteBindingStore(":memory:");
       const live = store.enqueueOutboundReply({ id: "live", idempotencyKey: "same-effect", rootMessageId: "message", kind: "card_update", payload: "{}" });
@@ -253,7 +266,7 @@ describe("SQLite store", () => {
       expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
       expect(store!.workerSessionThreads.reserve(input)).toBe("duplicate");
       const [reply] = store!.listPendingOutboundReplies();
-      expect(reply).toMatchObject({ kind: "group_card_create", rootMessageId: null, targetChatId: "chat", threadAliasId: null, workerThreadId: expect.any(String), workerId: "reviewer", workerSessionGeneration: 1, laneKey: "worker-thread:reviewer:1" });
+      expect(reply).toMatchObject({ kind: "group_card_create", rootMessageId: null, targetChatId: "chat", threadAliasId: null, workerThreadId: expect.any(String), workerId: "reviewer", workerSessionGeneration: 1, laneKey: "gateway:feishu:primary:worker-thread:reviewer:1" });
       const claim = store!.claimOutboundReply(reply!.id, null)!;
       expect(() => store!.database.prepare("UPDATE outbound_replies SET worker_thread_id = NULL WHERE id = ?").run(reply!.id)).toThrow("immutable_outbound_revision");
       expect(store!.markOutboundReplyDelivered(claim, "worker-root", "worker-card", "worker-topic")).toBe(true);
@@ -562,12 +575,12 @@ describe("SQLite store", () => {
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies WHERE id IN ('main-update','answer-update') ORDER BY id").all()).toEqual([
-      { id: "answer-update", lane_key: "primary-answer:prompt-1:1" },
-      { id: "main-update", lane_key: "primary-main:binding-1:1" }
+      { id: "answer-update", lane_key: "gateway:feishu:primary:primary-answer:prompt-1:1" },
+      { id: "main-update", lane_key: "gateway:feishu:primary:primary-main:binding-1:1" }
     ]);
     expect(store.database.prepare("SELECT lane_key FROM outbox_lane_heads WHERE reply_id IN ('main-update','answer-update') ORDER BY lane_key").all()).toEqual([
-      { lane_key: "primary-answer:prompt-1:1" },
-      { lane_key: "primary-main:binding-1:1" }
+      { lane_key: "gateway:feishu:primary:primary-answer:prompt-1:1" },
+      { lane_key: "gateway:feishu:primary:primary-main:binding-1:1" }
     ]);
   });
 
@@ -632,8 +645,8 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "task-update", idempotencyKey: "task-update", workerTurnId: "turn-1", rootMessageId: "task-message", kind: "card_update", payload: "{}" });
 
     expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
-      expect.objectContaining({ lane_key: "worker-main:reviewer:1" }),
-      { id: "task-update", lane_key: "worker-turn:turn-1" }
+      expect.objectContaining({ lane_key: "gateway:feishu:primary:worker-main:reviewer:1" }),
+      { id: "task-update", lane_key: "gateway:feishu:primary:worker-turn:turn-1" }
     ]);
   });
 
@@ -1059,7 +1072,7 @@ describe("SQLite store", () => {
     expect(store.markOutboundReplyFailedWithQuarantine(failed.id, "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked" });
     expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ workerTurnId: "turn-b" })]);
     expect(store.database.prepare("SELECT DISTINCT lane_key FROM outbound_replies ORDER BY lane_key").all()).toEqual([
-      { lane_key: "worker-turn:turn-a" }, { lane_key: "worker-turn:turn-b" }
+      { lane_key: "gateway:feishu:primary:worker-turn:turn-a" }, { lane_key: "gateway:feishu:primary:worker-turn:turn-b" }
     ]);
   });
 
@@ -2713,12 +2726,12 @@ describe("SQLite store", () => {
     }
     const pendingAfter = store.listPendingOutboundReplies().find((reply) => reply.id === pendingCreate.id)!;
     expect(pendingAfter).toMatchObject({ idempotencyKey: "run-card:create:pending:answer", kind: "stream_card_create", viewVersion: 2 });
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(pendingAfter.id)).toEqual({ lane_key: "answer:pending" });
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(pendingAfter.id)).toEqual({ lane_key: "gateway:feishu:primary:answer:pending" });
     expect(pendingAfter.payload).toBe(JSON.stringify({ phase: "failed", notice: "Topic archived", version: 2 }));
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "pending")).toHaveLength(1);
     expect(store.listPendingOutboundReplies().find((reply) => reply.id === checkpointedCreate.id)).toMatchObject({ payload: checkpointedBefore.payload, viewVersion: checkpointedBefore.viewVersion, cardIdCheckpoint: "card-checkpointed" });
     expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ idempotencyKey: "run-card:update:delivered:answer:2", kind: "card_update", rootMessageId: "answer-delivered" }));
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "primary-answer:delivered:1" });
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "gateway:feishu:primary:primary-answer:delivered:1" });
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "card-target")).toEqual([]);
     expect(store.getOperationalSummary().prompts.cancelled).toBe(4);
     expect(store.countPendingPrompts("b1")).toBe(1);
@@ -3007,8 +3020,8 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("p2")).toMatchObject({ queuePosition: 2, viewVersion: views[1]!.viewVersion });
     expect(store.loadRunCard("p3")).toMatchObject({ queuePosition: 4, viewVersion: third.viewVersion + 1 });
     expect(store.database.prepare("SELECT idempotency_key, lane_key FROM outbound_replies WHERE kind = 'card_update' ORDER BY prompt_id").all()).toEqual([
-      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "primary-answer:p1:1" },
-      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "primary-answer:p3:1" }
+      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "gateway:feishu:primary:primary-answer:p1:1" },
+      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "gateway:feishu:primary:primary-answer:p3:1" }
     ]);
   });
 
@@ -3674,7 +3687,7 @@ describe("SQLite store", () => {
 
     store = new SqliteBindingStore(path);
     expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
-    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "reply:o1" });
+    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "gateway:feishu:primary:reply:o1" });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 32").get()).toEqual({ version: 32 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 33").get()).toEqual({ version: 33 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 34").get()).toEqual({ version: 34 });
@@ -3685,7 +3698,7 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'answer_delivery_coverage_before_claim'").get()).toEqual({ name: "answer_delivery_coverage_before_claim" });
     expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     store.enqueueOutboundReply({ id: "o2", idempotencyKey: "key-2", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
-    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "reply:o2" });
+    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "gateway:feishu:primary:reply:o2" });
     expect(store.getOutboundReply("o2")).toMatchObject({ workClass: "live" });
   });
 
@@ -3755,7 +3768,7 @@ describe("SQLite store", () => {
 
     expect(store.listOutboundLaneHeads(4, new Date().toISOString()).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
     expect(store.listOutboundLaneHeads(4, null).map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
-    expect(store.listOutboundLaneHeads(4, null, ["message:card-0"]).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
+    expect(store.listOutboundLaneHeads(4, null, ["gateway:feishu:primary:message:card-0"]).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
     vi.setSystemTime(new Date("2026-08-24T00:00:10.500Z"));
     expect(store.getOperationalSummary().outboxLanes).toEqual({
       pending: 8, eligible: 7, blocked: 1,
@@ -3901,8 +3914,8 @@ describe("SQLite store", () => {
     expect(store.markOutboundReplyFailedWithQuarantine("first", "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099" }))
       .toMatchObject({ action: "blocked", laneClass: "immutable" });
     expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
-      { id: "first", lane_key: "reply:first" },
-      { id: "second", lane_key: "reply:second" }
+      { id: "first", lane_key: "gateway:feishu:primary:reply:first" },
+      { id: "second", lane_key: "gateway:feishu:primary:reply:second" }
     ]);
     expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["second"]);
   });
@@ -3924,11 +3937,11 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT id, lane_key, state FROM outbound_replies WHERE id IN ('failed', 'later') ORDER BY delivery_order").all()).toEqual([
-      { id: "failed", lane_key: "reply:failed", state: "dead_letter" },
-      { id: "later", lane_key: "reply:later", state: "pending" }
+      { id: "failed", lane_key: "gateway:feishu:primary:reply:failed", state: "dead_letter" },
+      { id: "later", lane_key: "gateway:feishu:primary:reply:later", state: "pending" }
     ]);
     expect(store.database.prepare("SELECT lane_key, failed_reply_id, state FROM outbox_lane_quarantines WHERE failed_reply_id = 'failed'").get()).toEqual({
-      lane_key: "reply:failed", failed_reply_id: "failed", state: "active"
+      lane_key: "gateway:feishu:primary:reply:failed", failed_reply_id: "failed", state: "active"
     });
     expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toContain("later");
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 7").get()).toEqual({ version: 7 });
@@ -4466,6 +4479,21 @@ describe("SQLite store", () => {
     expect(() => store!.database.prepare("UPDATE outbound_replies SET gateway_plan_json = '{}' WHERE id = 'out-1'").run()).toThrow("immutable_outbound_revision");
     expect(() => store!.database.prepare("UPDATE outbound_replies SET gateway_checkpoint_json = '{}' WHERE id = 'out-1'").run()).not.toThrow();
     expect(store.markOutboundReplyDelivered(claim, "root")).toBe(true);
+  });
+
+  it("scopes legacy outbox lanes and quarantines by Gateway identity", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-gateway-lane-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "root", kind: "card_reply", payload: "{}" });
+    const claim = store.claimOutboundReply("failed", null)!;
+    store.markOutboundReplyFailedWithQuarantine(claim, "bad target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: null });
+    store.database.exec("DROP TRIGGER outbound_replies_immutable_claim; DELETE FROM outbox_lane_heads; UPDATE outbox_lane_quarantines SET lane_key = 'reply:failed'; UPDATE outbound_replies SET lane_key = 'reply:failed'; DELETE FROM schema_migrations WHERE version = 40");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = 'failed'").get()).toEqual({ lane_key: "gateway:feishu:primary:reply:failed" });
+    expect(store.database.prepare("SELECT lane_key, state FROM outbox_lane_quarantines WHERE failed_reply_id = 'failed'").get()).toEqual({ lane_key: "gateway:feishu:primary:reply:failed", state: "active" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 40").get()).toEqual({ version: 40 });
   });
 
   it("persists classified failures and reopens one cooled transient round only", () => {

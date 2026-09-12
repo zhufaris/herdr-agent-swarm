@@ -62,7 +62,7 @@ export function confirmDeliveryRecoveries(context: SqliteContext, replyId: strin
             AND delivered.binding_id = failed.binding_id AND delivered.view_version >= failed.view_version
             AND delivered.delivery_order > failed.delivery_order
             AND EXISTS (SELECT 1 FROM bindings binding WHERE binding.id = failed.binding_id
-              AND failed.lane_key = 'primary-main:' || binding.id || ':' || binding.generation))
+              AND failed.lane_key = 'gateway:' || failed.gateway_id || ':primary-main:' || binding.id || ':' || binding.generation))
           OR (recovery.action = 'released_newer_snapshot'
             AND failed.kind = 'card_update' AND delivered.kind = 'card_update'
             AND delivered.delivery_order > failed.delivery_order

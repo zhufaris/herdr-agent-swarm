@@ -4,6 +4,7 @@ import { OutboundIntentWriter } from "../../src/events/outbound-intent-writer.js
 import { LarkOutboxDispatcher } from "../../src/events/lark-outbox-dispatcher.js";
 import { InProcessOutboundWorkNotifier } from "../../src/events/outbound-work-notifier.js";
 import type { SqliteBindingStore } from "./sqlite-binding-store.js";
+import { createFeishuCompatibilityDelivery } from "../../src/gateways/feishu/plugin.js";
 
 export function createTestOutbound(store: SqliteBindingStore, dispatcher: LarkOutboxDispatcher): OutboundIntentWriter {
   return new OutboundIntentWriter(store, {
@@ -22,7 +23,7 @@ export function createTestPublisher(store: SqliteBindingStore, lark: LarkPort, l
     subscribe: processWork.subscribe.bind(processWork),
     wake: () => { processWork.wake(); void dispatcher.requestScan(); }
   };
-  dispatcher = new LarkOutboxDispatcher(store, lark, logger, work);
+  dispatcher = new LarkOutboxDispatcher(store, createFeishuCompatibilityDelivery(lark), logger, work);
   const writer = new OutboundIntentWriter(store, work);
   return Object.assign(dispatcher, {
     enqueueCard: writer.enqueueCard.bind(writer),

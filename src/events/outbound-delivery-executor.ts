@@ -1,14 +1,13 @@
-import type { OutboundDeliveryClaim } from "../domain/delivery.js";
 import type { Logger } from "pino";
-import type { LarkPort } from "../domain/ports/external.js";
+import type { OutboundDeliveryClaim } from "../domain/delivery.js";
 import type { OutboxStore } from "../domain/ports/outbox.js";
-import type { LarkDeliveryOperation, LarkDeliveryTarget, OutboundReply } from "../domain/types.js";
+import type { OutboundReply } from "../domain/types.js";
+import { GatewayDeliveryError, type GatewayDeliveryPort, type GatewayDeliveryReceipt, type GatewayExternalRef } from "../gateways/contract/plugin.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { classifyDeliveryError } from "./delivery-error-classifier.js";
-import { DeliveryOperationError, performDeliveryOperation } from "./delivery-operation-error.js";
-import { materializeOutboundReply } from "./outbound-intent-materializer.js";
+import { DeliveryOperationError } from "./delivery-operation-error.js";
+import { prepareOutboundGatewayIntent } from "./outbound-gateway-intent.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerProgressTarget, PermanentDeliveryError } from "./outbound-target-validation.js";
 
 export type OutboundDeliveryOutcome = "delivered" | "failed";
 type AnswerCheckpoint = (promptId: string, viewVersion: number) => void;
@@ -16,7 +15,7 @@ type WorkerTurnCheckpoint = (turnId: string, viewVersion: number) => void;
 type WorkerMainCheckpoint = (workerId: string, workerSessionGeneration: number, viewVersion: number) => void;
 type MainCardCheckpoint = (bindingId: string, viewVersion: number) => void;
 
-/** Executes one durable outbox intent. Scheduling and retry timing stay outside this module. */
+/** Executes one durable outbox claim through a provider-neutral Gateway port. */
 export class OutboundDeliveryExecutor {
   private readonly answerCheckpoints = new Set<AnswerCheckpoint>();
   private readonly workerTurnCheckpoints = new Set<WorkerTurnCheckpoint>();
@@ -24,7 +23,7 @@ export class OutboundDeliveryExecutor {
   private readonly mainCardCheckpoints = new Set<MainCardCheckpoint>();
   private scheduler: PromptWorkScheduler | null = null;
 
-  constructor(private readonly store: OutboxStore, private readonly lark: LarkPort, private readonly logger: Logger) {}
+  constructor(private readonly store: OutboxStore, private readonly gateway: GatewayDeliveryPort, private readonly logger: Logger) {}
 
   onAnswerCheckpoint(listener: AnswerCheckpoint): () => void { return subscribe(this.answerCheckpoints, listener); }
   onWorkerTurnCheckpoint(listener: WorkerTurnCheckpoint): () => void { return subscribe(this.workerTurnCheckpoints, listener); }
@@ -34,181 +33,99 @@ export class OutboundDeliveryExecutor {
 
   async deliver(candidate: OutboundReply, dueAt: string | null): Promise<OutboundDeliveryOutcome> {
     if ((candidate.kind === "stream_content" || candidate.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(candidate.id)) return "delivered";
+    let preparationError: unknown;
+    if (candidate.gatewayPlanJson === null) {
+      try {
+        const plan = this.gateway.prepare(prepareOutboundGatewayIntent(this.store, candidate).intent);
+        this.store.prepareOutboundGatewayPlan(candidate.id, { gatewayId: plan.gatewayId, gatewayProfileId: plan.profileId, gatewayPlanJson: JSON.stringify(plan) });
+      } catch (error) { preparationError = error; }
+    }
     const claim = this.store.claimOutboundReply(candidate.id, dueAt);
     if (!claim) return "failed";
     const reply = claim.reply;
     try {
-      const materializedPayload = materializeOutboundReply(reply);
-      if (reply.kind === "group_card_create") await this.deliverGroupCardCreate(claim, materializedPayload);
-      else if (reply.kind === "card_update") await this.deliverCardUpdate(claim, materializedPayload);
-      else if (reply.kind === "stream_card_create") await this.deliverStreamCardCreate(claim, materializedPayload);
-      else if (reply.kind === "stream_content") await this.deliverStreamContent(claim, materializedPayload);
-      else if (reply.kind === "stream_finish") await this.deliverStreamFinish(claim, materializedPayload);
-      else await this.deliverReply(claim, materializedPayload);
+      const prepared = prepareOutboundGatewayIntent(this.store, reply);
+      if (preparationError) throw preparationError;
+      if (prepared.emptyStreamContent) {
+        this.logger.info({ event: "gateway-outbox-empty-stream-content-skipped", gatewayId: reply.gatewayId, replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: reply.viewVersion, outcome: "checkpointed" }, "checkpointed empty Gateway stream content without an external call");
+        this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, reply.rootMessageId!));
+      } else {
+        const plan = decodeGatewayPlan(reply.gatewayPlanJson);
+        if (plan.gatewayId !== reply.gatewayId || plan.profileId !== reply.gatewayProfileId) throw new Error(`Gateway plan identity mismatch for reply ${reply.id}`);
+        const receipt = await this.gateway.execute(plan, {
+          attemptId: claim.attemptId, leaseFencingToken: claim.fencingToken, idempotencyKey: reply.idempotencyKey,
+          priorCheckpoints: reply.cardIdCheckpoint ? [{ kind: "surface", ref: { gatewayId: reply.gatewayId, kind: "surface", opaqueId: reply.cardIdCheckpoint } }] : [],
+          checkpoint: async (value) => { this.checkpoint(() => this.store.checkpointOutboundReplyCard(claim, value.ref.opaqueId) !== null); }
+        });
+        this.settle(claim, receipt);
+      }
+      this.afterDelivery(reply, prepared.streamMetadata);
       return "delivered";
     } catch (error) {
       if (error instanceof DeliveryCheckpointError) {
-        this.logger.error({ event: "lark-outbox-checkpoint-uncertain", replyId: reply.id, attemptId: claim.attemptId, outcome: "uncertain" }, "external delivery completed but its checkpoint could not be confirmed");
+        this.logger.error({ event: "gateway-outbox-checkpoint-uncertain", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, outcome: "uncertain" }, "external delivery completed but its checkpoint could not be confirmed");
         throw error;
       }
       return this.fail(claim, error);
     }
   }
 
-  private async deliverGroupCardCreate(claim: OutboundDeliveryClaim, payload: string): Promise<void> {
+  private settle(claim: OutboundDeliveryClaim, receipt: GatewayDeliveryReceipt): void {
     const reply = claim.reply;
-    if (!reply.targetChatId || (reply.threadAliasId === null) === (reply.workerThreadId === null)) throw new PermanentDeliveryError("Group card target is incomplete");
-    const card = parseDeliveryObject(payload);
-    const sent = await this.perform(reply, "create_topic", () => this.lark.createTopic(card, reply.idempotencyKey, reply.targetChatId!));
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, sent.rootMessageId, undefined, sent.topicId));
-    if (reply.workerThreadId && reply.workerId && reply.workerSessionGeneration !== null && reply.viewVersion !== null) this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion!), reply);
+    const messageId = findRef(receipt.refs, "message")?.opaqueId ?? reply.rootMessageId;
+    const surfaceId = findRef(receipt.refs, "surface")?.opaqueId;
+    const threadId = findRef(receipt.refs, "thread")?.opaqueId;
+    if (!messageId) throw new Error(`Gateway delivery returned no message identity for reply ${reply.id}`);
+    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, messageId, surfaceId, threadId));
+    if (reply.kind === "card_reply" || reply.kind === "stream_card_create" || reply.kind === "text") this.runPostDelivery("bridge-message", reply, () => this.store.recordBridgeMessage(messageId));
   }
 
-  private async deliverCardUpdate(claim: OutboundDeliveryClaim, payload: string): Promise<void> {
-    const reply = claim.reply;
-    const rootMessageId = requireRootMessageId(reply);
-    if (reply.cardRole === "answer") assertAnswerMessageTarget(this.store, reply.bindingId, reply.promptId, rootMessageId);
-    if (reply.workerTurnId) assertWorkerMessageTarget(this.store, reply.workerTurnId, rootMessageId);
-    if (reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainMessageTarget(this.store, reply.workerId, reply.workerSessionGeneration, rootMessageId);
-    const card = parseDeliveryObject(payload);
-    if (reply.targetRole === "session_status" && this.lark.updateCardKit) await this.perform(reply, "update_cardkit", () => this.lark.updateCardKit!(rootMessageId, card, reply.cardSequence ?? 1));
-    else await this.perform(reply, "update_card", () => this.lark.updateCard(rootMessageId, card));
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, rootMessageId));
-    if (reply.workerTurnId) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
-    if (reply.workerId && reply.workerSessionGeneration !== null) this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
-    if (reply.bindingId && reply.targetRole === "session_status") this.notify("main-card", this.mainCardCheckpoints, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);
-  }
-
-  private async deliverStreamCardCreate(claim: OutboundDeliveryClaim, payload: string): Promise<void> {
-    const reply = claim.reply;
-    const rootMessageId = requireRootMessageId(reply);
-    const decoded = decodeStreamingCardPayload(payload);
-    if (reply.workerTurnId) assertWorkerCardCreateTarget(this.store, reply.workerTurnId, rootMessageId, decoded.card, decoded.stream);
-    else assertAnswerCardCreateTarget(this.store, reply.bindingId, reply.promptId, rootMessageId, decoded.card, decoded.stream);
-    let sent: { messageId: string; cardId?: string };
-    if (this.lark.createStreamingCard && this.lark.replyStreamingCardReference) {
-      const cardId = reply.cardIdCheckpoint ?? (await this.perform(reply, "create_streaming_card", () => this.lark.createStreamingCard!(decoded.card))).cardId;
-      this.checkpoint(() => this.store.checkpointOutboundReplyCard(claim, cardId) !== null);
-      sent = { ...(await this.perform(reply, "reply_streaming_card_reference", () => this.lark.replyStreamingCardReference!(rootMessageId, cardId, reply.idempotencyKey))), cardId };
-    } else if (this.lark.replyStreamingCard) sent = await this.perform(reply, "reply_streaming_card", () => this.lark.replyStreamingCard!(rootMessageId, decoded.card));
-    else sent = await this.perform(reply, "reply_card", () => this.lark.replyCard(rootMessageId, decoded.card, reply.idempotencyKey));
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, sent.messageId, sent.cardId));
-    this.runPostDelivery("bridge-message", reply, () => this.store.recordBridgeMessage(sent.messageId));
-    if (reply.bindingId && reply.promptId && this.store.getPrompt(reply.promptId)) this.runPostDelivery("prompt-wakeup", reply, () => this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId! }));
-    if (reply.promptId && decoded.stream) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, (reply.viewVersion ?? 0) + 1), reply);
-    if (reply.workerTurnId && decoded.stream) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, (reply.viewVersion ?? 0) + 1), reply);
-  }
-
-  private async deliverStreamContent(claim: OutboundDeliveryClaim, materializedPayload: string): Promise<void> {
-    const reply = claim.reply;
-    const rootMessageId = requireRootMessageId(reply);
-    if (!this.lark.streamCardContent) throw new PermanentDeliveryError("Lark adapter does not support CardKit content streaming");
-    const payload = parseDeliveryObject(materializedPayload) as unknown as { elementId: string; content: string; sequence: number; pageIndex: number; workerElement?: "progress" };
-    if (reply.workerTurnId) {
-      if (payload.workerElement === "progress") assertWorkerProgressTarget(this.store, reply.workerTurnId, rootMessageId, payload.elementId, payload.pageIndex);
-      else assertWorkerCardTarget(this.store, reply.workerTurnId, rootMessageId, payload.elementId);
-    } else assertAnswerStreamTarget(this.store, reply.bindingId, reply.promptId, rootMessageId, payload.elementId);
-    if (payload.content) await this.perform(reply, "stream_card_content", () => this.lark.streamCardContent!(rootMessageId, payload.elementId, payload.content, payload.sequence));
-    else this.logger.info({ event: "lark-outbox-empty-answer-content-skipped", replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: payload.sequence, outcome: "checkpointed" }, "checkpointed an empty legacy Answer update without sending it to Lark");
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, rootMessageId));
-    if (reply.promptId) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
-    if (reply.workerTurnId) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
-  }
-
-  private async deliverStreamFinish(claim: OutboundDeliveryClaim, materializedPayload: string): Promise<void> {
-    const reply = claim.reply;
-    const rootMessageId = requireRootMessageId(reply);
-    if (!this.lark.finishStreamingCard) throw new PermanentDeliveryError("Lark adapter does not support CardKit stream finalization");
-    const payload = parseDeliveryObject(materializedPayload) as unknown as { summary: string; sequence: number };
-    if (reply.workerTurnId) assertWorkerCardTarget(this.store, reply.workerTurnId, rootMessageId);
-    else assertAnswerCardTarget(this.store, reply.bindingId, reply.promptId, rootMessageId);
-    await this.perform(reply, "finish_streaming_card", () => this.lark.finishStreamingCard!(rootMessageId, payload.sequence, payload.summary));
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, rootMessageId));
-    if (reply.promptId) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
-    if (reply.workerTurnId) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
-  }
-
-  private async deliverReply(claim: OutboundDeliveryClaim, payload: string): Promise<void> {
-    const reply = claim.reply;
-    const rootMessageId = requireRootMessageId(reply);
-    if (reply.kind === "card_reply" && reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainCreateTarget(this.store, reply.workerId, reply.workerSessionGeneration, rootMessageId);
-    const sent = reply.kind === "text"
-      ? await this.perform(reply, "reply_text", () => this.lark.replyText(rootMessageId, payload, reply.idempotencyKey))
-      : await this.deliverCardReply(reply, rootMessageId, payload);
-    const cardId = "cardId" in sent && typeof sent.cardId === "string" ? sent.cardId : undefined;
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, sent.messageId, cardId));
-    this.runPostDelivery("bridge-message", reply, () => this.store.recordBridgeMessage(sent.messageId));
-    if (reply.workerId && reply.workerSessionGeneration !== null) this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
+  private afterDelivery(reply: OutboundReply, streamMetadata: boolean): void {
+    if (reply.kind === "stream_card_create" && reply.bindingId && reply.promptId && this.store.getPrompt(reply.promptId)) this.runPostDelivery("prompt-wakeup", reply, () => this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId! }));
+    if (reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish")) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
+    if (reply.promptId && reply.kind === "stream_card_create" && streamMetadata) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, (reply.viewVersion ?? 0) + 1), reply);
+    if (reply.workerTurnId && (reply.kind === "stream_content" || reply.kind === "stream_finish" || reply.kind === "card_update")) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
+    if (reply.workerTurnId && reply.kind === "stream_card_create" && streamMetadata) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, (reply.viewVersion ?? 0) + 1), reply);
+    if (reply.workerId && reply.workerSessionGeneration !== null && reply.kind !== "group_card_create") this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
+    if (reply.workerThreadId && reply.workerId && reply.workerSessionGeneration !== null && reply.kind === "group_card_create" && reply.viewVersion !== null) this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion!), reply);
     if (reply.bindingId && reply.targetRole === "session_status") this.notify("main-card", this.mainCardCheckpoints, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);
   }
 
   private checkpoint(operation: () => boolean): void {
-    try {
-      if (!operation()) throw new Error("stale_outbound_receipt");
-    } catch { throw new DeliveryCheckpointError("outbound_checkpoint_uncertain"); }
-  }
-
-  private perform<T>(reply: OutboundReply, operation: LarkDeliveryOperation, call: () => Promise<T>): Promise<T> {
-    return performDeliveryOperation({ operation, target: deliveryTarget(reply) }, call);
-  }
-
-  private deliverCardReply(reply: OutboundReply, rootMessageId: string, payload: string): Promise<{ messageId: string }> {
-    const card = parseDeliveryObject(payload);
-    return this.perform(reply, "reply_card", () => this.lark.replyCard(rootMessageId, card, reply.idempotencyKey));
+    try { if (!operation()) throw new Error("stale_outbound_receipt"); }
+    catch { throw new DeliveryCheckpointError("outbound_checkpoint_uncertain"); }
   }
 
   private fail(claim: OutboundDeliveryClaim, error: unknown): OutboundDeliveryOutcome {
     const reply = claim.reply;
-    const classified = classifyDeliveryError(error);
-    const metadata = { failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, ...(classified.recoveryKind === undefined ? {} : { recoveryKind: classified.recoveryKind }) };
-    const transition = this.store.markOutboundReplyFailedWithQuarantine(claim, classified.message, metadata, classified.retryDelayMs);
-    if (!transition) {
-      this.logger.warn({ event: "lark-outbox-stale-receipt", replyId: reply.id, attemptId: claim.attemptId, outcome: "ignored" }, "ignored a stale delivery receipt");
-      return "failed";
-    }
-    const failed = transition?.reply ?? null;
-    const context = { event: failed?.state === "dead_letter" ? "lark-outbox-dead-lettered" : "lark-outbox-retry-scheduled", err: safeLogError(error instanceof DeliveryOperationError ? error.cause : error), replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed?.attemptCount ?? reply.attemptCount + 1, nextAttemptAt: failed?.nextAttemptAt, failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, larkErrorCode: classified.larkErrorCode, deliveryOperation: classified.operationContext?.operation, deliveryTarget: classified.operationContext?.target, autoRecoveryCount: failed?.autoRecoveryCount ?? reply.autoRecoveryCount, laneClass: transition?.laneClass, quarantineAction: transition?.action, outcome: failed?.state === "dead_letter" ? "dead_letter" : "retry" };
-    if (failed?.state === "dead_letter") this.logger.error(context, classified.failureClass === "permanent" ? "Lark outbox reply was permanently rejected" : "Lark outbox reply exhausted retries");
-    else this.logger.warn(context, "Lark outbox reply delivery failed; retry scheduled");
-    if (transition?.action === "rebuild_answer" && transition.promptId) this.notify("answer", this.answerCheckpoints, (listener) => listener(transition.promptId!, failed?.viewVersion ?? 0), reply);
+    const gatewayFailure = error instanceof GatewayDeliveryError ? error.failure : null;
+    const legacy = gatewayFailure ? null : classifyDeliveryError(error);
+    const classified = gatewayFailure ?? { failureClass: legacy!.failureClass, effectCertainty: legacy!.effectCertainty, httpStatus: legacy!.httpStatus, providerCode: legacy!.larkErrorCode, safeMessage: legacy!.message, ...(legacy!.retryDelayMs === undefined ? {} : { retryAfterMs: legacy!.retryDelayMs }), ...(legacy!.recoveryKind === undefined ? {} : { recoveryKind: legacy!.recoveryKind }), ...(legacy!.operationContext ? { providerOperation: legacy!.operationContext.operation } : {}) };
+    const metadata = { failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, larkErrorCode: classified.providerCode, ...(classified.recoveryKind === undefined ? {} : { recoveryKind: classified.recoveryKind }) };
+    const transition = this.store.markOutboundReplyFailedWithQuarantine(claim, classified.safeMessage, metadata, classified.retryAfterMs);
+    if (!transition) { this.logger.warn({ event: "gateway-outbox-stale-receipt", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, outcome: "ignored" }, "ignored a stale Gateway delivery receipt"); return "failed"; }
+    const failed = transition.reply;
+    const context = { event: failed.state === "dead_letter" ? "gateway-outbox-dead-lettered" : "gateway-outbox-retry-scheduled", err: safeLogError(error instanceof GatewayDeliveryError ? error.cause ?? error : error instanceof DeliveryOperationError ? error.cause : error), gatewayId: reply.gatewayId, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed.attemptCount, nextAttemptAt: failed.nextAttemptAt, failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, providerCode: classified.providerCode, deliveryOperation: classified.providerOperation, deliveryTarget: preparedPurpose(reply), autoRecoveryCount: failed.autoRecoveryCount, laneClass: transition.laneClass, quarantineAction: transition.action, outcome: failed.state === "dead_letter" ? "dead_letter" : "retry" };
+    if (failed.state === "dead_letter") this.logger.error(context, classified.failureClass === "permanent" ? "Gateway outbox reply was permanently rejected" : "Gateway outbox reply exhausted retries");
+    else this.logger.warn(context, "Gateway outbox reply delivery failed; retry scheduled");
+    if (transition.action === "rebuild_answer" && transition.promptId) this.notify("answer", this.answerCheckpoints, (listener) => listener(transition.promptId!, failed.viewVersion ?? 0), reply);
     return "failed";
   }
 
-  private notify<Listener>(name: string, listeners: ReadonlySet<Listener>, invoke: (listener: Listener) => void, reply: OutboundReply): void {
-    for (const listener of listeners) this.runPostDelivery(name, reply, () => invoke(listener));
-  }
-
+  private notify<Listener>(name: string, listeners: ReadonlySet<Listener>, invoke: (listener: Listener) => void, reply: OutboundReply): void { for (const listener of listeners) this.runPostDelivery(name, reply, () => invoke(listener)); }
   private runPostDelivery(name: string, reply: OutboundReply, operation: () => void): void {
-    try { operation(); } catch (error) {
-      this.logger.error({ event: "lark-outbox-checkpoint-listener-failed", err: safeLogError(error), subscriber: name, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, outcome: "isolated" }, "post-delivery convergence hook failed; durable delivery remains authoritative");
-    }
+    try { operation(); } catch (error) { this.logger.error({ event: "gateway-outbox-checkpoint-listener-failed", err: safeLogError(error), gatewayId: reply.gatewayId, subscriber: name, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, outcome: "isolated" }, "post-delivery convergence hook failed; durable delivery remains authoritative"); }
   }
 }
 
-function deliveryTarget(reply: OutboundReply): LarkDeliveryTarget {
-  if (reply.kind === "group_card_create") return reply.workerThreadId ? "worker_main" : "group_thread";
-  if (reply.workerTurnId) return "worker_turn";
-  if (reply.workerId) return "worker_main";
-  if (reply.targetRole === "session_status") return "primary_main";
-  if (reply.cardRole === "answer") return "primary_answer";
-  return "operation_result";
+function findRef(refs: readonly GatewayExternalRef[], kind: GatewayExternalRef["kind"]): GatewayExternalRef | undefined { return refs.find((ref) => ref.kind === kind); }
+function decodeGatewayPlan(value: string | null): import("../gateways/contract/plugin.js").PreparedGatewayDelivery {
+  if (!value) throw new Error("Outbound Gateway plan is missing");
+  try { return JSON.parse(value) as import("../gateways/contract/plugin.js").PreparedGatewayDelivery; }
+  catch { throw new Error("Outbound Gateway plan is invalid"); }
 }
-
+function preparedPurpose(reply: OutboundReply): string {
+  if (reply.workerTurnId) return "worker-turn"; if (reply.workerId) return "worker-main"; if (reply.targetRole === "session_status") return "primary-main"; if (reply.cardRole === "answer") return "primary-answer"; return "operation-result";
+}
 class DeliveryCheckpointError extends Error {}
-
 function subscribe<Listener>(listeners: Set<Listener>, listener: Listener): () => void { listeners.add(listener); return () => listeners.delete(listener); }
-
-function decodeStreamingCardPayload(payload: string): { card: object; stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" } } {
-  const decoded = parseDeliveryObject(payload) as object & { card?: object; stream?: { pageIndex?: unknown; pageStart?: unknown; elementId?: unknown; deliveryMode?: unknown } };
-  if (!decoded.card || !decoded.stream) return { card: decoded };
-  const stream = { pageIndex: typeof decoded.stream.pageIndex === "number" ? decoded.stream.pageIndex : -1, pageStart: typeof decoded.stream.pageStart === "number" ? decoded.stream.pageStart : -1, elementId: typeof decoded.stream.elementId === "string" ? decoded.stream.elementId : "" };
-  return decoded.stream.deliveryMode === "static" ? { card: decoded.card, stream: { ...stream, deliveryMode: "static" } } : { card: decoded.card, stream };
-}
-function requireRootMessageId(reply: OutboundReply): string { if (!reply.rootMessageId) throw new PermanentDeliveryError(`Outbound reply ${reply.id} has no root message target`); return reply.rootMessageId; }
-function parseDeliveryObject(payload: string): object {
-  try {
-    const value: unknown = JSON.parse(payload);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("not an object");
-    return value;
-  } catch { throw new PermanentDeliveryError("Durable delivery payload is not a JSON object"); }
-}

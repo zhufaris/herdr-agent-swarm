@@ -3,6 +3,7 @@ import { LarkSdkAdapter } from "../../adapters/lark-adapter.js";
 import type { LarkPort } from "../../domain/ports/external.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../../domain/types.js";
 import { GATEWAY_PROTOCOL_VERSION, type ConversationGatewayPlugin, type GatewayDeliveryContext, type GatewayDeliveryIntent, type GatewayDeliveryReceipt, type GatewayExternalRef, type GatewayIngressResponse, type GatewaySession, type NegotiatedGatewayProfile, type PreparedGatewayDelivery } from "../contract/plugin.js";
+import { performFeishuDelivery } from "./errors.js";
 
 export interface FeishuGatewayConfig {
   gatewayId: string; appId: string; appSecret: string; chatId: string; botOpenId: string; requestTimeoutMs?: number;
@@ -35,6 +36,7 @@ export function requireFeishuCompatibilityPort(session: GatewaySession): LarkPor
   if (!port) throw new Error(`Gateway ${session.gatewayId} is not a Feishu compatibility session`);
   return port;
 }
+export function createFeishuCompatibilityDelivery(transport: LarkPort, gatewayId = "feishu:primary") { return new FeishuGatewayDelivery(gatewayId, feishuProfile(), transport); }
 
 class FeishuGatewayIngress {
   constructor(private readonly gatewayId: string, private readonly transport: LarkPort) {}
@@ -56,40 +58,44 @@ class FeishuGatewayDelivery {
     if (plan.gatewayId !== this.gatewayId || plan.profileId !== this.profile.id || plan.protocolVersion !== GATEWAY_PROTOCOL_VERSION) throw new Error("Feishu Gateway delivery plan identity mismatch");
     const intent = plan.intent;
     if (intent.kind === "conversation.create") {
-      const receipt = await this.transport.createTopic(intent.view, intent.idempotencyKey, intent.conversationId);
+      const receipt = await performFeishuDelivery(intent, "create_topic", () => this.transport.createTopic(intent.view, intent.idempotencyKey, intent.conversationId));
       return { refs: [ref(this.gatewayId, "thread", receipt.topicId), ref(this.gatewayId, "message", receipt.rootMessageId)] };
     }
-    if (intent.kind === "message.reply.text") return { refs: [ref(this.gatewayId, "message", (await this.transport.replyText(intent.rootMessageId, intent.text, intent.idempotencyKey)).messageId)] };
-    if (intent.kind === "message.reply.view") return { refs: [ref(this.gatewayId, "message", (await this.transport.replyCard(intent.rootMessageId, intent.view, intent.idempotencyKey)).messageId)] };
+    if (intent.kind === "message.reply.text") return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "reply_text", () => this.transport.replyText(intent.rootMessageId, intent.text, intent.idempotencyKey))).messageId)] };
+    if (intent.kind === "message.reply.view") {
+      const receipt = await performFeishuDelivery(intent, "reply_card", () => this.transport.replyCard(intent.rootMessageId, intent.view, intent.idempotencyKey));
+      const cardId = (receipt as { cardId?: unknown }).cardId;
+      return { refs: [ref(this.gatewayId, "message", receipt.messageId), ...(typeof cardId === "string" ? [ref(this.gatewayId, "surface", cardId)] : [])] };
+    }
     if (intent.kind === "surface.replace") {
-      if (intent.sequence !== undefined && this.transport.updateCardKit) await this.transport.updateCardKit(intent.messageId, intent.view, intent.sequence);
-      else await this.transport.updateCard(intent.messageId, intent.view);
+      if (intent.sequence !== undefined && this.transport.updateCardKit) await performFeishuDelivery(intent, "update_cardkit", () => this.transport.updateCardKit!(intent.messageId, intent.view, intent.sequence!));
+      else await performFeishuDelivery(intent, "update_card", () => this.transport.updateCard(intent.messageId, intent.view));
       return { refs: [] };
     }
     if (intent.kind === "stream.create") {
       if (this.transport.createStreamingCard && this.transport.replyStreamingCardReference) {
         const prior = context.priorCheckpoints.find((item) => item.kind === "surface")?.ref.opaqueId;
-        const surfaceId = prior ?? (await this.transport.createStreamingCard(intent.view)).cardId;
+        const surfaceId = prior ?? (await performFeishuDelivery(intent, "create_streaming_card", () => this.transport.createStreamingCard!(intent.view))).cardId;
         if (!prior) await context.checkpoint({ kind: "surface", ref: ref(this.gatewayId, "surface", surfaceId) });
-        const message = await this.transport.replyStreamingCardReference(intent.rootMessageId, surfaceId, intent.idempotencyKey);
+        const message = await performFeishuDelivery(intent, "reply_streaming_card_reference", () => this.transport.replyStreamingCardReference!(intent.rootMessageId, surfaceId, intent.idempotencyKey));
         return { refs: [ref(this.gatewayId, "message", message.messageId), ref(this.gatewayId, "surface", surfaceId)] };
       }
       const receipt = this.transport.replyStreamingCard
-        ? await this.transport.replyStreamingCard(intent.rootMessageId, intent.view)
-        : { ...(await this.transport.replyCard(intent.rootMessageId, intent.view, intent.idempotencyKey)), cardId: "" };
+        ? await performFeishuDelivery(intent, "reply_streaming_card", () => this.transport.replyStreamingCard!(intent.rootMessageId, intent.view))
+        : { ...(await performFeishuDelivery(intent, "reply_card", () => this.transport.replyCard(intent.rootMessageId, intent.view, intent.idempotencyKey))), cardId: "" };
       return { refs: [ref(this.gatewayId, "message", receipt.messageId), ...(receipt.cardId ? [ref(this.gatewayId, "surface", receipt.cardId)] : [])] };
     }
     if (intent.kind === "stream.append") {
       if (!this.transport.streamCardContent) throw new Error("Feishu Gateway does not support stream append");
-      await this.transport.streamCardContent(intent.surfaceId, intent.slot, intent.content, intent.sequence);
+      await performFeishuDelivery(intent, "stream_card_content", () => this.transport.streamCardContent!(intent.surfaceId, intent.slot, intent.content, intent.sequence));
       return { refs: [] };
     }
     if (intent.kind === "stream.finish") {
       if (!this.transport.finishStreamingCard) throw new Error("Feishu Gateway does not support stream finish");
-      await this.transport.finishStreamingCard(intent.surfaceId, intent.sequence, intent.summary);
+      await performFeishuDelivery(intent, "finish_streaming_card", () => this.transport.finishStreamingCard!(intent.surfaceId, intent.sequence, intent.summary));
       return { refs: [] };
     }
-    return { refs: [ref(this.gatewayId, "message", (await this.transport.shareThread(intent.conversationId, { messageId: intent.messageId, chatId: intent.targetConversationId })).messageId)] };
+    return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "share_thread", () => this.transport.shareThread(intent.conversationId, { messageId: intent.messageId, chatId: intent.targetConversationId }))).messageId)] };
   }
 }
 

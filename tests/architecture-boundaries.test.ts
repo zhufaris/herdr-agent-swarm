@@ -202,11 +202,13 @@ describe("application composition boundaries", () => {
   it("separates outbound drain scheduling from single-reply delivery", () => {
     const drain = readFileSync(new URL("../src/events/lark-outbox-dispatcher.ts", import.meta.url), "utf8");
     const delivery = readFileSync(new URL("../src/events/outbound-delivery-executor.ts", import.meta.url), "utf8");
-    expect(drain).toContain("new OutboundDeliveryExecutor(store, lark, logger)");
+    expect(drain).toContain("new OutboundDeliveryExecutor(store, gateway, logger)");
     expect(drain).not.toContain("outbound-intent-materializer");
     expect(drain).not.toContain("outbound-target-validation");
     expect(drain).not.toContain("delivery-error-classifier");
-    expect(delivery).toContain("materializeOutboundReply");
+    expect(delivery).toContain("prepareOutboundGatewayIntent");
+    expect(delivery).toContain("GatewayDeliveryPort");
+    expect(delivery).not.toContain("LarkPort");
     expect(delivery).toContain("classifyDeliveryError");
     expect(delivery).toContain("markOutboundReplyDelivered");
   });

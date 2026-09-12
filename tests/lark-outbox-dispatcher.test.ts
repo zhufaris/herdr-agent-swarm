@@ -20,10 +20,12 @@ import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createWorkerMainView } from "../src/domain/worker-main-view.js";
 import type { OutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
+import { GatewayDeliveryError, type GatewayDeliveryPort, type PreparedGatewayDelivery } from "../src/gateways/contract/plugin.js";
+import { createFeishuCompatibilityDelivery } from "../src/gateways/feishu/plugin.js";
 
 class LarkOutboxDispatcher extends ProductionLarkOutboxDispatcher {
   constructor(store: SqliteBindingStore, lark: LarkPort, logger: Logger, work: OutboundWorkNotifier = new InProcessOutboundWorkNotifier(logger), safetyScanIntervalMs = 30_000) {
-    super(store, lark, logger, work, safetyScanIntervalMs);
+    super(store, createFeishuCompatibilityDelivery(lark), logger, work, safetyScanIntervalMs);
   }
 }
 
@@ -180,7 +182,7 @@ describe("Lark channel publisher", () => {
 
     expect(updateCard).toHaveBeenCalledOnce();
     expect(store.database.prepare("SELECT state, attempt_count FROM outbound_replies").get()).toEqual({ state: "delivered", attempt_count: 1 });
-    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-checkpoint-listener-failed", outcome: "isolated" }), expect.any(String));
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-checkpoint-listener-failed", outcome: "isolated" }), expect.any(String));
     store.close();
   });
 
@@ -435,6 +437,35 @@ describe("Lark channel publisher", () => {
     await publisher.requestScan(true);
     expect(cards).toEqual([{ schema: "2.0" }]);
     expect(store.listPendingOutboundReplies()).toEqual([]);
+    await publisher.stop(); store.close();
+  });
+
+  it("persists one prepared Gateway plan before claim and reuses it across retries", async () => {
+    const plans: PreparedGatewayDelivery[] = [];
+    let fail = true;
+    const gateway: GatewayDeliveryPort = {
+      prepare: vi.fn((intent) => ({ protocolVersion: 1, gatewayId: "feishu:primary", profileId: "feishu-cardkit-v1", rendererRevision: 1, operation: intent.kind, intent })),
+      execute: vi.fn(async (plan) => {
+        plans.push(structuredClone(plan));
+        if (fail) throw new GatewayDeliveryError({ failureClass: "transient", effectCertainty: "rejected", providerCode: null, httpStatus: 503, safeMessage: "unavailable" });
+        return { refs: [{ gatewayId: "feishu:primary", kind: "message", opaqueId: "message-1" }] };
+      })
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "frozen-plan", idempotencyKey: "frozen-plan", rootMessageId: "root-1", kind: "card_reply", payload: '{"schema":"2.0"}' });
+    const publisher = new ProductionLarkOutboxDispatcher(store, gateway, pino({ enabled: false }), new InProcessOutboundWorkNotifier(pino({ enabled: false })));
+
+    await publisher.requestScan(true);
+    const persisted = store.getOutboundReply("frozen-plan")!;
+    expect(persisted).toMatchObject({ state: "pending", attemptCount: 1, gatewayPlanJson: expect.any(String), gatewayPlanHash: expect.any(String) });
+    fail = false;
+    await publisher.requestScan(true);
+
+    expect(gateway.prepare).toHaveBeenCalledTimes(1);
+    expect(gateway.execute).toHaveBeenCalledTimes(2);
+    expect(plans).toHaveLength(2);
+    expect(plans[1]).toEqual(plans[0]);
+    expect(store.getOutboundReply("frozen-plan")).toMatchObject({ state: "delivered", gatewayPlanJson: persisted.gatewayPlanJson, gatewayPlanHash: persisted.gatewayPlanHash });
     await publisher.stop(); store.close();
   });
 
@@ -754,9 +785,9 @@ describe("Lark channel publisher", () => {
     const publisher = new LarkOutboxDispatcher(store, lark, logger);
 
     await connectedWriter(store, publisher).enqueueCard("root-1", "failure:1", { secret: "private card payload" }, "b1");
-    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-retry-scheduled", replyKind: "card_reply", attempt: 1, outcome: "retry" }), expect.any(String));
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-retry-scheduled", replyKind: "card_reply", attempt: 1, outcome: "retry" }), expect.any(String));
     for (let attempt = 0; attempt < 4; attempt += 1) await publisher.requestScan(true);
-    expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-outbox-dead-lettered", attempt: 5, outcome: "dead_letter" }), expect.any(String));
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-dead-lettered", attempt: 5, outcome: "dead_letter" }), expect.any(String));
     expect(JSON.stringify([...warn.mock.calls, ...error.mock.calls])).not.toContain("private card payload");
     expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, pendingOutbox: 0 });
     store.close();
@@ -779,9 +810,9 @@ describe("Lark channel publisher", () => {
     await connectedWriter(store, publisher).enqueueCardUpdate(null, "card-1", "failure:safe-error", { secret: "private card payload" });
 
     expect(error).toHaveBeenCalledWith(expect.objectContaining({
-      event: "lark-outbox-dead-lettered", deliveryOperation: "update_card", deliveryTarget: "operation_result",
+      event: "gateway-outbox-dead-lettered", deliveryOperation: "update_card", deliveryTarget: "operation-result",
       err: { name: "Error", message: "Request failed with status code 400", code: "ERR_BAD_REQUEST", status: 400, larkCode: 230099 }
-    }), "Lark outbox reply was permanently rejected");
+    }), "Gateway outbox reply was permanently rejected");
     expect(warn).not.toHaveBeenCalled();
     expect(JSON.stringify(error.mock.calls)).not.toMatch(/top-secret|private card payload|response body|Authorization|config|request|response/);
     await publisher.stop();

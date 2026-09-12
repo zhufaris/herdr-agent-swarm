@@ -8,6 +8,7 @@ import { primaryPresentation } from "./helpers/presentation.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { LarkPort } from "../src/domain/ports.js";
 import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
+import { createFeishuCompatibilityDelivery } from "../src/gateways/feishu/plugin.js";
 import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
@@ -40,14 +41,14 @@ describe("Answer page crash recovery", () => {
 
     const answer = `${"a".repeat(ANSWER_STREAM_PAGE_LIMIT)}\n${"b".repeat(ANSWER_STREAM_PAGE_LIMIT)}\n${"c".repeat(2_000)}`;
     const logger = pino({ enabled: false });
-    const initialDispatcher = new LarkOutboxDispatcher(store, lark, logger, new InProcessOutboundWorkNotifier(logger));
+    const initialDispatcher = new LarkOutboxDispatcher(store, createFeishuCompatibilityDelivery(lark), logger, new InProcessOutboundWorkNotifier(logger));
     await initialDispatcher.requestScan(true);
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
     store.close();
 
     for (let step = 0; step < 20; step += 1) {
       store = new SqliteBindingStore(databasePath);
-      const dispatcher = new LarkOutboxDispatcher(store, lark, logger, new InProcessOutboundWorkNotifier(logger));
+      const dispatcher = new LarkOutboxDispatcher(store, createFeishuCompatibilityDelivery(lark), logger, new InProcessOutboundWorkNotifier(logger));
       const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
       await workflow.converge("p1");
       await dispatcher.requestScan(true);

@@ -5,7 +5,7 @@ import type { Binding, OutboundReply, OutboundWorkClass } from "../../domain/typ
 import type { RunCardView } from "../../domain/run-card-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import { encodeDeliveryIntent } from "../../domain/delivery-intent.js";
-import { outboundLaneKey } from "../outbox-lanes.js";
+import { gatewayScopedOutboundLaneKey, outboundLaneKey } from "../outbox-lanes.js";
 import { mapOutboundReply, type OutboundReplyRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteLarkDeliveryCooldownStore } from "./lark-delivery-cooldown-store.js";
@@ -26,7 +26,7 @@ export class SqliteOutboxQueueStore {
   enqueue(input: EnqueueOutboundReplyInput): OutboundReply {
     const timestamp = now();
     const bindingGeneration = input.promptId ? this.dependencies.loadRunCard(input.promptId)?.bindingGeneration ?? null : input.bindingId ? this.dependencies.getBinding(input.bindingId)?.generation ?? null : null;
-    const laneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
+    const logicalLaneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
     const streamMetadata = outboundStreamMetadata(input.kind, input.payload);
     const encoded = encodeDeliveryIntent(input.kind, input.payload);
     const intentKind = input.intentKind ?? encoded.intentKind;
@@ -34,6 +34,7 @@ export class SqliteOutboxQueueStore {
     const rendererRevision = input.rendererRevision ?? encoded.rendererRevision;
     const workClass = input.workClass ?? "live";
     const gatewayId = input.gatewayId ?? "feishu:primary";
+    const laneKey = gatewayScopedOutboundLaneKey(gatewayId, logicalLaneKey);
     const gatewayProfileId = input.gatewayProfileId ?? "feishu-cardkit-v1";
     const gatewayPlanJson = input.gatewayPlanJson ?? null;
     const gatewayPlanHash = input.gatewayPlanHash ?? null;
@@ -113,6 +114,23 @@ export class SqliteOutboxQueueStore {
 
   wasClaimed(id: string): boolean {
     return this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE id = ? AND (first_claimed_at IS NOT NULL OR attempt_count > 0 OR card_id_checkpoint IS NOT NULL)").get(id) !== undefined;
+  }
+
+  prepareGatewayPlan(id: string, input: { gatewayId: string; gatewayProfileId: string; gatewayPlanJson: string }): OutboundReply | null {
+    return this.context.transaction(() => {
+      const current = this.get(id);
+      if (!current || current.state !== "pending") return null;
+      const gatewayPlanHash = createHash("sha256").update(input.gatewayPlanJson).digest("hex");
+      if (current.gatewayPlanJson !== null || current.gatewayPlanHash !== null) {
+        if (current.gatewayId !== input.gatewayId || current.gatewayProfileId !== input.gatewayProfileId || current.gatewayPlanJson !== input.gatewayPlanJson || current.gatewayPlanHash !== gatewayPlanHash) throw new Error("outbound_gateway_plan_conflict");
+        return current;
+      }
+      const claim = this.context.database.prepare("SELECT claim_attempt_id, first_claimed_at FROM outbound_replies WHERE id = ?").get(id) as { claim_attempt_id: string | null; first_claimed_at: string | null } | undefined;
+      if (!claim || claim.claim_attempt_id !== null) return null;
+      if (claim.first_claimed_at !== null && (current.gatewayId !== input.gatewayId || current.gatewayProfileId !== input.gatewayProfileId)) throw new Error("outbound_gateway_identity_conflict");
+      const updated = this.context.database.prepare("UPDATE outbound_replies SET gateway_id = ?, gateway_profile_id = ?, gateway_plan_json = ?, gateway_plan_hash = ?, updated_at = ? WHERE id = ? AND state = 'pending' AND claim_attempt_id IS NULL AND gateway_plan_json IS NULL AND gateway_plan_hash IS NULL").run(input.gatewayId, input.gatewayProfileId, input.gatewayPlanJson, gatewayPlanHash, now(), id);
+      return updated.changes === 1 ? this.get(id) : null;
+    });
   }
 
   claim(id: string, dueAt: string | null): OutboundDeliveryClaim | null {

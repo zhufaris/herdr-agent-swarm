@@ -180,7 +180,7 @@ export class SqlitePromptStore {
       const view = input.view;
       this.projections.insertRunCard(view);
       this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-        .run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
+        .run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `gateway:${this.dependencies.getBinding(input.prompt.bindingId)?.gatewayId ?? "feishu:primary"}:answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
       return { prompt: this.requirePrompt(input.prompt.id), view: this.projections.loadRunCard(input.prompt.id)!, inserted: true };
     });
   }
@@ -411,6 +411,7 @@ export class SqlitePromptStore {
       const identitylessDetached = active.every((row) => row.observation_state === "detached" && row.transcript_turn_id === null);
       if (!identitylessDetached && !supersessionIsFenced) return { outcome: "conflict", prompt: null, supersededPromptIds: [], outboxReserved: false };
       const timestamp = now();
+      const gatewayId = typeof binding.gateway_id === "string" ? binding.gateway_id : "feishu:primary";
       const supersededPromptIds = active.map((row) => row.id);
       for (const row of active) {
         this.context.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?").run("Superseded by a newer external Herdr turn; prior outcome is uncertain", timestamp, row.id);
@@ -441,7 +442,7 @@ export class SqlitePromptStore {
         const view = { ...input.externalView, promptId, bindingId: input.bindingId, bindingGeneration: input.expectedGeneration, paneId: input.expectedPaneId, requestText: input.requestText, queuePosition: 0 };
         const runningView = reduceRunCard(view, { type: "started", occurredAt: input.startedAt });
         this.projections.insertRunCard(view);
-        this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), `run-card:create:${promptId}:answer`, input.bindingId, promptId, runningView.viewVersion, binding.root_message_id, JSON.stringify(input.answerCardFor(runningView)), `answer:${promptId}`, timestamp, timestamp, timestamp);
+        this.context.database.prepare(`INSERT INTO outbound_replies(id, gateway_id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), gatewayId, `run-card:create:${promptId}:answer`, input.bindingId, promptId, runningView.viewVersion, binding.root_message_id, JSON.stringify(input.answerCardFor(runningView)), `gateway:${gatewayId}:answer:${promptId}`, timestamp, timestamp, timestamp);
         outboxReserved = true;
       }
       return { outcome, prompt: this.requirePrompt(promptId), supersededPromptIds, outboxReserved };

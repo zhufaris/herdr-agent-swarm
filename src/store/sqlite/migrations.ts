@@ -139,6 +139,7 @@ export class SqliteMigrations {
     // layouts. Re-apply additive Gateway columns and the claim immutability
     // trigger after every possible rebuild so mixed-version databases converge.
     this.gateway.ensureGatewayIdentityAndPlans();
+    this.gateway.ensureGatewayScopedOutboxLanes();
     this.cards.ensureOutboundClaims();
   }
 

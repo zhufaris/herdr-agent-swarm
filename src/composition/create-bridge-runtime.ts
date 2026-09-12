@@ -24,7 +24,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, lark, transcriptReader } = infrastructure;
   const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), wakePrimary: (bindingId) => events.wakePrimary(bindingId), wakeInstance: (instanceId) => events.wakeInstance(instanceId), maxQueueDepth: config.maxQueueDepth });
   const bus = events.lifecycle; const scheduler = events.promptWork; const inboundWork = events.inboundWork;
-  const delivery = createOutboundRuntime(config, stores, lark, bus, events.outboundWork, logger, presentation);
+  const delivery = createOutboundRuntime(config, stores, infrastructure.gateway, bus, events.outboundWork, logger, presentation);
   const { outboundWork, channelPublisher, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention } = delivery;
   const worker = createWorkerRuntime({ config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork });
   const { instanceWork, instanceTurns, instanceRuntime, primaryToolGateway } = worker;

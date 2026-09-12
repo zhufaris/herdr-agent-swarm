@@ -76,14 +76,15 @@ export interface GatewayIngressSink { accept(event: GatewayInboundEvent): Promis
 export interface GatewayIngressPort { start(sink: GatewayIngressSink): Promise<void>; stop(): Promise<void>; }
 
 export type GatewayDeliveryIntent =
-  | { kind: "conversation.create"; conversationId: string; view: object; idempotencyKey: string }
-  | { kind: "message.reply.text"; rootMessageId: string; text: string; idempotencyKey: string }
-  | { kind: "message.reply.view"; rootMessageId: string; view: object; idempotencyKey: string }
-  | { kind: "surface.replace"; messageId: string; view: object; sequence?: number }
-  | { kind: "stream.create"; rootMessageId: string; view: object; idempotencyKey: string }
-  | { kind: "stream.append"; surfaceId: string; slot: string; content: string; sequence: number }
-  | { kind: "stream.finish"; surfaceId: string; sequence: number; summary: string }
-  | { kind: "conversation.share"; conversationId: string; messageId: string; targetConversationId: string };
+  | { kind: "conversation.create"; purpose: GatewayDeliveryPurpose; conversationId: string; view: object; idempotencyKey: string }
+  | { kind: "message.reply.text"; purpose: GatewayDeliveryPurpose; rootMessageId: string; text: string; idempotencyKey: string }
+  | { kind: "message.reply.view"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: object; idempotencyKey: string }
+  | { kind: "surface.replace"; purpose: GatewayDeliveryPurpose; messageId: string; view: object; sequence?: number }
+  | { kind: "stream.create"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: object; idempotencyKey: string }
+  | { kind: "stream.append"; purpose: GatewayDeliveryPurpose; surfaceId: string; slot: string; content: string; sequence: number }
+  | { kind: "stream.finish"; purpose: GatewayDeliveryPurpose; surfaceId: string; sequence: number; summary: string }
+  | { kind: "conversation.share"; purpose: GatewayDeliveryPurpose; conversationId: string; messageId: string; targetConversationId: string };
+export type GatewayDeliveryPurpose = "primary-main" | "primary-answer" | "worker-main" | "worker-turn" | "group-thread" | "operation-result";
 
 export interface PreparedGatewayDelivery {
   protocolVersion: 1; gatewayId: GatewayId; profileId: string; rendererRevision: number; operation: GatewayDeliveryIntent["kind"]; intent: GatewayDeliveryIntent;
@@ -94,6 +95,14 @@ export interface GatewayDeliveryContext {
   checkpoint(value: GatewayDeliveryCheckpoint): Promise<void>; signal?: AbortSignal;
 }
 export interface GatewayDeliveryReceipt { refs: readonly GatewayExternalRef[]; }
+export interface GatewayFailure {
+  failureClass: "transient" | "permanent" | "unknown"; effectCertainty: "not-started" | "rejected" | "uncertain";
+  providerCode: string | null; providerOperation?: string; httpStatus: number | null; retryAfterMs?: number; recoveryKind?: "closed_answer_stream" | "stale_main_card"; safeMessage: string;
+}
+export class GatewayDeliveryError extends Error {
+  readonly name = "GatewayDeliveryError";
+  constructor(readonly failure: GatewayFailure, readonly cause?: unknown) { super(failure.safeMessage, { cause }); }
+}
 export interface GatewayDeliveryPort {
   prepare(intent: GatewayDeliveryIntent): PreparedGatewayDelivery;
   execute(plan: PreparedGatewayDelivery, context: GatewayDeliveryContext): Promise<GatewayDeliveryReceipt>;

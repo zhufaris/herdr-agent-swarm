@@ -133,7 +133,8 @@ export class SqliteOutboxDeliveryStore {
   checkpointCard(id: string, cardId: string, claim?: OutboundDeliveryClaim): OutboundReply | null {
     return this.context.transaction(() => {
       if (!this.queue.matchesClaim(id, claim)) return null;
-      const updated = this.context.database.prepare("UPDATE outbound_replies SET card_id_checkpoint = COALESCE(card_id_checkpoint, ?), updated_at = ? WHERE id = ? AND state = 'pending' AND (card_id_checkpoint IS NULL OR card_id_checkpoint = ?)").run(cardId, now(), id, cardId);
+      const checkpoint = JSON.stringify({ kind: "surface", gatewayId: claim?.reply.gatewayId ?? "feishu:primary", opaqueId: cardId });
+      const updated = this.context.database.prepare("UPDATE outbound_replies SET card_id_checkpoint = COALESCE(card_id_checkpoint, ?), gateway_checkpoint_json = COALESCE(gateway_checkpoint_json, ?), updated_at = ? WHERE id = ? AND state = 'pending' AND (card_id_checkpoint IS NULL OR card_id_checkpoint = ?) AND (gateway_checkpoint_json IS NULL OR gateway_checkpoint_json = ?)").run(cardId, checkpoint, now(), id, cardId, checkpoint);
       return updated.changes === 1 ? this.queue.get(id) : null;
     });
   }
