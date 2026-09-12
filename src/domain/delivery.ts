@@ -28,7 +28,7 @@ export type AnswerPageReservationOutcome = "reserved" | "waiting" | "stale";
 export type DeadLetterActionOutcome = "retried" | "dismissed" | "missing" | "unauthorized" | "stale";
 
 export interface OutboundReply {
-  id: string; idempotencyKey: string; bindingId: string | null; promptId: string | null; workerTurnId: string | null;
+  id: string; gatewayId: string; gatewayProfileId: string; gatewayPlanJson: string | null; gatewayPlanHash: string | null; gatewayCheckpointJson: string | null; idempotencyKey: string; bindingId: string | null; promptId: string | null; workerTurnId: string | null;
   workerId: string | null; workerSessionGeneration: number | null; viewVersion: number | null; cardSequence: number | null;
   selectionId: string | null; cardRole: RequestCardRole | null; targetRole: OutboundTargetRole | null; threadAliasId: string | null; workerThreadId: string | null; targetChatId: string | null; laneKey: string;
   workClass: OutboundWorkClass;

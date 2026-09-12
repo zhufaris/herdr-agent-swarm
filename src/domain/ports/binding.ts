@@ -23,7 +23,7 @@ export interface BindingProvisioningStore {
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   countPendingPrompts(bindingId: string): number;
-  createPendingBinding(input: { id: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding;
+  createPendingBinding(input: { id: string; gatewayId?: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding;
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;

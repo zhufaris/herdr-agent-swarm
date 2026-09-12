@@ -4443,6 +4443,31 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 38").get()).toEqual({ count: 1 });
   });
 
+  it("additively backfills Gateway identity and delivery-plan columns without rewriting legacy payloads", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-gateway-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.recordInboundMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic", rootMessageId: "root", parentMessageId: null, actorOpenId: "actor", text: "hello", mentionsBot: true, isRootMessage: false });
+    store.enqueueOutboundReply({ id: "out-1", idempotencyKey: "out-1", rootMessageId: "root", kind: "card_update", payload: '{"legacy":true}' });
+    store.database.exec("DROP TRIGGER outbound_replies_immutable_claim; DROP INDEX bindings_gateway_route; DROP INDEX inbound_messages_gateway_event; DROP INDEX outbound_replies_gateway_state");
+    for (const table of ["bindings", "inbound_messages"]) store.database.exec(`ALTER TABLE ${table} DROP COLUMN gateway_id`);
+    for (const column of ["gateway_checkpoint_json", "gateway_plan_hash", "gateway_plan_json", "gateway_profile_id", "gateway_id"]) store.database.exec(`ALTER TABLE outbound_replies DROP COLUMN ${column}`);
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 39");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT gateway_id FROM bindings WHERE id = 'b1'").get()).toEqual({ gateway_id: "feishu:primary" });
+    expect(store.database.prepare("SELECT gateway_id FROM inbound_messages WHERE event_id = 'event-1'").get()).toEqual({ gateway_id: "feishu:primary" });
+    expect(store.database.prepare("SELECT gateway_id, gateway_profile_id, gateway_plan_json, gateway_plan_hash, gateway_checkpoint_json, payload FROM outbound_replies WHERE id = 'out-1'").get()).toEqual({ gateway_id: "feishu:primary", gateway_profile_id: "feishu-cardkit-v1", gateway_plan_json: null, gateway_plan_hash: null, gateway_checkpoint_json: null, payload: '{"legacy":true}' });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 39").get()).toEqual({ version: 39 });
+
+    const claim = store.claimOutboundReply("out-1", null)!;
+    expect(() => store!.database.prepare("UPDATE outbound_replies SET gateway_id = 'telegram:primary' WHERE id = 'out-1'").run()).toThrow("immutable_outbound_revision");
+    expect(() => store!.database.prepare("UPDATE outbound_replies SET gateway_plan_json = '{}' WHERE id = 'out-1'").run()).toThrow("immutable_outbound_revision");
+    expect(() => store!.database.prepare("UPDATE outbound_replies SET gateway_checkpoint_json = '{}' WHERE id = 'out-1'").run()).not.toThrow();
+    expect(store.markOutboundReplyDelivered(claim, "root")).toBe(true);
+  });
+
   it("persists classified failures and reopens one cooled transient round only", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));

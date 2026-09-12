@@ -14,7 +14,7 @@ export function createLatestSchema(context: SqliteContext): void {
   context.database.exec(`
   CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
   CREATE TABLE IF NOT EXISTS bindings(
-    id TEXT PRIMARY KEY, creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
+    id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
     root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
     runtime TEXT NOT NULL CHECK(runtime = 'traex'),
     state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
@@ -106,7 +106,7 @@ export function createLatestSchema(context: SqliteContext): void {
     chat_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target_kind TEXT NOT NULL CHECK(target_kind IN ('primary','instance')), instance_id TEXT, instance_generation INTEGER, updated_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS inbound_messages(
-    event_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+    event_id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', message_id TEXT NOT NULL, payload_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('received','processing','accepted')), error TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
@@ -146,7 +146,7 @@ export function createLatestSchema(context: SqliteContext): void {
     CHECK((state = 'pending' AND dispatch_prompt_id IS NULL) OR state != 'pending')
   );
   CREATE TABLE IF NOT EXISTS outbound_replies(
-    id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, stream_page_index INTEGER, stream_element_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), thread_alias_id TEXT REFERENCES binding_thread_aliases(id), worker_thread_id TEXT REFERENCES worker_session_threads(id), target_chat_id TEXT, work_class TEXT NOT NULL DEFAULT 'live' CHECK(work_class IN ('live','history')), root_message_id TEXT,
+    id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', gateway_profile_id TEXT NOT NULL DEFAULT 'feishu-cardkit-v1', gateway_plan_json TEXT, gateway_plan_hash TEXT, gateway_checkpoint_json TEXT, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT REFERENCES bindings(id), prompt_id TEXT, worker_turn_id TEXT REFERENCES instance_turns(id) ON DELETE CASCADE, worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER, view_version INTEGER, card_sequence INTEGER, selection_id TEXT, stream_page_index INTEGER, stream_element_id TEXT, card_role TEXT CHECK(card_role IN ('task','answer')), target_role TEXT CHECK(target_role IN ('session_status','operation_result')), thread_alias_id TEXT REFERENCES binding_thread_aliases(id), worker_thread_id TEXT REFERENCES worker_session_threads(id), target_chat_id TEXT, work_class TEXT NOT NULL DEFAULT 'live' CHECK(work_class IN ('live','history')), root_message_id TEXT,
     kind TEXT NOT NULL CHECK(kind IN ('text','card_reply','card_update','group_card_create','stream_card_create','stream_content','stream_finish')), payload TEXT NOT NULL, intent_kind TEXT, intent_json TEXT, renderer_revision INTEGER,
     state TEXT NOT NULL CHECK(state IN ('pending','delivered','dead_letter','dismissed')), attempt_count INTEGER NOT NULL DEFAULT 0,
     error TEXT, delivered_message_id TEXT, card_id_checkpoint TEXT, delivery_order INTEGER, lane_key TEXT, next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,

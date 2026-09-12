@@ -20,7 +20,7 @@ export function createCompatibilityGatewayIngressSink(handlers: LegacyGatewayHan
 
 function toLegacyMessage(event: Extract<GatewayInboundEvent, { kind: "message.received" }>): IncomingLarkMessage {
   return {
-    eventId: event.eventKey, messageId: event.message.opaqueId, parentMessageId: event.parentMessage?.opaqueId ?? null,
+    gatewayId: event.address.gatewayId, eventId: event.eventKey, messageId: event.message.opaqueId, parentMessageId: event.parentMessage?.opaqueId ?? null,
     chatId: event.address.conversation.opaqueId, topicId: event.address.thread?.opaqueId ?? null, rootMessageId: event.address.rootMessage?.opaqueId ?? null,
     actorOpenId: event.actor.opaqueId, text: event.text, mentionsBot: event.mentionsAgent, isRootMessage: event.isRoot, hasUnsupportedContent: event.hasUnsupportedContent
   };

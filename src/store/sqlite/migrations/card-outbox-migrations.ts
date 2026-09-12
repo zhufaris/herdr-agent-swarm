@@ -370,16 +370,17 @@ export class CardOutboxMigrations {
       const immutableClaim = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_immutable_claim'").get() as { sql: string } | undefined;
       const groupTargets = names.has("target_chat_id") && names.has("thread_alias_id");
       const workerTarget = names.has("worker_thread_id");
-      if (immutableClaim && (!immutableClaim.sql.includes("work_class") || groupTargets && !immutableClaim.sql.includes("target_chat_id") || workerTarget && !immutableClaim.sql.includes("worker_thread_id"))) this.context.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
+      if (immutableClaim && (!immutableClaim.sql.includes("work_class") || !immutableClaim.sql.includes("gateway_plan_json") || groupTargets && !immutableClaim.sql.includes("target_chat_id") || workerTarget && !immutableClaim.sql.includes("worker_thread_id"))) this.context.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
       const groupTargetColumns = groupTargets ? `target_chat_id, thread_alias_id, ${workerTarget ? "worker_thread_id, " : ""}` : "";
       const groupTargetChanges = groupTargets ? `NEW.target_chat_id IS NOT OLD.target_chat_id OR NEW.thread_alias_id IS NOT OLD.thread_alias_id OR ${workerTarget ? "NEW.worker_thread_id IS NOT OLD.worker_thread_id OR " : ""}` : "";
       this.context.database.exec(`
         CREATE INDEX IF NOT EXISTS outbound_replies_projection_revision ON outbound_replies(projection_key, snapshot_revision DESC);
         CREATE INDEX IF NOT EXISTS outbound_replies_claims ON outbound_replies(claim_attempt_id) WHERE claim_attempt_id IS NOT NULL;
         CREATE TRIGGER IF NOT EXISTS outbound_replies_immutable_claim
-        BEFORE UPDATE OF payload, intent_json, intent_kind, renderer_revision, root_message_id, ${groupTargetColumns}kind, view_version, card_sequence, idempotency_key, lane_key, work_class, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, card_role, target_role, selection_id, stream_page_index, stream_element_id, snapshot_revision, first_claimed_at ON outbound_replies
+        BEFORE UPDATE OF payload, intent_json, intent_kind, renderer_revision, gateway_id, gateway_profile_id, gateway_plan_json, gateway_plan_hash, root_message_id, ${groupTargetColumns}kind, view_version, card_sequence, idempotency_key, lane_key, work_class, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, card_role, target_role, selection_id, stream_page_index, stream_element_id, snapshot_revision, first_claimed_at ON outbound_replies
         WHEN OLD.first_claimed_at IS NOT NULL AND (
           NEW.payload IS NOT OLD.payload OR NEW.intent_json IS NOT OLD.intent_json OR NEW.intent_kind IS NOT OLD.intent_kind OR NEW.renderer_revision IS NOT OLD.renderer_revision
+          OR NEW.gateway_id IS NOT OLD.gateway_id OR NEW.gateway_profile_id IS NOT OLD.gateway_profile_id OR NEW.gateway_plan_json IS NOT OLD.gateway_plan_json OR NEW.gateway_plan_hash IS NOT OLD.gateway_plan_hash
           OR NEW.root_message_id IS NOT OLD.root_message_id OR ${groupTargetChanges}NEW.kind IS NOT OLD.kind OR NEW.view_version IS NOT OLD.view_version OR NEW.card_sequence IS NOT OLD.card_sequence
           OR NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.lane_key IS NOT OLD.lane_key OR NEW.work_class IS NOT OLD.work_class OR NEW.binding_id IS NOT OLD.binding_id OR NEW.prompt_id IS NOT OLD.prompt_id
           OR NEW.worker_turn_id IS NOT OLD.worker_turn_id OR NEW.worker_id IS NOT OLD.worker_id OR NEW.worker_session_generation IS NOT OLD.worker_session_generation

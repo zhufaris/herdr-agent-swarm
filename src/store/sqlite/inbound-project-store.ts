@@ -12,7 +12,7 @@ export class SqliteInboundProjectStore {
     return this.context.transaction(() => {
       if (this.database.prepare("SELECT 1 FROM inbound_messages WHERE event_id = ? OR message_id = ?").get(message.eventId, message.messageId)) return false;
       const timestamp = now();
-      return this.database.prepare(`INSERT INTO inbound_messages(event_id, message_id, payload_json, state, created_at, updated_at) VALUES (?, ?, ?, 'received', ?, ?)`).run(message.eventId, message.messageId, JSON.stringify(message), timestamp, timestamp).changes === 1;
+      return this.database.prepare(`INSERT INTO inbound_messages(event_id, gateway_id, message_id, payload_json, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'received', ?, ?)`).run(message.eventId, message.gatewayId ?? "feishu:primary", message.messageId, JSON.stringify(message), timestamp, timestamp).changes === 1;
     });
   }
 

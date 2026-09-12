@@ -5,6 +5,7 @@ import { CardOutboxMigrations } from "./migrations/card-outbox-migrations.js";
 import { PromptTurnMigrations } from "./migrations/prompt-turn-migrations.js";
 import { RetiredSchemaMigrations } from "./migrations/retired-schema-migrations.js";
 import { WorkerMigrations } from "./migrations/worker-migrations.js";
+import { GatewayMigrations } from "./migrations/gateway-migrations.js";
 
 export class SqliteMigrations {
   private readonly binding: BindingSessionMigrations;
@@ -12,6 +13,7 @@ export class SqliteMigrations {
   private readonly cards: CardOutboxMigrations;
   private readonly worker: WorkerMigrations;
   private readonly retired: RetiredSchemaMigrations;
+  private readonly gateway: GatewayMigrations;
 
   constructor(private readonly context: SqliteContext) {
     this.binding = new BindingSessionMigrations(context);
@@ -19,6 +21,7 @@ export class SqliteMigrations {
     this.cards = new CardOutboxMigrations(context);
     this.worker = new WorkerMigrations(context);
     this.retired = new RetiredSchemaMigrations(context);
+    this.gateway = new GatewayMigrations(context);
   }
 
   run(): void {
@@ -124,6 +127,7 @@ export class SqliteMigrations {
       } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
     }
     this.cards.ensureOutboundWorkClass();
+    this.gateway.ensureGatewayIdentityAndPlans();
     this.cards.ensureOutboundClaims();
     this.cards.ensureDeliveryRecoveries();
     this.cards.ensureAnswerRecoveryEvidence();
@@ -131,6 +135,11 @@ export class SqliteMigrations {
     this.cards.ensureWorkerThreadTargets();
     this.cards.ensureOutboundEffectCertainty();
     this.cards.ensureLarkDeliveryCooldown();
+    // Legacy outbox rebuilds above intentionally preserve their historical
+    // layouts. Re-apply additive Gateway columns and the claim immutability
+    // trigger after every possible rebuild so mixed-version databases converge.
+    this.gateway.ensureGatewayIdentityAndPlans();
+    this.cards.ensureOutboundClaims();
   }
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {

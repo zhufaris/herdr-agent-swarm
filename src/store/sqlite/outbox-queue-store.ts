@@ -33,6 +33,11 @@ export class SqliteOutboxQueueStore {
     const intentJson = input.intentJson ?? encoded.intentJson;
     const rendererRevision = input.rendererRevision ?? encoded.rendererRevision;
     const workClass = input.workClass ?? "live";
+    const gatewayId = input.gatewayId ?? "feishu:primary";
+    const gatewayProfileId = input.gatewayProfileId ?? "feishu-cardkit-v1";
+    const gatewayPlanJson = input.gatewayPlanJson ?? null;
+    const gatewayPlanHash = input.gatewayPlanHash ?? null;
+    const gatewayCheckpointJson = input.gatewayCheckpointJson ?? null;
     const rootMessageId = input.rootMessageId ?? null;
     const targetChatId = input.targetChatId ?? null;
     const threadAliasId = input.threadAliasId ?? null;
@@ -40,7 +45,7 @@ export class SqliteOutboxQueueStore {
     return this.context.transaction(() => {
       const existing = this.getByKey(input.idempotencyKey);
       if (existing) {
-        const same = existing.payload === input.payload && existing.intentJson === intentJson && existing.rendererRevision === rendererRevision && existing.rootMessageId === rootMessageId && existing.targetChatId === targetChatId && existing.threadAliasId === threadAliasId && existing.workerThreadId === workerThreadId && existing.kind === input.kind && existing.viewVersion === (input.viewVersion ?? null) && existing.cardSequence === (input.cardSequence ?? null);
+        const same = existing.gatewayId === gatewayId && existing.gatewayProfileId === gatewayProfileId && existing.gatewayPlanJson === gatewayPlanJson && existing.gatewayPlanHash === gatewayPlanHash && existing.gatewayCheckpointJson === gatewayCheckpointJson && existing.payload === input.payload && existing.intentJson === intentJson && existing.rendererRevision === rendererRevision && existing.rootMessageId === rootMessageId && existing.targetChatId === targetChatId && existing.threadAliasId === threadAliasId && existing.workerThreadId === workerThreadId && existing.kind === input.kind && existing.viewVersion === (input.viewVersion ?? null) && existing.cardSequence === (input.cardSequence ?? null);
         if (same) return existing;
         if (existing.workClass !== workClass) throw new Error("outbound_idempotency_conflict");
         if (existing.state !== "pending") return existing;
@@ -66,8 +71,8 @@ export class SqliteOutboxQueueStore {
         this.context.database.prepare("DELETE FROM outbound_replies WHERE prompt_id = ? AND root_message_id = ? AND kind = ? AND state = 'pending' AND first_claimed_at IS NULL AND attempt_count = 0 AND card_id_checkpoint IS NULL AND projection_key IS NULL AND card_role IS ? AND COALESCE(view_version, 0) < ?").run(input.promptId, rootMessageId, input.kind, input.cardRole ?? null, input.viewVersion);
       }
       this.context.database.prepare(`
-        INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, thread_alias_id, worker_thread_id, target_chat_id, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+        INSERT INTO outbound_replies(id, gateway_id, gateway_profile_id, gateway_plan_json, gateway_plan_hash, gateway_checkpoint_json, idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, stream_page_index, stream_element_id, card_role, target_role, thread_alias_id, worker_thread_id, target_chat_id, work_class, root_message_id, kind, payload, intent_kind, intent_json, renderer_revision, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
         ON CONFLICT(idempotency_key) DO UPDATE SET
           payload = CASE WHEN outbound_replies.state = 'pending' THEN excluded.payload ELSE outbound_replies.payload END,
           view_version = CASE WHEN outbound_replies.state = 'pending' THEN excluded.view_version ELSE outbound_replies.view_version END,
@@ -78,7 +83,7 @@ export class SqliteOutboxQueueStore {
           intent_json = CASE WHEN outbound_replies.state = 'pending' THEN excluded.intent_json ELSE outbound_replies.intent_json END,
           renderer_revision = CASE WHEN outbound_replies.state = 'pending' THEN excluded.renderer_revision ELSE outbound_replies.renderer_revision END,
           updated_at = CASE WHEN outbound_replies.state = 'pending' THEN excluded.updated_at ELSE outbound_replies.updated_at END
-      `).run(input.id, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, threadAliasId, workerThreadId, targetChatId, workClass, rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
+      `).run(input.id, gatewayId, gatewayProfileId, gatewayPlanJson, gatewayPlanHash, gatewayCheckpointJson, input.idempotencyKey, input.bindingId ?? null, input.promptId ?? null, input.workerTurnId ?? null, input.workerId ?? null, input.workerSessionGeneration ?? null, input.viewVersion ?? null, input.cardSequence ?? null, input.selectionId ?? null, streamMetadata.pageIndex, streamMetadata.elementId, input.cardRole ?? null, input.targetRole ?? null, threadAliasId, workerThreadId, targetChatId, workClass, rootMessageId, input.kind, input.payload, intentKind, intentJson, rendererRevision, laneKey, timestamp, timestamp, timestamp);
       const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(input.idempotencyKey) as OutboundReplyRow | undefined;
       if (!row) throw new Error(`Outbound reply not found: ${input.idempotencyKey}`);
       if (input.kind === "stream_card_create" && input.promptId) {
@@ -119,7 +124,7 @@ export class SqliteOutboxQueueStore {
       const fence = hasFence ? this.context.database.prepare("SELECT owner_id, fencing_token FROM temp.bridge_write_fence").get() as { owner_id: string; fencing_token: number } : null;
       const reply = mapOutboundReply(row);
       const attemptId = randomUUID();
-      const payloadHash = createHash("sha256").update(JSON.stringify([reply.idempotencyKey, reply.rootMessageId, reply.targetChatId, reply.threadAliasId, reply.workerThreadId, reply.kind, reply.payload, reply.intentKind, reply.intentJson, reply.rendererRevision, reply.viewVersion, reply.cardSequence, reply.workClass])).digest("hex");
+      const payloadHash = createHash("sha256").update(JSON.stringify([reply.gatewayId, reply.gatewayProfileId, reply.gatewayPlanJson, reply.gatewayPlanHash, reply.idempotencyKey, reply.rootMessageId, reply.targetChatId, reply.threadAliasId, reply.workerThreadId, reply.kind, reply.payload, reply.intentKind, reply.intentJson, reply.rendererRevision, reply.viewVersion, reply.cardSequence, reply.workClass])).digest("hex");
       this.context.database.prepare("UPDATE outbound_replies SET claim_attempt_id = ?, claimed_fence = ?, claimed_owner_id = ?, claimed_at = ?, first_claimed_at = COALESCE(first_claimed_at, ?), payload_hash = ? WHERE id = ?").run(attemptId, fence?.fencing_token ?? null, fence?.owner_id ?? null, now(), now(), payloadHash, id);
       return Object.freeze({ reply: Object.freeze(reply), attemptId, fencingToken: fence?.fencing_token ?? null, payloadHash, snapshotRevision: Number(row.snapshot_revision) });
     });
