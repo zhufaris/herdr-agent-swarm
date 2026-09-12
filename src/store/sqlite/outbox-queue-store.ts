@@ -8,6 +8,7 @@ import { encodeDeliveryIntent } from "../../domain/delivery-intent.js";
 import { outboundLaneKey } from "../outbox-lanes.js";
 import { mapOutboundReply, type OutboundReplyRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
+import type { SqliteLarkDeliveryCooldownStore } from "./lark-delivery-cooldown-store.js";
 
 export type EnqueueOutboundReplyInput = Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string };
 
@@ -18,7 +19,8 @@ export class SqliteOutboxQueueStore {
       getBinding(id: string): Binding | null;
       loadRunCard(promptId: string): RunCardView | null;
       loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
-    }
+    },
+    private readonly cooldown: SqliteLarkDeliveryCooldownStore
   ) {}
 
   enqueue(input: EnqueueOutboundReplyInput): OutboundReply {
@@ -109,6 +111,7 @@ export class SqliteOutboxQueueStore {
 
   claim(id: string, dueAt: string | null): OutboundDeliveryClaim | null {
     return this.context.transaction(() => {
+      if (this.cooldown.activeUntil()) return null;
       const row = this.context.database.prepare(`SELECT o.* FROM outbound_replies o JOIN outbox_lane_heads h ON h.reply_id = o.id WHERE o.id = ? AND o.state = 'pending' AND o.claim_attempt_id IS NULL AND (? IS NULL OR o.next_attempt_at <= ?) AND NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = o.lane_key AND active.claim_attempt_id IS NOT NULL)`).get(id, dueAt, dueAt) as OutboundReplyRow | undefined;
       if (!row) return null;
       const hasFence = this.context.database.prepare("SELECT 1 FROM sqlite_temp_master WHERE name = 'bridge_write_fence'").get();
@@ -150,6 +153,7 @@ export class SqliteOutboxQueueStore {
 
   listLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], workClass?: OutboundWorkClass): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
+    if (this.cooldown.activeUntil()) return [];
     const exclusions = excludedLaneKeys.length > 0 ? `AND h.lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
     const due = dueAt === null ? "" : "AND h.next_attempt_at <= ?";
     const classFilter = workClass ? "AND o.work_class = ?" : "";
@@ -162,7 +166,9 @@ export class SqliteOutboxQueueStore {
 
   getNextLaneHeadAttemptAt(): string | null {
     const row = this.context.database.prepare("SELECT MIN(h.next_attempt_at) AS next_attempt_at FROM outbox_lane_heads h WHERE NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = h.lane_key AND active.claim_attempt_id IS NOT NULL)").get() as { next_attempt_at: string | null };
-    return row.next_attempt_at;
+    if (!row.next_attempt_at) return null;
+    const cooldown = this.cooldown.activeUntil();
+    return cooldown && cooldown > row.next_attempt_at ? cooldown : row.next_attempt_at;
   }
 
   refreshLaneHead(laneKey: string): void {

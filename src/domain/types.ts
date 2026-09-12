@@ -154,6 +154,11 @@ export interface PromptLatencySummary {
   delivery: PromptLatencyPhaseSummary;
 }
 
+export interface LarkDeliveryCooldownSummary {
+  active: boolean; blockedUntil: string | null; remainingMs: number; triggerCount: number;
+  lastHttpStatus: number | null; lastLarkErrorCode: string | null; lastReason: string | null;
+}
+
 export interface OperationalSummary {
   bindings: Record<BindingState, number>;
   prompts: Record<PromptState, number>;
@@ -179,6 +184,7 @@ export interface OperationalSummary {
   unresolvedDeadLetters: number;
   unresolvedDeadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
   uncertainDeliveryEffects: number;
+  larkDeliveryCooldown: LarkDeliveryCooldownSummary;
   eligibleDeadLetterRecoveries: number;
   deliveryRecoveries: Record<"unresolved" | "replacement_pending" | "recovered" | "dismissed", number>;
   oldestPendingAt: string | null;

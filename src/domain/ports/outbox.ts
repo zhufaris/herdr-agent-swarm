@@ -1,4 +1,4 @@
-import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PromptJob, DeliveryFailureMetadata, OutboundWorkClass } from "../types.js";
+import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PromptJob, DeliveryFailureMetadata, LarkDeliveryCooldownSummary, OutboundWorkClass } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 
@@ -12,6 +12,7 @@ export interface OutboxStore {
   getBinding(id: string): Binding | null;
   isActiveBindingThreadAlias(bindingId: string, rootMessageId: string): boolean;
   getNextOutboundLaneHeadAttemptAt(): string | null;
+  getLarkDeliveryCooldown(): LarkDeliveryCooldownSummary;
   getPrompt(id: string): PromptJob | null;
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], workClass?: OutboundWorkClass): OutboundReply[];
   loadRunCard(promptId: string): RunCardView | null;

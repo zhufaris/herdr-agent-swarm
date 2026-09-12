@@ -1183,6 +1183,18 @@ exponential backoff. Existing shared reply lanes are migrated transactionally;
 dead-letter audit and quarantine state remain attached to the failed reply, and
 the migration never replays TraeX or Worker work.
 
+Because every delivery uses one configured Lark application identity and current
+429 responses do not expose a trustworthy narrower quota scope, a definite 429
+also extends one durable app-wide cooldown. The failed reply retry deadline and
+the cooldown are committed under the same claim fence. Lane selection and direct
+claim both reject new work until the deadline, so force scans and restarts cannot
+bypass the gate; already in-flight requests are allowed to settle. Multiple 429s
+can extend but never shorten the deadline. The next-wake query combines the
+earliest lane deadline with the active cooldown, and the dispatcher adds at most
+250 ms of local post-boundary jitter before normal work-conserving delivery
+resumes. The cooldown blocks only Lark delivery, remains visible in `/status`,
+and does not change readiness or Prompt/Worker scheduling.
+
 Permanent failures and transient failures that exhaust their single cooled
 recovery round are handled by a durable lane quarantine. Answer stream failures
 never allow a later content sequence or finish operation to skip the failed

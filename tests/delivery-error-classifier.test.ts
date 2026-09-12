@@ -55,4 +55,15 @@ describe("delivery error classifier", () => {
     const error = new DeliveryOperationError(context, Object.assign(new Error("timeout after acceptance"), { code: "ETIMEDOUT" }));
     expect(classifyDeliveryError(error)).toMatchObject({ failureClass: "unknown", effectCertainty: "uncertain", operationContext: context, message: "timeout after acceptance" });
   });
+
+  it.each([
+    ["7200", 3_600_000],
+    ["-1", undefined],
+    ["not-a-date", undefined]
+  ] as const)("bounds HTTP 429 Retry-After %s", (header, retryDelayMs) => {
+    const error = { response: { status: 429, headers: { "retry-after": header } } };
+    const classified = classifyDeliveryError(error, undefined, Date.parse("2026-09-12T00:00:00.000Z"));
+    expect(classified).toMatchObject({ failureClass: "transient", effectCertainty: "rejected", httpStatus: 429 });
+    expect(classified.retryDelayMs).toBe(retryDelayMs);
+  });
 });

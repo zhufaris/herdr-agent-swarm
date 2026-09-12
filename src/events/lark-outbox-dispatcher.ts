@@ -249,10 +249,12 @@ export class LarkOutboxDispatcher implements OutboxDispatcherControl, OutboundCh
     const nextAttemptAt = this.store.getNextOutboundLaneHeadAttemptAt();
     if (!nextAttemptAt) return;
     const dueAt = Date.parse(nextAttemptAt);
+    const cooldown = this.store.getLarkDeliveryCooldown();
+    const cooldownJitterMs = cooldown.active && cooldown.blockedUntil === nextAttemptAt ? Math.floor(Math.random() * 251) : 0;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.launchScan();
-    }, Math.max(LarkOutboxDispatcher.SCAN_RETRY_BASE_MS, dueAt - Date.now()));
+    }, Math.max(LarkOutboxDispatcher.SCAN_RETRY_BASE_MS, dueAt - Date.now() + cooldownJitterMs));
     this.retryTimer.unref?.();
   }
 

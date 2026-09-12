@@ -2,6 +2,7 @@ import type { AttachmentState, SessionLifecycle } from "../../domain/pane-thread
 import type { BindingState, DeliveryFailureClass, OperationalSummary, OutboundReply, OutboundReplyState, OutboxLaneClass, PromptState, RetiredPaneCleanupState, SessionOperationState, SqliteIntegrityInspection } from "../../domain/types.js";
 import { inspectSqliteIntegrity } from "../sqlite-integrity.js";
 import type { SqliteContext } from "./context.js";
+import { SqliteLarkDeliveryCooldownStore } from "./lark-delivery-cooldown-store.js";
 
 export class SqliteOperationsStore {
   constructor(private readonly context: SqliteContext) {}
@@ -14,6 +15,7 @@ export class SqliteOperationsStore {
     const promptLatencyWindowSize = 100;
     const observedAt = now();
     const stalledBefore = new Date(Date.parse(observedAt) - 300_000).toISOString();
+    const larkDeliveryCooldown = new SqliteLarkDeliveryCooldownStore(this.context).snapshot(observedAt);
     const groupedCounts = <T extends string>(table: string, column: string, values: readonly T[]): Record<T, number> => {
       const result = Object.fromEntries(values.map((value) => [value, 0])) as Record<T, number>;
       const rows = this.context.database.prepare(`SELECT ${column} AS value, COUNT(*) AS count FROM ${table} GROUP BY ${column}`).all() as Array<{ value: T; count: number }>;
@@ -104,14 +106,15 @@ export class SqliteOperationsStore {
         oldestAcceptedAgeSeconds: oldestAcceptedSessionOperation.value === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(oldestAcceptedSessionOperation.value)) / 1_000))
       },
       workerThreads: groupedCounts("worker_session_threads", "state", ["legacy-unpublished", "reserving", "active", "stale"]),
-      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, uncertainDeliveryEffects: Number(uncertainDeliveryEffects.count), eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
+      outbound, pendingOutbox: outbound.pending, deadLetters: outbound.dead_letter, deadLettersByClass, unresolvedDeadLetters, unresolvedDeadLettersByClass, uncertainDeliveryEffects: Number(uncertainDeliveryEffects.count), larkDeliveryCooldown, eligibleDeadLetterRecoveries: Number(eligibleRecoveries.count), oldestPendingAt: oldestPending.value,
       deliveryRecoveries: groupedCounts("delivery_recoveries", "state", ["unresolved", "replacement_pending", "recovered", "dismissed"]),
       outboxLanes: {
-        pending: Number(laneHealth.pending), eligible: Number(laneHealth.eligible ?? 0), blocked: Number(laneHealth.blocked ?? 0),
-        nextAttemptAt: laneHealth.next_attempt_at, oldestHeadAt: laneHealth.oldest_head_at,
+        pending: Number(laneHealth.pending), eligible: larkDeliveryCooldown.active ? 0 : Number(laneHealth.eligible ?? 0),
+        blocked: larkDeliveryCooldown.active ? Number(laneHealth.pending) : Number(laneHealth.blocked ?? 0),
+        nextAttemptAt: larkDeliveryCooldown.active && Number(laneHealth.pending) > 0 ? larkDeliveryCooldown.blockedUntil : laneHealth.next_attempt_at, oldestHeadAt: laneHealth.oldest_head_at,
         oldestHeadAgeSeconds: laneHealth.oldest_head_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_head_at)) / 1_000)),
-        stalled: Number(laneHealth.stalled ?? 0),
-        oldestStalledAgeSeconds: laneHealth.oldest_stalled_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_stalled_at)) / 1_000))
+        stalled: larkDeliveryCooldown.active ? 0 : Number(laneHealth.stalled ?? 0),
+        oldestStalledAgeSeconds: larkDeliveryCooldown.active || laneHealth.oldest_stalled_at === null ? null : Math.max(0, Math.floor((Date.parse(observedAt) - Date.parse(laneHealth.oldest_stalled_at)) / 1_000))
       },
       outboxQuarantines: {
         active: quarantineStates.active, released: quarantineStates.released, byLaneClass: quarantinesByLaneClass, byFailureClass: quarantinesByFailureClass,

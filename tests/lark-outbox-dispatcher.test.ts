@@ -805,6 +805,68 @@ describe("Lark channel publisher", () => {
     vi.useRealTimers();
   });
 
+  it("blocks independent lanes after 429 and resumes automatically at the app cooldown", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const calls: string[] = [];
+    let limited = true;
+    const replyCard = vi.fn(async (rootMessageId: string) => {
+      calls.push(rootMessageId);
+      if (rootMessageId === "root-1" && limited) throw Object.assign(new Error("rate limited"), { response: { status: 429, headers: { "retry-after": "5" } } });
+      return { messageId: `message-${rootMessageId}` };
+    });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyCard }), pino({ enabled: false }));
+
+    await connectedWriter(store, publisher).enqueueCard("root-1", "limited", {});
+    store.enqueueOutboundReply({ id: "independent", idempotencyKey: "independent", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
+    await publisher.requestScan(true);
+    expect(calls).toEqual(["root-1"]);
+
+    limited = false;
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toEqual(["root-1"]);
+    await vi.advanceTimersByTimeAsync(251);
+    await vi.waitFor(() => expect(calls).toEqual(expect.arrayContaining(["root-1", "root-2"])));
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+
+    await publisher.stop();
+    random.mockRestore();
+    store.close();
+    vi.useRealTimers();
+  });
+
+  it("restores the app cooldown timer after dispatcher restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const directory = mkdtempSync(join(tmpdir(), "herdr-dispatch-cooldown-"));
+    const path = join(directory, "bridge.db");
+    let store = new SqliteBindingStore(path);
+    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.enqueueOutboundReply({ id: "independent", idempotencyKey: "independent", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
+    const claim = store.claimOutboundReply("limited", null)!;
+    store.markOutboundReplyFailedWithQuarantine(claim, "rate limited", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: null }, 5_000);
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const replyCard = vi.fn(async (rootMessageId: string) => ({ messageId: `message-${rootMessageId}` }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyCard }), pino({ enabled: false }));
+    publisher.start();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(replyCard).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(251);
+    await vi.waitFor(() => expect(replyCard).toHaveBeenCalledTimes(2));
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+
+    await publisher.stop();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+    random.mockRestore();
+    vi.useRealTimers();
+  });
+
   it("automatically reopens one cooled transient dead letter and delivers it without another recovery round", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));

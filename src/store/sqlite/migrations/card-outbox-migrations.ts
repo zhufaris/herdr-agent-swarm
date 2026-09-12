@@ -551,6 +551,17 @@ export class CardOutboxMigrations {
     this.context.database.exec("CREATE INDEX IF NOT EXISTS outbound_replies_effect_certainty ON outbound_replies(state, effect_certainty, dead_lettered_at)");
   }
 
+  ensureLarkDeliveryCooldown(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS lark_delivery_cooldowns(
+        scope TEXT PRIMARY KEY CHECK(scope = 'app'), blocked_until TEXT NOT NULL,
+        trigger_count INTEGER NOT NULL CHECK(trigger_count >= 1), last_http_status INTEGER, last_lark_error_code TEXT,
+        last_reason TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+    `);
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (38)").run();
+  }
+
   ensureDualRequestCardColumns(): void {
     const columns = this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     const names = new Set(columns.map((column) => column.name));

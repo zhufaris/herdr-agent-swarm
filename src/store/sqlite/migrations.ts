@@ -130,6 +130,7 @@ export class SqliteMigrations {
     this.cards.ensureGroupCardCreates();
     this.cards.ensureWorkerThreadTargets();
     this.cards.ensureOutboundEffectCertainty();
+    this.cards.ensureLarkDeliveryCooldown();
   }
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {

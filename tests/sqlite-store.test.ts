@@ -34,7 +34,7 @@ describe("SQLite store", () => {
       expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
       expect(store.markOutboundReplyDelivered("first", "message")).toBe(false);
       expect(store.checkpointOutboundReplyCard(first, "card")).not.toBeNull();
-      expect(store.markOutboundReplyFailedWithQuarantine(first, "temporary", { failureClass: "transient", httpStatus: 429, larkErrorCode: null })).not.toBeNull();
+      expect(store.markOutboundReplyFailedWithQuarantine(first, "temporary", { failureClass: "transient", httpStatus: 503, larkErrorCode: null })).not.toBeNull();
       const retry = store.claimOutboundReply("first", null)!;
       expect(retry.attemptId).not.toBe(first.attemptId);
       expect(retry.payloadHash).toBe(first.payloadHash);
@@ -4284,6 +4284,91 @@ describe("SQLite store", () => {
 
     random.mockRestore();
     vi.useRealTimers();
+  });
+
+  it("persists an app-wide 429 cooldown across lanes and restart", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-lark-cooldown-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "independent", idempotencyKey: "independent", rootMessageId: "card-2", kind: "card_update", payload: "{}" });
+    const claim = store.claimOutboundReply("limited", null)!;
+
+    expect(store.markOutboundReplyFailedWithQuarantine(claim, "rate limited Authorization: Bearer top-secret", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: "99991400" }, 7_000)).toMatchObject({
+      action: "retry", reply: { nextAttemptAt: "2026-09-12T00:00:07.000Z" }
+    });
+    expect(store.database.prepare("SELECT scope, blocked_until, trigger_count, last_http_status, last_lark_error_code, last_reason FROM lark_delivery_cooldowns").get()).toEqual({
+      scope: "app", blocked_until: "2026-09-12T00:00:07.000Z", trigger_count: 1, last_http_status: 429, last_lark_error_code: "99991400", last_reason: "rate limited Authorization: Bearer [REDACTED]"
+    });
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.claimOutboundReply("independent", null)).toBeNull();
+    expect(store.getNextOutboundLaneHeadAttemptAt()).toBe("2026-09-12T00:00:07.000Z");
+    expect(store.getOperationalSummary()).toMatchObject({
+      larkDeliveryCooldown: { active: true, blockedUntil: "2026-09-12T00:00:07.000Z", remainingMs: 7_000, triggerCount: 1, lastHttpStatus: 429, lastLarkErrorCode: "99991400", lastReason: "rate limited Authorization: Bearer [REDACTED]" },
+      outboxLanes: { pending: 2, eligible: 0, blocked: 2, nextAttemptAt: "2026-09-12T00:00:07.000Z", stalled: 0, oldestStalledAgeSeconds: null }
+    });
+    store.close(); store = new SqliteBindingStore(path);
+    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+
+    vi.setSystemTime(new Date("2026-09-12T00:00:07.000Z"));
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["limited", "independent"]);
+    expect(store.getOperationalSummary().larkDeliveryCooldown).toMatchObject({ active: false, remainingMs: 0, triggerCount: 1 });
+    expect(store.claimOutboundReply("independent", null)).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("extends an app cooldown monotonically and ignores stale 429 receipts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["first", "second", "stale"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: `card-${id}`, kind: "card_update", payload: "{}" });
+    const first = store.claimOutboundReply("first", null)!;
+    const second = store.claimOutboundReply("second", null)!;
+    const stale = store.claimOutboundReply("stale", null)!;
+    expect(store.markOutboundReplyFailedWithQuarantine(stale, "temporary", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 503, larkErrorCode: null })).not.toBeNull();
+    const current = store.claimOutboundReply("stale", null)!;
+
+    store.markOutboundReplyFailedWithQuarantine(first, "seven seconds", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: "rate" }, 7_000);
+    store.markOutboundReplyFailedWithQuarantine(second, "three seconds", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: "rate" }, 3_000);
+    expect(store.markOutboundReplyFailedWithQuarantine(stale, "stale twelve seconds", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: "rate" }, 12_000)).toBeNull();
+    expect(store.database.prepare("SELECT blocked_until, trigger_count, last_reason FROM lark_delivery_cooldowns WHERE scope = 'app'").get()).toEqual({
+      blocked_until: "2026-09-12T00:00:07.000Z", trigger_count: 2, last_reason: "three seconds"
+    });
+    expect(store.getOutboundReply(current.reply.id)).toMatchObject({ state: "pending", attemptCount: 1, httpStatus: 503 });
+    vi.useRealTimers();
+  });
+
+  it("rolls back reply settlement when the 429 cooldown cannot be persisted", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", rootMessageId: "card", kind: "card_update", payload: "{}" });
+    const claim = store.claimOutboundReply("limited", null)!;
+    store.database.exec("CREATE TRIGGER reject_lark_cooldown BEFORE INSERT ON lark_delivery_cooldowns BEGIN SELECT RAISE(ABORT, 'cooldown_write_failed'); END");
+
+    expect(() => store!.markOutboundReplyFailedWithQuarantine(claim, "rate limited", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: null }, 5_000)).toThrow("cooldown_write_failed");
+    expect(store.getOutboundReply("limited")).toMatchObject({ state: "pending", attemptCount: 0, error: null });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM lark_delivery_cooldowns").get()).toEqual({ count: 0 });
+    store.database.exec("DROP TRIGGER reject_lark_cooldown");
+    expect(store.markOutboundReplyDelivered(claim, "message")).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("migrates the app cooldown table idempotently without changing outbox state", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-lark-cooldown-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.enqueueOutboundReply({ id: "pending", idempotencyKey: "pending", rootMessageId: "card", kind: "card_update", payload: "{}" });
+    store.database.exec("DROP TABLE lark_delivery_cooldowns; DELETE FROM schema_migrations WHERE version = 38");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 38").get()).toEqual({ version: 38 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM lark_delivery_cooldowns").get()).toEqual({ count: 0 });
+    expect(store.listPendingOutboundReplies()).toMatchObject([{ id: "pending", state: "pending" }]);
+    store.close(); store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 38").get()).toEqual({ count: 1 });
   });
 
   it("persists classified failures and reopens one cooled transient round only", () => {

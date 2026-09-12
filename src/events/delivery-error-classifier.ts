@@ -50,9 +50,9 @@ function retryAfterDelayMs(error: unknown, currentTime: number): number | undefi
   if (typeof header !== "string" && typeof header !== "number") return undefined;
   const value = String(header).trim();
   const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.min(3_600_000, Math.round(seconds * 1_000)) : undefined;
   const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? Math.max(0, timestamp - currentTime) : undefined;
+  return Number.isFinite(timestamp) ? Math.min(3_600_000, Math.max(0, timestamp - currentTime)) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }

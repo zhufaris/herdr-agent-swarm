@@ -29,6 +29,7 @@ export class SqliteOutboxCapabilityStore implements OutboxStore {
   getBinding(id: string): ReturnType<OutboxStore["getBinding"]> { return this.bindings.getBinding(id); }
   isActiveBindingThreadAlias(bindingId: string, rootMessageId: string): boolean { return this.aliases.isActiveBindingRoot(bindingId, rootMessageId); }
   getNextOutboundLaneHeadAttemptAt(): string | null { return this.outbox.getNextOutboundLaneHeadAttemptAt(); }
+  getLarkDeliveryCooldown(): ReturnType<OutboxStore["getLarkDeliveryCooldown"]> { return this.outbox.getLarkDeliveryCooldown(); }
   getPrompt(id: string): ReturnType<OutboxStore["getPrompt"]> { return this.prompts.getPrompt(id); }
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], workClass?: import("../../domain/types.js").OutboundWorkClass): OutboundReply[] { return this.outbox.listOutboundLaneHeads(limit, dueAt, excludedLaneKeys, workClass); }
   loadRunCard(promptId: string): ReturnType<OutboxStore["loadRunCard"]> { return this.projections.loadRunCard(promptId); }

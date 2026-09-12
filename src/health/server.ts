@@ -79,6 +79,7 @@ export function startHealthServer(options: {
       const operationalDegraded = "error" in operational
         || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
         || operational.eligibleDeadLetterRecoveries > 0
+        || operational.larkDeliveryCooldown.active
         || operational.outboxQuarantines.active > 0
         || operational.outboxLanes.stalled > 0
         || operational.inbound.oldestPendingAgeSeconds !== null && operational.inbound.oldestPendingAgeSeconds >= 300;

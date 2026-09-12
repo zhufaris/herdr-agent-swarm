@@ -153,6 +153,11 @@ export function createLatestSchema(context: SqliteContext): void {
     failure_class TEXT CHECK(failure_class IN ('transient','permanent','unknown')), effect_certainty TEXT CHECK(effect_certainty IN ('not-started','rejected','uncertain')), http_status INTEGER, lark_error_code TEXT, auto_recovery_count INTEGER NOT NULL DEFAULT 0, dead_lettered_at TEXT,
     CHECK((kind = 'group_card_create' AND root_message_id IS NULL AND target_chat_id IS NOT NULL AND ((thread_alias_id IS NOT NULL AND worker_thread_id IS NULL) OR (thread_alias_id IS NULL AND worker_thread_id IS NOT NULL))) OR (kind != 'group_card_create' AND root_message_id IS NOT NULL AND target_chat_id IS NULL AND thread_alias_id IS NULL AND worker_thread_id IS NULL))
   );
+  CREATE TABLE IF NOT EXISTS lark_delivery_cooldowns(
+    scope TEXT PRIMARY KEY CHECK(scope = 'app'), blocked_until TEXT NOT NULL,
+    trigger_count INTEGER NOT NULL CHECK(trigger_count >= 1), last_http_status INTEGER, last_lark_error_code TEXT,
+    last_reason TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
   CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert
   AFTER INSERT ON outbound_replies
   WHEN NEW.intent_json IS NULL

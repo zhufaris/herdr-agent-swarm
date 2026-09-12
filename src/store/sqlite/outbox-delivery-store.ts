@@ -9,6 +9,7 @@ import type { SqliteContext } from "./context.js";
 import type { SqliteOutboxQueueStore } from "./outbox-queue-store.js";
 import { confirmAnswerRecoveries, confirmDeliveryRecoveries } from "./delivery-recovery-evidence.js";
 import type { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
+import type { SqliteLarkDeliveryCooldownStore } from "./lark-delivery-cooldown-store.js";
 
 export class SqliteOutboxDeliveryStore {
   constructor(
@@ -23,7 +24,8 @@ export class SqliteOutboxDeliveryStore {
       persistBindingPatch(id: string, patch: Partial<Binding>): Binding;
       invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): unknown;
     },
-    private readonly workerThreads: SqliteWorkerSessionThreadStore
+    private readonly workerThreads: SqliteWorkerSessionThreadStore,
+    private readonly cooldown: SqliteLarkDeliveryCooldownStore
   ) {}
 
   markDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean {
@@ -145,8 +147,11 @@ export class SqliteOutboxDeliveryStore {
       const timestamp = now();
       const deadLetteredAt = attempts >= 5 ? timestamp : null;
       const certainty = deliveryEffectCertainty(metadata);
-      const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, next_attempt_at = ?, failure_class = ?, effect_certainty = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'`).run(attempts, boundedError(error), attempts, retryAt(attempts, retryDelayMs), metadata?.failureClass ?? "unknown", certainty, metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
-      return updated.changes === 1 ? this.queue.get(id) : null;
+      const nextAttemptAt = retryAt(attempts, retryDelayMs);
+      const updated = this.context.database.prepare(`UPDATE outbound_replies SET state = CASE WHEN ? >= 5 THEN 'dead_letter' ELSE state END, error = ?, attempt_count = ?, claim_attempt_id = NULL, claimed_fence = NULL, claimed_at = NULL, next_attempt_at = ?, failure_class = ?, effect_certainty = ?, http_status = ?, lark_error_code = ?, dead_lettered_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'`).run(attempts, boundedError(error), attempts, nextAttemptAt, metadata?.failureClass ?? "unknown", certainty, metadata?.httpStatus ?? null, metadata?.larkErrorCode ?? null, deadLetteredAt, timestamp, id);
+      if (updated.changes !== 1) return null;
+      if (metadata?.httpStatus === 429 && claim) this.cooldown.extend(nextAttemptAt, error, metadata, timestamp);
+      return this.queue.get(id);
     });
   }
 

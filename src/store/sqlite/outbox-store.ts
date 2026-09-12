@@ -11,6 +11,7 @@ import { SqliteOutboxRecoveryStore } from "./outbox-recovery-store.js";
 import { SqliteOutboxRetentionStore } from "./outbox-retention-store.js";
 import { SqliteBindingThreadAliasStore, type ReservePaneThreadAliasInput } from "./binding-thread-alias-store.js";
 import { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
+import { SqliteLarkDeliveryCooldownStore } from "./lark-delivery-cooldown-store.js";
 
 type Dependencies = {
   getBinding(id: string): Binding | null;
@@ -29,11 +30,13 @@ export class SqliteOutboxStore {
   private readonly delivery: SqliteOutboxDeliveryStore;
   private readonly recovery: SqliteOutboxRecoveryStore;
   private readonly retention: SqliteOutboxRetentionStore;
+  readonly cooldown: SqliteLarkDeliveryCooldownStore;
 
   constructor(context: SqliteContext, dependencies: Dependencies, private readonly threadAliases = new SqliteBindingThreadAliasStore(context), private readonly workerThreads = new SqliteWorkerSessionThreadStore(context)) {
-    this.queue = new SqliteOutboxQueueStore(context, dependencies);
+    this.cooldown = new SqliteLarkDeliveryCooldownStore(context);
+    this.queue = new SqliteOutboxQueueStore(context, dependencies, this.cooldown);
     this.workerThreads.connectOutbox((input) => this.queue.enqueue(input));
-    this.delivery = new SqliteOutboxDeliveryStore(context, this.queue, dependencies, this.workerThreads);
+    this.delivery = new SqliteOutboxDeliveryStore(context, this.queue, dependencies, this.workerThreads, this.cooldown);
     this.recovery = new SqliteOutboxRecoveryStore(context, this.queue, this.delivery, dependencies);
     this.retention = new SqliteOutboxRetentionStore(context);
   }
@@ -45,6 +48,7 @@ export class SqliteOutboxStore {
   dismissSupersededAnswerStream(replyId: string): boolean { return this.queue.dismissSupersededAnswerStream(replyId); }
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], workClass?: import("../../domain/types.js").OutboundWorkClass): OutboundReply[] { return this.queue.listLaneHeads(limit, dueAt, excludedLaneKeys, workClass); }
   getNextOutboundLaneHeadAttemptAt(): string | null { return this.queue.getNextLaneHeadAttemptAt(); }
+  getLarkDeliveryCooldown(): import("../../domain/types.js").LarkDeliveryCooldownSummary { return this.cooldown.snapshot(); }
   refreshOutboxLaneHead(laneKey: string): void { this.queue.refreshLaneHead(laneKey); }
   getOutboundReply(id: string): OutboundReply | null { return this.queue.get(id); }
   reservePaneThreadAlias(input: ReservePaneThreadAliasInput): "reserved" | "duplicate" | "stale" { return this.threadAliases.reserve(input, this.queue); }
