@@ -7,6 +7,7 @@ import type { SqliteOperationsStore } from "./operations-store.js";
 import type { SqlitePaneOperationStore } from "./pane-operation-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
+import type { SqlitePromptAcceptanceStore } from "./prompt-acceptance-store.js";
 import type { SqliteSessionOperationStore } from "./session-operation-store.js";
 import type { SqliteTurnControlStore } from "./turn-control-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
@@ -16,6 +17,7 @@ export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStor
     private readonly controls: SqliteTurnControlStore,
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly prompts: SqlitePromptStore,
+    private readonly promptAcceptance: SqlitePromptAcceptanceStore,
     private readonly instances: SqliteInstanceStore,
     private readonly workerTurns: SqliteWorkerTurnStore
   ) {}
@@ -37,7 +39,7 @@ export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStor
   acceptInstanceTurn: TurnControlWorkflowStore["acceptInstanceTurn"] = (input) => this.workerTurns.acceptInstanceTurn(input);
   acceptInstanceTurnWithCard: TurnControlWorkflowStore["acceptInstanceTurnWithCard"] = (input) => this.workerTurns.acceptInstanceTurnWithCard(input);
   countPendingInstanceTurns: TurnControlWorkflowStore["countPendingInstanceTurns"] = (id, generation) => this.workerTurns.countPendingInstanceTurns(id, generation);
-  acceptPrompt: TurnControlWorkflowStore["acceptPrompt"] = (input) => this.prompts.acceptPrompt(input);
+  acceptPrompt: TurnControlWorkflowStore["acceptPrompt"] = (input) => this.promptAcceptance.acceptPrompt(input);
   countPendingPrompts: TurnControlWorkflowStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
 }
 
@@ -46,6 +48,7 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
     private readonly paneOperations: SqlitePaneOperationStore,
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly prompts: SqlitePromptStore,
+    private readonly promptAcceptance: SqlitePromptAcceptanceStore,
     private readonly projections: SqliteProjectionStore,
     private readonly sessionOperations: SqliteSessionOperationStore,
     private readonly operations: SqliteOperationsStore
@@ -75,7 +78,7 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
   rejectAppliedPaneControlOperation: ModelSelectionStore["rejectAppliedPaneControlOperation"] = (id, detail) => this.paneOperations.rejectAppliedPaneControlOperation(id, detail);
   createCardInteraction: CardInteractionStore["createCardInteraction"] = (input) => this.sessionOperations.createInteraction(input);
   getCardInteraction: CardInteractionStore["getCardInteraction"] = (id) => this.sessionOperations.getInteraction(id);
-  acceptInterruptedContinuation: CardInteractionStore["acceptInterruptedContinuation"] = (input) => this.prompts.acceptInterruptedContinuation(input);
+  acceptInterruptedContinuation: CardInteractionStore["acceptInterruptedContinuation"] = (input) => this.promptAcceptance.acceptInterruptedContinuation(input);
   getPrompt: CardInteractionStore["getPrompt"] = (id) => this.prompts.getPrompt(id);
   loadRunCard: CardInteractionStore["loadRunCard"] = (id) => this.projections.loadRunCard(id);
   loadTopicView: CardInteractionStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);

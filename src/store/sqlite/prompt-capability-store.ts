@@ -6,20 +6,22 @@ import type { SqliteOperationsStore } from "./operations-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqlitePromptRecoveryStore } from "./prompt-recovery-store.js";
+import type { SqlitePromptAcceptanceStore } from "./prompt-acceptance-store.js";
 
 export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, PromptRunStore {
   constructor(
     private readonly prompts: SqlitePromptStore,
     private readonly recovery: SqlitePromptRecoveryStore,
+    private readonly acceptance: SqlitePromptAcceptanceStore,
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly bindingProjections: SqliteBindingProjectionStore,
     private readonly projections: SqliteProjectionStore,
     private readonly operations: SqliteOperationsStore
   ) {}
 
-  acceptPrompt(input: Parameters<PromptAcceptanceStore["acceptPrompt"]>[0]): ReturnType<PromptAcceptanceStore["acceptPrompt"]> { return this.prompts.acceptPrompt(input); }
-  acceptPromptWithEffects(input: Parameters<PromptAcceptanceStore["acceptPromptWithEffects"]>[0]): ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]> { return this.prompts.acceptPromptWithEffects(input); }
-  acceptInterruptedContinuation(input: Parameters<PromptAcceptanceStore["acceptInterruptedContinuation"]>[0]): ReturnType<PromptAcceptanceStore["acceptInterruptedContinuation"]> { return this.prompts.acceptInterruptedContinuation(input); }
+  acceptPrompt(input: Parameters<PromptAcceptanceStore["acceptPrompt"]>[0]): ReturnType<PromptAcceptanceStore["acceptPrompt"]> { return this.acceptance.acceptPrompt(input); }
+  acceptPromptWithEffects(input: Parameters<PromptAcceptanceStore["acceptPromptWithEffects"]>[0]): ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]> { return this.acceptance.acceptPromptWithEffects(input); }
+  acceptInterruptedContinuation(input: Parameters<PromptAcceptanceStore["acceptInterruptedContinuation"]>[0]): ReturnType<PromptAcceptanceStore["acceptInterruptedContinuation"]> { return this.acceptance.acceptInterruptedContinuation(input); }
   audit(input: Parameters<PromptAcceptanceStore["audit"]>[0]): void { this.operations.audit(input); }
   countPendingPrompts(bindingId: string): number { return this.prompts.countPendingPrompts(bindingId); }
 

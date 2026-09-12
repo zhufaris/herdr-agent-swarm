@@ -26,6 +26,7 @@ import type { SqliteWorkerTurnStore } from "../../src/store/sqlite/worker-turn-s
 import type { SqliteProjectionStore } from "../../src/store/sqlite/projection-store.js";
 import type { SqlitePromptStore } from "../../src/store/sqlite/prompt-store.js";
 import type { SqlitePromptRecoveryStore } from "../../src/store/sqlite/prompt-recovery-store.js";
+import type { SqlitePromptAcceptanceStore } from "../../src/store/sqlite/prompt-acceptance-store.js";
 import type { SqliteOutboxStore } from "../../src/store/sqlite/outbox-store.js";
 import type { SqliteInstanceStore } from "../../src/store/sqlite/instance-store.js";
 import type { SqliteCardContextStore } from "../../src/store/sqlite/card-context-store.js";
@@ -44,6 +45,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   private readonly projections: SqliteProjectionStore;
   private readonly prompts: SqlitePromptStore;
   private readonly promptRecovery: SqlitePromptRecoveryStore;
+  private readonly promptAcceptance: SqlitePromptAcceptanceStore;
   private readonly outbox: SqliteOutboxStore;
   private readonly instances: SqliteInstanceStore;
   private readonly cardContexts: SqliteCardContextStore;
@@ -65,6 +67,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.bindingProjections = this.graph.bindingProjections;
     this.prompts = this.graph.prompts;
     this.promptRecovery = this.graph.promptRecovery;
+    this.promptAcceptance = this.graph.promptAcceptance;
     this.workerTurns = this.graph.workerTurns;
     this.instances = this.graph.instances;
     this.cardContexts = this.graph.cardContexts;
@@ -508,19 +511,19 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   enqueuePrompt(input: Omit<PromptJob, "state" | "observationState" | "attemptCount" | "error" | "createdAt" | "updatedAt" | "priority" | "wasDetached" | "dispatchedAt" | "transcriptTurnId" | "transcriptTurnStartedAt" | "executionOrigin"> & Partial<Pick<PromptJob, "priority" | "wasDetached" | "executionOrigin">>): { prompt: PromptJob; inserted: boolean } {
-    return this.prompts.enqueuePrompt(input);
+    return this.promptAcceptance.enqueuePrompt(input);
   }
 
   acceptPrompt(input: AcceptPromptInput): { prompt: PromptJob; view: RunCardView; inserted: boolean } {
-    return this.prompts.acceptPrompt(input);
+    return this.promptAcceptance.acceptPrompt(input);
   }
 
   acceptPromptWithEffects(input: AcceptPromptInput): import("../domain/ports/prompt-acceptance.js").PromptAcceptanceReceipt {
-    return this.prompts.acceptPromptWithEffects(input);
+    return this.promptAcceptance.acceptPromptWithEffects(input);
   }
 
-  acceptInterruptedContinuation(input: Parameters<SqlitePromptStore["acceptInterruptedContinuation"]>[0]): ReturnType<SqlitePromptStore["acceptInterruptedContinuation"]> {
-    return this.prompts.acceptInterruptedContinuation(input);
+  acceptInterruptedContinuation(input: Parameters<SqlitePromptAcceptanceStore["acceptInterruptedContinuation"]>[0]): ReturnType<SqlitePromptAcceptanceStore["acceptInterruptedContinuation"]> {
+    return this.promptAcceptance.acceptInterruptedContinuation(input);
   }
 
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void {

@@ -260,6 +260,27 @@ describe("application composition boundaries", () => {
     expect(graph).toContain("new SqlitePromptRecoveryStore");
   });
 
+  it("keeps Primary prompt acceptance in one deep SQLite module", () => {
+    const prompt = readFileSync(new URL("../src/store/sqlite/prompt-store.ts", import.meta.url), "utf8");
+    const acceptancePath = new URL("../src/store/sqlite/prompt-acceptance-store.ts", import.meta.url);
+    expect(existsSync(acceptancePath)).toBe(true);
+    const acceptance = readFileSync(acceptancePath, "utf8");
+    const capability = readFileSync(new URL("../src/store/sqlite/prompt-capability-store.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    const acceptanceMethods = [
+      "enqueuePrompt", "acceptPrompt", "acceptPromptWithEffects",
+      "acceptInterruptedContinuation"
+    ];
+    for (const method of acceptanceMethods) {
+      expect(acceptance).toContain(`${method}(`);
+      expect(prompt).not.toContain(`${method}(`);
+    }
+    expect(acceptance).toContain("private readonly context: SqliteContext");
+    expect(capability).toContain("private readonly acceptance: SqlitePromptAcceptanceStore");
+    expect(capability).toContain("this.acceptance.");
+    expect(graph).toContain("new SqlitePromptAcceptanceStore");
+  });
+
   it("executes prompt acceptance effects only from a committed typed receipt", () => {
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const effects = readFileSync(new URL("../src/coordinator/prompt-acceptance-effects.ts", import.meta.url), "utf8");
