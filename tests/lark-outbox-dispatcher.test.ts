@@ -253,6 +253,27 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("does not rebuild a Main Card when a non-CardKit update returns a sequence conflict", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "main-1" });
+    store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 });
+    const conflict = Object.assign(new Error("sequence conflict"), { larkCode: 300317 });
+    const updateCard = vi.fn(async () => { throw conflict; });
+    const replyCard = vi.fn(async () => ({ messageId: "replacement-main" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard, replyCard }), pino({ enabled: false }));
+
+    await publisher.requestScan();
+
+    expect(updateCard).toHaveBeenCalledOnce();
+    expect(replyCard).not.toHaveBeenCalled();
+    expect(store.getBinding("b1")?.statusMessageId).toBe("main-1");
+    expect(store.database.prepare("SELECT kind, state, lark_error_code FROM outbound_replies").all()).toEqual([
+      { kind: "card_update", state: "dead_letter", lark_error_code: "300317" }
+    ]);
+    store.close();
+  });
+
   it("records only the explicit session-status reply as the binding status card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -521,6 +542,27 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("does not replace an Answer when stream finalization returns the closed-content code", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
+    const closed = Object.assign(new Error("streaming mode is closed"), { larkCode: 300309 });
+    const finishStreamingCard = vi.fn(async () => { throw closed; });
+    const replyStreamingCard = vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ finishStreamingCard, replyStreamingCard }), pino({ enabled: false }));
+
+    await connectedWriter(store, publisher).enqueueStreamFinish("b1", "p1", "cardkit-1", "Completed", 2);
+
+    expect(finishStreamingCard).toHaveBeenCalledOnce();
+    expect(replyStreamingCard).not.toHaveBeenCalled();
+    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "active", deliveryMode: "streaming", messageId: "answer-1" })]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, outboxQuarantines: { active: 1, byLaneClass: { answer_stream: 1 } } });
+    store.close();
+  });
+
   it("streams canonical content from the preserved offset after a lightweight startup replacement is delivered", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -639,6 +681,25 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("dead-letters content rejected by Lark on the first attempt", async () => {
+    const rejection = Object.assign(new Error("content rejected"), { response: { status: 400, data: { code: 230028 } } });
+    const replyCard = vi.fn(async () => { throw rejection; });
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyCard }), pino({ enabled: false }));
+
+    await connectedWriter(store, publisher).enqueueCard("root-1", "content-rejected", { schema: "2.0" });
+    await publisher.requestScan(true);
+
+    expect(replyCard).toHaveBeenCalledOnce();
+    const persisted = store.database.prepare("SELECT id FROM outbound_replies WHERE idempotency_key = ?").get("content-rejected") as { id: string };
+    expect(store.getOutboundReply(persisted.id)).toMatchObject({
+      state: "dead_letter", attemptCount: 1, failureClass: "permanent",
+      effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230028"
+    });
+    expect(store.getOperationalSummary().eligibleDeadLetterRecoveries).toBe(0);
+    store.close();
+  });
+
   it("dead-letters a stale continuation create without calling Lark or retrying", async () => {
     const create = vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }));
     const store = new SqliteBindingStore(":memory:");
@@ -702,7 +763,8 @@ describe("Lark channel publisher", () => {
 
   it("does not serialize Axios request details into delivery failure logs", async () => {
     const warn = vi.fn();
-    const logger = { warn, error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+    const error = vi.fn();
+    const logger = { warn, error, debug: vi.fn() } as unknown as Logger;
     const failure = Object.assign(new Error("Request failed with status code 400"), {
       code: "ERR_BAD_REQUEST",
       config: { headers: { Authorization: "Bearer top-secret" }, data: "private card payload" },
@@ -715,11 +777,12 @@ describe("Lark channel publisher", () => {
 
     await connectedWriter(store, publisher).enqueueCardUpdate(null, "card-1", "failure:safe-error", { secret: "private card payload" });
 
-    expect(warn).toHaveBeenCalledWith(expect.objectContaining({
-      event: "lark-outbox-retry-scheduled",
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({
+      event: "lark-outbox-dead-lettered", deliveryOperation: "update_card", deliveryTarget: "operation_result",
       err: { name: "Error", message: "Request failed with status code 400", code: "ERR_BAD_REQUEST", status: 400, larkCode: 230099 }
-    }), expect.any(String));
-    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/top-secret|private card payload|response body|Authorization|config|request|response/);
+    }), "Lark outbox reply was permanently rejected");
+    expect(warn).not.toHaveBeenCalled();
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/top-secret|private card payload|response body|Authorization|config|request|response/);
     await publisher.stop();
     store.close();
   });

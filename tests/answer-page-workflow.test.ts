@@ -97,7 +97,7 @@ describe("AnswerPageWorkflow", () => {
       const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
       await workflow.converge("p1");
       const failed = store.listPendingOutboundReplies()[0]!;
-      store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(failed.id, null)!, "closed", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300309" });
+      store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(failed.id, null)!, "closed", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300309", recoveryKind: "closed_answer_stream" });
       await workflow.converge("p1");
       const replacement = store.listPendingOutboundReplies()[0]!;
       store.markOutboundReplyDelivered(store.claimOutboundReply(replacement.id, null)!, "answer-2", "card-2");
@@ -120,6 +120,22 @@ describe("AnswerPageWorkflow", () => {
     } finally { store.close(); }
   });
 
+  it("does not infer closed-stream recovery from a raw Lark code", async () => {
+    const store = readyStore();
+    try {
+      store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "partial answer", answerSegments: ["partial answer"], viewVersion: 2 });
+      const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
+      await workflow.converge("p1");
+      const failed = store.listPendingOutboundReplies()[0]!;
+
+      expect(store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(failed.id, null)!, "closed", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "300309" })).toMatchObject({
+        action: "blocked", laneClass: "answer_stream"
+      });
+      expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "active", deliveryMode: "streaming", messageId: "answer-1" })]);
+      expect(store.listPendingOutboundReplies()).toEqual([]);
+    } finally { store.close(); }
+  });
+
   it("retains cross-page recovery links and coverage across reopen and outbox pruning", async () => {
     const directory = mkdtempSync(join(tmpdir(), "answer-evidence-"));
     const path = join(directory, "state.sqlite");
@@ -129,7 +145,7 @@ describe("AnswerPageWorkflow", () => {
       let workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
       await workflow.converge("p1");
       const failed = store.listPendingOutboundReplies()[0]!;
-      store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(failed.id, null)!, "closed", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300309" });
+      store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(failed.id, null)!, "closed", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300309", recoveryKind: "closed_answer_stream" });
       await workflow.converge("p1");
       const replacement = store.listPendingOutboundReplies()[0]!;
       store.markOutboundReplyDelivered(store.claimOutboundReply(replacement.id, null)!, "answer-2", "card-2");

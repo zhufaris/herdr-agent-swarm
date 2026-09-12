@@ -1204,6 +1204,18 @@ recovery or dismissal, not rows whose lane was merely released. The separate
 `deliveryRecoveries` counters retain unresolved/replacement-pending work even
 while a manual retry is pending; these counters do not yet change readiness.
 
+Semantic Lark recovery is authorized at the exact external-call boundary. The
+outbox executor associates each Lark port call with bounded operation and target
+enums; the delivery classifier combines those facts with the normalized business
+code. Only a Primary Main Card `updateCard`/`updateCardKit` rejection with
+`230099`, a Primary Main Card `updateCardKit` rejection with `300317`, or a
+Primary Answer `streamCardContent` rejection with `300309` can produce a semantic
+recovery kind. SQLite consumes that explicit kind and never infers recovery from
+the raw code. `230028` is a permanent content rejection of the current revision
+and is not automatically retried or rewritten. Nonmatching endpoints remain
+dead-lettered without rebuilding an unrelated card or Answer stream. Timeout and
+reset uncertainty takes precedence and remains blocked for operator inspection.
+
 An accepted delivery ACK also commits matching recovery evidence: the same
 failed row after retry, an explicitly linked Main Card rebuild in its original
 binding generation, or a later card update with matching target, lane, owning

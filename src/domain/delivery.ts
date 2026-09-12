@@ -5,6 +5,12 @@ export type OutboundWorkClass = "live" | "history";
 export type DeliveryFailureClass = "transient" | "permanent" | "unknown";
 export type DeliveryEffectCertainty = "not-started" | "rejected" | "uncertain";
 export type CardKitRecoveryKind = "closed_answer_stream" | "stale_main_card";
+export type LarkDeliveryOperation =
+  | "create_topic" | "update_card" | "update_cardkit"
+  | "create_streaming_card" | "reply_streaming_card_reference" | "reply_streaming_card"
+  | "stream_card_content" | "finish_streaming_card" | "reply_text" | "reply_card";
+export type LarkDeliveryTarget = "primary_main" | "primary_answer" | "worker_main" | "worker_turn" | "group_thread" | "operation_result";
+export interface DeliveryOperationContext { operation: LarkDeliveryOperation; target: LarkDeliveryTarget }
 export interface DeliveryFailureMetadata {
   failureClass: DeliveryFailureClass; httpStatus: number | null; larkErrorCode: string | null;
   effectCertainty?: DeliveryEffectCertainty;

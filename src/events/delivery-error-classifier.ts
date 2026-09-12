@@ -1,34 +1,43 @@
-import type { DeliveryEffectCertainty, DeliveryFailureMetadata } from "../domain/types.js";
+import type { DeliveryEffectCertainty, DeliveryFailureMetadata, DeliveryOperationContext } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { DeliveryOperationError } from "./delivery-operation-error.js";
 import { PermanentDeliveryError } from "./outbound-target-validation.js";
 
-export interface ClassifiedDeliveryFailure extends Omit<DeliveryFailureMetadata, "effectCertainty"> { effectCertainty: DeliveryEffectCertainty; message: string; retryDelayMs?: number }
+export interface ClassifiedDeliveryFailure extends Omit<DeliveryFailureMetadata, "effectCertainty"> { effectCertainty: DeliveryEffectCertainty; message: string; operationContext?: DeliveryOperationContext; retryDelayMs?: number }
 
-// CardKit documents these as invalid parameters, a missing entity, or an
-// expired entity. Repeating the same durable intent cannot repair the target.
-const PERMANENT_LARK_CODES = new Set(["10002", "200740", "200750"]);
+// Definite business rejections in this set cannot be repaired by repeating the
+// same durable revision. Matching operation contexts may authorize replacement.
+const PERMANENT_LARK_CODES = new Set(["10002", "200740", "200750", "230028", "230099", "300309", "300317"]);
 const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT"]);
-const CARDKIT_RECOVERY_KINDS = new Map([
-  ["300309", "closed_answer_stream"],
-  ["300317", "stale_main_card"]
-] as const);
 
-export function classifyDeliveryError(error: unknown, currentTime = Date.now()): ClassifiedDeliveryFailure {
-  const safe = safeLogError(error);
+export function classifyDeliveryError(error: unknown, context?: DeliveryOperationContext, currentTime = Date.now()): ClassifiedDeliveryFailure {
+  const operationContext = context ?? (error instanceof DeliveryOperationError ? error.context : undefined);
+  const cause = error instanceof DeliveryOperationError ? error.cause : error;
+  const safe = safeLogError(cause);
   const httpStatus = safe.status ?? null;
   const larkErrorCode = safe.larkCode === undefined ? null : String(safe.larkCode).slice(0, 128);
   const code = safe.code === undefined ? null : String(safe.code).toUpperCase();
-  const recoveryKind = larkErrorCode === "300309" || larkErrorCode === "300317" ? CARDKIT_RECOVERY_KINDS.get(larkErrorCode) : undefined;
-  const timeout = error instanceof Error && (error.name === "AbortError" || /timeout|timed out/i.test(error.message));
+  const recoveryKind = semanticRecoveryKind(larkErrorCode, operationContext);
+  const timeout = cause instanceof Error && (cause.name === "AbortError" || /timeout|timed out/i.test(cause.message));
   let failureClass: DeliveryFailureMetadata["failureClass"] = "unknown";
   let effectCertainty: DeliveryEffectCertainty = "uncertain";
-  if (error instanceof PermanentDeliveryError || httpStatus !== null || larkErrorCode !== null) effectCertainty = "rejected";
+  if (cause instanceof PermanentDeliveryError || httpStatus !== null || larkErrorCode !== null) effectCertainty = "rejected";
   else if (code !== null && PRE_CONNECT_CODES.has(code)) effectCertainty = "not-started";
-  if (error instanceof PermanentDeliveryError || recoveryKind !== undefined || larkErrorCode !== null && PERMANENT_LARK_CODES.has(larkErrorCode)) failureClass = "permanent";
+  if (cause instanceof PermanentDeliveryError || larkErrorCode !== null && PERMANENT_LARK_CODES.has(larkErrorCode)) failureClass = "permanent";
   else if (httpStatus === 429 || httpStatus !== null && httpStatus >= 500 || effectCertainty === "not-started") failureClass = "transient";
   else if (timeout || effectCertainty === "uncertain") failureClass = "unknown";
-  const retryDelayMs = httpStatus === 429 ? retryAfterDelayMs(error, currentTime) : undefined;
-  return { failureClass, effectCertainty, httpStatus, larkErrorCode, message: safe.message, ...(recoveryKind === undefined ? {} : { recoveryKind }), ...(retryDelayMs === undefined ? {} : { retryDelayMs }) };
+  const retryDelayMs = httpStatus === 429 ? retryAfterDelayMs(cause, currentTime) : undefined;
+  return { failureClass, effectCertainty, httpStatus, larkErrorCode, message: safe.message, ...(operationContext === undefined ? {} : { operationContext }), ...(recoveryKind === undefined ? {} : { recoveryKind }), ...(retryDelayMs === undefined ? {} : { retryDelayMs }) };
+}
+
+function semanticRecoveryKind(code: string | null, context?: DeliveryOperationContext): DeliveryFailureMetadata["recoveryKind"] {
+  if (!context) return undefined;
+  if (context.target === "primary_main" && (
+    code === "230099" && (context.operation === "update_card" || context.operation === "update_cardkit")
+    || code === "300317" && context.operation === "update_cardkit"
+  )) return "stale_main_card";
+  if (code === "300309" && context.target === "primary_answer" && context.operation === "stream_card_content") return "closed_answer_stream";
+  return undefined;
 }
 
 function retryAfterDelayMs(error: unknown, currentTime: number): number | undefined {

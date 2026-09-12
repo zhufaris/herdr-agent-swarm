@@ -238,7 +238,7 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 - [x] 阶段 C 次片：关闭的 Primary Answer stream 到单个静态替代页的内容覆盖证明，见第 8.5 节。
 - [ ] 阶段 C 剩余：跨多页覆盖合并、多代替代链、变更源内容的协调、Worker 覆盖证明、候选重扫、ledger 保留策略及 current/historical 健康分类。
 - [x] 阶段 D：移除整批 Promise.all 屏障、公平补位、持久化 live/history 工作分类与 3:1 配额，修复 R6，见第 8.6 节。
-- [ ] 阶段 E：跨 lane quota cooldown、端点错误语义、独立 in-flight/uncertain 指标和性能测量。
+- [ ] 阶段 E：端点错误语义已完成：语义恢复同时要求精确 Lark 调用和 durable target，SQLite 不再从裸错误码推断；`230028` 当前 revision 首次拒绝即终止。跨 lane quota cooldown、独立 in-flight 指标和性能测量仍待完成（uncertain effect 计数已实现）。
 - [x] 用户已授权并完成本地提交；发布与第 7 节在线验证仍需另行授权。
 
 卡片设计/可读性/稳定性优化和 instances 多 Agent 易用性优化已记为后续待办，先各自形成方案再实施；不扩入当前稳定性切片。当前本地完成状态不代表上线批准。
@@ -279,7 +279,7 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 - shutdown 立即停止新 claim，等待 active delivery 收敛。任一 checkpoint 变得 uncertain 时也停止补位，等待 sibling delivery 完成后再抛错，防止下一 scan 与残留请求叠加突破并发 4。
 - 独立 `card_reply` 属于独立 reply lane，没有跨消息完成顺序要求。因此第一条飞书发送阻塞时，第二条已持久化入站可以先完成；这不改变同一卡片/Answer element 的严格顺序。
 
-验证覆盖 R6 立即补位、3:1 history 配额、并发上限、同 lane 顺序、backoff、失败隔离、停止期间不 claim、checkpoint uncertain 等待 sibling、旧库 work-class 回填、claim 后禁止重分类和 no-op reopen。阶段 E 的 quota cooldown、端点错误语义与指标仍未实施。
+验证覆盖 R6 立即补位、3:1 history 配额、并发上限、同 lane 顺序、backoff、失败隔离、停止期间不 claim、checkpoint uncertain 等待 sibling、旧库 work-class 回填、claim 后禁止重分类和 no-op reopen。该段记录对应当时状态；阶段 E 的端点错误语义随后已实现，剩余项见 8.3。
 
 最新验证：`npm test` 161 文件、2,014 测试全部通过（16:50:17，16.89 秒）；`architecture:check` 291 个源码文件、`npm run typecheck`、`npm run build` 和 `git diff --check` 通过。build identity：`sha256:38e50ad6bb4d19884f8fa6339bfc767a1be0abcb22aa121c24c5daadfc3499c9`。变更仍未提交、安装、重启或投递到真实 Lark。
 
@@ -304,3 +304,9 @@ Primary Main、Primary Answer、Worker Main 和 Worker Task 统一采用“身�
 聚焦验证覆盖 6 个测试文件、139 项测试，包含四类卡片、Answer page workflow 和共享样式。最终全量结果见本节后续验证记录。
 
 最终验证：卡片相关 7 个测试文件、144 项测试通过；`npm test` 161 文件、2,026 项测试全部通过（18:06:03，18.06 秒）；`architecture:check`、`npm run typecheck`、`npm run build`、`git diff --check` 和 `v0.4.0` 本地 release SHA256 校验通过。build identity：`sha256:9bc64496b74a6f8fdc8ec54900d8a2c8de933f5d39fc17ab59a45bdca5a7bdda`。release staging 位于 `/tmp/herdr-card-readability-final-v040-wfENR6`；未提交、打 tag、发布、安装、重启或写入真实 Lark。
+
+### 8.9 Lark 端点错误语义（2026-09-12）
+
+每个 Lark port 调用现在携带有限枚举的 operation 与 durable target 上下文；分类器同时使用该上下文和安全归一化后的业务码决定恢复策略。只有匹配的 Primary Main `230099/300317` 与 Primary Answer content-stream `300309` 生成 recovery kind，SQLite 不再从裸错误码二次推断。`230028` 是当前 revision 的永久内容拒绝，第一次响应后立即 dead letter，不自动重试或改写。非匹配端点保持拒绝证据但不重建其它卡片，uncertain effect 仍优先进入 blocked quarantine。
+
+专项验证覆盖 classifier、Lark adapter、安全日志、dispatcher、Answer workflow 与 SQLite，共 6 个文件、391 项测试通过。最终全量 `npm test` 为 167 个文件、2,127 项测试通过；`architecture:check` 检查 303 个源码文件，`npm run typecheck`、`npm run build` 与 `git diff --check` 通过。build identity：`sha256:dadd807e46345f141e624362fdc7be41e00735a2c755a6b41f06c9887a3300da`。未安装、重启、部署或写入真实 Lark。

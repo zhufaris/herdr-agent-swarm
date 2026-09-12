@@ -79,6 +79,21 @@ describe("SQLite store", () => {
       expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "delivered", effectCertainty: null });
     });
 
+    it("does not let semantic recovery override an uncertain external effect", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+      store.updateBinding("b1", { statusMessageId: "main-1" });
+      store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
+      const failed = store.listPendingOutboundReplies()[0]!;
+      const claim = store.claimOutboundReply(failed.id, null)!;
+
+      expect(store.markOutboundReplyFailedWithQuarantine(claim, "ambiguous reset", { failureClass: "permanent", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: "300317", recoveryKind: "stale_main_card" })).toMatchObject({
+        state: "dead_letter", action: "blocked", reply: { failureClass: "unknown", effectCertainty: "uncertain" }
+      });
+      expect(store.getBinding("b1")?.statusMessageId).toBe("main-1");
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE kind = 'card_reply' AND state = 'pending'").get()).toEqual({ count: 0 });
+    });
+
     it("ignores an uncertain receipt from an earlier delivery attempt", () => {
       store = new SqliteBindingStore(":memory:");
       store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
@@ -274,7 +289,7 @@ describe("SQLite store", () => {
     store.updateBinding("b1", { statusMessageId: "locked-main" });
     store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
     const failed = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "300317" });
+    store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300317", recoveryKind: "stale_main_card" });
     const replacement = store.listPendingOutboundReplies()[0]!;
     expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { replacement_pending: 1 } });
     const first = store.claimOutboundReply(replacement.id, null)!;
@@ -294,7 +309,7 @@ describe("SQLite store", () => {
     store.updateBinding("b1", { statusMessageId: "locked-main" });
     store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
     const failed = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "300317" });
+    store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300317", recoveryKind: "stale_main_card" });
     const replacement = store.listPendingOutboundReplies()[0]!;
     const claim = store.claimOutboundReply(replacement.id, null)!;
     store.database.prepare("UPDATE bindings SET generation = generation + 1 WHERE id = 'b1'").run();
@@ -3974,7 +3989,7 @@ describe("SQLite store", () => {
     const third = { ...second, title: "Third", viewVersion: 3 };
     expect(store.reserveMainCard(third, "root-1", { version: 3 })).toBe("reserved");
 
-    expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "card action is lock", { failureClass: "unknown", httpStatus: 400, larkErrorCode: "230099" })).toMatchObject({
+    expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "card action is lock", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099", recoveryKind: "stale_main_card" })).toMatchObject({
       action: "rebuild_main", laneClass: "main_card", reply: { attemptCount: 1, state: "dead_letter" }
     });
     expect(store.getBinding("b1")?.statusMessageId).toBe("locked-main");
@@ -3982,6 +3997,21 @@ describe("SQLite store", () => {
       kind: "card_reply", targetRole: "session_status", rootMessageId: "root-1", viewVersion: 3, payload: JSON.stringify({ version: 3 })
     })]);
     expect(store.reserveMainCard({ ...third, title: "Fourth", viewVersion: 4 }, "root-1", { version: 4 })).toBe("waiting");
+  });
+
+  it("does not infer Main Card recovery from a raw Lark code", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    expect(store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 })).toBe("reserved");
+    const [failed] = store.listPendingOutboundReplies();
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "card action is lock", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" })).toMatchObject({
+      action: "released_newer_snapshot", laneClass: "main_card"
+    });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE kind = 'card_reply' AND state = 'pending'").get()).toEqual({ count: 0 });
+    expect(store.getBinding("b1")?.statusMessageId).toBe("locked-main");
   });
 
   it("releases only the newest coalesced replaceable-card successor", () => {
