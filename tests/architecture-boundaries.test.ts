@@ -281,6 +281,23 @@ describe("application composition boundaries", () => {
     expect(graph).toContain("new SqlitePromptAcceptanceStore");
   });
 
+  it("keeps external Primary turn adoption in one deep SQLite module", () => {
+    const prompt = readFileSync(new URL("../src/store/sqlite/prompt-store.ts", import.meta.url), "utf8");
+    const adoptionPath = new URL("../src/store/sqlite/external-turn-adoption-store.ts", import.meta.url);
+    expect(existsSync(adoptionPath)).toBe(true);
+    const adoption = readFileSync(adoptionPath, "utf8");
+    const capability = readFileSync(new URL("../src/store/sqlite/recovery-capability-store.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    for (const method of ["adoptExternalTurn", "getActiveExternalPrompt"]) {
+      expect(adoption).toContain(`${method}(`);
+      expect(prompt).not.toContain(`${method}(`);
+    }
+    expect(adoption).toContain("private readonly context: SqliteContext");
+    expect(capability).toContain("private readonly adoption: SqliteExternalTurnAdoptionStore");
+    expect(capability).toContain("this.adoption.");
+    expect(graph).toContain("new SqliteExternalTurnAdoptionStore");
+  });
+
   it("executes prompt acceptance effects only from a committed typed receipt", () => {
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const effects = readFileSync(new URL("../src/coordinator/prompt-acceptance-effects.ts", import.meta.url), "utf8");

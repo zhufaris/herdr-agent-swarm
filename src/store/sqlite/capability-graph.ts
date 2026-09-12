@@ -22,6 +22,7 @@ import { SqliteProjectionStore } from "./projection-store.js";
 import { SqlitePromptStore } from "./prompt-store.js";
 import { SqlitePromptRecoveryStore } from "./prompt-recovery-store.js";
 import { SqlitePromptAcceptanceStore } from "./prompt-acceptance-store.js";
+import { SqliteExternalTurnAdoptionStore } from "./external-turn-adoption-store.js";
 import { SqlitePromptCapabilityStore } from "./prompt-capability-store.js";
 import { SqliteHealthStoreAdapter, SqliteRetentionStoreAdapter, SqliteStoreLifecycleAdapter } from "./runtime-stores.js";
 import { SqliteSessionOperationStore } from "./session-operation-store.js";
@@ -47,6 +48,7 @@ export class SqliteCapabilityGraph {
   readonly prompts: SqlitePromptStore;
   readonly promptRecovery: SqlitePromptRecoveryStore;
   readonly promptAcceptance: SqlitePromptAcceptanceStore;
+  readonly externalTurnAdoption: SqliteExternalTurnAdoptionStore;
   readonly outbox: SqliteOutboxStore;
   readonly instances: SqliteInstanceStore;
   readonly cardContexts: SqliteCardContextStore;
@@ -114,6 +116,7 @@ export class SqliteCapabilityGraph {
       getBinding: (id) => this.bindings.getBinding(id),
       countPendingPrompts: (id) => this.prompts.countPendingPrompts(id)
     });
+    this.externalTurnAdoption = new SqliteExternalTurnAdoptionStore(this.context, this.projections, (id) => this.prompts.getPrompt(id));
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.instances.getAgentInstance(id),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
@@ -206,7 +209,7 @@ export class SqliteCapabilityGraph {
       startupRecovery: new SqliteStartupRecoveryCapabilityStore(routing, this.operations, (timestamp) => this.migrations.canonicalizeLegacyAnswerTargets(timestamp)),
       startupViews: new SqliteStartupViewCapabilityStore(this.bindings, this.prompts, this.projections, this.outbox),
       deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.projections, this.operations),
-      externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.bindings),
+      externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.externalTurnAdoption, this.bindings),
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.threadAliases, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox

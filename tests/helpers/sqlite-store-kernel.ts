@@ -27,6 +27,7 @@ import type { SqliteProjectionStore } from "../../src/store/sqlite/projection-st
 import type { SqlitePromptStore } from "../../src/store/sqlite/prompt-store.js";
 import type { SqlitePromptRecoveryStore } from "../../src/store/sqlite/prompt-recovery-store.js";
 import type { SqlitePromptAcceptanceStore } from "../../src/store/sqlite/prompt-acceptance-store.js";
+import type { SqliteExternalTurnAdoptionStore } from "../../src/store/sqlite/external-turn-adoption-store.js";
 import type { SqliteOutboxStore } from "../../src/store/sqlite/outbox-store.js";
 import type { SqliteInstanceStore } from "../../src/store/sqlite/instance-store.js";
 import type { SqliteCardContextStore } from "../../src/store/sqlite/card-context-store.js";
@@ -46,6 +47,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   private readonly prompts: SqlitePromptStore;
   private readonly promptRecovery: SqlitePromptRecoveryStore;
   private readonly promptAcceptance: SqlitePromptAcceptanceStore;
+  private readonly externalTurnAdoption: SqliteExternalTurnAdoptionStore;
   private readonly outbox: SqliteOutboxStore;
   private readonly instances: SqliteInstanceStore;
   private readonly cardContexts: SqliteCardContextStore;
@@ -68,6 +70,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.prompts = this.graph.prompts;
     this.promptRecovery = this.graph.promptRecovery;
     this.promptAcceptance = this.graph.promptAcceptance;
+    this.externalTurnAdoption = this.graph.externalTurnAdoption;
     this.workerTurns = this.graph.workerTurns;
     this.instances = this.graph.instances;
     this.cardContexts = this.graph.cardContexts;
@@ -149,7 +152,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
-    return this.prompts.getActiveExternalPrompt(bindingId, expectedGeneration);
+    return this.externalTurnAdoption.getActiveExternalPrompt(bindingId, expectedGeneration);
   }
 
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null { return this.workerTurns.claimNextInstanceTurn(instanceId, expectedGeneration); }
@@ -503,7 +506,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption {
-    return this.prompts.adoptExternalTurn(input);
+    return this.externalTurnAdoption.adoptExternalTurn(input);
   }
 
   recoverLegacyElementIdDeadLetters(): number {
