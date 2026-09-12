@@ -558,6 +558,23 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("extracts update_plan when wrapped plan fields use quoted JSON keys", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const input = 'const p = await tools.update_plan({explanation:"working",plan:[{"step":"Inspect live state","status":"completed"},{"step":"Deploy bridge","status":"in_progress"}]}); text(p);';
+    await appendFile(path, mutation([{
+      type: "function_call", id: "quoted-plan-wrapper", call_id: "quoted-plan-wrapper-call", name: "exec",
+      arguments: JSON.stringify({ input })
+    }]));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      answerDelta: "", mainStatus: { planSteps: [
+        { key: "plan:0", label: "Inspect live state", state: "done" },
+        { key: "plan:1", label: "Deploy bridge", state: "active" }
+      ] }
+    });
+  });
+
   it("reports per-turn token growth only when a baseline exists", async () => {
     const { root, path } = await createTranscript();
     await appendFile(path, eventMessage({ type: "token_count", info: { total_token_usage: { total_tokens: 10_000 } } }));
