@@ -10,3 +10,4 @@ export type { DatabaseIntegrityStore, HealthStore, LeaseStore } from "./ports/he
 export type { AdoptExternalTurnInput, CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore } from "./ports/workflow.js";
 export type { CommandIntentStore } from "./ports/swarm-command.js";
 export type { PanePresentation, PrimaryPresentation } from "./ports/presentation.js";
+export type { WorkerSessionThreadApplicationStore, WorkerSessionThreadDeliveryStore, WorkerSessionThreadLifecycleStore, WorkerSessionThreadProjectionStore, WorkerSessionThreadWorkflowPort, WorkerThreadPublicationDecision, WorkerThreadPublicationTarget, WorkerThreadResolution, WorkerThreadScope } from "./ports/worker-session-thread.js";

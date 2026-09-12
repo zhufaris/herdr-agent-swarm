@@ -64,17 +64,6 @@ export class WorkerLifecycleActions {
     if (instance.role !== "worker") return warning("仅支持管理 Worker；当前 Thread 是唯一 Primary。");
     if (bindingContext && bindingContext !== instance.projectId) return warning("实例不属于当前话题项目。");
     if (!this.options.context.contains(instance, conversationKey)) return warning("实例状态已变化，请刷新后重试。");
-    if (command.action === "worker_thread_send") {
-      if (instance.workerSessionGeneration !== command.workerSessionGeneration || !instance.parent) return warning("Worker Session 已变化，请刷新后重试。");
-      const view = this.options.store.loadWorkerMainView(instance.id, instance.workerSessionGeneration);
-      if (!view || view.parentBindingId !== instance.parent.bindingId || view.parentBindingGeneration !== (instance.parent.bindingGeneration ?? 1) || view.parentPaneId !== instance.parent.paneId) return warning("Worker Main 状态尚未就绪或已失效。");
-      const existing = this.options.store.loadWorkerSessionThread(instance.id, instance.workerSessionGeneration);
-      if (existing && existing.state !== "legacy-unpublished") return { toast: { type: existing.state === "stale" ? "warning" : "success", content: existing.state === "active" ? `Worker 对话已存在（${existing.rootMessageId ?? existing.id}）。` : existing.state === "reserving" ? "Worker 对话已受理；如未显示，请查看 `/swarm failures`。" : "Worker 对话已失效，请刷新实例目录。" } };
-      if (!view.messageId) return warning("Worker Main Card 正在创建，请稍后重试。");
-      const result = this.options.store.reserveWorkerSessionThread({ publicationKey: `worker-thread:${instance.id}:${instance.workerSessionGeneration}`, workerId: instance.id, workerSessionGeneration: instance.workerSessionGeneration, parentBindingId: view.parentBindingId, parentBindingGeneration: view.parentBindingGeneration, parentPaneId: view.parentPaneId, targetChatId: action.chatId, mode: "legacy-entry", sourceMainMessageId: view.messageId, actionMessageId: action.messageId, card: this.options.presentation.workerThreadEntry(view, new Date().toISOString()) });
-      if (result === "reserved") this.options.wakeOutbound?.();
-      return { toast: { type: result === "stale" ? "warning" : "success", content: result === "reserved" ? "已提交 Worker 卡片，将发送到群并创建独立对话。" : result === "duplicate" ? "Worker 对话已存在或正在创建。" : "Worker 状态已变化，请刷新实例目录。" } };
-    }
     if (command.action === "instance_open") return { card: this.options.views.detail(instance, conversationKey) };
     if (command.action === "instance_turn_open") {
       const turn = this.options.store.getInstanceTurn(command.turnId); const view = this.options.store.loadWorkerTurnCard(command.turnId);

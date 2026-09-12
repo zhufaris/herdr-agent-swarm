@@ -632,6 +632,16 @@ Sessions are classified as `legacy-unpublished` during upgrade without any Lark
 write. An explicit `/instances` action may turn that marker into one passive
 entry root while leaving the already delivered canonical Main Card untouched.
 
+The protocol is exposed through two deep modules.
+`WorkerSessionThreadWorkflow` owns scope precedence, thread-local commands,
+authorization, fixed-Worker submission, feedback cards, and legacy-entry callback
+behavior behind `handleMessage` and `publishFromCard`.
+`SqliteWorkerSessionThreadStore` owns tagged scope resolution, canonical/legacy
+publication decisions, delivery settlement, Main Card placement, and retirement.
+Ingress, instance interaction, card-context convergence, outbox delivery, and
+instance lifecycle consume semantic outcomes and do not interpret thread table
+states or repeat ownership SQL.
+
 Direct replies use the normalized Lark `parent_id`, not the topic root or selected
 Worker. A reply to the exact active card is rejected while runtime steering is
 unsupported. A reply

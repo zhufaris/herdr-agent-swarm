@@ -317,6 +317,7 @@ describe("application composition boundaries", () => {
       "prompt-run.ts",
       "turn-control.ts",
       "worker-card-display.ts",
+      "worker-session-thread.ts",
       "workflow.ts"
     ]);
   });
@@ -356,6 +357,24 @@ describe("application composition boundaries", () => {
     expect(facade).not.toContain("instance_plan_removal");
     expect(facade).not.toContain("instance_create_submit");
     expect(facade).not.toContain("decideWorkerCardBindingOwnership");
+  });
+
+  it("keeps Worker Session Thread protocol behind its deep modules", () => {
+    const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const instances = readFileSync(new URL("../src/coordinator/instance-interaction-workflow.ts", import.meta.url), "utf8");
+    const lifecycle = readFileSync(new URL("../src/coordinator/instance-interactions/worker-lifecycle-actions.ts", import.meta.url), "utf8");
+    const cardContext = readFileSync(new URL("../src/store/sqlite/card-context-store.ts", import.meta.url), "utf8");
+    const delivery = readFileSync(new URL("../src/store/sqlite/outbox-delivery-store.ts", import.meta.url), "utf8");
+    const store = readFileSync(new URL("../src/store/sqlite/worker-session-thread-store.ts", import.meta.url), "utf8");
+    expect(routing).toContain("workerSessionThreads.handleMessage(message)");
+    expect(routing).not.toContain("findWorkerSessionThread");
+    expect(instances).not.toContain("handleWorkerThreadMessage");
+    expect(lifecycle).not.toContain("legacy-unpublished");
+    expect(cardContext).toContain("reserveWorkerMainPlacement");
+    expect(cardContext).not.toContain("canonical-main");
+    expect(delivery).toContain("settlePublication");
+    expect(delivery).not.toContain("worker_session_threads");
+    expect(store).toContain("worker_session_threads");
   });
 
   it("routes every binding runtime transition through one converger", () => {

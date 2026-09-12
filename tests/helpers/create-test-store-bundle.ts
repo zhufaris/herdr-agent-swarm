@@ -13,7 +13,7 @@ export function createTestStoreBundle(path = ":memory:"): TestStoreBundle {
   Object.assign(driver,
     createOutboxTestDriver(modules.outboxAdmin),
     bindMethods(modules.outbox, ["enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
-    bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias", "reserveWorkerSessionThread", "loadWorkerSessionThread", "findWorkerSessionThreadByScope", "findWorkerSessionThreadRecordByScope"])
+    bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias"])
   );
   return {
     ...createCapabilities(driver, modules),
@@ -32,7 +32,7 @@ function createCapabilities(store: SqliteStoreKernel, modules = store.capability
     deliveryRecovery: store, cardInteraction: store, externalTurns: store,
     sessionOperations: modules.sessionOperations, modelSelection: store, sessionAdministration: store,
     paneRetention: store, commandIntents: modules.commandIntents, inboundMessages: store,
-    startupRecovery: store, startupViews: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
+    startupRecovery: store, startupViews: store, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay, workerSessionThreads: modules.workerSessionThreads
   };
 }
 

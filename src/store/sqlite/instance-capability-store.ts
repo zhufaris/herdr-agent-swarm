@@ -6,7 +6,6 @@ import type { SqliteInstanceStore } from "./instance-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
-import type { SqliteOutboxStore } from "./outbox-store.js";
 
 export class SqliteInstanceCapabilityStore implements InstanceStore {
   constructor(
@@ -16,8 +15,7 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
     private readonly cardContexts: SqliteCardContextStore,
     private readonly projections: SqliteProjectionStore,
     private readonly prompts: SqlitePromptStore,
-    private readonly operations: SqliteInstanceOperationStore,
-    private readonly outbox: SqliteOutboxStore
+    private readonly operations: SqliteInstanceOperationStore
   ) {}
 
   findBindingByLarkScope: InstanceStore["findBindingByLarkScope"] = (topicId, rootMessageId) => this.bindings.findBindingByLarkScope(topicId, rootMessageId);
@@ -94,9 +92,6 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   updateInstanceOperation: InstanceStore["updateInstanceOperation"] = (input) => this.operations.updateInstanceOperation(input);
   getConversationTarget: InstanceStore["getConversationTarget"] = (chatId) => this.operations.getConversationTarget(chatId);
   setConversationTarget: InstanceStore["setConversationTarget"] = (input) => this.operations.setConversationTarget(input);
-  reserveWorkerSessionThread: InstanceStore["reserveWorkerSessionThread"] = (input) => this.outbox.reserveWorkerSessionThread(input);
-  loadWorkerSessionThread: InstanceStore["loadWorkerSessionThread"] = (workerId, generation) => this.outbox.loadWorkerSessionThread(workerId, generation);
-  findWorkerSessionThreadByScope: InstanceStore["findWorkerSessionThreadByScope"] = (chatId, topicId, rootMessageId) => this.outbox.findWorkerSessionThreadByScope(chatId, topicId, rootMessageId);
 
   projectLegacyBindingAsAgentInstance: InstanceStore["projectLegacyBindingAsAgentInstance"] = (bindingId) => {
     const binding = this.bindings.getBinding(bindingId);

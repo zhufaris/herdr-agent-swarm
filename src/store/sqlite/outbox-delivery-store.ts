@@ -8,6 +8,7 @@ import { freezeRunCardWorkerContext } from "../../domain/run-card-view.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteOutboxQueueStore } from "./outbox-queue-store.js";
 import { confirmAnswerRecoveries, confirmDeliveryRecoveries } from "./delivery-recovery-evidence.js";
+import type { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
 
 export class SqliteOutboxDeliveryStore {
   constructor(
@@ -21,7 +22,8 @@ export class SqliteOutboxDeliveryStore {
       saveRunCard(view: RunCardView): RunCardView;
       persistBindingPatch(id: string, patch: Partial<Binding>): Binding;
       invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): unknown;
-    }
+    },
+    private readonly workerThreads: SqliteWorkerSessionThreadStore
   ) {}
 
   markDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean {
@@ -41,19 +43,11 @@ export class SqliteOutboxDeliveryStore {
         if (activated.changes !== 1) throw new Error("Group card thread alias is stale");
         this.context.database.prepare("INSERT OR IGNORE INTO bridge_messages(message_id, created_at) VALUES (?, ?)").run(messageId, now());
       }
-      let canonicalWorkerGroupCreate = false;
       if (row.kind === "group_card_create" && row.worker_thread_id) {
         if (!topicId || !row.worker_id || row.worker_session_generation === null) throw new Error("Worker group card delivery returned incomplete identity");
-        const thread = this.context.database.prepare("SELECT mode FROM worker_session_threads WHERE id = ? AND state = 'reserving'").get(row.worker_thread_id) as { mode: "canonical-main" | "legacy-entry" } | undefined;
-        if (!thread) throw new Error("Worker Session thread is stale");
-        const valid = this.context.database.prepare(`SELECT 1 FROM worker_session_threads thread JOIN agent_instances worker ON worker.id = thread.worker_id JOIN bindings binding ON binding.id = thread.parent_binding_id WHERE thread.id = ? AND thread.state = 'reserving' AND worker.role = 'worker' AND worker.worker_session_lifecycle = 'active' AND worker.worker_session_generation = thread.worker_session_generation AND worker.parent_binding_id = thread.parent_binding_id AND worker.parent_binding_generation = thread.parent_binding_generation AND worker.parent_pane_id = thread.parent_pane_id AND binding.chat_id = thread.chat_id AND binding.generation = thread.parent_binding_generation AND binding.pane_id = thread.parent_pane_id AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'`).get(row.worker_thread_id);
         const timestamp = now();
-        const activated = valid
-          ? this.context.database.prepare("UPDATE worker_session_threads SET topic_id = ?, root_message_id = ?, state = 'active', activated_at = ?, updated_at = ? WHERE id = ? AND state = 'reserving'").run(topicId, messageId, timestamp, timestamp, row.worker_thread_id)
-          : this.context.database.prepare("UPDATE worker_session_threads SET topic_id = ?, root_message_id = ?, state = 'stale', activated_at = ?, stale_at = ?, updated_at = ? WHERE id = ? AND state = 'reserving'").run(topicId, messageId, timestamp, timestamp, timestamp, row.worker_thread_id);
-        if (activated.changes !== 1) throw new Error("Worker Session thread is stale");
-        canonicalWorkerGroupCreate = thread.mode === "canonical-main" && Boolean(valid);
-        this.context.database.prepare("INSERT OR IGNORE INTO bridge_messages(message_id, created_at) VALUES (?, ?)").run(messageId, timestamp);
+        const settlement = this.workerThreads.settlePublication({ threadId: row.worker_thread_id, workerId: row.worker_id, workerSessionGeneration: row.worker_session_generation, viewVersion: row.view_version, messageId, cardId: cardId ?? null, topicId, occurredAt: timestamp });
+        if (settlement.invalidations.length > 0) this.dependencies.invalidateCardContexts(settlement.invalidations);
       }
       if (row.prompt_id) {
         if (row.card_role === "answer") {
@@ -105,9 +99,9 @@ export class SqliteOutboxDeliveryStore {
           }
         }
       }
-      if (row.worker_id && row.worker_session_generation !== null && (row.kind !== "group_card_create" || canonicalWorkerGroupCreate)) {
-        const messageCheckpoint = row.kind === "card_reply" || canonicalWorkerGroupCreate ? messageId : null;
-        const cardCheckpoint = row.kind === "card_reply" || canonicalWorkerGroupCreate ? cardId ?? null : null;
+      if (row.worker_id && row.worker_session_generation !== null && row.kind !== "group_card_create") {
+        const messageCheckpoint = row.kind === "card_reply" ? messageId : null;
+        const cardCheckpoint = row.kind === "card_reply" ? cardId ?? null : null;
         this.context.database.prepare(`UPDATE worker_main_views SET delivered_version = MAX(delivered_version, ?), message_id = COALESCE(?, message_id), card_id = COALESCE(?, card_id), state_json = json_set(state_json, '$.deliveredVersion', MAX(COALESCE(json_extract(state_json, '$.deliveredVersion'), 0), ?), '$.messageId', COALESCE(?, json_extract(state_json, '$.messageId')), '$.cardId', COALESCE(?, json_extract(state_json, '$.cardId'))), updated_at = ? WHERE worker_id = ? AND worker_session_generation = ?`).run(row.view_version ?? 0, messageCheckpoint, cardCheckpoint, row.view_version ?? 0, messageCheckpoint, cardCheckpoint, now(), row.worker_id, row.worker_session_generation);
         if (messageCheckpoint) {
           const main = this.dependencies.loadWorkerMainView(row.worker_id, row.worker_session_generation);

@@ -2,9 +2,8 @@
 
 ## Status
 
-Design approved in principle. This specification defines a behavior-preserving
-refactor of the implemented Worker Session Thread feature and awaits final user
-review before implementation planning.
+Implemented. Worker Session Thread application behavior and SQLite transitions
+now sit behind the deep-module interfaces described below.
 
 ## Goal
 

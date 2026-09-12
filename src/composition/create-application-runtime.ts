@@ -21,7 +21,7 @@ export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
   | "retiredPaneCleanup" | "bindingProvisioning" | "modelSelection" | "paneControl"
   | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose"
   | "paneRetention" | "sessionOperations" | "cardInteraction" | "runtimeReconciliation"
-  | "inboundRouting" | "commandIntents" | "instance"
+  | "inboundRouting" | "commandIntents" | "instance" | "workerSessionThreads"
   | "inboundDispatch" | "inboundMessages" | "startupRecovery" | "startupViews"
   | "answerPages" | "mainCards">;
 

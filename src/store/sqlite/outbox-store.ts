@@ -10,7 +10,7 @@ import { SqliteOutboxDeliveryStore } from "./outbox-delivery-store.js";
 import { SqliteOutboxRecoveryStore } from "./outbox-recovery-store.js";
 import { SqliteOutboxRetentionStore } from "./outbox-retention-store.js";
 import { SqliteBindingThreadAliasStore, type ReservePaneThreadAliasInput } from "./binding-thread-alias-store.js";
-import { SqliteWorkerSessionThreadStore, type ReserveWorkerSessionThreadInput } from "./worker-session-thread-store.js";
+import { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
 
 type Dependencies = {
   getBinding(id: string): Binding | null;
@@ -32,7 +32,8 @@ export class SqliteOutboxStore {
 
   constructor(context: SqliteContext, dependencies: Dependencies, private readonly threadAliases = new SqliteBindingThreadAliasStore(context), private readonly workerThreads = new SqliteWorkerSessionThreadStore(context)) {
     this.queue = new SqliteOutboxQueueStore(context, dependencies);
-    this.delivery = new SqliteOutboxDeliveryStore(context, this.queue, dependencies);
+    this.workerThreads.connectOutbox((input) => this.queue.enqueue(input));
+    this.delivery = new SqliteOutboxDeliveryStore(context, this.queue, dependencies, this.workerThreads);
     this.recovery = new SqliteOutboxRecoveryStore(context, this.queue, this.delivery, dependencies);
     this.retention = new SqliteOutboxRetentionStore(context);
   }
@@ -47,10 +48,6 @@ export class SqliteOutboxStore {
   refreshOutboxLaneHead(laneKey: string): void { this.queue.refreshLaneHead(laneKey); }
   getOutboundReply(id: string): OutboundReply | null { return this.queue.get(id); }
   reservePaneThreadAlias(input: ReservePaneThreadAliasInput): "reserved" | "duplicate" | "stale" { return this.threadAliases.reserve(input, this.queue); }
-  reserveWorkerSessionThread(input: ReserveWorkerSessionThreadInput): "reserved" | "duplicate" | "stale" { return this.workerThreads.reserve(input, this.queue); }
-  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number) { return this.workerThreads.loadBySession(workerId, workerSessionGeneration); }
-  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null) { return this.workerThreads.findActiveByScope(chatId, topicId, rootMessageId); }
-  findWorkerSessionThreadRecordByScope(chatId: string, topicId: string | null, rootMessageId: string | null) { return this.workerThreads.findByScope(chatId, topicId, rootMessageId); }
 
   claimOutboundReply(id: string, dueAt: string | null): OutboundDeliveryClaim | null { return this.queue.claim(id, dueAt); }
   markOutboundReplyDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean { return this.delivery.markDelivered(id, messageId, cardId, claim, topicId); }

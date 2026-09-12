@@ -7,39 +7,35 @@ import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("routes a fixed Worker Session thread before global commands or Primary binding lookup", async () => {
-    const thread = { id: "thread-1", workerId: "worker-1", workerSessionGeneration: 1, rootMessageId: "worker-root" };
-    const store = {
-      findWorkerSessionThreadByScope: vi.fn(() => thread), findWorkerSessionThreadRecordByScope: vi.fn(() => thread), findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false)
-    };
-    const instanceInteractions = { handleWorkerThreadMessage: vi.fn(async () => undefined), handleCommand: vi.fn() };
+    const store = { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => ({ handled: true as const, disposition: "command_completed" as const })) };
+    const instanceInteractions = { handleCommand: vi.fn(), handleOrdinaryMessage: vi.fn() };
     const swarmCommands = { handle: vi.fn() };
     const workflow = new InboundMessageRoutingWorkflow({
-      config: { projects: [], lark: { adminOpenIds: [] } }, store, instanceInteractions, swarmCommands, presentation: primaryPresentation, logger: pino({ enabled: false })
+      config: { projects: [], lark: { adminOpenIds: [] } }, store, instanceInteractions, workerSessionThreads, swarmCommands, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "worker-event", messageId: "worker-message", parentMessageId: null, chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "/status", mentionsBot: true, isRootMessage: false };
 
     await workflow.handle(message);
 
-    expect(instanceInteractions.handleWorkerThreadMessage).toHaveBeenCalledWith(message, thread);
+    expect(workerSessionThreads.handleMessage).toHaveBeenCalledWith(message);
     expect(instanceInteractions.handleCommand).not.toHaveBeenCalled();
     expect(swarmCommands.handle).not.toHaveBeenCalled();
   });
 
   it("rejects a known stale Worker thread instead of falling through to Primary or provisioning", async () => {
-    const stale = { id: "thread-old", workerId: "worker-old", workerSessionGeneration: 1, rootMessageId: "worker-root", state: "stale" };
     const outbound = { enqueueCard: vi.fn(async () => undefined) };
-    const store = {
-      findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => stale), findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false)
-    };
-    const instanceInteractions = { handleWorkerThreadMessage: vi.fn(), handleOrdinaryMessage: vi.fn() };
+    const store = { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => ({ handled: true as const, disposition: "rejected" as const })) };
+    const instanceInteractions = { handleOrdinaryMessage: vi.fn() };
     const provisioning = { selectProject: vi.fn() };
-    const workflow = new InboundMessageRoutingWorkflow({ config: { projects: [], lark: { adminOpenIds: [] } }, store, outbound, instanceInteractions, provisioning, presentation: primaryPresentation, logger: pino({ enabled: false }) } as never);
+    const workflow = new InboundMessageRoutingWorkflow({ config: { projects: [], lark: { adminOpenIds: [] } }, store, outbound, instanceInteractions, workerSessionThreads, provisioning, presentation: primaryPresentation, logger: pino({ enabled: false }) } as never);
     const message = { eventId: "stale-event", messageId: "stale-message", parentMessageId: null, chatId: "chat", topicId: "old-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
 
     await workflow.handle(message);
 
-    expect(outbound.enqueueCard).toHaveBeenCalledWith("worker-root", "rejected:stale-message", expect.any(Object));
-    expect(instanceInteractions.handleWorkerThreadMessage).not.toHaveBeenCalled();
+    expect(workerSessionThreads.handleMessage).toHaveBeenCalledWith(message);
+    expect(outbound.enqueueCard).not.toHaveBeenCalled();
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
     expect(provisioning.selectProject).not.toHaveBeenCalled();
   });
@@ -47,7 +43,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("routes an active-topic reply to the Primary FIFO without consulting Worker targeting", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
     const store = {
-      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => null),
+      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false),
       getConversationTarget: vi.fn(() => null),
       countPendingPrompts: vi.fn(() => 0),
       acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
@@ -68,7 +64,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("falls back to the active Primary FIFO when the replied card is not a Worker Task Card", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
     const store = {
-      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
+      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
       acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
@@ -87,7 +83,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("keeps a Lark-flattened Task Card reply on the Primary FIFO instead of guessing a Worker", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "primary-root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
     const store = {
-      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
+      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
       acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
@@ -112,7 +108,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleCommand: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null) },
+      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) },
       outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "/to test continue", mentionsBot: false, isRootMessage: true };
@@ -128,7 +124,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => { throw new InstanceTurnCapacityExceeded(); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null) },
+      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) },
       outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-full", messageId: "message-full", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "send to worker", mentionsBot: false, isRootMessage: true };
@@ -145,7 +141,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => { throw new InstanceTurnCapacityExceeded(); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), findWorkerSessionThreadByScope: vi.fn(() => null), findWorkerSessionThreadRecordByScope: vi.fn(() => null), getConversationTarget: vi.fn(() => null) },
+      store: { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) },
       outbound, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-full", messageId: "message-full", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "operator", text: "send to worker", mentionsBot: false, isRootMessage: true };

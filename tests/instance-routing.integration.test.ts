@@ -10,6 +10,7 @@ import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 import { parseCardActionCommand } from "../src/coordinator/card-action-command.js";
 import type { IncomingLarkCardAction } from "../src/domain/types.js";
+import { WorkerSessionThreadWorkflow } from "../src/coordinator/worker-session-thread-workflow.js";
 
 function handleCardAction(workflow: InstanceInteractionWorkflow, action: IncomingLarkCardAction) {
   const command = parseCardActionCommand(action.value, action.option);
@@ -56,8 +57,9 @@ function setup(adminOpenIds: readonly string[] = ["u1"]) {
   };
   let interaction = 0;
   const wakeOutbound = vi.fn();
-  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation, idFactory: () => `interaction-${++interaction}` });
-  return { create, workflow, outbound, messaging, control, wakeOutbound };
+  const workerSessionThreads = new WorkerSessionThreadWorkflow({ adminOpenIds, store: store.workerSessionThreads, messaging: messaging as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation });
+  const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation, idFactory: () => `interaction-${++interaction}`, workerSessionThreads });
+  return { create, workflow, workerSessionThreads, outbound, messaging, control, wakeOutbound };
 }
 
 function taskCard(instanceId: string, state: "queued" | "running" | "completed" | "failed" | "cancelled" | "dispatch-uncertain", turnId = `turn-${state}`) {
@@ -96,37 +98,35 @@ function renderedTaskCard(turnId: string): object {
 
 describe("instance routing", () => {
   it("routes ordinary Worker-thread text to the fixed session instead of a selected target", async () => {
-    const { create, workflow, messaging } = setup();
+    const { create, workerSessionThreads, messaging } = setup();
     let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker-thread", nativeSessionId: "worker-session" })!;
     const main = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "w1:worker-thread", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-11T00:00:00.000Z" });
     store!.saveWorkerMainView(main);
-    store!.reserveWorkerSessionThread({ publicationKey: "worker-thread:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", targetChatId: "chat", mode: "canonical-main", viewVersion: main.viewVersion, card: {} });
+    store!.workerSessionThreads.reserve({ publicationKey: "worker-thread:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", targetChatId: "chat", mode: "canonical-main", viewVersion: main.viewVersion, card: {} });
     const createReply = store!.listPendingOutboundReplies().find(({ workerThreadId }) => workerThreadId !== null)!;
     store!.markOutboundReplyDelivered(store!.claimOutboundReply(createReply.id, null)!, "worker-root", "worker-card", "worker-topic");
     store!.setConversationTarget({ chatId: "binding:binding-default", projectId: "p1", target: { kind: "primary" } });
     vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true } as never);
 
-    const thread = store!.findWorkerSessionThreadByScope("chat", "worker-topic", "worker-root")!;
-    await workflow.handleWorkerThreadMessage({ ...message("new review", "worker-message"), topicId: "worker-topic", rootMessageId: "worker-root" }, thread);
+    await workerSessionThreads.handleMessage({ ...message("new review", "worker-message"), topicId: "worker-topic", rootMessageId: "worker-root" });
 
     expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, content: { kind: "turn", text: "new review" }, source: { messageId: "worker-message", rootMessageId: "worker-root" } }));
   });
 
   it("uses exact active-turn identity for Worker-thread steer and stop", async () => {
-    const { create, workflow, messaging } = setup();
+    const { create, workerSessionThreads, messaging } = setup();
     const worker = create("reviewer", "worker");
     const task = taskCard(worker.id, "running", "thread-active-turn");
-    store!.reserveWorkerSessionThread({ publicationKey: "worker-entry:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", targetChatId: "chat", mode: "legacy-entry", sourceMainMessageId: task.mainCardMessageId, actionMessageId: "instances", card: {} });
+    store!.workerSessionThreads.reserve({ publicationKey: "worker-entry:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", targetChatId: "chat", mode: "legacy-entry", sourceMainMessageId: task.mainCardMessageId, actionMessageId: "instances", card: {} });
     const createReply = store!.listPendingOutboundReplies().find(({ workerThreadId }) => workerThreadId !== null)!;
     store!.markOutboundReplyDelivered(store!.claimOutboundReply(createReply.id, null)!, "worker-root", undefined, "worker-topic");
-    const thread = store!.findWorkerSessionThreadByScope("chat", "worker-topic", "worker-root")!;
     vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered", durableResult: true });
     vi.mocked(messaging.interrupt).mockResolvedValue({ status: "interrupted" });
 
-    await workflow.handleWorkerThreadMessage({ ...message("/steer inspect locking", "steer-message"), topicId: "worker-topic", rootMessageId: "worker-root" }, thread);
-    await workflow.handleWorkerThreadMessage({ ...message("/stop", "stop-message"), topicId: "worker-topic", rootMessageId: "worker-root" }, thread);
+    await workerSessionThreads.handleMessage({ ...message("/steer inspect locking", "steer-message"), topicId: "worker-topic", rootMessageId: "worker-root" });
+    await workerSessionThreads.handleMessage({ ...message("/stop", "stop-message"), topicId: "worker-topic", rootMessageId: "worker-root" });
 
     expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId, text: "inspect locking" }));
     expect(messaging.interrupt).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, targetTurnId: task.turnId }));

@@ -58,7 +58,7 @@ export class CardOutboxMigrations {
       for (const card of cards) {
         const canonical = answerElementId(card.prompt_id, Number(card.answer_page_index));
         if (canonical !== card.answer_element_id) this.context.database.prepare("UPDATE run_cards SET answer_element_id = ?, updated_at = ? WHERE prompt_id = ?").run(canonical, timestamp, card.prompt_id);
-        const replies = this.context.database.prepare("SELECT id, kind, payload FROM outbound_replies INDEXED BY outbound_replies_prompt_role_state WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter')").all(card.prompt_id) as Array<{ id: string; kind: string; payload: string }>;
+        const replies = this.context.database.prepare("SELECT id, kind, payload FROM outbound_replies INDEXED BY outbound_replies_prompt_role_state WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','dead_letter') AND first_claimed_at IS NULL").all(card.prompt_id) as Array<{ id: string; kind: string; payload: string }>;
         for (const reply of replies) {
           const payload = canonicalizeAnswerPayload(reply.kind, reply.payload, card.prompt_id, canonical);
           if (payload !== reply.payload) this.context.database.prepare("UPDATE outbound_replies SET payload = ?, updated_at = ? WHERE id = ?").run(payload, timestamp, reply.id);

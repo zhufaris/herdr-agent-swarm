@@ -14,6 +14,7 @@ import type { InboundMessageRoutingStore } from "../coordinator/inbound-message-
 import { SqliteCapabilityGraph } from "./sqlite/capability-graph.js";
 import type { SqliteContext } from "./sqlite/context.js";
 import type { SqliteLeaseStore } from "./sqlite/lease-store.js";
+import type { WorkerSessionThreadApplicationStore } from "../domain/ports/worker-session-thread.js";
 
 export interface SqliteStoreLifecycle {
   activateWriteFence(ownerId: string, fencingToken: number): void;
@@ -65,6 +66,7 @@ export interface SqliteStoreBundle {
   readonly startupViews: StartupViewStore;
   readonly retention: SqliteRetentionStore;
   readonly workerCardDisplay: WorkerCardDisplayStore;
+  readonly workerSessionThreads: WorkerSessionThreadApplicationStore;
 }
 
 export function createSqliteStoreBundle(path: string): SqliteStoreBundle {
@@ -87,6 +89,6 @@ function createSqliteStoreBundleFromGraph(graph: SqliteCapabilityGraph): SqliteS
     deliveryRecovery: modules.deliveryRecovery, cardInteraction: modules.cardInteraction, externalTurns: modules.externalTurns,
     sessionOperations: modules.sessionOperations, modelSelection: modules.modelSelection, sessionAdministration: modules.sessionAdministration,
     paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, inboundMessages: modules.inboundMessages,
-    startupRecovery: modules.startupRecovery, startupViews: modules.startupViews, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay
+    startupRecovery: modules.startupRecovery, startupViews: modules.startupViews, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay, workerSessionThreads: modules.workerSessionThreads
   };
 }

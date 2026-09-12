@@ -195,16 +195,15 @@ describe("SQLite store", () => {
     it("reserves and activates one canonical group-root Worker Main Card", () => {
       const view = activeWorkerStore(null);
       const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
-      expect(store!.reserveWorkerSessionThread(input)).toBe("reserved");
-      expect(store!.reserveWorkerSessionThread(input)).toBe("duplicate");
+      expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
+      expect(store!.workerSessionThreads.reserve(input)).toBe("duplicate");
       const [reply] = store!.listPendingOutboundReplies();
       expect(reply).toMatchObject({ kind: "group_card_create", rootMessageId: null, targetChatId: "chat", threadAliasId: null, workerThreadId: expect.any(String), workerId: "reviewer", workerSessionGeneration: 1, laneKey: "worker-thread:reviewer:1" });
       const claim = store!.claimOutboundReply(reply!.id, null)!;
       expect(() => store!.database.prepare("UPDATE outbound_replies SET worker_thread_id = NULL WHERE id = ?").run(reply!.id)).toThrow("immutable_outbound_revision");
       expect(store!.markOutboundReplyDelivered(claim, "worker-root", "worker-card", "worker-topic")).toBe(true);
-      expect(store!.loadWorkerSessionThread("reviewer", 1)).toMatchObject({ mode: "canonical-main", state: "active", rootMessageId: "worker-root", topicId: "worker-topic" });
+      expect(store!.workerSessionThreads.resolveScope({ chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root" })).toMatchObject({ kind: "active", target: { workerId: "reviewer", rootMessageId: "worker-root" } });
       expect(store!.getOperationalSummary().workerThreads).toMatchObject({ active: 1, reserving: 0, stale: 0, "legacy-unpublished": 0 });
-      expect(store!.findWorkerSessionThreadByScope("chat", "worker-topic", "worker-root")).toMatchObject({ workerId: "reviewer" });
       expect(store!.loadWorkerMainView("reviewer", 1)).toMatchObject({ messageId: "worker-root", cardId: "worker-card", deliveredVersion: view.viewVersion });
       expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     });
@@ -212,13 +211,13 @@ describe("SQLite store", () => {
     it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {
       const view = activeWorkerStore("canonical-worker-main");
       const input = { publicationKey: "worker-entry:reviewer:1", actionMessageId: "instances-card", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "legacy-entry" as const, sourceMainMessageId: "canonical-worker-main", card: { schema: "2.0" } };
-      expect(store!.reserveWorkerSessionThread(input)).toBe("reserved");
+      expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
       const reply = store!.listPendingOutboundReplies()[0]!;
       expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(reply.id, null)!, "entry-root", undefined, "entry-topic")).toBe(true);
-      expect(store!.loadWorkerSessionThread("reviewer", 1)).toMatchObject({ mode: "legacy-entry", state: "active", rootMessageId: "entry-root" });
+      expect(store!.workerSessionThreads.resolveScope({ chatId: "chat", topicId: "entry-topic", rootMessageId: "entry-root" })).toMatchObject({ kind: "active", target: { workerId: "reviewer", mode: "legacy-entry" } });
       expect(store!.loadWorkerMainView("reviewer", 1)).toMatchObject({ messageId: "canonical-worker-main", cardId: "canonical-card", deliveredVersion: view.deliveredVersion });
       store!.updateBinding("b1", { generation: 2 });
-      expect(store!.findWorkerSessionThreadByScope("chat", "entry-topic", "entry-root")).toBeNull();
+      expect(store!.workerSessionThreads.resolveScope({ chatId: "chat", topicId: "entry-topic", rootMessageId: "entry-root" })).toMatchObject({ kind: "stale" });
     });
 
     it("classifies pre-migration Workers without publishing group cards", () => {
@@ -232,7 +231,7 @@ describe("SQLite store", () => {
       store!.close(); store = undefined;
 
       store = new SqliteBindingStore(path);
-      expect(store.loadWorkerSessionThread("reviewer", 1)).toMatchObject({ mode: "legacy-entry", state: "legacy-unpublished", rootMessageId: null });
+      expect(store.database.prepare("SELECT mode, state, root_message_id FROM worker_session_threads WHERE worker_id = ? AND worker_session_generation = ?").get("reviewer", 1)).toEqual({ mode: "legacy-entry", state: "legacy-unpublished", root_message_id: null });
       expect(store.listPendingOutboundReplies().filter(({ workerThreadId }) => workerThreadId !== null)).toEqual([]);
       expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version IN (35, 36) ORDER BY version").all()).toEqual([{ version: 35 }, { version: 36 }]);
     });
@@ -3238,6 +3237,25 @@ describe("SQLite store", () => {
 
     expect(store.loadRunCard("p1")?.answerElementId).toBe(answerElementId("p1", 0));
     expect(JSON.parse(store.listPendingOutboundReplies()[0]!.payload)).toMatchObject({ body: { elements: [{ element_id: answerElementId("p1", 0) }] } });
+  });
+
+  it("does not rewrite or replay a claimed legacy Answer payload during startup canonicalization", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "claimed-legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "claimed-legacy", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    const reply = store.listPendingOutboundReplies()[0]!;
+    const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
+    const legacyPayload = JSON.stringify({ body: { elements: [{ element_id: legacyId }] } });
+    store.database.prepare("UPDATE run_cards SET answer_element_id = ? WHERE prompt_id = 'claimed-legacy'").run(legacyId);
+    store.database.prepare("UPDATE outbound_replies SET payload = ?, intent_json = NULL WHERE id = ?").run(legacyPayload, reply.id);
+    const claim = store.claimOutboundReply(reply.id, null)!;
+    store.markOutboundReplyFailedWithQuarantine(claim, "retry later", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+
+    expect(() => store!.recoverLegacyElementIdDeadLetters()).not.toThrow();
+    expect(store.loadRunCard("claimed-legacy")?.answerElementId).toBe(answerElementId("claimed-legacy", 0));
+    expect(store.getOutboundReply(reply.id)).toMatchObject({ state: "pending", payload: legacyPayload });
+    expect(store.database.prepare("SELECT first_claimed_at FROM outbound_replies WHERE id = ?").get(reply.id)).toMatchObject({ first_claimed_at: expect.any(String) });
   });
 
   it("repairs answer payloads when the persisted run-card id is already canonical", () => {

@@ -140,7 +140,7 @@ export class SqliteOperationsStore {
     const timestamp = now();
     return this.context.transaction(() => {
       canonicalize(timestamp);
-      const result = this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, updated_at = ? WHERE state = 'dead_letter' AND kind = 'stream_card_create' AND card_role = 'answer' AND error LIKE '%elementID format error%' AND prompt_id IN (SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL)` ).run(timestamp, timestamp);
+      const result = this.context.database.prepare(`UPDATE outbound_replies SET state = 'pending', attempt_count = 0, error = NULL, next_attempt_at = ?, updated_at = ? WHERE state = 'dead_letter' AND first_claimed_at IS NULL AND kind = 'stream_card_create' AND card_role = 'answer' AND error LIKE '%elementID format error%' AND prompt_id IN (SELECT p.id FROM prompt_jobs p JOIN run_cards c ON c.prompt_id = p.id WHERE p.state = 'queued' AND c.answer_message_id IS NULL AND c.answer_card_id IS NULL)` ).run(timestamp, timestamp);
       return Number(result.changes);
     });
   }

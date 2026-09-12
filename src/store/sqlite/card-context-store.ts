@@ -9,7 +9,6 @@ import type { TopicViewState } from "../../domain/topic-view.js";
 import { updateTopicWorkerContext } from "../../domain/topic-view.js";
 import { selectWorkerMainView, type WorkerMainProjectionSource } from "../../domain/worker-main-selector.js";
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
-import type { WorkerSessionThread } from "../../domain/worker-session-thread.js";
 import { updateWorkerTurnCardTargets, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { Binding, MainCardReservationOutcome } from "../../domain/types.js";
 import type { SqliteContext } from "./context.js";
@@ -27,8 +26,7 @@ export interface SqliteCardContextStoreDependencies {
   saveRunCard(view: RunCardView): RunCardView;
   reserveMainCard(view: TopicViewState, rootMessageId: string | null, card: object): MainCardReservationOutcome;
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
-  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number): WorkerSessionThread | null;
-  reserveWorkerSessionThread(input: { publicationKey: string; workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; targetChatId: string; mode: "canonical-main"; viewVersion: number; card: object }): "reserved" | "duplicate" | "stale";
+  reserveWorkerMainPlacement(view: WorkerMainView, card: object): "reserved" | "waiting" | "current" | "stale";
 }
 
 export class SqliteCardContextStore {
@@ -131,31 +129,9 @@ export class SqliteCardContextStore {
         const next = invalidation.reason === "worker-main.delivered" && previous?.messageId && selected.viewVersion <= selected.deliveredVersion
           ? { ...selected, viewVersion: selected.viewVersion + 1, updatedAt: now() }
           : selected;
-        const binding = this.dependencies.getBinding(source.parentBindingId);
-        if (!binding?.rootMessageId) return this.markStale(invalidation);
-        const thread = this.dependencies.loadWorkerSessionThread(next.workerId, next.workerSessionGeneration);
-        if (thread?.mode === "canonical-main") {
-          if (thread.state === "active" && thread.rootMessageId) {
-            if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, thread.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
-          } else if (thread.state === "reserving") {
-            if (next !== previous) this.saveWorkerMainView(next);
-          } else if (thread.rootMessageId) {
-            if (next !== previous || next.viewVersion > next.deliveredVersion) { this.reserveWorkerMainCard(next, thread.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion; }
-          } else {
-            if (next !== previous) this.saveWorkerMainView(next);
-            return this.markStale(invalidation);
-          }
-        } else if (!thread && previous === null) {
-          const saved = this.saveWorkerMainView(next);
-          if (!saved) return this.markStale(invalidation);
-          reserved = this.dependencies.reserveWorkerSessionThread({
-            publicationKey: `worker-thread:${next.workerId}:${next.workerSessionGeneration}`, workerId: next.workerId, workerSessionGeneration: next.workerSessionGeneration,
-            parentBindingId: next.parentBindingId, parentBindingGeneration: next.parentBindingGeneration, parentPaneId: next.parentPaneId, targetChatId: binding.chatId,
-            mode: "canonical-main", viewVersion: next.viewVersion, card: renderers.workerMain(next)
-          }) === "reserved";
-        } else if (next !== previous || next.viewVersion > next.deliveredVersion) {
-          this.reserveWorkerMainCard(next, binding.rootMessageId, renderers.workerMain(next)); reserved = next.viewVersion > next.deliveredVersion;
-        }
+        const placement = this.dependencies.reserveWorkerMainPlacement(next, renderers.workerMain(next));
+        if (placement === "stale") return this.markStale(invalidation);
+        reserved = placement === "reserved";
       } else if (invalidation.targetKind === "worker-turn") {
         // Legacy Task Cards are immutable historical artifacts. Mark old
         // invalidations converged without creating or patching visible cards.

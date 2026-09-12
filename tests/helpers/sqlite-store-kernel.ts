@@ -98,11 +98,6 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.cardContexts.reserveWorkerMainCard(view, rootMessageId, card);
   }
 
-  reserveWorkerSessionThread(input: Parameters<SqliteOutboxStore["reserveWorkerSessionThread"]>[0]): ReturnType<SqliteOutboxStore["reserveWorkerSessionThread"]> { return this.outbox.reserveWorkerSessionThread(input); }
-  loadWorkerSessionThread(workerId: string, workerSessionGeneration: number): ReturnType<SqliteOutboxStore["loadWorkerSessionThread"]> { return this.outbox.loadWorkerSessionThread(workerId, workerSessionGeneration); }
-  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null): ReturnType<SqliteOutboxStore["findWorkerSessionThreadByScope"]> { return this.outbox.findWorkerSessionThreadByScope(chatId, topicId, rootMessageId); }
-  findWorkerSessionThreadRecordByScope(chatId: string, topicId: string | null, rootMessageId: string | null): ReturnType<SqliteOutboxStore["findWorkerSessionThreadRecordByScope"]> { return this.outbox.findWorkerSessionThreadRecordByScope(chatId, topicId, rootMessageId); }
-
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     return this.cardContexts.invalidateCardContexts(targets);
   }

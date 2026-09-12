@@ -21,6 +21,7 @@ import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { executePromptAcceptanceEffects } from "./prompt-acceptance-effects.js";
+import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -28,11 +29,12 @@ export interface InboundMessageRoutingWorkflowPort {
 }
 
 export interface InboundMessageRoutingStore extends
-  Pick<InboundRoutingStore, "findBindingByLarkScope" | "isBindingThreadAlias" | "findWorkerSessionThreadByScope" | "findWorkerSessionThreadRecordByScope">,
+  Pick<InboundRoutingStore, "findBindingByLarkScope" | "isBindingThreadAlias">,
   PromptAcceptanceStore {}
 interface Options {
   config: BridgeConfig; store: InboundMessageRoutingStore; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
+  workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "handleMessage">;
 }
 
 export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkflowPort {
@@ -48,20 +50,20 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   }
 
   async handle(message: IncomingLarkMessage): Promise<void> {
-    const workerThread = this.options.store.findWorkerSessionThreadByScope(message.chatId, message.topicId, message.rootMessageId);
-    const staleWorkerThread = workerThread ? null : this.options.store.findWorkerSessionThreadRecordByScope(message.chatId, message.topicId, message.rootMessageId);
+    if (this.options.workerSessionThreads) {
+      const workerRoute = await this.options.workerSessionThreads.handleMessage(message);
+      if (workerRoute.handled) {
+        this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, decision: "worker-session-thread", outcome: "accepted" }, "routed persisted Lark message");
+        this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
+        return;
+      }
+    }
     const instanceCommand = parseInstanceCommand(message.text);
     const command = parseCommand(message.text); const binding = this.options.store.findBindingByLarkScope(message.topicId, message.rootMessageId); const alias = this.options.store.isBindingThreadAlias(message.topicId, message.rootMessageId);
     let decision = "unresolved";
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
-      if (workerThread) {
-        decision = "worker-session-thread";
-        if (this.options.instanceInteractions) { await this.options.instanceInteractions.handleWorkerThreadMessage(message, workerThread); disposition = message.text.trim().startsWith("/") ? "command_completed" : "prompt_queued"; }
-        else { await this.reject(message, "Worker 对话暂不可用，请稍后重试。"); disposition = "rejected"; }
-      }
-      else if (staleWorkerThread) { decision = "stale-worker-session-thread"; await this.reject(message, "Worker 对话已失效，请从 Primary 的 `/instances` 重新进入。"); disposition = "rejected"; }
-      else if (instanceCommand && alias) { decision = `alias-instance-command-rejected:${instanceCommand.kind}`; await this.reject(message, "这个入口话题固定连接当前 Pane 的 Primary Agent；请回到原始 Main Card 话题管理项目或 Worker。"); disposition = "rejected"; }
+      if (instanceCommand && alias) { decision = `alias-instance-command-rejected:${instanceCommand.kind}`; await this.reject(message, "这个入口话题固定连接当前 Pane 的 Primary Agent；请回到原始 Main Card 话题管理项目或 Worker。"); disposition = "rejected"; }
       else if (instanceCommand) { decision = `instance-command:${instanceCommand.kind}`; if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
       else if (command && alias && rejectsAliasCommand(command)) { decision = `alias-command-rejected:${command.kind}`; await this.reject(message, "这个入口话题只用于当前 Agent 交互；请回到原始 Main Card 话题执行会话或拓扑管理命令。"); disposition = "rejected"; }
       else if (command) { decision = `command:${command.kind}`; await this.options.swarmCommands.handle(message, command); }

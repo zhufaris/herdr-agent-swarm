@@ -106,7 +106,8 @@ export class SqliteCapabilityGraph {
       hasPendingOutboundReplyForWorkerTurn: (turnId) => this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId)
     });
     this.instances = new SqliteInstanceStore(this.context, {
-      invalidateWorkerInstanceContexts: (instance, reason) => this.cardContexts.invalidateWorkerInstanceContexts(instance, reason)
+      invalidateWorkerInstanceContexts: (instance, reason) => this.cardContexts.invalidateWorkerInstanceContexts(instance, reason),
+      retireWorkerSession: (workerId, generation, occurredAt) => this.workerThreads.retireSession(workerId, generation, occurredAt)
     });
     this.instanceOperations = new SqliteInstanceOperationStore(this.context, (id) => this.instances.getAgentInstance(id));
     this.cardContexts = new SqliteCardContextStore(this.context, {
@@ -121,8 +122,7 @@ export class SqliteCapabilityGraph {
       saveRunCard: (view) => this.projections.saveRunCard(view),
       reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
-      loadWorkerSessionThread: (workerId, generation) => this.workerThreads.loadBySession(workerId, generation),
-      reserveWorkerSessionThread: (input) => this.outbox.reserveWorkerSessionThread(input)
+      reserveWorkerMainPlacement: (view, card) => this.workerThreads.reserveCanonicalMain(view, card)
     });
     this.workerCardDisplays = new SqliteWorkerCardDisplayStore(this.context, {
       loadWorkerMainProjectionSource: (workerId, generation) => this.cardContexts.loadWorkerMainProjectionSource(workerId, generation),
@@ -150,7 +150,7 @@ export class SqliteCapabilityGraph {
   capabilityModules() {
     const prompt = new SqlitePromptCapabilityStore(this.prompts, this.bindings, this.bindingProjections, this.projections, this.operations);
     const bindingSession = new SqliteBindingSessionCapabilityStore(this.bindings, this.bindingProjections, this.prompts, this.projections, this.inboundProjects, this.paneOperations, this.operations);
-    const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.threadAliases, this.inboundProjects, this.workerThreads);
+    const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.threadAliases, this.inboundProjects);
     const ingress = new SqliteIngressCapabilityStore(routing, this.prompts, this.bindings, this.bindingProjections, this.projections, this.operations);
     const paneControl = new SqlitePaneControlCapabilityStore(this.paneOperations, this.bindings, this.prompts, this.projections, this.sessionOperations, this.operations);
     return {
@@ -164,6 +164,7 @@ export class SqliteCapabilityGraph {
       operationsQuery: new SqliteOperationsQueryCapabilityStore(this.bindings, this.projections),
       retention: new SqliteRetentionStoreAdapter(this.outbox, this.inboundProjects, this.sessionOperations),
       workerCardDisplay: this.workerCardDisplays,
+      workerSessionThreads: this.workerThreads,
       commandIntents: new SqliteCommandIntentStoreAdapter(this.commandIntents, {
         audit: (input) => this.operations.audit(input),
         getBinding: (id) => this.bindings.getBinding(id)
@@ -191,7 +192,7 @@ export class SqliteCapabilityGraph {
       startupViews: new SqliteStartupViewCapabilityStore(this.bindings, this.prompts, this.projections, this.outbox),
       deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.projections, this.operations),
       externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.bindings),
-      instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations, this.outbox),
+      instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.prompts, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.threadAliases, this.projections, this.prompts, this.inboundProjects, this.workerTurns, this.cardContexts),
       outboxAdmin: this.outbox
     };

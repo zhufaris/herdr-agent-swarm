@@ -80,7 +80,7 @@ describe("Lark channel publisher", () => {
     const worker = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: null }, workspace: { id: "worker-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
     const view = createWorkerMainView({ workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary", runtimeGeneration: worker.generation, runtimeState: worker.observedState, runtimeAttached: false, desiredState: worker.desiredState, parentActive: true, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-11T00:00:00.000Z" });
     store.saveWorkerMainView(view);
-    store.reserveWorkerSessionThread({ publicationKey: "worker-thread:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "primary-pane", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: { schema: "2.0" } });
+    store.workerSessionThreads.reserve({ publicationKey: "worker-thread:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "primary-pane", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: { schema: "2.0" } });
     const createTopic = vi.fn(async () => ({ topicId: "worker-topic", rootMessageId: "worker-root" }));
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ createTopic }), pino({ enabled: false }));
     const checkpoint = vi.fn();
@@ -89,7 +89,7 @@ describe("Lark channel publisher", () => {
     await publisher.requestScan(true);
 
     expect(createTopic).toHaveBeenCalledWith({ schema: "2.0" }, "worker-thread:reviewer:1", "chat");
-    expect(store.loadWorkerSessionThread(worker.id, 1)).toMatchObject({ state: "active", rootMessageId: "worker-root", topicId: "worker-topic" });
+    expect(store.workerSessionThreads.resolveScope({ chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root" })).toMatchObject({ kind: "active", target: { workerId: worker.id, rootMessageId: "worker-root" } });
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-root", deliveredVersion: view.viewVersion });
     expect(checkpoint).toHaveBeenCalledWith(worker.id, 1, view.viewVersion);
     store.close();

@@ -12,7 +12,7 @@ export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & Leas
     inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
     getSessionOperation: ReturnType<SqliteStoreKernel["capabilityModules"]>["sessionOperations"]["getSessionOperation"];
   } & ReturnType<SqliteStoreKernel["capabilityModules"]>["approvals"] &
-  Pick<ReturnType<SqliteStoreKernel["capabilityModules"]>["cardContext"], "listPendingCardContextInvalidations" | "markCardContextProjected" | "projectCardContext">;
+  Pick<ReturnType<SqliteStoreKernel["capabilityModules"]>["cardContext"], "listPendingCardContextInvalidations" | "markCardContextProjected" | "projectCardContext"> & { workerSessionThreads: ReturnType<SqliteStoreKernel["capabilityModules"]>["workerSessionThreads"] };
 
 type StoreConstructor = new (path: string) => SqliteBindingStore;
 
@@ -28,7 +28,8 @@ export const SqliteBindingStore: StoreConstructor = class {
     return Object.assign(kernel, {
       ...createOutboxTestDriver(modules.outboxAdmin),
       ...bindMethods(modules.outbox, ["enqueueOutboundReply", "getActiveAnswerPage", "getNextOutboundLaneHeadAttemptAt", "getPrompt", "listOutboundLaneHeads", "loadRunCard", "recoverEligibleDeadLetters", "recordBridgeMessage", "dismissSupersededAnswerStream", "loadWorkerTurnCard", "loadWorkerMainView", "listWorkerTurnCardPages"]),
-      ...bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias", "reserveWorkerSessionThread", "loadWorkerSessionThread", "findWorkerSessionThreadByScope", "findWorkerSessionThreadRecordByScope"]),
+      ...bindMethods(modules.outboxAdmin, ["listPendingOutboundReplies", "hasPendingOutboundReplyForWorkerTurn", "getOutboundReply", "markOutboundReplyFailed", "markOutboundReplyDeadLetter", "reservePaneThreadAlias"]),
+      workerSessionThreads: modules.workerSessionThreads,
       ...bindMethods(modules.instance, ["createAgentInstance", "createWorkerAgentInstance", "findAgentInstanceByPane", "listWorkerInstancesByParent", "listAgentInstances", "setPrimaryAgentInstance", "attachAgentInstanceRuntime", "checkpointAgentInstance", "updateAgentInstanceLifecycle", "updateAgentInstanceObservation", "reserveAgentInstanceStop", "finishAgentInstanceStop", "rollbackAgentInstanceStop", "detachAgentInstanceRuntime", "terminateWorkerSession", "getWorkspaceLease", "updateWorkspaceLease", "createInstanceRemovalPlan", "getInstanceRemovalPlan", "consumeInstanceRemovalPlan", "removeAgentInstance", "setBindingPrimaryToolCapability", "verifyBindingPrimaryToolCapability", "hasBindingPrimaryToolCapability", "revokeBindingPrimaryToolCapability", "acceptInstanceOperation", "claimInstanceOperation", "updateInstanceOperation", "getConversationTarget", "setConversationTarget", "projectLegacyBindingAsAgentInstance"]),
       activateWriteFence: modules.lifecycle.activateWriteFence.bind(modules.lifecycle),
       deactivateWriteFence: modules.lifecycle.deactivateWriteFence.bind(modules.lifecycle),

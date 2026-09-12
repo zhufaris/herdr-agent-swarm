@@ -6,7 +6,6 @@ import type { BridgeEvent } from "../events.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { ModelPreference } from "../model-selection.js";
 import type { AcceptPromptInput } from "./prompt.js";
-import type { WorkerSessionThread } from "../worker-session-thread.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
@@ -18,8 +17,6 @@ export interface OperationsQueryStore {
 export interface InboundRoutingStore {
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   isBindingThreadAlias(topicId: string | null, rootMessageId: string | null): boolean;
-  findWorkerSessionThreadByScope(chatId: string, topicId: string | null, rootMessageId: string | null): WorkerSessionThread | null;
-  findWorkerSessionThreadRecordByScope(chatId: string, topicId: string | null, rootMessageId: string | null): WorkerSessionThread | null;
   getBinding(id: string): Binding | null;
   isBridgeMessage(messageId: string): boolean;
   listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[];
