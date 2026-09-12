@@ -8,6 +8,7 @@ import type { SqlitePaneOperationStore } from "./pane-operation-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqlitePromptAcceptanceStore } from "./prompt-acceptance-store.js";
+import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 import type { SqliteSessionOperationStore } from "./session-operation-store.js";
 import type { SqliteTurnControlStore } from "./turn-control-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
@@ -18,6 +19,7 @@ export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStor
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly prompts: SqlitePromptStore,
     private readonly promptAcceptance: SqlitePromptAcceptanceStore,
+    private readonly promptDispatch: SqlitePromptDispatchStore,
     private readonly instances: SqliteInstanceStore,
     private readonly workerTurns: SqliteWorkerTurnStore
   ) {}
@@ -33,7 +35,7 @@ export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStor
   convertTurnControlToWorkerPriority: TurnControlStore["convertTurnControlToWorkerPriority"] = (input) => this.controls.convertToWorkerPriority(input);
   recoverTurnControlOperations: TurnControlStore["recoverTurnControlOperations"] = (render) => this.controls.recover(render);
   getBinding: TurnControlWorkflowStore["getBinding"] = (id) => this.bindings.getBinding(id);
-  getActiveOrdinaryPrompt: TurnControlWorkflowStore["getActiveOrdinaryPrompt"] = (id, generation) => this.prompts.getActiveOrdinaryPrompt(id, generation);
+  getActiveOrdinaryPrompt: TurnControlWorkflowStore["getActiveOrdinaryPrompt"] = (id, generation) => this.promptDispatch.getActiveOrdinaryPrompt(id, generation);
   getAgentInstance: TurnControlWorkflowStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);
   getActiveInstanceTurn: TurnControlWorkflowStore["getActiveInstanceTurn"] = (id, generation) => this.workerTurns.getActiveInstanceTurn(id, generation);
   acceptInstanceTurn: TurnControlWorkflowStore["acceptInstanceTurn"] = (input) => this.workerTurns.acceptInstanceTurn(input);
@@ -49,6 +51,7 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly prompts: SqlitePromptStore,
     private readonly promptAcceptance: SqlitePromptAcceptanceStore,
+    private readonly promptDispatch: SqlitePromptDispatchStore,
     private readonly projections: SqliteProjectionStore,
     private readonly sessionOperations: SqliteSessionOperationStore,
     private readonly operations: SqliteOperationsStore
@@ -79,7 +82,7 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
   createCardInteraction: CardInteractionStore["createCardInteraction"] = (input) => this.sessionOperations.createInteraction(input);
   getCardInteraction: CardInteractionStore["getCardInteraction"] = (id) => this.sessionOperations.getInteraction(id);
   acceptInterruptedContinuation: CardInteractionStore["acceptInterruptedContinuation"] = (input) => this.promptAcceptance.acceptInterruptedContinuation(input);
-  getPrompt: CardInteractionStore["getPrompt"] = (id) => this.prompts.getPrompt(id);
+  getPrompt: CardInteractionStore["getPrompt"] = (id) => this.promptDispatch.getPrompt(id);
   loadRunCard: CardInteractionStore["loadRunCard"] = (id) => this.projections.loadRunCard(id);
   loadTopicView: CardInteractionStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
 }

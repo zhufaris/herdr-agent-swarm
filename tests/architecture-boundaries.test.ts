@@ -298,6 +298,29 @@ describe("application composition boundaries", () => {
     expect(graph).toContain("new SqliteExternalTurnAdoptionStore");
   });
 
+  it("keeps Primary prompt dispatch in one deep SQLite module", () => {
+    const prompt = readFileSync(new URL("../src/store/sqlite/prompt-store.ts", import.meta.url), "utf8");
+    const dispatchPath = new URL("../src/store/sqlite/prompt-dispatch-store.ts", import.meta.url);
+    expect(existsSync(dispatchPath)).toBe(true);
+    const dispatch = readFileSync(dispatchPath, "utf8");
+    const capability = readFileSync(new URL("../src/store/sqlite/prompt-capability-store.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    const dispatchMethods = [
+      "getActiveOrdinaryPrompt", "getPrompt", "claimNextDispatchablePrompt",
+      "markPromptDispatched", "markModelPromptPrepared", "markModelPromptAccepted",
+      "rollbackPreparedModelPrompt", "claimPromptTranscriptTurn", "updatePrompt",
+      "completeTurn", "failPrompt"
+    ];
+    for (const method of dispatchMethods) {
+      expect(dispatch).toContain(`${method}(`);
+      expect(prompt).not.toContain(`${method}(`);
+    }
+    expect(dispatch).toContain("private readonly context: SqliteContext");
+    expect(capability).toContain("private readonly dispatch: SqlitePromptDispatchStore");
+    expect(capability).toContain("this.dispatch.");
+    expect(graph).toContain("new SqlitePromptDispatchStore");
+  });
+
   it("executes prompt acceptance effects only from a committed typed receipt", () => {
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const effects = readFileSync(new URL("../src/coordinator/prompt-acceptance-effects.ts", import.meta.url), "utf8");

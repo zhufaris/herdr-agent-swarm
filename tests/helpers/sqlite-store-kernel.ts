@@ -28,6 +28,7 @@ import type { SqlitePromptStore } from "../../src/store/sqlite/prompt-store.js";
 import type { SqlitePromptRecoveryStore } from "../../src/store/sqlite/prompt-recovery-store.js";
 import type { SqlitePromptAcceptanceStore } from "../../src/store/sqlite/prompt-acceptance-store.js";
 import type { SqliteExternalTurnAdoptionStore } from "../../src/store/sqlite/external-turn-adoption-store.js";
+import type { SqlitePromptDispatchStore } from "../../src/store/sqlite/prompt-dispatch-store.js";
 import type { SqliteOutboxStore } from "../../src/store/sqlite/outbox-store.js";
 import type { SqliteInstanceStore } from "../../src/store/sqlite/instance-store.js";
 import type { SqliteCardContextStore } from "../../src/store/sqlite/card-context-store.js";
@@ -48,6 +49,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   private readonly promptRecovery: SqlitePromptRecoveryStore;
   private readonly promptAcceptance: SqlitePromptAcceptanceStore;
   private readonly externalTurnAdoption: SqliteExternalTurnAdoptionStore;
+  private readonly promptDispatch: SqlitePromptDispatchStore;
   private readonly outbox: SqliteOutboxStore;
   private readonly instances: SqliteInstanceStore;
   private readonly cardContexts: SqliteCardContextStore;
@@ -71,6 +73,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.promptRecovery = this.graph.promptRecovery;
     this.promptAcceptance = this.graph.promptAcceptance;
     this.externalTurnAdoption = this.graph.externalTurnAdoption;
+    this.promptDispatch = this.graph.promptDispatch;
     this.workerTurns = this.graph.workerTurns;
     this.instances = this.graph.instances;
     this.cardContexts = this.graph.cardContexts;
@@ -148,7 +151,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.bindings.revokePrimaryToolCapability(bindingId, expectedGeneration);
   }
   getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
-    return this.prompts.getActiveOrdinaryPrompt(bindingId, expectedGeneration);
+    return this.promptDispatch.getActiveOrdinaryPrompt(bindingId, expectedGeneration);
   }
 
   getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
@@ -486,23 +489,23 @@ export class SqliteStoreKernel implements TurnControlStore {
   markPromptDispatched(id: string): void;
   markPromptDispatched(id: string, dispatchedAt: string): void;
   markPromptDispatched(id: string, dispatchedAt = now()): void {
-    this.prompts.markPromptDispatched(id, dispatchedAt);
+    this.promptDispatch.markPromptDispatched(id, dispatchedAt);
   }
 
   markModelPromptPrepared(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean {
-    return this.prompts.markModelPromptPrepared(input);
+    return this.promptDispatch.markModelPromptPrepared(input);
   }
 
   markModelPromptAccepted(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string; turnId: string }): boolean {
-    return this.prompts.markModelPromptAccepted(input);
+    return this.promptDispatch.markModelPromptAccepted(input);
   }
 
   rollbackPreparedModelPrompt(input: { bindingId: string; bindingGeneration: number; promptId: string; revision: number; operationId: string }): boolean {
-    return this.prompts.rollbackPreparedModelPrompt(input);
+    return this.promptDispatch.rollbackPreparedModelPrompt(input);
   }
 
   claimPromptTranscriptTurn(input: { promptId: string; bindingId: string; turnId: string; startedAt: string }): TranscriptTurnClaimOutcome {
-    return this.prompts.claimPromptTranscriptTurn(input);
+    return this.promptDispatch.claimPromptTranscriptTurn(input);
   }
 
   adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption {
@@ -534,19 +537,19 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   claimNextDispatchablePrompt(bindingId: string): { binding: Binding; prompt: PromptJob; model: { name: string; revision: number } | null } | null {
-    return this.prompts.claimNextDispatchablePrompt(bindingId);
+    return this.promptDispatch.claimNextDispatchablePrompt(bindingId);
   }
 
   updatePrompt(id: string, state: PromptState, error: string | null = null): void {
-    this.prompts.updatePrompt(id, state, error);
+    this.promptDispatch.updatePrompt(id, state, error);
   }
 
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding {
-    return this.prompts.completeTurn(input);
+    return this.promptDispatch.completeTurn(input);
   }
 
   failPrompt(input: { promptId: string; error: string; occurredAt: string }): void {
-    this.prompts.failPrompt(input);
+    this.promptDispatch.failPrompt(input);
   }
 
   cancelQueuedPromptsWithProjection(input: { bindingId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): { cancelledPromptIds: string[]; outboxReserved: boolean } {
@@ -652,7 +655,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   }
 
   getPrompt(id: string): PromptJob | null {
-    return this.prompts.getPrompt(id);
+    return this.promptDispatch.getPrompt(id);
   }
 
   getModelPreference(bindingId: string): ModelPreference | null {

@@ -7,6 +7,7 @@ import type { SqliteOutboxStore } from "./outbox-store.js";
 import { SqlitePromptCapabilityStore } from "./prompt-capability-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqliteExternalTurnAdoptionStore } from "./external-turn-adoption-store.js";
+import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 
 export class SqliteInboundRoutingCapabilityStore implements InboundRoutingStore {
@@ -87,17 +88,18 @@ export class SqliteDeliveryRecoveryCapabilityStore implements DeliveryRecoverySt
 export class SqliteExternalTurnCapabilityStore implements ExternalTurnObservationStore {
   constructor(
     private readonly prompts: SqlitePromptStore,
+    private readonly dispatch: SqlitePromptDispatchStore,
     private readonly adoption: SqliteExternalTurnAdoptionStore,
     private readonly bindings: SqliteBindingLifecycleStore
   ) {}
 
   adoptExternalTurn: ExternalTurnObservationStore["adoptExternalTurn"] = (input) => this.adoption.adoptExternalTurn(input);
-  completeTurn: ExternalTurnObservationStore["completeTurn"] = (input) => this.prompts.completeTurn(input);
+  completeTurn: ExternalTurnObservationStore["completeTurn"] = (input) => this.dispatch.completeTurn(input);
   countPendingPrompts: ExternalTurnObservationStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
-  failPrompt: ExternalTurnObservationStore["failPrompt"] = (input) => this.prompts.failPrompt(input);
+  failPrompt: ExternalTurnObservationStore["failPrompt"] = (input) => this.dispatch.failPrompt(input);
   findBindingByPane: ExternalTurnObservationStore["findBindingByPane"] = (id) => this.bindings.findBindingByPane(id);
   getActiveExternalPrompt: ExternalTurnObservationStore["getActiveExternalPrompt"] = (id, generation) => this.adoption.getActiveExternalPrompt(id, generation);
   getBinding: ExternalTurnObservationStore["getBinding"] = (id) => this.bindings.getBinding(id);
-  getPrompt: ExternalTurnObservationStore["getPrompt"] = (id) => this.prompts.getPrompt(id);
+  getPrompt: ExternalTurnObservationStore["getPrompt"] = (id) => this.dispatch.getPrompt(id);
   listBindingsByState: ExternalTurnObservationStore["listBindingsByState"] = (state) => this.bindings.listBindingsByState(state);
 }

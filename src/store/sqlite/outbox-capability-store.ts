@@ -7,7 +7,7 @@ import type { SqliteCardContextStore } from "./card-context-store.js";
 import type { SqliteInboundProjectStore } from "./inbound-project-store.js";
 import type { SqliteOutboxStore } from "./outbox-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
-import type { SqlitePromptStore } from "./prompt-store.js";
+import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
 
 export class SqliteOutboxCapabilityStore implements OutboxStore {
@@ -16,7 +16,7 @@ export class SqliteOutboxCapabilityStore implements OutboxStore {
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly aliases: SqliteBindingThreadAliasStore,
     private readonly projections: SqliteProjectionStore,
-    private readonly prompts: SqlitePromptStore,
+    private readonly promptDispatch: SqlitePromptDispatchStore,
     private readonly inbound: SqliteInboundProjectStore,
     private readonly workerTurns: SqliteWorkerTurnStore,
     private readonly cardContexts: SqliteCardContextStore
@@ -31,7 +31,7 @@ export class SqliteOutboxCapabilityStore implements OutboxStore {
   isActiveBindingThreadAlias(bindingId: string, rootMessageId: string): boolean { return this.aliases.isActiveBindingRoot(bindingId, rootMessageId); }
   getNextOutboundLaneHeadAttemptAt(): string | null { return this.outbox.getNextOutboundLaneHeadAttemptAt(); }
   getLarkDeliveryCooldown(): ReturnType<OutboxStore["getLarkDeliveryCooldown"]> { return this.outbox.getLarkDeliveryCooldown(); }
-  getPrompt(id: string): ReturnType<OutboxStore["getPrompt"]> { return this.prompts.getPrompt(id); }
+  getPrompt(id: string): ReturnType<OutboxStore["getPrompt"]> { return this.promptDispatch.getPrompt(id); }
   listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], workClass?: import("../../domain/types.js").OutboundWorkClass): OutboundReply[] { return this.outbox.listOutboundLaneHeads(limit, dueAt, excludedLaneKeys, workClass); }
   loadRunCard(promptId: string): ReturnType<OutboxStore["loadRunCard"]> { return this.projections.loadRunCard(promptId); }
   markOutboundReplyDelivered(claim: OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string): boolean { return this.outbox.markOutboundReplyDelivered(claim.reply.id, messageId, cardId, claim, topicId); }

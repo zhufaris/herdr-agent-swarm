@@ -7,12 +7,14 @@ import type { SqliteProjectionStore } from "./projection-store.js";
 import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqlitePromptRecoveryStore } from "./prompt-recovery-store.js";
 import type { SqlitePromptAcceptanceStore } from "./prompt-acceptance-store.js";
+import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 
 export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, PromptRunStore {
   constructor(
     private readonly prompts: SqlitePromptStore,
     private readonly recovery: SqlitePromptRecoveryStore,
     private readonly acceptance: SqlitePromptAcceptanceStore,
+    private readonly dispatch: SqlitePromptDispatchStore,
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly bindingProjections: SqliteBindingProjectionStore,
     private readonly projections: SqliteProjectionStore,
@@ -34,17 +36,17 @@ export class SqlitePromptCapabilityStore implements PromptAcceptanceStore, Promp
   requeueStaleUndispatchedPromptClaim(candidate: Parameters<NonNullable<PromptRunStore["requeueStaleUndispatchedPromptClaim"]>>[0]): boolean { return this.recovery.requeueStaleUndispatchedPromptClaim(candidate); }
   releaseUndispatchedPromptClaim(candidate: Parameters<NonNullable<PromptRunStore["releaseUndispatchedPromptClaim"]>>[0]): boolean { return this.recovery.releaseUndispatchedPromptClaim(candidate); }
   getBinding(id: string): ReturnType<PromptRunStore["getBinding"]> { return this.bindings.getBinding(id); }
-  getPrompt(id: string): ReturnType<PromptRunStore["getPrompt"]> { return this.prompts.getPrompt(id); }
-  claimNextDispatchablePrompt(bindingId: string): ReturnType<PromptRunStore["claimNextDispatchablePrompt"]> { return this.prompts.claimNextDispatchablePrompt(bindingId); }
-  markPromptDispatched(id: string, dispatchedAt: string): void { this.prompts.markPromptDispatched(id, dispatchedAt); }
-  markModelPromptPrepared(input: Parameters<PromptRunStore["markModelPromptPrepared"]>[0]): boolean { return this.prompts.markModelPromptPrepared(input); }
-  markModelPromptAccepted(input: Parameters<PromptRunStore["markModelPromptAccepted"]>[0]): boolean { return this.prompts.markModelPromptAccepted(input); }
-  rollbackPreparedModelPrompt(input: Parameters<PromptRunStore["rollbackPreparedModelPrompt"]>[0]): boolean { return this.prompts.rollbackPreparedModelPrompt(input); }
-  claimPromptTranscriptTurn(input: Parameters<PromptRunStore["claimPromptTranscriptTurn"]>[0]): ReturnType<PromptRunStore["claimPromptTranscriptTurn"]> { return this.prompts.claimPromptTranscriptTurn(input); }
+  getPrompt(id: string): ReturnType<PromptRunStore["getPrompt"]> { return this.dispatch.getPrompt(id); }
+  claimNextDispatchablePrompt(bindingId: string): ReturnType<PromptRunStore["claimNextDispatchablePrompt"]> { return this.dispatch.claimNextDispatchablePrompt(bindingId); }
+  markPromptDispatched(id: string, dispatchedAt: string): void { this.dispatch.markPromptDispatched(id, dispatchedAt); }
+  markModelPromptPrepared(input: Parameters<PromptRunStore["markModelPromptPrepared"]>[0]): boolean { return this.dispatch.markModelPromptPrepared(input); }
+  markModelPromptAccepted(input: Parameters<PromptRunStore["markModelPromptAccepted"]>[0]): boolean { return this.dispatch.markModelPromptAccepted(input); }
+  rollbackPreparedModelPrompt(input: Parameters<PromptRunStore["rollbackPreparedModelPrompt"]>[0]): boolean { return this.dispatch.rollbackPreparedModelPrompt(input); }
+  claimPromptTranscriptTurn(input: Parameters<PromptRunStore["claimPromptTranscriptTurn"]>[0]): ReturnType<PromptRunStore["claimPromptTranscriptTurn"]> { return this.dispatch.claimPromptTranscriptTurn(input); }
   markPromptObservationDetached(id: string, notice: string): void { this.recovery.markPromptObservationDetached(id, notice); }
-  updatePrompt(id: string, state: Parameters<PromptRunStore["updatePrompt"]>[1], error?: string | null): void { this.prompts.updatePrompt(id, state, error); }
-  completeTurn(input: Parameters<PromptRunStore["completeTurn"]>[0]): ReturnType<PromptRunStore["completeTurn"]> { return this.prompts.completeTurn(input); }
-  failPrompt(input: Parameters<PromptRunStore["failPrompt"]>[0]): void { this.prompts.failPrompt(input); }
+  updatePrompt(id: string, state: Parameters<PromptRunStore["updatePrompt"]>[1], error?: string | null): void { this.dispatch.updatePrompt(id, state, error); }
+  completeTurn(input: Parameters<PromptRunStore["completeTurn"]>[0]): ReturnType<PromptRunStore["completeTurn"]> { return this.dispatch.completeTurn(input); }
+  failPrompt(input: Parameters<PromptRunStore["failPrompt"]>[0]): void { this.dispatch.failPrompt(input); }
   updateBindingMetadata(...args: Parameters<PromptRunStore["updateBindingMetadata"]>): ReturnType<PromptRunStore["updateBindingMetadata"]> { return this.bindings.updateBindingMetadata(...args); }
   transitionBinding(...args: Parameters<PromptRunStore["transitionBinding"]>): ReturnType<PromptRunStore["transitionBinding"]> { return this.bindings.transitionBinding(...args); }
   listQueuedTurnRunCards(bindingId: string): ReturnType<PromptRunStore["listQueuedTurnRunCards"]> { return this.prompts.listQueuedTurnRunCards(bindingId); }

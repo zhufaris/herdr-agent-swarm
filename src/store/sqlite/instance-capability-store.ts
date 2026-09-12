@@ -4,7 +4,7 @@ import type { SqliteCardContextStore } from "./card-context-store.js";
 import type { SqliteInstanceOperationStore } from "./instance-operation-store.js";
 import type { SqliteInstanceStore } from "./instance-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
-import type { SqlitePromptStore } from "./prompt-store.js";
+import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
 
 export class SqliteInstanceCapabilityStore implements InstanceStore {
@@ -14,7 +14,7 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
     private readonly turns: SqliteWorkerTurnStore,
     private readonly cardContexts: SqliteCardContextStore,
     private readonly projections: SqliteProjectionStore,
-    private readonly prompts: SqlitePromptStore,
+    private readonly promptDispatch: SqlitePromptDispatchStore,
     private readonly operations: SqliteInstanceOperationStore
   ) {}
 
@@ -85,7 +85,7 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   verifyBindingPrimaryToolCapability: InstanceStore["verifyBindingPrimaryToolCapability"] = (input) => this.bindings.verifyPrimaryToolCapability(input);
   hasBindingPrimaryToolCapability: InstanceStore["hasBindingPrimaryToolCapability"] = (bindingId, generation) => this.bindings.hasPrimaryToolCapability(bindingId, generation);
   revokeBindingPrimaryToolCapability: InstanceStore["revokeBindingPrimaryToolCapability"] = (bindingId, generation) => this.bindings.revokePrimaryToolCapability(bindingId, generation);
-  getActiveOrdinaryPrompt: InstanceStore["getActiveOrdinaryPrompt"] = (bindingId, generation) => this.prompts.getActiveOrdinaryPrompt(bindingId, generation);
+  getActiveOrdinaryPrompt: InstanceStore["getActiveOrdinaryPrompt"] = (bindingId, generation) => this.promptDispatch.getActiveOrdinaryPrompt(bindingId, generation);
 
   acceptInstanceOperation: InstanceStore["acceptInstanceOperation"] = (input) => this.operations.acceptInstanceOperation(input);
   claimInstanceOperation: InstanceStore["claimInstanceOperation"] = (id, generation) => this.operations.claimInstanceOperation(id, generation);
