@@ -29,7 +29,7 @@
 
 ## Herdr-originated messages
 
-- [ ] When a message or turn is initiated directly in Herdr rather than through
+- [x] When a message or turn is initiated directly in Herdr rather than through
   Lark, observe its canonical transcript and converge both the owning Primary
   Main Card and the corresponding Answer Card. Preserve independent projection
   checkpoints, durable outbox ordering, exact turn ownership, and the no-replay

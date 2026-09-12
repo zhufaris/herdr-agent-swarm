@@ -257,6 +257,7 @@ describe("instance runtime reconciliation", () => {
     const router = new HerdrEventRouter({
       invalidateWorkspace: (workspaceId) => cache.invalidate(workspaceId), invalidatePanes: (paneIds) => cache.invalidatePanes(paneIds),
       reconcileBindings: async () => undefined, reconcileInstances: (scope) => reconciler.requestReconciliation(scope),
+      observePrimaryTurns: async () => undefined,
       observeInstanceTurns: async () => undefined, retryRetiredPanes: async () => undefined, logger: pino({ enabled: false })
     });
 

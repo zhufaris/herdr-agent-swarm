@@ -243,6 +243,10 @@ npx vitest run tests/answer-page-workflow.test.ts tests/sqlite-store.test.ts tes
 
 卡片设计/可读性/稳定性优化和 instances 多 Agent 易用性优化已记为后续待办，先各自形成方案再实施；不扩入当前稳定性切片。当前本地完成状态不代表上线批准。
 
+Herdr 直接发起的 Primary turn 现已纳入事件驱动双投影收敛：pane hint 先完成 Binding identity reconcile，再显式唤醒 Primary external-turn observer；canonical transcript 生成的生命周期事件同时驱动 Main Card 与对应 Answer Card。首次 EOF baseline 不回放历史，周期扫描继续提供丢失 hint 的兜底。
+
+最终验证：event router、external-turn observer、runtime reconcile、discovery、card projection、startup/shutdown 与架构边界专项 9 个文件、149 项测试通过；`npm test` 167 个文件、2,144 项测试全部通过；`architecture:check` 检查 304 个源码文件，`npm run typecheck`、`npm run build` 与 `git diff --check` 通过。build identity：`sha256:bf401c8d8659ca3e5671fd0e63e9080afc8abb7629c793cce897aab13b9cbc04`。未安装、重启、部署或写入真实 Lark。
+
 ### 8.4 恢复证据切片（2026-09-11）
 
 新增 migration 31 和 `delivery_recoveries`，每个 failed reply/revision 一条稳定记录，保存首次失败摘要、恢复动作、显式 replacement、成功 reply/message/time。SQLite dead-letter trigger 与失败状态同事务写入；ledger 同样受 lease write fence 保护，不随 outbox 历史行 cascade 删除。它不是逐次 HTTP 尝试日志。

@@ -243,7 +243,7 @@ export class ExternalTurnObserver {
         await this.publish(binding.id, "TurnFailed", "herdr", { promptId, error: "A newer Herdr turn superseded this detached turn; its prior outcome remains uncertain.", queueDepth: this.options.store.countPendingPrompts(binding.id) });
       }
       await this.publish(binding.id, "TurnStarted", "herdr", { promptId: owned.promptId, queueDepth: this.options.store.countPendingPrompts(binding.id) });
-      this.options.logger.info({ event: "external-turn-adopted", bindingId: binding.id, promptId: owned.promptId, paneId: binding.paneId, turnId, adoption: result.outcome, supersededPromptCount: result.supersededPromptIds.length, outcome: "observing" }, "adopted external Herdr turn for Answer Card projection");
+      this.options.logger.info({ event: "external-turn-adopted", bindingId: binding.id, promptId: owned.promptId, paneId: binding.paneId, turnId, adoption: result.outcome, supersededPromptCount: result.supersededPromptIds.length, outcome: "observing" }, "adopted external Herdr turn for Primary card projection");
     }
     if (!owned) return observation.freshTurnStart ? "pending" : "ignored";
     const previousOutput = owned.output;

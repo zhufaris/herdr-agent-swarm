@@ -4,11 +4,71 @@ import { ExternalTurnObserver } from "../src/coordinator/external-turn-observer.
 import type { TraexTranscriptObservation } from "../src/domain/ports.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { HerdrEventRouter } from "../src/runtime/herdr-event-router.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
+import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { primaryPresentation } from "./helpers/presentation.js";
+import type { LarkPort } from "../src/domain/ports.js";
+import { initialTopicView } from "../src/domain/topic-view.js";
 import { MAX_TURN_OUTPUT_CHARS, TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
 
 describe("ExternalTurnObserver", () => {
+  it("converges both Primary cards from one direct Herdr turn after a pane hint", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", statusMessageId: "main-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", spaceName: "repo", paneId: "w1:p1", phase: "ready", agentState: "idle" });
+    const observations: TraexTranscriptObservation[] = [
+      { turnId: "turn-1", freshTurnStart: true, requestText: "direct request", answerDelta: "direct answer", mainStatus: { statusTitle: "Working directly", tokenCount: 42 }, turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-09-12T00:00:00.000Z" } },
+      { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-09-12T00:00:00.000Z", finalAnswer: "direct answer" } },
+      { answerDelta: "" }
+    ];
+    const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
+    const transcriptReader = { open: vi.fn(async () => ({ mode: "typed" as const, cursor })) };
+    const mainUpdates: object[] = [];
+    const answerUpdates: string[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic", rootMessageId: "root" }; },
+      async replyText() { return { messageId: "text" }; },
+      async replyCard() { return { messageId: "card" }; },
+      async replyStreamingCard() { return { messageId: "answer-1", cardId: "answer-card-1" }; },
+      async streamCardContent(_cardId, _elementId, content) { answerUpdates.push(content); },
+      async finishStreamingCard() {},
+      async updateCard(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
+      async shareThread() { return { messageId: "shared" }; }
+    };
+    const logger = pino({ enabled: false });
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, logger);
+    const stopPublisher = publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, logger, primaryPresentation, undefined, undefined, { cardUpdateDebounceMs: 0, mainCardUpdateDebounceMs: 0 });
+    const stopProjector = projector.start();
+    const observer = new ExternalTurnObserver({ store, transcriptReader, bus, outboundWork: { wake() { void publisher.requestScan(); } }, logger, presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external-1" });
+    const binding = store.getBinding("b1")!;
+    const router = new HerdrEventRouter({
+      invalidateWorkspace() {}, invalidatePanes() {}, reconcileBindings: () => observer.observe(binding), reconcileInstances: async () => {},
+      observePrimaryTurns: (paneIds) => paneIds ? observer.observeByPane(paneIds) : observer.scanActiveBindings(),
+      observeInstanceTurns: async () => {}, retryRetiredPanes: async () => {}, logger
+    });
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
+
+    await vi.waitFor(() => expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", executionOrigin: "herdr", transcriptTurnId: "turn-1" }));
+    await vi.waitFor(() => expect(answerUpdates.some((content) => content.includes("direct answer"))).toBe(true));
+    await vi.waitFor(() => expect(mainUpdates.some((card) => JSON.stringify(card).includes("direct answer"))).toBe(true));
+    expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "direct answer" });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "direct answer", activePromptId: null });
+    expect(store.listRunCards("b1")).toHaveLength(1);
+    const deliveryCount = store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get() as { count: number };
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
+    expect(store.listRunCards("b1")).toHaveLength(1);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get()).toEqual(deliveryCount);
+
+    await observer.stop(); await projector.stop(); stopProjector(); stopPublisher(); await publisher.stop(); store.close();
+  });
+
   it("opens only the active binding attached to a targeted Pane", async () => {
     const store = new SqliteBindingStore(":memory:");
     for (const [id, paneId] of [["b1", "w1:p1"], ["b2", "w1:p2"]]) {

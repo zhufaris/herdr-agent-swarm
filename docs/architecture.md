@@ -987,6 +987,17 @@ between observers. Other turn conflicts remain ignored. Periodic scans and
 explicit handoffs are serialized per binding so two external cursor reads
 cannot race.
 
+Herdr pane hints explicitly observe Primary external turns after the affected
+Binding reconciliation completes. Instance reconciliation, Worker turn
+observation, and retired-pane cleanup remain independent consumers of the same
+bounded hint. The Primary observer publishes the existing lifecycle events, so
+`ConversationViewProjector` independently converges the corresponding Answer
+Card and the owning Main Card through their durable outbox paths. A first normal
+observation still establishes an EOF baseline and never imports pre-binding
+history; the event route only lowers latency for transcript records appended
+after that baseline. Lost or failed hints retain the periodic observer scan as
+the convergence path.
+
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;
 ordinary prompts use `agent prompt --wait`, and

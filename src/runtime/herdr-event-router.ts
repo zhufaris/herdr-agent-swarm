@@ -7,6 +7,7 @@ export interface HerdrEventRouterOptions {
   invalidatePanes(paneIds: readonly string[]): void;
   reconcileBindings(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
   reconcileInstances(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
+  observePrimaryTurns(paneIds?: readonly string[]): Promise<void>;
   observeInstanceTurns(paneIds?: readonly string[]): Promise<void>;
   retryRetiredPanes(paneIds?: readonly string[]): Promise<void>;
   logger: Pick<Logger, "warn" | "debug">;
@@ -56,7 +57,7 @@ export class HerdrEventRouter {
       this.paneHints += 1;
       this.options.invalidatePanes(hint.paneIds);
       await this.run(hint, [
-        this.options.reconcileBindings({ paneIds: hint.paneIds }),
+        this.options.reconcileBindings({ paneIds: hint.paneIds }).then(() => this.options.observePrimaryTurns(hint.paneIds)),
         this.options.reconcileInstances({ paneIds: hint.paneIds }),
         this.options.observeInstanceTurns(hint.paneIds),
         this.options.retryRetiredPanes(hint.paneIds)
@@ -66,8 +67,10 @@ export class HerdrEventRouter {
     if (hint.scope === "workspaces") {
       this.workspaceHints += 1;
       for (const workspaceId of hint.workspaceIds) this.options.invalidateWorkspace(workspaceId);
+      const primary = this.options.reconcileBindings({ workspaceIds: hint.workspaceIds })
+        .then(() => hint.paneIds.length > 0 ? this.options.observePrimaryTurns(hint.paneIds) : undefined);
       const work: Promise<void>[] = [
-        this.options.reconcileBindings({ workspaceIds: hint.workspaceIds }),
+        primary,
         this.options.reconcileInstances({ workspaceIds: hint.workspaceIds })
       ];
       if (hint.paneIds.length > 0) {
@@ -81,7 +84,7 @@ export class HerdrEventRouter {
     }
     this.fullHints += 1;
     await this.run(hint, [
-      this.options.reconcileBindings(),
+      this.options.reconcileBindings().then(() => this.options.observePrimaryTurns()),
       this.options.reconcileInstances(),
       this.options.observeInstanceTurns(),
       this.options.retryRetiredPanes()

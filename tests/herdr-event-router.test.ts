@@ -8,6 +8,7 @@ function setup() {
     invalidatePanes: vi.fn(),
     reconcileBindings: vi.fn(async () => undefined),
     reconcileInstances: vi.fn(async () => undefined),
+    observePrimaryTurns: vi.fn(async () => undefined),
     observeInstanceTurns: vi.fn(async () => undefined),
     retryRetiredPanes: vi.fn(async () => undefined)
   };
@@ -22,6 +23,7 @@ describe("HerdrEventRouter", () => {
     expect(calls.invalidateWorkspace).not.toHaveBeenCalled();
     expect(calls.invalidatePanes).toHaveBeenCalledWith(["w1:p1"]);
     expect(calls.reconcileBindings).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
+    expect(calls.observePrimaryTurns).toHaveBeenCalledWith(["w1:p1"]);
     expect(calls.reconcileInstances).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
     expect(calls.observeInstanceTurns).toHaveBeenCalledWith(["w1:p1"]);
     expect(calls.retryRetiredPanes).toHaveBeenCalledWith(["w1:p1"]);
@@ -33,13 +35,15 @@ describe("HerdrEventRouter", () => {
     calls.invalidatePanes.mockImplementation(() => { order.push("invalidate"); });
     calls.reconcileBindings.mockImplementation(async () => { order.push("bindings"); });
     calls.reconcileInstances.mockImplementation(async () => { order.push("instances"); });
-    calls.observeInstanceTurns.mockImplementation(async () => { order.push("turns"); });
+    calls.observePrimaryTurns.mockImplementation(async () => { order.push("primary-turns"); });
+    calls.observeInstanceTurns.mockImplementation(async () => { order.push("worker-turns"); });
     calls.retryRetiredPanes.mockImplementation(async () => { order.push("retired"); });
 
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
 
     expect(order[0]).toBe("invalidate");
-    expect(new Set(order.slice(1))).toEqual(new Set(["bindings", "instances", "turns", "retired"]));
+    expect(order.indexOf("primary-turns")).toBeGreaterThan(order.indexOf("bindings"));
+    expect(new Set(order.slice(1))).toEqual(new Set(["bindings", "primary-turns", "instances", "worker-turns", "retired"]));
   });
 
   it("invalidates and reconciles affected workspaces for topology hints", async () => {
@@ -49,6 +53,7 @@ describe("HerdrEventRouter", () => {
     expect(calls.invalidateWorkspace.mock.calls).toEqual([["w1"], ["w2"]]);
     expect(calls.reconcileBindings).toHaveBeenCalledWith({ workspaceIds: ["w1", "w2"] });
     expect(calls.reconcileInstances).toHaveBeenCalledWith({ workspaceIds: ["w1", "w2"] });
+    expect(calls.observePrimaryTurns).toHaveBeenCalledWith(["w2:p1"]);
     expect(calls.observeInstanceTurns).toHaveBeenCalledWith(["w2:p1"]);
   });
 
@@ -58,6 +63,7 @@ describe("HerdrEventRouter", () => {
 
     expect(calls.reconcileBindings).toHaveBeenCalledWith();
     expect(calls.reconcileInstances).toHaveBeenCalledWith();
+    expect(calls.observePrimaryTurns).toHaveBeenCalledWith();
     expect(calls.observeInstanceTurns).toHaveBeenCalledWith();
     expect(calls.retryRetiredPanes).toHaveBeenCalledWith();
   });
@@ -69,6 +75,28 @@ describe("HerdrEventRouter", () => {
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
 
     expect(calls.retryRetiredPanes).toHaveBeenCalled();
+    expect(calls.observePrimaryTurns).not.toHaveBeenCalled();
+    expect(router.snapshot()).toMatchObject({ paneHints: 1, handlerFailures: 1 });
+  });
+
+  it("does not expand a workspace hint without Pane identity into a full Primary transcript scan", async () => {
+    const { calls, router } = setup();
+
+    await router.handle({ kind: "pane-updated", scope: "workspaces", workspaceIds: ["w1"], paneIds: [] });
+
+    expect(calls.reconcileBindings).toHaveBeenCalledWith({ workspaceIds: ["w1"] });
+    expect(calls.observePrimaryTurns).not.toHaveBeenCalled();
+  });
+
+  it("keeps independent consumers running when the ordered Primary observation chain fails", async () => {
+    const { calls, router } = setup();
+    calls.observePrimaryTurns.mockRejectedValueOnce(new Error("transcript unavailable"));
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
+
+    expect(calls.reconcileInstances).toHaveBeenCalledOnce();
+    expect(calls.observeInstanceTurns).toHaveBeenCalledOnce();
+    expect(calls.retryRetiredPanes).toHaveBeenCalledOnce();
     expect(router.snapshot()).toMatchObject({ paneHints: 1, handlerFailures: 1 });
   });
 
