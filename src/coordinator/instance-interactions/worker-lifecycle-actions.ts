@@ -39,7 +39,8 @@ export class WorkerLifecycleActions {
     if (conversationKey.startsWith("binding:") && !this.options.context.isCurrentBindingCard(command, conversationKey, action.chatId)) return warning("话题上下文已变化，请重新打开实例目录。");
     if (command.action === "primary_worker_create_submit") {
       const binding = this.options.store.getBinding(command.bindingId);
-      if (!binding?.projectId || !this.projects.has(binding.projectId)) return warning("项目不存在或已移除。");
+      if (!binding || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || !binding.paneId) return warning("Primary 状态已变化，请刷新后重试。");
+      if (!binding.projectId || !this.projects.has(binding.projectId)) return warning("项目不存在或已移除。");
       const name = action.formValues?.name?.trim() ?? "";
       if (!name) return { toast: { type: "error", content: "请填写有效的 Worker 名。" } };
       try {

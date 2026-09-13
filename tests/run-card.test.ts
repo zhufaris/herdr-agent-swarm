@@ -426,23 +426,23 @@ describe("run card", () => {
       expect(serialized).toContain("Herdr Pane");
       expect(serialized).toContain("自动重新同步");
       expect(serialized).not.toContain("重新发送");
-      expect(actions).toEqual(["primary_worker_create_submit"]);
+      expect(actions).toEqual(phase === "blocked" ? ["primary_worker_create_submit"] : []);
     }
   });
 
   it("renders the create-Worker action for every Main Card state", () => {
     const cases = [
-      { phase: "provisioning", queueDepth: 0, actions: ["primary_worker_create_submit"] },
-      { phase: "draining", queueDepth: 0, actions: ["primary_worker_create_submit"] },
+      { phase: "provisioning", queueDepth: 0, actions: [] },
+      { phase: "draining", queueDepth: 0, actions: [] },
       { phase: "ready", queueDepth: 0, actions: ["primary_worker_create_submit"] },
       { phase: "queued", queueDepth: 2, actions: ["primary_worker_create_submit"] },
       { phase: "done", queueDepth: 0, actions: ["primary_worker_create_submit"] },
       { phase: "running", activePromptId: "p1", queueDepth: 0, actions: ["primary_worker_create_submit"] },
       { phase: "running", activePromptId: "p1", queueDepth: 2, actions: ["primary_worker_create_submit"] },
       { phase: "blocked", activePromptId: "p1", queueDepth: 0, actions: ["primary_worker_create_submit"] },
-      { phase: "error", queueDepth: 0, actions: ["primary_worker_create_submit"] },
-      { phase: "orphaned", queueDepth: 0, actions: ["primary_worker_create_submit"] },
-      { phase: "archived", queueDepth: 0, actions: ["primary_worker_create_submit"] }
+      { phase: "error", queueDepth: 0, actions: [] },
+      { phase: "orphaned", queueDepth: 0, actions: [] },
+      { phase: "archived", queueDepth: 0, actions: [] }
     ] as const;
 
     for (const entry of cases) {
@@ -473,7 +473,7 @@ describe("run card", () => {
     const memberCard = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: false, lifecycle: "active", attachment: "degraded" });
 
     expect(JSON.stringify(mainCard)).toContain("TraeX 正在运行，但未注册为 Herdr Agent。");
-    expect(mainCardCallbackActions(mainCard)).toEqual(["primary_worker_create_submit"]);
+    expect(mainCardCallbackActions(mainCard)).toEqual([]);
     expect(findTaggedNodes(creatorCard, "button").map(callbackValue).map((value) => value.action)).toContain("session_reset");
     expect(findTaggedNodes(memberCard, "button").map(callbackValue).map((value) => value.action)).not.toContain("session_reset");
   });

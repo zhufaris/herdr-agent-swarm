@@ -551,6 +551,12 @@ describe("instance routing", () => {
     await expect(handleCardAction(workflow, { messageId: "primary-main", chatId: "chat", operatorOpenId: "u1", value: { action: "primary_worker_create_submit", ...defaultBindingCard, bindingGeneration: 2 }, formValues: { name: "reviewer" } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
     expect(control.createWorker).not.toHaveBeenCalled();
   });
+  it("rejects inline Worker creation when the Primary binding is no longer active and attached", async () => {
+    const { workflow, control } = setup();
+    store!.updateBinding("binding-default", { attachment: "orphaned" });
+    await expect(handleCardAction(workflow, { messageId: "primary-main", chatId: "chat", operatorOpenId: "u1", value: { action: "primary_worker_create_submit", ...defaultBindingCard }, formValues: { name: "reviewer" } })).resolves.toMatchObject({ toast: { type: "warning" } });
+    expect(control.createWorker).not.toHaveBeenCalled();
+  });
   it("wakes durable card context after create so one canonical Worker Main thread is reserved", async () => {
     const work = new InProcessOutboundWorkNotifier();
     const { workflow } = setup(["u1"], () => work.wake());

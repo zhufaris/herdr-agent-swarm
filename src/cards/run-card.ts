@@ -155,6 +155,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
       conversationKey: `binding:${input.bindingId}`
     }, "primary")
   ] };
+  const canCreateWorker = input.phase === "ready" || input.phase === "queued" || input.phase === "running" || input.phase === "blocked" || input.phase === "done";
   if (input.workers.length > 0) {
     elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n${input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
     const workerButtons = [
@@ -162,8 +163,8 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     ];
     const row = actionRow(workerButtons);
     if (row) elements.push(row);
-    elements.push(createWorker);
-  } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, createWorker);
+    if (canCreateWorker) elements.push(createWorker);
+  } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, ...(canCreateWorker ? [createWorker] : []));
   const recentActivity = recentItems(progress.filter((event) => !planKeys.has(event.key)), 5);
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最近活动", summary: summarizeProgress(recentActivity), visibleCount: 5 }));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
