@@ -1,4 +1,5 @@
 import type { AgentInstance } from "../domain/agent-instance.js";
+import { InstanceTargetError } from "../domain/instance-target-error.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { ControlActor } from "../domain/commands.js";
 import type { InstanceEvent, InstanceTurn } from "../domain/instance-turn.js";
@@ -15,7 +16,7 @@ export class InstanceMessagingWorkflow {
 
   async submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string }; source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null } }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView | null; inserted: boolean }> {
     const target = this.authorize(input.actor, input.projectId, input.targetInstanceId);
-    if (!target.runtimeRef || target.desiredState !== "running") throw new Error("Target instance is not running");
+    if (!target.runtimeRef || target.desiredState !== "running") throw new InstanceTargetError("instance_not_running");
     const id = this.options.idFactory();
     if (input.source) {
       const primaryAnswer = input.actor.kind === "thread-primary" ? { aggregateKind: "primary-turn" as const, aggregateId: input.actor.parentPromptId, generation: input.actor.bindingGeneration, messageId: null } : null;
@@ -92,9 +93,9 @@ export class InstanceMessagingWorkflow {
 
   private authorize(actor: ControlActor, requestedProjectId: string | undefined, targetId: string): AgentInstance {
     const target = this.options.store.getAgentInstance(targetId);
-    if (!target) throw new Error("Target instance not found");
+    if (!target) throw new InstanceTargetError("instance_not_found");
     const projectId = requestedProjectId ?? target.projectId;
-    if (target.projectId !== projectId) throw new Error("Target instance is not in the requested project");
+    if (target.projectId !== projectId) throw new InstanceTargetError("instance_project_mismatch");
     if (actor.kind === "thread-primary") {
       const binding = this.requireCurrentPrimary(actor, projectId);
       if (target.role !== "worker" || !binding.paneId || target.parent?.bindingId !== binding.id || target.parent.paneId !== binding.paneId) throw new Error("Primary tools can target only Workers owned by this Primary pane");

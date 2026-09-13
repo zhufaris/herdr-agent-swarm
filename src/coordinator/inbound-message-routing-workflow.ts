@@ -15,6 +15,7 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { PermanentInboundMessageRejection } from "../domain/permanent-inbound-message-rejection.js";
 import { isInstanceTurnCapacityExceeded } from "../domain/instance-turn-capacity-error.js";
+import { isInstanceTargetError } from "../domain/instance-target-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
@@ -118,12 +119,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
 
 function permanentInstanceCommandRejection(error: unknown): string | null {
   if (isInstanceTurnCapacityExceeded(error)) return error.message;
-  const message = error instanceof Error ? error.message : String(error);
-  return [
-    "Target instance is not running",
-    "Target instance not found",
-    "Target instance is not in the requested project"
-  ].includes(message) ? message : null;
+  return isInstanceTargetError(error) ? error.message : null;
 }
 export function rejectsAliasCommand(command: BridgeCommand): boolean {
   return command.kind === "new" || command.kind === "projects" || command.kind === "spaces" || command.kind === "reset" || command.kind === "attach" || command.kind === "rename" || command.kind === "close" || command.kind === "pane_close_request" || command.kind === "pane_close_confirm" || command.kind === "reattach" || command.kind === "replace" || command.kind === "resume" || command.kind === "worker_create" || command.kind === "model" && command.name !== null;

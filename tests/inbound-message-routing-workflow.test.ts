@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InboundMessageRoutingWorkflow } from "../src/coordinator/inbound-message-routing-workflow.js";
 import { PermanentInboundMessageRejection } from "../src/domain/permanent-inbound-message-rejection.js";
 import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
+import { InstanceTargetError } from "../src/domain/instance-target-error.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
@@ -42,7 +43,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
   it("terminalizes a stopped Worker Thread message instead of retrying it", async () => {
     const outbound = { enqueueCard: vi.fn(async () => undefined) };
-    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw new InstanceTargetError("instance_not_running"); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
       stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
@@ -59,7 +60,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
   it("keeps an unavailable Worker Session Thread message retryable when rejection reservation fails", async () => {
     const reservationFailure = new Error("database unavailable");
     const outbound = { enqueueCard: vi.fn(async () => { throw reservationFailure; }) };
-    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw new InstanceTargetError("instance_not_running"); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
       stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
@@ -72,6 +73,21 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
   it("keeps an unknown Worker Session Thread failure retryable", async () => {
     const workerFailure = new Error("database unavailable");
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw workerFailure; }) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      outbound, workerSessionThreads, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "worker-event", messageId: "worker-message", parentMessageId: "worker-root", chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
+
+    await expect(workflow.handle(message)).rejects.toBe(workerFailure);
+    expect(outbound.enqueueCard).not.toHaveBeenCalled();
+  });
+
+  it("does not terminalize an untyped error that merely reuses an unavailable-target message", async () => {
+    const workerFailure = new Error("Target instance is not running");
     const outbound = { enqueueCard: vi.fn(async () => undefined) };
     const workerSessionThreads = { handleMessage: vi.fn(async () => { throw workerFailure; }) };
     const workflow = new InboundMessageRoutingWorkflow({
@@ -150,7 +166,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
   it("turns a stopped Worker rejection into a durable terminal disposition", async () => {
     const outbound = { enqueueCard: vi.fn(async () => undefined) };
-    const instanceInteractions = { handleCommand: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
+    const instanceInteractions = { handleCommand: vi.fn(async () => { throw new InstanceTargetError("instance_not_running"); }) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
       stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null) }),
