@@ -27,6 +27,15 @@ describe("agent driver contract", () => {
     expect(startAgent).toHaveBeenCalledWith("w1:p1", { name: "demo-primary", kind: "traex", executable: "/bin/traex", args: [] });
   });
 
+  it("uses a caller-scoped managed name when a Worker provides one", async () => {
+    const startAgent = vi.fn(async () => undefined);
+    const driver = new TraexDriver({ startAgent } as unknown as HerdrPort, "/bin/traex", 1_000);
+
+    await driver.start(runtime, { projectId: "demo", name: "test", managedName: "yy1r-test", model: null });
+
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ name: "yy1r-test" }));
+  });
+
   it("injects the scoped MCP server into capable Primary drivers only", async () => {
     const startAgent = vi.fn(async () => undefined);
     const traex = new TraexDriver({ startAgent } as unknown as HerdrPort, "traex", 1_000);

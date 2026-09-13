@@ -80,7 +80,7 @@ export class InstanceControlWorkflow {
       const pending = instance.pendingRuntimeRef;
       if (!pending) throw new Error("Provisioning pane checkpoint is missing");
       if (instance.provisioningCheckpoint === "pane-allocated") {
-        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, model: instance.model });
+        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, managedName: workerAgentName(instance), model: instance.model });
         instance = this.requireCheckpoint(instance, "runtime-started", "starting");
       }
       if (instance.provisioningCheckpoint === "runtime-started") {
@@ -200,6 +200,11 @@ function workerPaneTitle(instance: AgentInstance): string {
   if (!instance.parent) throw new Error("Worker parent identity is missing");
   const primary = primaryPaneToken(instance.sourcePrimaryPaneLabel, instance.parent.paneId);
   return `lark_${primary}-${instance.name}`;
+}
+
+function workerAgentName(instance: AgentInstance): string {
+  if (!instance.parent) throw new Error("Worker parent identity is missing");
+  return `${primaryPaneToken(instance.sourcePrimaryPaneLabel, instance.parent.paneId)}-${instance.name}`;
 }
 
 function paneTitleSegment(value: string): string {

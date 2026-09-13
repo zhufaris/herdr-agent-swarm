@@ -5,7 +5,7 @@ import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle 
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { appendWithinCardLimit } from "./card-payload.js";
-import { callbackButton } from "./cardkit-button.js";
+import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 import { actionRow, cardSection, lifecycleMarker, passiveCardElements, recentItems } from "./card-style.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
@@ -146,12 +146,24 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
+  const createWorker = { tag: "form", name: "primary_worker_create_form", elements: [
+    { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "Worker name，例如 reviewer" } },
+    formSubmitButton("创建并启动 Worker", "primary_worker_create_submit", {
+      action: "primary_worker_create_submit",
+      bindingId: input.bindingId,
+      bindingGeneration: input.bindingGeneration,
+      conversationKey: `binding:${input.bindingId}`
+    }, "primary")
+  ] };
   if (input.workers.length > 0) {
     elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n${input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
-    const workerButtons = input.workers.flatMap((worker) => worker.workerMain.messageId ? [callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default")] : []);
+    const workerButtons = [
+      ...input.workers.flatMap((worker) => worker.workerMain.messageId ? [callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default")] : [])
+    ];
     const row = actionRow(workerButtons);
     if (row) elements.push(row);
-  }
+    elements.push(createWorker);
+  } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, createWorker);
   const recentActivity = recentItems(progress.filter((event) => !planKeys.has(event.key)), 5);
   if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最近活动", summary: summarizeProgress(recentActivity), visibleCount: 5 }));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });

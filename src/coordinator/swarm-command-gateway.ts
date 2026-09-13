@@ -25,6 +25,7 @@ interface Options {
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
   promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlWorkflow, "createWorker" | "inspect">;
+  wakeCardContext(): void;
   presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult">;
 }
 
@@ -178,7 +179,8 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
         const result = await this.options.instanceControl.createWorker({ actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, projectId: intent.context.projectId, bindingId: intent.context.primary.bindingId, name: command.name, agentKind: command.agentKind, model: command.model, start: command.start });
         this.workerResults.set(intent.id, result); operation = { operationKind: "worker", operationId: result.instance.id };
         if (!intent.context.rootMessageId) throw new Error("Worker creation requires a Primary root message");
-        this.options.store.registerWorkerThreadEntry({ commandIntentId: intent.id, workerId: result.instance.id, workerSessionGeneration: result.instance.workerSessionGeneration, bindingId: intent.context.primary.bindingId, bindingGeneration: intent.context.primary.bindingGeneration, rootMessageId: intent.context.rootMessageId });
+        const entryRegistered = this.options.store.registerWorkerThreadEntry({ commandIntentId: intent.id, workerId: result.instance.id, workerSessionGeneration: result.instance.workerSessionGeneration, bindingId: intent.context.primary.bindingId, bindingGeneration: intent.context.primary.bindingGeneration, rootMessageId: intent.context.rootMessageId });
+        if (entryRegistered) this.options.wakeCardContext();
         if (result.status === "created-start-failed") { outcomeCode = "created_start_failed"; outcomeDetail = result.error; }
         if (intent.idempotencyKey.startsWith("lark-message:")) await this.reply(message, `Worker ${result.instance.name} 已创建${result.status === "created-start-failed" ? `，但启动失败：${result.error}` : "。"}`);
       } else throw new Error(`Query command ${command.kind} cannot execute as mutation`);

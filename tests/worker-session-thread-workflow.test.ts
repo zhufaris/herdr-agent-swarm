@@ -8,9 +8,9 @@ const active = (patch: Record<string, unknown> = {}) => ({ kind: "active" as con
 function setup(resolution: object = { kind: "none" }) {
   const store = { resolveScope: vi.fn(() => resolution), reserveLegacyEntry: vi.fn(() => ({ kind: "reserved" as const })) };
   const messaging = { submit: vi.fn(async () => ({ inserted: true, card: { queuePosition: 2 } })), steer: vi.fn(async () => ({ status: "delivered", durableResult: true })), interrupt: vi.fn(async () => ({ status: "interrupted", durableResult: true })) };
-  const outbound = { enqueueCard: vi.fn(async () => undefined) }; const wakeOutbound = vi.fn();
-  const workflow = new WorkerSessionThreadWorkflow({ adminOpenIds: ["operator"], store: store as never, messaging: messaging as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation });
-  return { workflow, store, messaging, outbound, wakeOutbound };
+  const outbound = { enqueueCard: vi.fn(async () => undefined) }; const wakeOutbound = vi.fn(); const gatewayEffects = { shareConversation: vi.fn(async () => ({ messageId: "shared" })) };
+  const workflow = new WorkerSessionThreadWorkflow({ adminOpenIds: ["operator"], store: store as never, messaging: messaging as never, outbound: outbound as never, wakeOutbound, gatewayEffects, presentation: applicationPresentation });
+  return { workflow, store, messaging, outbound, wakeOutbound, gatewayEffects };
 }
 
 describe("WorkerSessionThreadWorkflow", () => {
@@ -43,10 +43,20 @@ describe("WorkerSessionThreadWorkflow", () => {
   });
 
   it.each([
-    [{ kind: "reserved" }, "已提交", 1], [{ kind: "pending" }, "已受理", 0], [{ kind: "existing", rootMessageId: "root" }, "已存在", 0], [{ kind: "stale" }, "已变化", 0]
+    [{ kind: "reserved" }, "已提交", 1], [{ kind: "pending" }, "已受理", 0], [{ kind: "existing", rootMessageId: "root" }, "已打开", 0], [{ kind: "stale" }, "已变化", 0]
   ] as const)("maps publication %j to stable callback feedback", async (decision, copy, wakes) => {
     const { workflow, store, wakeOutbound } = setup(); store.reserveLegacyEntry.mockReturnValue(decision);
     const result = await workflow.publishFromCard({ messageId: "card", chatId: "chat", operatorOpenId: "operator", value: {} }, { instanceId: "worker", runtimeGeneration: 2, workerSessionGeneration: 1, conversationKey: "binding:binding", bindingId: "binding", bindingGeneration: 1 });
     expect(result.toast?.content).toContain(copy); expect(wakeOutbound).toHaveBeenCalledTimes(wakes);
+  });
+
+  it("shares an existing Worker Thread instead of creating another one", async () => {
+    const { workflow, store, gatewayEffects, wakeOutbound } = setup();
+    store.reserveLegacyEntry.mockReturnValue({ kind: "existing", rootMessageId: "worker-root" });
+
+    await expect(workflow.publishFromCard({ messageId: "card", chatId: "chat", operatorOpenId: "operator", value: {} }, { instanceId: "worker", runtimeGeneration: 2, workerSessionGeneration: 1, conversationKey: "binding:binding", bindingId: "binding", bindingGeneration: 1 })).resolves.toEqual({ toast: { type: "success", content: "已打开 Worker Thread。" } });
+
+    expect(gatewayEffects.shareConversation).toHaveBeenCalledWith({ conversationId: "worker-root", messageId: "card", targetConversationId: "chat", purpose: "group-thread" });
+    expect(wakeOutbound).not.toHaveBeenCalled();
   });
 });

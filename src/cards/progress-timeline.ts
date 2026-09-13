@@ -40,7 +40,7 @@ function timelineColor(phase: TimelinePhase): string {
 function progressLine(event: RunProgressEvent): string {
   const label = boundedLabel(event.label);
   const state = { pending: "☐", active: "◌", done: "✓", failed: "✕" }[event.state];
-  const icon = { analyze: "🧠", search: "🔎", read: "📖", edit: "🛠️", test: "🧪", step: "•" }[event.kind];
+  const icon = { analyze: "🧠", search: "🔎", read: "📖", edit: "🛠️", test: "🧪", step: "•" }[event.kind] ?? "•";
   return `${state} ${icon} ${label}`;
 }
 

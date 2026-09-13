@@ -132,7 +132,7 @@ export class SqliteCardContextStore {
             : selected;
           const placement = this.dependencies.reserveWorkerMainPlacement(next, renderers.workerMain(next));
           if (placement === "stale") return "stale";
-          const threadEntryReserved = invalidation.reason === "worker-main.delivered" && next.messageId
+          const threadEntryReserved = next.messageId
             ? this.reserveWorkerThreadEntries(next, renderers.workerThreadEntryReady)
             : false;
           return placement === "reserved" || threadEntryReserved ? "reserved" : "current";

@@ -40,7 +40,8 @@ export interface SpaceDirectoryPane {
   paneId: string; name: string; agentState: import("../types.js").AgentState; foregroundExecutables: string[]; bindingId?: string; claimProjectId?: string;
 }
 export interface SpaceDirectoryGroup { spaceName: string; workspaceId: string; directories: string[]; panes: SpaceDirectoryPane[]; error?: string; unregistered?: boolean; }
-export interface TopicPaneDirectoryEntry { bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; title: string; spaceName: string; agentState: import("../runtime-observation.js").AgentState; }
+export interface TopicPaneDirectoryWorker { workerId: string; runtimeGeneration: number; workerSessionGeneration: number; workerName: string; paneId: string | null; state: import("../agent-instance.js").ObservedInstanceState; }
+export interface TopicPaneDirectoryEntry { bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; title: string; spaceName: string; agentState: import("../runtime-observation.js").AgentState; workers: TopicPaneDirectoryWorker[]; }
 export interface InstanceDirectoryEntry { instance: AgentInstance; workspace: WorkspaceLease; capabilities: AgentCapabilities; queueDepth: number; approvalCount?: number; }
 export interface ThreadPrimaryView { bindingId: string; generation: number; paneId: string | null; state: Binding["state"]; }
 export type InteractionToast = { toast: { type: "success" | "warning" | "error"; content: string } };

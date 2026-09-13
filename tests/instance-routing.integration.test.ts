@@ -384,6 +384,20 @@ describe("instance routing", () => {
     expect(JSON.stringify(detail)).toContain('"bindingGeneration":3');
   });
 
+  it("derives the project for a fenced Main Card create action from the current binding", async () => {
+    const { workflow, outbound } = setup();
+
+    await expect(handleCardAction(workflow, {
+      messageId: "main-create", chatId: "chat", operatorOpenId: "u1",
+      value: { action: "instance_create_form", ...defaultBindingCard }
+    })).resolves.toEqual({ toast: { type: "success", content: "创建 Worker 表单已发送到当前话题。" } });
+
+    expect(outbound.enqueueCard).toHaveBeenLastCalledWith(
+      "root", "instance-create-form:main-create:u1:p1", expect.objectContaining({ schema: "2.0" }), "binding-default", "operation_result"
+    );
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain('"projectId":"p1"');
+  });
+
   it("rejects a card target from outside the bound topic project", async () => {
     const { create, workflow } = setup();
     const otherProjectWorker = create("other-worker", "worker", "p2");
@@ -489,7 +503,7 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
     taskCard(worker.id, "completed", "owned-task");
 
-    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🧭 reviewer" }, subtitle: { content: "HERDR WORKER · PRIMARY w1:primary-default · ⚠️ 未配置" } } } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🧭 Worker · reviewer" }, subtitle: { content: "HERDR WORKER · PRIMARY w1:primary-default · ⚠️ 未配置" } } } });
   });
 
   it("rejects stale and cross-Primary Worker card targets", async () => {
@@ -514,6 +528,28 @@ describe("instance routing", () => {
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
     expect(store!.listAgentInstances("p1").find(({ name }) => name === "reviewer")).toBeDefined();
     expect(wakeOutbound).toHaveBeenCalledTimes(2);
+  });
+  it("creates and starts a TraeX Worker from the inline Primary Main Card form using trusted binding context", async () => {
+    const { workflow, control, wakeOutbound } = setup();
+
+    await expect(handleCardAction(workflow, {
+      messageId: "primary-main", chatId: "chat", operatorOpenId: "u1",
+      value: { action: "primary_worker_create_submit", ...defaultBindingCard },
+      formValues: { name: "  reviewer  ", agent_kind: "codex", model: "forged-model", start: "false" }
+    })).resolves.toMatchObject({ toast: { type: "success", content: "Worker reviewer 已创建。" } });
+
+    expect(control.createWorker).toHaveBeenCalledWith({
+      actor: { kind: "human", userId: "u1", channel: "feishu" },
+      projectId: "p1", bindingId: "binding-default", kind: "worker_create",
+      name: "reviewer", agentKind: "traex", model: null, start: true
+    });
+    expect(wakeOutbound).toHaveBeenCalledOnce();
+  });
+  it("rejects empty and stale inline Primary Worker creation submissions", async () => {
+    const { workflow, control } = setup();
+    await expect(handleCardAction(workflow, { messageId: "primary-main", chatId: "chat", operatorOpenId: "u1", value: { action: "primary_worker_create_submit", ...defaultBindingCard }, formValues: { name: "   " } })).resolves.toEqual({ toast: { type: "error", content: "请填写有效的 Worker 名。" } });
+    await expect(handleCardAction(workflow, { messageId: "primary-main", chatId: "chat", operatorOpenId: "u1", value: { action: "primary_worker_create_submit", ...defaultBindingCard, bindingGeneration: 2 }, formValues: { name: "reviewer" } })).resolves.toEqual({ toast: { type: "warning", content: "话题上下文已变化，请重新打开实例目录。" } });
+    expect(control.createWorker).not.toHaveBeenCalled();
   });
   it("wakes durable card context after create so one canonical Worker Main thread is reserved", async () => {
     const work = new InProcessOutboundWorkNotifier();

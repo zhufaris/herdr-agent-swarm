@@ -24,8 +24,9 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
   };
   const worker = { id: "worker", name: "reviewer", workerSessionGeneration: 1 }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
-  const gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, presentation: applicationPresentation } as never);
-  return { store, gateway, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound };
+  const wakeCardContext = vi.fn();
+  const gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, wakeCardContext, presentation: applicationPresentation } as never);
+  return { store, gateway, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound, wakeCardContext };
 }
 
 describe("SwarmCommandGateway", () => {
@@ -58,6 +59,7 @@ describe("SwarmCommandGateway", () => {
     const worker = fixture.store.createWorkerAgentInstance({ id: "worker", projectId: "project", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: null }, workspace: { id: "worker-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
     fixture.instanceControl.createWorker.mockResolvedValueOnce({ status: "created", instance: worker });
     await fixture.gateway.handle({ ...message, messageId: "worker-entry" }, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true });
+    expect(fixture.wakeCardContext).toHaveBeenCalledOnce();
 
     expect(fixture.store.database.prepare("SELECT worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state FROM worker_thread_entry_requests").all())
       .toEqual([{ worker_id: "worker", worker_session_generation: 1, binding_id: "binding", binding_generation: 1, root_message_id: "root", state: "pending" }]);

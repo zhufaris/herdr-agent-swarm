@@ -69,12 +69,24 @@ export class SqliteCommandIntentStore {
 
   registerWorkerThreadEntry(input: { commandIntentId: string; workerId: string; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; rootMessageId: string }): boolean {
     const timestamp = now();
-    return this.context.database.prepare(`
-      INSERT INTO worker_thread_entry_requests(command_intent_id, worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state, created_at, updated_at)
-      SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?
-      WHERE EXISTS (SELECT 1 FROM swarm_command_intents WHERE id = ? AND state = 'executing')
-        AND EXISTS (SELECT 1 FROM agent_instances WHERE id = ? AND role = 'worker' AND worker_session_generation = ? AND parent_binding_id = ? AND parent_binding_generation = ?)
-    `).run(input.commandIntentId, input.workerId, input.workerSessionGeneration, input.bindingId, input.bindingGeneration, input.rootMessageId, timestamp, timestamp, input.commandIntentId, input.workerId, input.workerSessionGeneration, input.bindingId, input.bindingGeneration).changes === 1;
+    return this.context.transaction(() => {
+      const inserted = this.context.database.prepare(`
+        INSERT INTO worker_thread_entry_requests(command_intent_id, worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state, created_at, updated_at)
+        SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+        WHERE EXISTS (SELECT 1 FROM swarm_command_intents WHERE id = ? AND state = 'executing')
+          AND EXISTS (SELECT 1 FROM agent_instances WHERE id = ? AND role = 'worker' AND worker_session_generation = ? AND parent_binding_id = ? AND parent_binding_generation = ?)
+      `).run(input.commandIntentId, input.workerId, input.workerSessionGeneration, input.bindingId, input.bindingGeneration, input.rootMessageId, timestamp, timestamp, input.commandIntentId, input.workerId, input.workerSessionGeneration, input.bindingId, input.bindingGeneration).changes === 1;
+      if (!inserted) return false;
+      this.context.database.prepare(`
+        INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
+        VALUES ('worker-session', ?, ?, 1, 0, 'worker-thread-entry.registered', ?, ?)
+        ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
+          requested_dependency_revision = card_context_invalidations.requested_dependency_revision + 1,
+          reason = excluded.reason,
+          updated_at = excluded.updated_at
+      `).run(input.workerId, input.workerSessionGeneration, timestamp, timestamp);
+      return true;
+    });
   }
 }
 

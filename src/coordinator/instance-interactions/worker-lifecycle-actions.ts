@@ -37,13 +37,29 @@ export class WorkerLifecycleActions {
     const bindingContext = this.options.context.boundProject(conversationKey, action.chatId);
     if (bindingContext === "invalid") return warning("话题上下文已失效，请重新打开实例目录。");
     if (conversationKey.startsWith("binding:") && !this.options.context.isCurrentBindingCard(command, conversationKey, action.chatId)) return warning("话题上下文已变化，请重新打开实例目录。");
+    if (command.action === "primary_worker_create_submit") {
+      const binding = this.options.store.getBinding(command.bindingId);
+      if (!binding?.projectId || !this.projects.has(binding.projectId)) return warning("项目不存在或已移除。");
+      const name = action.formValues?.name?.trim() ?? "";
+      if (!name) return { toast: { type: "error", content: "请填写有效的 Worker 名。" } };
+      try {
+        const createCommand = { kind: "worker_create" as const, name, agentKind: "traex" as const, model: null, start: true };
+        const result = this.options.workerCreation
+          ? await this.options.workerCreation.createWorkerFromCard(action, binding.id, createCommand)
+          : await this.options.control.createWorker({ actor, projectId: binding.projectId, ...createCommand, bindingId: binding.id });
+        this.options.wakeOutbound?.();
+        if (result.status === "created-start-failed") return { toast: { type: "warning", content: `Worker ${result.instance.name} 已创建，但启动失败：${result.error}` }, card: this.options.views.detail(result.instance, conversationKey) };
+        return { toast: { type: "success", content: `Worker ${result.instance.name} 已创建。` }, card: this.options.views.detail(result.instance, conversationKey) };
+      } catch (error) { return failed(error); }
+    }
     if (command.action === "instance_create_form") {
-      if (!this.projects.has(command.projectId)) return warning("项目不存在或已移除。");
-      if (bindingContext && bindingContext !== command.projectId) return warning("当前话题已固定到其他项目。");
       const binding = command.bindingId ? this.options.store.getBinding(command.bindingId) : null;
+      const projectId = command.projectId ?? binding?.projectId;
+      if (!projectId || !this.projects.has(projectId)) return warning("项目不存在或已移除。");
+      if (bindingContext && bindingContext !== projectId) return warning("当前话题已固定到其他项目。");
       const rootMessageId = binding?.rootMessageId ?? action.messageId;
-      const card = this.options.presentation.instanceCreate({ projectId: command.projectId, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(command) });
-      await this.options.outbound.enqueueCard(rootMessageId, `instance-create-form:${action.messageId}:${action.operatorOpenId}:${command.projectId}`, card, binding?.id ?? null, "operation_result");
+      const card = this.options.presentation.instanceCreate({ projectId, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(command) });
+      await this.options.outbound.enqueueCard(rootMessageId, `instance-create-form:${action.messageId}:${action.operatorOpenId}:${projectId}`, card, binding?.id ?? null, "operation_result");
       this.options.wakeOutbound?.();
       return { toast: { type: "success", content: "创建 Worker 表单已发送到当前话题。" } };
     }

@@ -30,8 +30,8 @@ describe("GatewayView", () => {
     const card = renderInstanceCreateCard({ projectId: "project", requestedBy: "user" });
     const materialized = JSON.stringify(materializeFeishuView(cardKitToGatewayView(card)));
 
-    expect(materialized).toContain('\"action_type\":\"form_submit\"');
-    expect(materialized).not.toContain('\"form_action_type\":\"submit\"');
+    expect(materialized).toContain('\"form_action_type\":\"submit\"');
+    expect(materialized).not.toContain('\"action_type\":\"form_submit\"');
   });
 
   it("materializes form select defaults as CardKit value strings", () => {

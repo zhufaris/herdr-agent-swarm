@@ -113,6 +113,14 @@ describe("InstanceControlWorkflow", () => {
     expect(vi.mocked(paneHost.allocatePane).mock.calls.map((call) => call[2]?.title)).toEqual(["lark_ilcs-reviewer", "lark_ilcs-tester"]);
   });
 
+  it("scopes Herdr agent names to the parent Primary token", async () => {
+    const { workflow, driver } = setup();
+
+    await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "test", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
+
+    expect(vi.mocked(driver.start)).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ managedName: "ilcs-test" }));
+  });
+
   it.each(["task-reviewer", "lark_ops"])("preserves the validated Worker name %s in the pane title", async (name) => {
     const { workflow, paneHost } = setup();
 

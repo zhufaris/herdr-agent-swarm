@@ -2,7 +2,7 @@ import type { CardAggregateKind } from "../domain/card-target-ref.js";
 import type { SessionOperationKind } from "../domain/types.js";
 
 export const instanceCardActionNames = [
-  "card_target_open", "instance_create_form", "instance_create_submit", "instance_open", "instance_turn_open",
+  "card_target_open", "instance_create_form", "instance_create_submit", "primary_worker_create_submit", "instance_open", "instance_turn_open",
   "instance_set_target", "instance_start", "instance_stop", "instance_interrupt", "instance_steer_form",
   "instance_steer_submit", "instance_plan_removal", "instance_confirm_removal", "worker_new_task_form",
   "worker_new_task_submit", "worker_task_instruction_form", "worker_task_instruction_submit", "worker_task_interrupt", "worker_thread_send",
@@ -41,8 +41,9 @@ export type SessionCardActionCommand =
 
 export type InstanceCardActionCommand =
   | ({ kind: "instance"; action: "card_target_open"; aggregateKind: CardAggregateKind; aggregateId: string; generation: number; messageId: string } & BindingCardContext)
-  | ({ kind: "instance"; action: "instance_create_form"; projectId: string } & BindingCardContext)
+  | ({ kind: "instance"; action: "instance_create_form"; projectId?: string } & BindingCardContext)
   | ({ kind: "instance"; action: "instance_create_submit"; projectId: string; requestedBy: string } & BindingCardContext)
+  | ({ kind: "instance"; action: "primary_worker_create_submit" } & BindingCardContext & { bindingId: string; bindingGeneration: number })
   | InstanceActionVariants<"instance_open" | "instance_set_target" | "instance_start" | "instance_stop" | "instance_interrupt" | "instance_steer_form" | "instance_plan_removal", InstanceIdentity>
   | ({ kind: "instance"; action: "instance_turn_open"; turnId: string } & InstanceIdentity)
   | ({ kind: "instance"; action: "instance_steer_submit"; requestedBy: string } & InstanceIdentity)
@@ -121,8 +122,9 @@ function parseInstance(action: string, item: Record<string, unknown>): InstanceC
     const aggregateId = string(item.aggregateId); const generation = integer(item.generation); const messageId = string(item.messageId);
     return aggregateKind && aggregateId && generation !== null && messageId ? { kind: "instance", action, aggregateKind, aggregateId, generation, messageId, ...binding } : null;
   }
-  if (action === "instance_create_form") { const projectId = string(item.projectId); return projectId ? { kind: "instance", action, projectId, ...binding } : null; }
+  if (action === "instance_create_form") { const projectId = optionalString(item.projectId); return projectId === undefined ? null : { kind: "instance", action, ...(projectId ? { projectId } : {}), ...binding }; }
   if (action === "instance_create_submit") { const projectId = string(item.projectId); const requestedBy = string(item.requestedBy); return projectId && requestedBy ? { kind: "instance", action, projectId, requestedBy, ...binding } : null; }
+  if (action === "primary_worker_create_submit") return binding.bindingId && binding.conversationKey === `binding:${binding.bindingId}` ? { kind: "instance", action, ...binding, bindingId: binding.bindingId, bindingGeneration: binding.bindingGeneration! } : null;
   const main = workerMainIdentity(item);
   if (action === "worker_new_task_form") return main ? { kind: "instance", action, ...main } : null;
   if (action === "worker_new_task_submit") { const interactionId = interaction(item.interactionId); const requestedBy = string(item.requestedBy); return main && interactionId && requestedBy ? { kind: "instance", action, interactionId, requestedBy, ...main } : null; }

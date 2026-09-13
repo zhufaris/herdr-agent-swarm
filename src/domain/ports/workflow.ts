@@ -1,4 +1,5 @@
 import type { Binding, BindingMetadataPatch, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, ExternalTurnAdoption, ExternalTurnSupersessionFence, FailureSummary, HerdrAgentSession, IncomingLarkMessage, OutboundWorkClass, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, PromptJob, SessionOperation, SessionOperationKind, SessionOperationState, SessionSummary, StaleOutboxQuarantineRecovery } from "../types.js";
+import type { AgentInstance } from "../agent-instance.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
 import type { PaneControlOutcome } from "../pane-control-lifecycle.js";
@@ -9,6 +10,7 @@ import type { AcceptPromptInput } from "./prompt.js";
 
 export interface OperationsQueryStore {
   listBindings(): Binding[];
+  listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[];
   loadTopicView(bindingId: string): TopicViewState | null;
   listFailures(chatId: string): FailureSummary[];
   listSessions(chatId: string): SessionSummary[];

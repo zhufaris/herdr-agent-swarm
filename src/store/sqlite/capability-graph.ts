@@ -184,7 +184,7 @@ export class SqliteCapabilityGraph {
       health: new SqliteHealthStoreAdapter(this.operations, this.bindings),
       integrity: this.operations,
       inboundDispatch: this.inboundProjects,
-      operationsQuery: new SqliteOperationsQueryCapabilityStore(this.bindings, this.projections),
+      operationsQuery: new SqliteOperationsQueryCapabilityStore(this.bindings, this.projections, this.instances),
       retention: new SqliteRetentionStoreAdapter(this.outbox, this.inboundProjects, this.sessionOperations),
       workerCardDisplay: this.workerCardDisplays,
       workerSessionThreads: this.workerThreads,

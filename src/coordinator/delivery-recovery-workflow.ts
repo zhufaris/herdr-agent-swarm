@@ -55,13 +55,16 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     const binding = this.options.store.getBinding(entry.bindingId);
     if (!binding || binding.chatId !== action.chatId || binding.generation !== entry.bindingGeneration || binding.paneId !== entry.paneId
       || binding.statusMessageId !== entry.sourceMainMessageId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return "stale";
-    const view = this.options.store.loadTopicView(binding.id);
-    if (!view) return "stale";
-    const publicationKey = `pane-card-send:${action.messageId}:${binding.id}:${binding.generation}:${entry.sourceMainMessageId}`;
-    const reserved = this.options.store.reservePaneThreadAlias({ publicationKey, actionMessageId: action.messageId, bindingId: binding.id, bindingGeneration: binding.generation, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId, targetChatId: action.chatId, viewVersion: view.viewVersion, card: this.options.presentation.paneEntryCard(view) });
-    if (reserved === "stale") return "stale";
-    if (reserved === "reserved") this.options.outboundWork.wake();
-    this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: reserved });
-    return reserved === "reserved" ? "sent" : "duplicate";
+    const target = binding.topicId ?? binding.rootMessageId;
+    if (!target) return "stale";
+    try {
+      await this.options.gatewayEffects.shareConversation({ conversationId: target, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
+      this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: "shared" });
+      return "sent";
+    } catch (error) {
+      this.options.logger.error({ event: "pane-card-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share canonical Primary thread");
+      this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: "failed" });
+      return "stale";
+    }
   }
 }

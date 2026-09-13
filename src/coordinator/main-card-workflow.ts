@@ -29,7 +29,7 @@ export class MainCardWorkflow implements MainCardWorkflowPort {
   private async reserve(bindingId: string, desired?: TopicViewState, workClass?: OutboundWorkClass): Promise<void> {
     const binding = this.store.getBinding(bindingId);
     const stored = desired ?? this.store.loadTopicView(bindingId);
-    const view = stored ? updateTopicModelPreference(stored, this.store.getModelPreference(bindingId)) : null;
+    const view = stored ? updateTopicModelPreference({ ...stored, bindingGeneration: binding?.generation ?? stored.bindingGeneration }, this.store.getModelPreference(bindingId)) : null;
     if (!binding || !view) return;
     if (!binding.rootMessageId) {
       if (desired) this.store.saveTopicView(view);

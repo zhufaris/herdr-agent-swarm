@@ -1,4 +1,5 @@
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../adapters/lark-ingress.js";
+import type { GatewayEffectPort } from "../gateways/effect-client.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { WorkerSessionThreadApplicationStore, WorkerSessionThreadWorkflowPort, WorkerThreadPublicationTarget, WorkerThreadResolution } from "../domain/ports/worker-session-thread.js";
@@ -7,6 +8,7 @@ import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js
 export class WorkerSessionThreadWorkflow implements WorkerSessionThreadWorkflowPort {
   constructor(private readonly options: {
     adminOpenIds: readonly string[]; store: WorkerSessionThreadApplicationStore; messaging: InstanceMessagingWorkflow; outbound: OutboundIntentPort; wakeOutbound(): void;
+    gatewayEffects: Pick<GatewayEffectPort, "shareConversation">;
     presentation: Pick<ApplicationPresentation, "requestRejected" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted">;
   }) {}
 
@@ -23,7 +25,12 @@ export class WorkerSessionThreadWorkflow implements WorkerSessionThreadWorkflowP
     const decision = this.options.store.reserveLegacyEntry({ actionMessageId: action.messageId, chatId: action.chatId, target, render: this.options.presentation.workerThreadEntry });
     if (decision.kind === "reserved") { this.options.wakeOutbound(); return success("已提交 Worker 卡片，将发送到群并创建独立对话。"); }
     if (decision.kind === "pending") return success("Worker 对话已受理；如未显示，请查看 `/swarm failures`。");
-    if (decision.kind === "existing") return success(`Worker 对话已存在（${decision.rootMessageId}）。`);
+    if (decision.kind === "existing") {
+      try {
+        await this.options.gatewayEffects.shareConversation({ conversationId: decision.rootMessageId, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
+        return success("已打开 Worker Thread。");
+      } catch { return warning("Worker Thread 已存在，但打开失败；请重试。"); }
+    }
     return warning("Worker 状态已变化，请刷新实例目录。");
   }
 

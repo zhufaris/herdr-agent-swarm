@@ -3,6 +3,7 @@ import { normalizeLarkPreview, truncateLarkMarkdown } from "../runtime/lark-mark
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
 import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems } from "./card-style.js";
+import { renderProgressTimeline } from "./progress-timeline.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 
 const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "排队", preparing: "准备中", running: "执行中", blocked: "阻塞", completed: "完成", failed: "失败", cancelled: "取消", "dispatch-uncertain": "派发不确定" };
@@ -14,7 +15,11 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   ];
   if (view.currentTask?.notice) elements.push({ tag: "markdown", content: `⚠️ ${safe(view.currentTask.notice)}` });
   elements.push({ tag: "markdown", content: currentTaskContent(view.currentTask) });
-  if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "进度")}  ${safe(view.currentTask.statusTitle)}${progressLines(view.currentTask).join("")}` });
+  if (view.currentTask?.progressEvents?.length) {
+    if (view.currentTask.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "当前进展")}  ${safe(view.currentTask.statusTitle)}` });
+    elements.push(...renderProgressTimeline(view.currentTask.progressEvents, timelinePhase(view.currentTask.phase), { title: "📈 当前进展", visibleCount: 5 }));
+  }
+  else if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "当前进展")}  ${safe(view.currentTask.statusTitle)}` });
   if (view.currentTask?.answer) elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("📝", "当前输出")}\n\n${safeOutput(view.currentTask.answer)}` });
   pushActions(elements, view, options.snapshot === true);
   elements.push({ tag: "markdown", content: `${cardSection("📨", "队列")}\n${view.queueCount} 条等待${view.nextTaskTitle ? `  ·  下一项 ${safe(view.nextTaskTitle)}` : ""}` });
@@ -107,8 +112,11 @@ function pushActions(elements: object[], view: WorkerMainView, snapshot: boolean
   if (row) elements.push({ tag: "markdown", content: [...new Set(guidance)].join("\n") }, row);
 }
 
-function progressLines(task: WorkerMainTaskSummary): string[] {
-  return recentItems(task.progressEvents ?? [], 3).map((event) => `\n${lifecycleMarker(event.state === "done" ? "completed" : event.state === "active" ? "running" : event.state)} ${safe(event.label)}`);
+function timelinePhase(phase: WorkerMainTaskSummary["phase"]): "running" | "blocked" | "completed" | "failed" {
+  if (phase === "blocked") return "blocked";
+  if (phase === "completed") return "completed";
+  if (phase === "failed" || phase === "cancelled" || phase === "dispatch-uncertain") return "failed";
+  return "running";
 }
 function runtimeDetails(view: WorkerMainView, projectDisplayName?: string): string {
   const project = projectDisplayName

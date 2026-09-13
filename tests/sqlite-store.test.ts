@@ -322,6 +322,55 @@ describe("SQLite store", () => {
       expect(store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "worker-thread-entry:worker-create")).toHaveLength(1);
     });
 
+    it("releases a Primary entry registered after the canonical Worker Main Card is current", () => {
+      const view = activeWorkerStore(null);
+      const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
+      expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
+      const group = store!.listPendingOutboundReplies().find(({ kind }) => kind === "group_card_create")!;
+      expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(group.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
+
+      const renderers = { workerMain: () => ({ schema: "2.0" }), workerThreadEntryReady: (entry: object) => ({ entry }), workerTask: () => ({ schema: "2.0" }), primaryMain: () => ({ schema: "2.0" }), primaryPaneEntry: () => ({ schema: "2.0" }), primaryAnswer: () => ({ schema: "2.0" }) };
+      for (const invalidation of store!.listPendingCardContextInvalidations()) store!.projectCardContext(invalidation, renderers);
+      expect(store!.listPendingCardContextInvalidations()).toEqual([]);
+
+      const command = store!.acceptCommandIntent({ id: "late-worker-create", idempotencyKey: "late-worker-create", laneKey: "binding:b1", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true }, context: { projectId: "p1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", actorOpenId: "operator", sourceMessageId: "source", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", terminalId: null, nativeSession: null, activePromptId: null } }, replayPolicy: "reconcilable", acceptedAt: "2026-09-13T00:00:00.000Z" }).intent;
+      expect(store!.claimNextCommandIntent()).toMatchObject({ id: command.id });
+      expect(store!.registerWorkerThreadEntry({ commandIntentId: command.id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "primary-root" })).toBe(true);
+
+      const [invalidation] = store!.listPendingCardContextInvalidations();
+      expect(invalidation).toMatchObject({ targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1, reason: "worker-thread-entry.registered" });
+      expect(store!.projectCardContext(invalidation!, renderers)).toBe("reserved");
+      expect(store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "worker-thread-entry:late-worker-create")).toHaveLength(1);
+      expect(store!.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'late-worker-create'").get()).toEqual({ state: "reserved" });
+    });
+
+    it("backfills only generation-current pending Primary entries on upgrade", () => {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), "worker-entry-backfill-"));
+      const path = join(temporaryDirectory, "state.sqlite");
+      store = new SqliteBindingStore(path);
+      store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
+      store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
+      const worker = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/reviewer", branch: "reviewer", baseCommit: "base" } }, 4);
+      if (worker.outcome !== "created") throw new Error("expected Worker");
+      const view = createWorkerMainView({ workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary", runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: false, desiredState: "running", parentActive: true, paneId: null, workspace: "/repo/reviewer", branch: "reviewer", model: null, occurredAt: "2026-09-13T00:00:00.000Z" });
+      store.saveWorkerMainView(view);
+      expect(store.workerSessionThreads.reserve({ publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: {} })).toBe("reserved");
+      const group = store.listPendingOutboundReplies().find(({ kind }) => kind === "group_card_create")!;
+      expect(store.markOutboundReplyDelivered(store.claimOutboundReply(group.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
+      for (const id of ["current-entry", "stale-entry"]) {
+        store.acceptCommandIntent({ id, idempotencyKey: id, laneKey: `binding:b1:${id}`, command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true }, context: { projectId: "p1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", actorOpenId: "operator", sourceMessageId: id, primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", terminalId: null, nativeSession: null, activePromptId: null } }, replayPolicy: "reconcilable", acceptedAt: "2026-09-13T00:00:00.000Z" });
+        expect(store.claimNextCommandIntent(`binding:b1:${id}`)).toMatchObject({ id });
+        expect(store.registerWorkerThreadEntry({ commandIntentId: id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "primary-root" })).toBe(true);
+      }
+      store.database.prepare("UPDATE worker_thread_entry_requests SET worker_session_generation = 2 WHERE command_intent_id = 'stale-entry'").run();
+      store.database.exec("DELETE FROM card_context_invalidations; DELETE FROM schema_migrations WHERE version = 43");
+      store.close(); store = new SqliteBindingStore(path);
+
+      expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1, reason: "startup.worker-thread-entry-backfill" })]);
+      expect(store.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'stale-entry'").get()).toEqual({ state: "pending" });
+      expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 43").get()).toEqual({ version: 43 });
+    });
+
     it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {
       const view = activeWorkerStore("canonical-worker-main");
       const input = { publicationKey: "worker-entry:reviewer:1", actionMessageId: "instances-card", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "legacy-entry" as const, sourceMainMessageId: "canonical-worker-main", card: { schema: "2.0" } };

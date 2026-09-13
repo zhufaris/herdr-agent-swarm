@@ -46,7 +46,11 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
       .filter((binding) => binding.chatId === message.chatId && (!scope || isInTopicPaneScope(this.options.config.projects, binding, scope)) && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached" && binding.paneId !== null && binding.statusMessageId !== null)
       .flatMap((binding): TopicPaneDirectoryEntry[] => {
         const view = this.options.store.loadTopicView(binding.id);
-        return view && binding.statusMessageId ? [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState }] : [];
+        if (!view || !binding.statusMessageId) return [];
+        const workers = this.options.store.listWorkerInstancesByParent({ bindingId: binding.id, paneId: binding.paneId! }).map((worker) => {
+          return { workerId: worker.id, runtimeGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, paneId: worker.runtimeRef?.paneId ?? worker.pendingRuntimeRef?.paneId ?? null, state: worker.observedState };
+        });
+        return [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState, workers }];
       })
       .sort((left, right) => left.spaceName.localeCompare(right.spaceName) || left.title.localeCompare(right.title) || left.paneId.localeCompare(right.paneId));
     await this.publishCards(message, "panes", [this.options.presentation.topicPanes(entries)]);

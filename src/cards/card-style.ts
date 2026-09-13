@@ -53,7 +53,7 @@ export function recentItems<T>(items: readonly T[], limit: number): T[] {
 /** Removes every nested callback button from a presentation-only snapshot. */
 export function passiveCardElements(elements: readonly object[]): object[] {
   return elements.flatMap((element) => {
-    if ("tag" in element && element.tag === "button") return [];
+    if ("tag" in element && (element.tag === "button" || element.tag === "form")) return [];
     const copy = { ...element } as Record<string, unknown>;
     if (Array.isArray(copy.elements)) copy.elements = passiveCardElements(copy.elements.filter((item): item is object => typeof item === "object" && item !== null));
     if (Array.isArray(copy.columns)) copy.columns = copy.columns.flatMap((column) => {

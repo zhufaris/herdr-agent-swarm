@@ -21,13 +21,13 @@ export class TraexDriver implements AgentRuntimeDriver {
     };
   }
 
-  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
+  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
     const args = [
       ...(options?.model ? ["--model", options.model] : []),
       ...(options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...mcpArguments(options.primaryTools)] : [])
     ];
     if (!this.herdr.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
-    await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.projectId, options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
+    await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
   }
 
   async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt> {

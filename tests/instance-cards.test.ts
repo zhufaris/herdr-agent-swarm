@@ -64,7 +64,7 @@ describe("instance cards", () => {
       viewVersion: 1, deliveredVersion: 1, frozenAt: null, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
     };
     const rendered = JSON.stringify(renderWorkerMainCard(view, { projectDisplayName: "Herdr Agent Swarm" }));
-    expect(rendered).toContain("🧭 reviewer");
+    expect(rendered).toContain("🧭 Worker · reviewer");
     expect(rendered).toContain("HERDR WORKER · PRIMARY primary-review · ✅ 空闲");
     expect(rendered).toContain("Project Herdr Agent Swarm (`swarm`)");
     expect(rendered).toContain("Primary primary-review (`w1:p0`)");
@@ -189,7 +189,7 @@ describe("instance cards", () => {
     expect(create).toContain('\"action\":\"instance_create_submit\"');
     expect(create).toContain('\"projectId\":\"p1\"');
     expect(create).toContain('\"requestedBy\":\"u1\"');
-    expect(create).toContain('\"action_type\":\"form_submit\"');
+    expect(create).toContain('\"form_action_type\":\"submit\"');
     expect(create).toContain("创建 Worker");
     expect(create).not.toContain("选择角色");
     expect(create).not.toContain("\"name\":\"role\"");
@@ -202,12 +202,12 @@ describe("instance cards", () => {
     expect(inputs).toEqual(inputs.map((input) => expect.objectContaining({ input_type: "text" })));
     expect(steer).toContain('\"action\":\"instance_steer_submit\"');
     expect(steer).toContain('\"generation\":2');
-    expect(steer).toContain('\"action_type\":\"form_submit\"');
+    expect(steer).toContain('\"form_action_type\":\"submit\"');
     for (const renderedCard of [createCard, steerCard]) {
       const form = renderedCard.body.elements.find(({ elements }) => elements !== undefined);
       const submit = form!.elements!.find(({ tag }) => tag === "button");
-      expect(submit).toMatchObject({ action_type: "form_submit" });
-      expect(submit).not.toHaveProperty("form_action_type");
+      expect(submit).toMatchObject({ form_action_type: "submit" });
+      expect(submit).not.toHaveProperty("action_type");
     }
   });
 

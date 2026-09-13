@@ -102,6 +102,7 @@ function validPayload(action: typeof instanceCardActionNames[number] | typeof se
   if (action === "primary_continue_submit") return { action, ...binding, interactionId: "interaction-1", parentPromptId: "prompt-1", sourceAnswerMessageId: "answer-1", requestedBy: "user" };
   if ((sessionCardActionNames as readonly string[]).includes(action)) return { action, ...binding, ...(["open_rename", "open_reattach", "submit_rename", "submit_reattach", "session_stop", "session_model", "session_reset", "session_archive", "session_replace", "session_resume", "session_pane_close"].includes(action) ? { interactionId: "interaction-1" } : {}) };
   if (action === "card_target_open") return { action, aggregateKind: "worker-turn", aggregateId: "turn-1", generation: 1, messageId: "card-1" };
+  if (action === "primary_worker_create_submit") return { action, ...binding, conversationKey: "binding:b1" };
   if (action === "instance_create_form" || action === "instance_create_submit") return { action, projectId: "p1", ...(action.endsWith("submit") ? { requestedBy: "user" } : {}) };
   if (action === "worker_thread_send") return { action, instanceId: "i1", generation: 1, workerSessionGeneration: 1 };
   if (action.startsWith("worker_new_task_")) return { action, instanceId: "i1", generation: 1, workerSessionGeneration: 1, sourceCardMessageId: "card-1", ...(action.endsWith("submit") ? { interactionId: "interaction-1", requestedBy: "user" } : {}) };
