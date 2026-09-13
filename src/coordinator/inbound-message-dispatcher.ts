@@ -5,6 +5,7 @@ import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import { CoalescingDrain } from "../runtime/coalescing-drain.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { isPermanentInboundMessageRejection } from "../domain/permanent-inbound-message-rejection.js";
+import { inboundMessageScopeKey } from "../domain/inbound-message-scope.js";
 
 const INBOUND_RETRY_INITIAL_MS = 250;
 const INBOUND_RETRY_MAX_MS = 30_000;
@@ -129,7 +130,9 @@ export class InboundMessageDispatcher implements InboundMessageDispatcherPort {
   }
 
   private async drainOnce(): Promise<boolean> {
-    for (let message = this.options.store.claimNextInboundMessage(); message; message = this.stopping ? null : this.options.store.claimNextInboundMessage()) {
+    const retryableScopeKeys = new Set<string>();
+    let hasRetryableFailure = false;
+    for (let message = this.options.store.claimNextInboundMessage([...retryableScopeKeys]); message; message = this.stopping ? null : this.options.store.claimNextInboundMessage([...retryableScopeKeys])) {
       try {
         await this.options.inboundWork.notify({ eventId: message.eventId, type: "InboundMessageReceived", origin: "lark", occurredAt: new Date().toISOString(), payload: message });
         this.options.store.markInboundMessageAccepted(message.eventId);
@@ -142,12 +145,14 @@ export class InboundMessageDispatcher implements InboundMessageDispatcherPort {
           continue;
         }
         this.options.store.releaseInboundMessage(message.eventId, errorMessage(error));
+        retryableScopeKeys.add(inboundMessageScopeKey(message));
+        hasRetryableFailure = true;
         this.recordFailure(error);
         this.options.logger.error({ event: "lark-message-acceptance-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, outcome: "retry" }, "inbound message acceptance failed; retained for retry");
-        return false;
+        continue;
       }
     }
-    return true;
+    return !hasRetryableFailure;
   }
 
   private recordFailure(error: unknown): void {

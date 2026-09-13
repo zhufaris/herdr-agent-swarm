@@ -45,6 +45,36 @@ describe("InboundMessageDispatcher authorization", () => {
 });
 
 describe("InboundMessageDispatcher durable FIFO", () => {
+  it("continues an independent inbound scope when an earlier scope is retryable", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const inboundWork = new InProcessInboundWorkNotifier();
+    const accepted: string[] = [];
+    inboundWork.subscribe(({ payload }) => {
+      if (payload.eventId === "a-stopped-worker") throw new Error("Target instance is not running");
+      accepted.push(payload.eventId);
+    });
+    const dispatcher = new InboundMessageDispatcher({ chatId: "chat", allowedOpenIds: ["operator"], store, inboundWork, logger: pino({ enabled: false }) });
+
+    try {
+      store.recordInboundMessage({ ...message("a-stopped-worker", "hi"), rootMessageId: "stopped-worker-root" });
+      store.recordInboundMessage({ ...message("b-later-stopped-worker", "later"), rootMessageId: "stopped-worker-root" });
+      store.recordInboundMessage({ ...message("z-new", "/swarm new"), rootMessageId: "new-root" });
+      dispatcher.start();
+      await dispatcher.drain();
+
+      expect(accepted).toEqual(["z-new"]);
+      expect(store.database.prepare("SELECT event_id, state, error FROM inbound_messages ORDER BY event_id").all()).toEqual([
+        { event_id: "a-stopped-worker", state: "received", error: "Target instance is not running" },
+        { event_id: "b-later-stopped-worker", state: "received", error: null },
+        { event_id: "z-new", state: "accepted", error: null }
+      ]);
+      expect(dispatcher.snapshot()).toMatchObject({ state: "retry_wait", retryAttempt: 1 });
+    } finally {
+      await dispatcher.stop();
+      store.close();
+    }
+  });
+
   it("acknowledges a permanent rejection and continues the durable FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     const inboundWork = new InProcessInboundWorkNotifier();

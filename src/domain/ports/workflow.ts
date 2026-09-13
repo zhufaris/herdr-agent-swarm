@@ -42,7 +42,7 @@ export interface StartupViewStore {
 /** Durable inbox operations. Claim/release remains owned by the single SQLite
  * transaction store; this port only defines the dispatcher capability. */
 export interface InboundMessageDispatchStore {
-  claimNextInboundMessage(): IncomingLarkMessage | null;
+  claimNextInboundMessage(excludedScopeKeys?: readonly string[]): IncomingLarkMessage | null;
   isBridgeMessage(messageId: string): boolean;
   markInboundMessageAccepted(eventId: string): void;
   recordInboundMessage(message: IncomingLarkMessage): boolean;

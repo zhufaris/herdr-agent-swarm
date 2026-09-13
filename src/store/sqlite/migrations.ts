@@ -32,6 +32,7 @@ export class SqliteMigrations {
     this.cards.ensureMainCardSequences();
     this.worker.ensureAgentInstanceLifecycleColumns();
     this.binding.ensureInboundMessageIdempotency();
+    this.binding.ensureInboundMessageScopes();
     this.cards.ensureOutboundCardCheckpoint();
     this.cards.ensureRequestCardOutboxColumns();
     this.cards.ensureOutboundTargetRole();

@@ -3,6 +3,7 @@ import type { IncomingLarkMessage, ProjectSelection, ProjectSelectionClaim } fro
 import { mapProjectSelection, type ProjectSelectionRow } from "../sqlite-records.js";
 import type { SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
+import { inboundMessageScopeKey } from "../../domain/inbound-message-scope.js";
 
 export class SqliteInboundProjectStore {
   constructor(private readonly context: SqliteContext) {}
@@ -12,13 +13,14 @@ export class SqliteInboundProjectStore {
     return this.context.transaction(() => {
       if (this.database.prepare("SELECT 1 FROM inbound_messages WHERE event_id = ? OR message_id = ?").get(message.eventId, message.messageId)) return false;
       const timestamp = now();
-      return this.database.prepare(`INSERT INTO inbound_messages(event_id, gateway_id, message_id, payload_json, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'received', ?, ?)`).run(message.eventId, message.gatewayId ?? "feishu:primary", message.messageId, JSON.stringify(message), timestamp, timestamp).changes === 1;
+      return this.database.prepare(`INSERT INTO inbound_messages(event_id, gateway_id, message_id, payload_json, scope_key, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'received', ?, ?)`).run(message.eventId, message.gatewayId ?? "feishu:primary", message.messageId, JSON.stringify(message), inboundMessageScopeKey(message), timestamp, timestamp).changes === 1;
     });
   }
 
-  claimNextInboundMessage(): IncomingLarkMessage | null {
+  claimNextInboundMessage(excludedScopeKeys: readonly string[] = []): IncomingLarkMessage | null {
     return this.context.transaction(() => {
-      const row = this.database.prepare("SELECT event_id, payload_json FROM inbound_messages WHERE state = 'received' ORDER BY created_at, event_id LIMIT 1").get() as { event_id: string; payload_json: string } | undefined;
+      const exclusions = excludedScopeKeys.length ? ` AND scope_key NOT IN (${excludedScopeKeys.map(() => "?").join(", ")})` : "";
+      const row = this.database.prepare(`SELECT event_id, payload_json FROM inbound_messages WHERE state = 'received'${exclusions} ORDER BY created_at, event_id LIMIT 1`).get(...excludedScopeKeys) as { event_id: string; payload_json: string } | undefined;
       if (!row) return null;
       this.database.prepare("UPDATE inbound_messages SET state = 'processing', error = NULL, updated_at = ? WHERE event_id = ?").run(now(), row.event_id);
       return JSON.parse(row.payload_json) as IncomingLarkMessage;

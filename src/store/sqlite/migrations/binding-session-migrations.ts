@@ -14,6 +14,24 @@ export class BindingSessionMigrations {
     this.context.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id)");
   }
 
+  ensureInboundMessageScopes(): void {
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(inbound_messages)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("scope_key")) this.context.database.exec("ALTER TABLE inbound_messages ADD COLUMN scope_key TEXT");
+    this.context.database.exec(`
+      UPDATE inbound_messages
+      SET scope_key = CASE
+        WHEN json_extract(payload_json, '$.topicId') IS NOT NULL THEN 'topic:' || json_extract(payload_json, '$.topicId')
+        WHEN json_extract(payload_json, '$.rootMessageId') IS NOT NULL THEN 'root:' || json_extract(payload_json, '$.rootMessageId')
+        ELSE 'message:' || message_id
+      END
+      WHERE scope_key IS NULL OR scope_key = ''
+    `);
+    const pendingIndexColumns = (this.context.database.prepare("PRAGMA index_info(inbound_messages_pending)").all() as Array<{ name: string }>).map(({ name }) => name);
+    if (pendingIndexColumns.join(",") !== "state,scope_key,created_at") {
+      this.context.database.exec("DROP INDEX IF EXISTS inbound_messages_pending; CREATE INDEX inbound_messages_pending ON inbound_messages(state, scope_key, created_at)");
+    }
+  }
+
   ensureTwoPhaseResetState(): void {
     const columns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!columns.has("replaces_binding_id")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN replaces_binding_id TEXT REFERENCES bindings(id)");

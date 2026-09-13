@@ -112,11 +112,11 @@ export function createLatestSchema(context: SqliteContext): void {
     chat_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target_kind TEXT NOT NULL CHECK(target_kind IN ('primary','instance')), instance_id TEXT, instance_generation INTEGER, updated_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS inbound_messages(
-    event_id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', message_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+    event_id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', message_id TEXT NOT NULL, payload_json TEXT NOT NULL, scope_key TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('received','processing','accepted')), error TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS inbound_messages_pending ON inbound_messages(state, created_at);
+  CREATE INDEX IF NOT EXISTS inbound_messages_pending ON inbound_messages(state, scope_key, created_at);
   CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id);
   CREATE TABLE IF NOT EXISTS bridge_messages(message_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS card_interactions(
