@@ -27,6 +27,7 @@ export class InstanceTurnSupervisor {
     const result = this.options.store.recoverInterruptedInstanceTurns();
     this.recovered = true;
     if (result.requeuedTurnIds.length > 0) this.options.logger?.info({ event: "instance-turns-requeued-after-restart", count: result.requeuedTurnIds.length, outcome: "awaiting_runtime_reconciliation" }, "requeued pre-dispatch instance turns");
+    if (result.cancelledLegacyTurnIds.length > 0) this.options.logger?.warn({ event: "legacy-worker-turns-cancelled-after-restart", count: result.cancelledLegacyTurnIds.length, outcome: "permanently_detached" }, "cancelled non-executable legacy Worker turns");
   }
 
   reconcile(): Promise<void> {

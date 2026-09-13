@@ -1930,11 +1930,53 @@ describe("SQLite store", () => {
     store.updateInstanceTurn({ turnId: "uncertain-turn", expectedGeneration: uncertainInstance.generation, state: "dispatching", eventKind: "turn.dispatching" });
 
     expect(store.recoverInterruptedInstanceTurns()).toEqual({
-      requeuedTurnIds: ["claimed-turn"],
+      requeuedTurnIds: ["claimed-turn"], cancelledLegacyTurnIds: [],
       observableTurns: [expect.objectContaining({ id: "uncertain-turn", state: "dispatching" })]
     });
     expect(store.getInstanceTurn("claimed-turn")).toMatchObject({ state: "queued" });
     expect(store.getInstanceTurn("uncertain-turn")).toMatchObject({ state: "dispatching" });
+  });
+
+  it("cancels only queued turns owned by permanently detached legacy Worker sessions", () => {
+    store = new SqliteBindingStore(":memory:");
+    const actor = { kind: "human" as const, userId: "u1" };
+    const create = (id: string, lifecycle: "legacy" | "active" | "terminated", withPendingPane = false) => {
+      store!.createAgentInstance({ id, projectId: "project-a", name: id, role: "worker", agentKind: "traex", model: null, workerSessionLifecycle: lifecycle, desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: `/repo/${id}`, branch: null, baseCommit: "base" } });
+      store!.database.prepare("UPDATE agent_instances SET observed_state = 'detached', pending_pane_id = ? WHERE id = ?").run(withPendingPane ? `w1:${id}` : null, id);
+      return store!.getAgentInstance(id)!;
+    };
+    const legacy = create("legacy", "legacy");
+    const pending = create("pending", "legacy", true);
+    const active = create("active", "active");
+    const terminated = create("terminated", "terminated");
+    const accept = (id: string, instance: ReturnType<typeof create>, withCard = false) => {
+      if (!withCard) return store!.acceptInstanceTurn({ id, idempotencyKey: id, actor, projectId: "project-a", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: id });
+      const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: instance.id, instanceGeneration: instance.generation, workerName: instance.name, parentTurnId: null, rootMessageId: "root", requestText: id, queuePosition: 1, occurredAt: "2026-09-13T00:00:00.000Z" });
+      return store!.acceptInstanceTurnWithCard({ id, idempotencyKey: id, actor, projectId: "project-a", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: id, parentTurnId: null, sourceMessageId: `source-${id}`, view, render: renderWorkerTurnCard });
+    };
+    accept("legacy-queued", legacy, true);
+    accept("legacy-uncertain", legacy);
+    store.updateInstanceTurn({ turnId: "legacy-uncertain", expectedGeneration: legacy.generation, state: "dispatch-uncertain", eventKind: "turn.dispatch-uncertain" });
+    accept("pending-queued", pending);
+    accept("active-queued", active);
+    accept("terminated-queued", terminated);
+
+    expect(store.recoverInterruptedInstanceTurns()).toEqual({
+      requeuedTurnIds: [], cancelledLegacyTurnIds: ["legacy-queued"],
+      observableTurns: [expect.objectContaining({ id: "legacy-uncertain", state: "dispatch-uncertain" })]
+    });
+
+    expect(store.getInstanceTurn("legacy-queued")).toMatchObject({ state: "cancelled", error: "Legacy Worker session is detached and cannot be resumed" });
+    expect(store.loadWorkerTurnCard("legacy-queued")).toMatchObject({ phase: "cancelled", queuePosition: 0, resultCapture: "unavailable", notice: "Legacy Worker session is detached and cannot be resumed" });
+    expect(store.getInstanceTurn("legacy-uncertain")).toMatchObject({ state: "dispatch-uncertain" });
+    for (const id of ["pending-queued", "active-queued", "terminated-queued"]) expect(store.getInstanceTurn(id)).toMatchObject({ state: "queued" });
+    expect(store.listInstanceEvents(legacy.id).at(-1)).toMatchObject({ turnId: "legacy-queued", kind: "turn.cancelled", payload: { state: "cancelled", reason: "legacy_worker_unrecoverable" } });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.getInstanceTurnDiagnostics()).toEqual({ queuedTurns: 3, activeTurns: 0, uncertainTurns: 1 });
+    expect(store.recoverInterruptedInstanceTurns()).toEqual({
+      requeuedTurnIds: [], cancelledLegacyTurnIds: [],
+      observableTurns: [expect.objectContaining({ id: "legacy-uncertain", state: "dispatch-uncertain" })]
+    });
   });
 
   it("claims a priority Worker turn before ordinary FIFO and preserves single-active exclusion", () => {

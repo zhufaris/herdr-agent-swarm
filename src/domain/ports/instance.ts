@@ -74,7 +74,7 @@ export interface InstanceStore {
   revokeBindingPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean;
   getActiveOrdinaryPrompt(bindingId: string, expectedGeneration: number): PromptJob | null;
   claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;
-  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] };
+  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; cancelledLegacyTurnIds: string[]; observableTurns: InstanceTurn[] };
   listObservableInstanceTurns(): InstanceTurn[];
   listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[];
   getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number };

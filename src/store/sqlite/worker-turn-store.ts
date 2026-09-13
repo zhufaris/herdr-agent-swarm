@@ -290,16 +290,47 @@ export class SqliteWorkerTurnStore {
     });
   }
 
-  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; observableTurns: InstanceTurn[] } {
+  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; cancelledLegacyTurnIds: string[]; observableTurns: InstanceTurn[] } {
     const timestamp = now();
     return this.context.transaction(() => {
+      const legacyNotice = "Legacy Worker session is detached and cannot be resumed";
+      const legacyQueued = this.context.database.prepare(`SELECT t.*
+        FROM instance_turns t
+        JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation
+        WHERE t.state = 'queued'
+          AND i.role = 'worker'
+          AND i.worker_session_lifecycle = 'legacy'
+          AND i.observed_state = 'detached'
+          AND i.pane_id IS NULL
+          AND i.pending_pane_id IS NULL
+        ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>;
+      const cancelledLegacyTurnIds: string[] = [];
+      for (const row of legacyQueued) {
+        const turn = mapInstanceTurn(row)!;
+        const changed = this.context.database.prepare(`UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ?
+          WHERE id = ? AND instance_generation = ? AND state = 'queued'
+            AND EXISTS (SELECT 1 FROM agent_instances i
+              WHERE i.id = instance_turns.instance_id
+                AND i.generation = instance_turns.instance_generation
+                AND i.role = 'worker'
+                AND i.worker_session_lifecycle = 'legacy'
+                AND i.observed_state = 'detached'
+                AND i.pane_id IS NULL
+                AND i.pending_pane_id IS NULL)`)
+          .run(legacyNotice, timestamp, turn.id, turn.instanceGeneration);
+        if (changed.changes !== 1) continue;
+        const view = this.loadWorkerTurnCard(turn.id);
+        if (view) this.saveWorkerTurnCard({ ...reduceWorkerTurnCard(view, { type: "cancelled", occurredAt: timestamp, notice: legacyNotice }), resultCapture: "unavailable" });
+        this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.cancelled", { state: "cancelled", reason: "legacy_worker_unrecoverable" });
+        cancelledLegacyTurnIds.push(turn.id);
+      }
       const claimed = this.context.database.prepare(`SELECT t.id, t.project_id, t.instance_id FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state = 'claimed' ORDER BY t.created_at, t.rowid`).all() as Array<{ id: string; project_id: string; instance_id: string }>;
       for (const turn of claimed) {
         this.context.database.prepare("UPDATE instance_turns SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'claimed'").run(timestamp, turn.id);
         this.insertInstanceEvent(turn.project_id, turn.instance_id, turn.id, "turn.requeued-after-restart", {});
       }
       const rows = this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>;
-      return { requeuedTurnIds: claimed.map(({ id }) => id), observableTurns: rows.map((row) => mapInstanceTurn(row)!) };
+      return { requeuedTurnIds: claimed.map(({ id }) => id), cancelledLegacyTurnIds, observableTurns: rows.map((row) => mapInstanceTurn(row)!) };
     });
   }
 
