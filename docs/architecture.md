@@ -625,6 +625,11 @@ revisions, so a lost wake-up cannot lose a refresh. Replaceable snapshots use
 `primary-main:<bindingId>:<bindingGeneration>`, and
 `primary-answer:<promptId>:<bindingGeneration>` lanes. The persisted `lane_key` is
 the delivery and quarantine authority; retrying a card can never repeat Agent work.
+The `/instances` create-form path emits the same best-effort notifier wake after
+the durable Worker result is available. That wake promptly turns the committed
+`worker.created` invalidation into the canonical Worker Main group-card intent;
+the periodic scan remains the recovery path when the hint is lost. The callback
+detail card is immediate feedback only and is not the Worker Main authority.
 
 `worker_session_threads` is a separate routing aggregate from
 `binding_thread_aliases`. It binds one Lark root to the exact Worker ID, Worker

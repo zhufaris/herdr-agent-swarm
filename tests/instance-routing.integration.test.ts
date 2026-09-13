@@ -11,6 +11,8 @@ import { applicationPresentation } from "./helpers/presentation.js";
 import { parseCardActionCommand } from "../src/coordinator/card-action-command.js";
 import type { IncomingLarkCardAction } from "../src/domain/types.js";
 import { WorkerSessionThreadWorkflow } from "../src/coordinator/worker-session-thread-workflow.js";
+import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
+import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 
 function handleCardAction(workflow: InstanceInteractionWorkflow, action: IncomingLarkCardAction) {
   const command = parseCardActionCommand(action.value, action.option);
@@ -40,7 +42,7 @@ function callbackValue(card: unknown, action: string): Record<string, unknown> {
 }
 const defaultBindingCard = { conversationKey: "binding:binding-default", bindingId: "binding-default", bindingGeneration: 1 };
 
-function setup(adminOpenIds: readonly string[] = ["u1"]) {
+function setup(adminOpenIds: readonly string[] = ["u1"], wakeOutboundOverride?: () => void) {
   store = new SqliteBindingStore(":memory:");
   store.createPendingBinding({ id: "binding-default", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-default", rootMessageId: "root", title: "default" });
   store.updateBinding("binding-default", { paneId: "w1:primary-default", state: "active", lifecycle: "active", attachment: "attached" });
@@ -51,12 +53,21 @@ function setup(adminOpenIds: readonly string[] = ["u1"]) {
     listWorkers: (projectId: string) => store!.listAgentInstances(projectId).filter(({ role }) => role === "worker"),
     listWorkersForParent: (parent: { bindingId: string; paneId: string }) => store!.listWorkerInstancesByParent(parent),
     inspect: (id: string) => { const instance = store!.getAgentInstance(id)!; return { instance, workspace: store!.getWorkspaceLease(instance.workspaceLeaseId)! }; },
-    createWorker: vi.fn(async (input) => { const binding = store!.getBinding(input.bindingId)!; return { status: "created" as const, instance: create(input.name, "worker", input.projectId, binding.id, binding.paneId!) }; }), start: vi.fn(), stop: vi.fn(),
+    createWorker: vi.fn(async (input) => {
+      const binding = store!.getBinding(input.bindingId)!;
+      const created = store!.createWorkerAgentInstance({
+        id: input.name, projectId: input.projectId, name: input.name, role: "worker", agentKind: input.agentKind, model: input.model, desiredState: input.start ? "running" : "stopped",
+        parent: { bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, nativeSessionId: null },
+        workspace: { id: `ws-${input.name}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+      }, 4);
+      if (created.outcome !== "created") throw new Error(created.outcome);
+      return { status: "created" as const, instance: created.instance };
+    }), start: vi.fn(), stop: vi.fn(),
     planRemoval: vi.fn(async ({ instanceId }) => { const instance = store!.getAgentInstance(instanceId)!; const workspace = store!.getWorkspaceLease(instance.workspaceLeaseId)!; return store!.createInstanceRemovalPlan({ id: "plan-1", instanceId, instanceGeneration: instance.generation, workspaceGeneration: workspace.generation, worktreeFingerprint: "clean-fp", safe: true, reason: "clean", state: "pending", createdAt: "now" }); }),
     confirmRemoval: vi.fn(async () => true)
   };
   let interaction = 0;
-  const wakeOutbound = vi.fn();
+  const wakeOutbound = wakeOutboundOverride ? vi.fn(wakeOutboundOverride) : vi.fn();
   const workerSessionThreads = new WorkerSessionThreadWorkflow({ adminOpenIds, store: store.workerSessionThreads, messaging: messaging as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation });
   const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation, idFactory: () => `interaction-${++interaction}`, workerSessionThreads });
   return { create, workflow, workerSessionThreads, outbound, messaging, control, wakeOutbound };
@@ -492,16 +503,32 @@ describe("instance routing", () => {
     await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, conversationKey: "binding:binding-other", bindingId: "binding-other", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
   });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
-    const { workflow, control } = setup(["u1", "u2"]);
+    const { workflow, control, wakeOutbound } = setup(["u1", "u2"]);
     const form = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", ...defaultBindingCard } });
     expect(JSON.stringify(form)).toContain("instance_create_submit");
     await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
     await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
     expect(store!.listAgentInstances("p1").find(({ name }) => name === "reviewer")).toBeDefined();
+    expect(wakeOutbound).toHaveBeenCalledOnce();
+  });
+  it("wakes durable card context after create so one canonical Worker Main thread is reserved", async () => {
+    const work = new InProcessOutboundWorkNotifier();
+    const { workflow } = setup(["u1"], () => work.wake());
+    const rebuilder = new CardContextRebuilder(store!, () => {}, { debug() {}, error() {} } as never, applicationPresentation, work);
+    rebuilder.start(60_000);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", agent_kind: "traex", model: "", start: "false" } });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(store!.listPendingOutboundReplies().filter((reply) => reply.kind === "group_card_create" && reply.workerId !== null)).toEqual([
+      expect.objectContaining({ idempotencyKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1 })
+    ]);
+    await rebuilder.stop();
   });
   it("creates an instance from the CardKit v2 form callback shape", async () => {
-    const { workflow, control } = setup();
+    const { workflow, control, wakeOutbound } = setup();
     const action = normalizeCardActionEvent({
       context: { open_message_id: "card", open_chat_id: "chat" },
       operator: { open_id: "u1" },
@@ -516,9 +543,10 @@ describe("instance routing", () => {
     await expect(handleCardAction(workflow, action!)).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.createWorker).toHaveBeenCalledWith(expect.objectContaining({ projectId: "p1", name: "reviewer", agentKind: "traex", start: false }));
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
+    expect(wakeOutbound).toHaveBeenCalledOnce();
   });
   it("warns when a persisted Worker cannot be started immediately", async () => {
-    const { create, workflow, control } = setup();
+    const { create, workflow, control, wakeOutbound } = setup();
     const created = create("reviewer", "worker");
     const failed = store!.checkpointAgentInstance({ instanceId: created.id, expectedGeneration: created.generation, checkpoint: "pane-allocated", observedState: "failed", pendingPaneId: "w1:p1", pendingWorkspaceId: "w1", lastError: "Bearer [REDACTED]" })!;
     vi.mocked(control.createWorker).mockResolvedValueOnce({ status: "created-start-failed", instance: failed, error: "Bearer [REDACTED]" });
@@ -530,6 +558,7 @@ describe("instance routing", () => {
     });
     expect(JSON.stringify(result)).toContain("pane-allocated");
     expect(JSON.stringify(result)).toContain("Bearer [REDACTED]");
+    expect(wakeOutbound).toHaveBeenCalledOnce();
   });
   it("rejects forged controls for a legacy Primary row", async () => {
     const { create, workflow, control } = setup();

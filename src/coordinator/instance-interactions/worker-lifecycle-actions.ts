@@ -55,6 +55,7 @@ export class WorkerLifecycleActions {
         const result = this.options.workerCreation
           ? bindingId ? await this.options.workerCreation.createWorkerFromCard(action, bindingId, createCommand) : (() => { throw new Error("Worker 创建需要活动的 Primary 话题。"); })()
           : await this.options.control.createWorker({ actor, projectId: command.projectId, ...createCommand, bindingId });
+        this.options.wakeOutbound?.();
         if (result.status === "created-start-failed") return { toast: { type: "warning", content: `Worker ${result.instance.name} 已创建，但启动失败：${result.error}` }, card: this.options.views.detail(result.instance, conversationKey) };
         return { toast: { type: "success", content: `Worker ${result.instance.name} 已创建。` }, card: this.options.views.detail(result.instance, conversationKey) };
       } catch (error) { return failed(error); }
