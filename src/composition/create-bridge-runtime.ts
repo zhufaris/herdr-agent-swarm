@@ -16,7 +16,7 @@ import { createFeishuGatewayApplicationPresentation, feishuGatewayPanePresentati
 
 export type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
 export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBundle, logger: Logger, availability: AgentRuntimeAvailability) {
-  const applicationPresentation = createFeishuGatewayApplicationPresentation(config.runtimeTuning.cards);
+  const applicationPresentation = createFeishuGatewayApplicationPresentation(config.runtimeTuning.cards, config.projects);
   const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: feishuGatewayPanePresentation };
   const events = new RuntimeEventIntegration(logger);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => events.handleHerdrHint(hint));
@@ -25,7 +25,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const bus = events.lifecycle; const scheduler = events.promptWork; const inboundWork = events.inboundWork;
   const delivery = createOutboundRuntime(config, stores, infrastructure.gateway, bus, events.outboundWork, logger, presentation);
   const { outboundWork, channelPublisher, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention } = delivery;
-  const worker = createWorkerRuntime({ config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork });
+  const worker = createWorkerRuntime({ config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, applicationPresentation });
   const { instanceWork, instanceTurns, instanceRuntime, primaryToolGateway } = worker;
   events.registerInstanceWakeup((instanceId) => instanceWork.wake(instanceId));
   const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);

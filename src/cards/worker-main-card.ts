@@ -8,7 +8,7 @@ import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "排队", preparing: "准备中", running: "执行中", blocked: "阻塞", completed: "完成", failed: "失败", cancelled: "取消", "dispatch-uncertain": "派发不确定" };
 const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovisioned: "未配置", starting: "启动中", idle: "空闲", working: "工作中", blocked: "阻塞", detached: "已脱离", stopped: "已停止", failed: "失败", terminated: "已终止" };
 
-export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?: boolean } = {}): object {
+export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?: boolean; projectDisplayName?: string } = {}): object {
   const elements: object[] = [
     { tag: "markdown", content: compactMetadata([`${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}`, `队列 \`${view.queueCount}\``, view.model ? `模型 \`${safe(view.model)}\`` : null]) },
   ];
@@ -25,7 +25,7 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   if (view.frozenAt) elements.push({ tag: "markdown", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` });
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },
-    header: { title: { tag: "plain_text", content: `🤖 Worker · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: "HERDR WORKER SESSION" }, template: view.runtimeState === "failed" ? "red" : view.runtimeState === "blocked" ? "orange" : view.runtimeState === "terminated" ? "grey" : "blue" },
+    header: { title: { tag: "plain_text", content: `🤖 Worker · ${safe(view.workerName)} · ${safe(view.primaryPaneName ?? view.parentPaneId)} · ${safe(options.projectDisplayName ?? view.projectId ?? "Unknown project")}` }, subtitle: { tag: "plain_text", content: "HERDR WORKER SESSION" }, template: view.runtimeState === "failed" ? "red" : view.runtimeState === "blocked" ? "orange" : view.runtimeState === "terminated" ? "grey" : "blue" },
     body: { elements }
   };
 }

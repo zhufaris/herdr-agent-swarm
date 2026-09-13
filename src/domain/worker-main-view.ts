@@ -28,6 +28,8 @@ export interface WorkerMainView {
   parentBindingId: string;
   parentBindingGeneration: number;
   parentPaneId: string;
+  primaryPaneName?: string;
+  projectId?: string;
   workerName: string;
   ownerName: string;
   runtimeGeneration: number;
@@ -65,7 +67,7 @@ export type WorkerMainChange =
 
 export function createWorkerMainView(input: {
   workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string;
-    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null;
+    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null; primaryPaneName?: string; projectId?: string;
   workspace: string; branch: string | null; model: string | null; occurredAt: string;
 }): WorkerMainView {
   return {

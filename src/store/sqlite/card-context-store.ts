@@ -230,7 +230,7 @@ export class SqliteCardContextStore {
     return {
       workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
       runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: (() => { const parent = this.dependencies.getBinding(instance.parent.bindingId); return parent?.generation === instance.parent!.bindingGeneration && parent.paneId === instance.parent!.paneId && parent.state === "active" && parent.lifecycle === "active" && parent.attachment === "attached"; })(),
-      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, ownerName: this.dependencies.getBinding(instance.parent.bindingId)?.title ?? "Primary",
+      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, primaryPaneName: instance.sourcePrimaryPaneLabel ?? instance.parent.paneId, projectId: instance.projectId, ownerName: this.dependencies.getBinding(instance.parent.bindingId)?.title ?? "Primary",
       workspace: lease.cwd, branch: lease.branch, currentTask, queueCount: Number(queue.count), nextTaskTitle: nextQueued ? summarizeTaskTitle(nextQueued.request_text) : null,
       recentTasks: recent.map(summary), createdAt: first.created_at ?? now()
     };

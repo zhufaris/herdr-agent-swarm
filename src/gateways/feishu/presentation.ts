@@ -3,10 +3,11 @@ import { cardKitPanePresentation } from "../../cards/cardkit-pane-presentation.j
 import { createCardKitPrimaryPresentation, type CardKitPresentationLimits } from "../../cards/cardkit-primary-presentation.js";
 import { cardKitWorkerPresentation } from "../../cards/cardkit-worker-presentation.js";
 import type { ApplicationPresentation, PanePresentation, PrimaryPresentation, WorkerPresentation } from "../../domain/ports/presentation.js";
+import type { ProjectConfig } from "../../domain/types.js";
 import { cardKitToGatewayView } from "./cardkit-view.js";
 
-export function createFeishuGatewayApplicationPresentation(limits: CardKitPresentationLimits): ApplicationPresentation {
-  return wrapCardKitPresentation(createCardKitApplicationPresentation(limits));
+export function createFeishuGatewayApplicationPresentation(limits: CardKitPresentationLimits, projects: readonly ProjectConfig[] = []): ApplicationPresentation {
+  return wrapCardKitPresentation(createCardKitApplicationPresentation(limits, projects));
 }
 export function createFeishuGatewayPrimaryPresentation(limits: CardKitPresentationLimits): PrimaryPresentation {
   return wrapCardKitPresentation(createCardKitPrimaryPresentation(limits));
