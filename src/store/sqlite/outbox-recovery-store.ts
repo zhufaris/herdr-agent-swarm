@@ -117,6 +117,12 @@ export class SqliteOutboxRecoveryStore {
           AND attempt_count = 0 AND first_claimed_at IS NULL
           AND delivered_message_id IS NULL
           AND card_id_checkpoint IS NULL
+          AND EXISTS (
+            SELECT 1 FROM instance_turns turn
+            JOIN agent_instances worker ON worker.id = turn.instance_id
+            WHERE turn.id = outbound_replies.worker_turn_id
+              AND COALESCE(worker.worker_session_lifecycle, 'legacy') != 'active'
+          )
       `).all() as Array<{ id: string; worker_turn_id: string; lane_key: string }>;
       let retired = 0;
       for (const row of rows) {

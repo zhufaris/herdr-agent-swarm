@@ -28,6 +28,7 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   listAgentInstances: InstanceStore["listAgentInstances"] = (projectId) => this.instances.listAgentInstances(projectId);
   setPrimaryAgentInstance: InstanceStore["setPrimaryAgentInstance"] = (projectId, instanceId) => this.instances.setPrimaryAgentInstance(projectId, instanceId);
   attachAgentInstanceRuntime: InstanceStore["attachAgentInstanceRuntime"] = (input) => this.instances.attachAgentInstanceRuntime(input);
+  refreshAgentInstanceRuntimeSession: InstanceStore["refreshAgentInstanceRuntimeSession"] = (input) => this.instances.refreshAgentInstanceRuntimeSession(input);
   checkpointAgentInstance: InstanceStore["checkpointAgentInstance"] = (input) => this.instances.checkpointAgentInstance(input);
   updateAgentInstanceLifecycle: InstanceStore["updateAgentInstanceLifecycle"] = (input) => this.instances.updateAgentInstanceLifecycle(input);
   updateAgentInstanceObservation: InstanceStore["updateAgentInstanceObservation"] = (input) => this.instances.updateAgentInstanceObservation(input);

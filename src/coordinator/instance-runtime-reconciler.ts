@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { matchesHerdrAgentKind, type AgentInstance, type ObservedInstanceState } from "../domain/agent-instance.js";
+import { isNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { InstanceRuntimeReconciliationStore } from "../domain/ports/instance.js";
 import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../domain/types.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
@@ -122,6 +123,15 @@ export class InstanceRuntimeReconciler {
     if (pane.workspaceId !== runtime.herdrWorkspaceId || pane.workspaceId !== project.workspaceId || pane.cwd !== workspace?.cwd || !pane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pane.agentKind)) {
       if (this.options.store.terminateWorkerSession({ instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pane ${runtime.paneId} identity mismatch` })) this.options.wakeCardContext?.();
       return;
+    }
+    if (instance.agentKind === "traex" && isNativeTraexSession(pane.agentSession) && pane.agentSession.value !== runtime.nativeSessionId) {
+      const refreshed = this.options.store.refreshAgentInstanceRuntimeSession({
+        instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: runtime.herdrWorkspaceId, paneId: runtime.paneId, nativeSessionId: pane.agentSession.value
+      });
+      if (!refreshed?.runtimeRef) return;
+      instance = refreshed;
+      runtime = refreshed.runtimeRef;
+      this.options.wakeCardContext?.();
     }
     const observedState = normalizeState(pane);
     const updated = this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState, lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });

@@ -139,6 +139,23 @@ describe("instance runtime reconciliation", () => {
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ observedState: "idle", runtimeRef: { paneId: "herdr-w:p1" } });
   });
 
+  it("refreshes only a matching Worker pane with its native TraeX session identity", async () => {
+    const observed = pane({
+      agentKind: "codex", foregroundExecutables: ["traex"],
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native-traex-session" }
+    });
+    const { instance, reconciler, wakeCardContext } = setup([observed]);
+    store!.database.prepare("UPDATE agent_instances SET agent_kind = ? WHERE id = ?").run("traex", instance.id);
+    store!.database.prepare("UPDATE agent_instances SET native_session_id = ? WHERE id = ?").run("terminal-id", instance.id);
+
+    await reconciler.reconcile();
+
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({
+      generation: instance.generation, runtimeRef: { paneId: "herdr-w:p1", nativeSessionId: "native-traex-session" }
+    });
+    expect(wakeCardContext).toHaveBeenCalledTimes(2);
+  });
+
   it("adopts a matching pending TraeX runtime without starting it again", async () => {
     const { instance, reconciler, wake, wakeCardContext, paneHost } = setupPending([pane()]);
 

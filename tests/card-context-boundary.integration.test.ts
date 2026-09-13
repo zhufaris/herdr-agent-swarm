@@ -99,7 +99,7 @@ describe("card context boundaries", () => {
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-main-message", cardId: "worker-main-card" });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerMain: { messageId: "worker-main-message" } }] });
     expect(store.loadWorkerTurnCard(task.turnId)).toMatchObject({ workerMain: { messageId: null }, primaryAnswer: { messageId: null } });
-    expect(store.listPendingOutboundReplies().some(({ workerTurnId }) => workerTurnId === task.turnId)).toBe(false);
+    expect(store.listPendingOutboundReplies().some(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")).toBe(true);
     const workerMainUpdate = store.listPendingOutboundReplies().find(({ workerId, kind }) => workerId === worker.id && kind === "card_update")!;
     expect(workerMainUpdate.laneKey).toBe("gateway:feishu:primary:worker-main:reviewer:1");
     expect(workerMainUpdate.rootMessageId).toBe("worker-main-message");

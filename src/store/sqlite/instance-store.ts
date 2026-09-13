@@ -101,6 +101,18 @@ export class SqliteInstanceStore {
     });
   }
 
+  refreshAgentInstanceRuntimeSession(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string }): AgentInstance | null {
+    if (!input.nativeSessionId) return null;
+    return this.context.transaction(() => {
+      const result = this.database.prepare(`UPDATE agent_instances
+        SET native_session_id = ?, updated_at = ?
+        WHERE id = ? AND generation = ? AND role = 'worker'
+          AND herdr_workspace_id = ? AND pane_id = ?
+      `).run(input.nativeSessionId, now(), input.instanceId, input.expectedGeneration, input.herdrWorkspaceId, input.paneId);
+      return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(input.instanceId) : null, "worker.native-session-refreshed");
+    });
+  }
+
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null {
     return this.context.transaction(() => {
       const result = this.database.prepare(`UPDATE agent_instances SET provisioning_checkpoint = ?, observed_state = COALESCE(?, observed_state), pending_pane_id = COALESCE(?, pending_pane_id), pending_herdr_workspace_id = COALESCE(?, pending_herdr_workspace_id), last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)

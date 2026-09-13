@@ -82,6 +82,13 @@ export class SqliteWorkerTurnStore {
       if (inserted) {
         this.saveWorkerTurnCard(acceptedView);
         this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
+        if (current.workerSessionLifecycle === "active") {
+          this.dependencies.enqueueOutboundReply({
+            id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id,
+            viewVersion: acceptedView.viewVersion, rootMessageId: acceptedView.rootMessageId, kind: "stream_card_create",
+            payload: JSON.stringify({ card: input.render(acceptedView), stream: { pageIndex: 0, pageStart: 0, elementId: acceptedView.elementId } })
+          });
+        }
         this.dependencies.invalidateWorkerCardContexts(acceptedView, "turn.accepted");
       }
       const view = this.loadWorkerTurnCard(turn.id);

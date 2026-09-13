@@ -63,7 +63,9 @@ describe("Primary to Worker product flow", () => {
         expect(await invoke("prompt_instance", { instanceId: "sibling-worker", task: "must reject", idempotencyKey: "cross-primary" })).toBeUndefined();
         expect(await invoke("prompt_instance", { instanceId: worker.id, task: "Reply WORKER_OK", idempotencyKey: "child" })).toMatchObject({ inserted: true, card: { turnId: "worker-turn", rootMessageId: "root" } });
         expect(store!.loadWorkerTurnCard("worker-turn")).toMatchObject({ rootMessageId: "root", requestText: "Reply WORKER_OK" });
-        expect(store!.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toEqual([]);
+        expect(store!.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId)).toEqual([expect.objectContaining({
+          workerTurnId: "worker-turn", kind: "stream_card_create", idempotencyKey: "worker-turn:create:worker-turn:0"
+        })]);
         expect(store!.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({ targetKind: "worker-session", targetId: worker.id }));
         await vi.waitFor(() => expect(store!.getInstanceTurn("worker-turn")?.state).toBe("completed"));
         const inspected = await invoke("inspect_instance", { instanceId: worker.id }) as { turns: Array<{ result: string | null }> };

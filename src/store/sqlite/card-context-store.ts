@@ -122,31 +122,35 @@ export class SqliteCardContextStore {
       if (!current || current.projectedDependencyRevision >= invalidation.requestedDependencyRevision) return "current";
       let reserved = false;
       if (invalidation.targetKind === "worker-session") {
-        const source = this.loadWorkerMainProjectionSource(invalidation.targetId, invalidation.targetGeneration);
-        if (!source) return this.markStale(invalidation);
-        const previous = this.loadWorkerMainView(invalidation.targetId, invalidation.targetGeneration);
-        const selected = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
-        const next = invalidation.reason === "worker-main.delivered" && previous?.messageId && selected.viewVersion <= selected.deliveredVersion
-          ? { ...selected, viewVersion: selected.viewVersion + 1, updatedAt: now() }
-          : selected;
-        const placement = this.dependencies.reserveWorkerMainPlacement(next, renderers.workerMain(next));
-        if (placement === "stale") return this.markStale(invalidation);
-        reserved = placement === "reserved";
-        if (invalidation.reason === "worker-main.delivered" && next.messageId) {
-          reserved = this.reserveWorkerThreadEntries(next, renderers.workerThreadEntryReady) || reserved;
-        }
+        return this.projectSessionMain(invalidation, () => {
+          const source = this.loadWorkerMainProjectionSource(invalidation.targetId, invalidation.targetGeneration);
+          if (!source) return "stale";
+          const previous = this.loadWorkerMainView(invalidation.targetId, invalidation.targetGeneration);
+          const selected = selectWorkerMainView(source, previous, invalidation.requestedDependencyRevision, now());
+          const next = invalidation.reason === "worker-main.delivered" && previous?.messageId && selected.viewVersion <= selected.deliveredVersion
+            ? { ...selected, viewVersion: selected.viewVersion + 1, updatedAt: now() }
+            : selected;
+          const placement = this.dependencies.reserveWorkerMainPlacement(next, renderers.workerMain(next));
+          if (placement === "stale") return "stale";
+          const threadEntryReserved = invalidation.reason === "worker-main.delivered" && next.messageId
+            ? this.reserveWorkerThreadEntries(next, renderers.workerThreadEntryReady)
+            : false;
+          return placement === "reserved" || threadEntryReserved ? "reserved" : "current";
+        });
       } else if (invalidation.targetKind === "worker-turn") {
         // Legacy Task Cards are immutable historical artifacts. Mark old
         // invalidations converged without creating or patching visible cards.
         return this.markStale(invalidation);
       } else if (invalidation.targetKind === "primary-session") {
-        const binding = this.dependencies.getBinding(invalidation.targetId);
-        const previous = this.dependencies.loadTopicView(invalidation.targetId);
-        if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) return this.markStale(invalidation);
-        const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
-        const next = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
-        this.dependencies.saveTopicView(next);
-        reserved = this.dependencies.reserveMainCard(next, binding.rootMessageId, renderers.primaryMain(next), renderers.primaryPaneEntry(next)) === "reserved";
+        return this.projectSessionMain(invalidation, () => {
+          const binding = this.dependencies.getBinding(invalidation.targetId);
+          const previous = this.dependencies.loadTopicView(invalidation.targetId);
+          if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) return "stale";
+          const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
+          const next = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
+          this.dependencies.saveTopicView(next);
+          return this.dependencies.reserveMainCard(next, binding.rootMessageId, renderers.primaryMain(next), renderers.primaryPaneEntry(next)) === "reserved" ? "reserved" : "current";
+        });
       } else {
         const previous = this.dependencies.loadRunCard(invalidation.targetId);
         const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;
@@ -162,6 +166,14 @@ export class SqliteCardContextStore {
       this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
       return reserved ? "reserved" : "current";
     });
+  }
+
+  /** Shared durable lifecycle for a Primary or Worker pane-session main card. */
+  private projectSessionMain(invalidation: CardContextInvalidation, project: () => "reserved" | "current" | "stale"): "reserved" | "current" | "stale" {
+    const outcome = project();
+    if (outcome === "stale") return this.markStale(invalidation);
+    this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
+    return outcome;
   }
 
   private reserveWorkerThreadEntries(view: WorkerMainView, render: (input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }) => object): boolean {

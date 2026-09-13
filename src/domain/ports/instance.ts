@@ -27,6 +27,7 @@ export interface InstanceStore {
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
   attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
+  refreshAgentInstanceRuntimeSession(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string }): AgentInstance | null;
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null;
@@ -93,7 +94,7 @@ export interface InstanceStore {
 export type InstanceLifecycleStore = Pick<InstanceStore,
   "createAgentInstance" | "createWorkerAgentInstance" | "getAgentInstance" | "findAgentInstanceByPane" |
   "listWorkerInstancesByParent" | "listAgentInstances" | "setPrimaryAgentInstance" |
-  "attachAgentInstanceRuntime" | "checkpointAgentInstance" | "updateAgentInstanceLifecycle" |
+  "attachAgentInstanceRuntime" | "refreshAgentInstanceRuntimeSession" | "checkpointAgentInstance" | "updateAgentInstanceLifecycle" |
   "updateAgentInstanceObservation" | "reserveAgentInstanceStop" | "finishAgentInstanceStop" |
   "rollbackAgentInstanceStop" | "detachAgentInstanceRuntime" | "terminateWorkerSession" |
   "getWorkspaceLease" | "updateWorkspaceLease" | "createInstanceRemovalPlan" |
@@ -137,7 +138,7 @@ export type WorkerTurnObservationStore = Pick<InstanceStore,
 >;
 
 export type InstanceRuntimeReconciliationStore = Pick<InstanceStore,
-  "attachAgentInstanceRuntime" | "countPendingInstanceTurns" |
+  "attachAgentInstanceRuntime" | "refreshAgentInstanceRuntimeSession" | "countPendingInstanceTurns" |
   "findAgentInstanceByPane" | "getWorkspaceLease" | "listAgentInstances" |
   "terminateWorkerSession" | "updateAgentInstanceObservation"
 >;
