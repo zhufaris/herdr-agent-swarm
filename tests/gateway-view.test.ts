@@ -26,6 +26,14 @@ describe("GatewayView", () => {
     expect(materializeFeishuView(view)).toEqual(card);
   });
 
+  it("preserves the CardKit v2 form submit action through the portable AST", () => {
+    const card = renderInstanceCreateCard({ projectId: "project", requestedBy: "user" });
+    const materialized = JSON.stringify(materializeFeishuView(cardKitToGatewayView(card)));
+
+    expect(materialized).toContain('\"action_type\":\"form_submit\"');
+    expect(materialized).not.toContain('\"form_action_type\":\"submit\"');
+  });
+
   it("degrades a rich view deterministically to fallback text for a plain Gateway", async () => {
     const control: InMemoryGatewayControl = { delivered: [], fallbackMessages: [], async emit() { throw new Error("not started"); } };
     const session = createInMemoryGatewayPlugin(control).create({ gatewayId: "memory:test" }, {});
