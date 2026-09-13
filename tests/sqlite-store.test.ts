@@ -2602,6 +2602,47 @@ describe("SQLite store", () => {
     expect(store.listRunCardsByPhases("b2", ["queued", "running", "completed"])).toEqual([]);
   });
 
+  it("selects only durable actionable Run Cards for startup convergence", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const accept = (promptId: string) => {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: `2026-09-01T00:00:0${promptId.length}.000Z` });
+      store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+    };
+    for (const id of ["history", "live", "lagging", "streaming", "pending", "missing", "quarantine"]) accept(id);
+    for (const id of ["history", "lagging", "streaming", "pending", "quarantine"]) {
+      const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === id)!;
+      store.markOutboundReplyDelivered(create.id, `message-${id}`, `card-${id}`);
+      store.saveRunCard({ ...store.loadRunCard(id)!, phase: "completed", answer: "done", answerSegments: ["done"], viewVersion: 1, answerDeliveredVersion: 1 });
+    }
+    store.saveRunCard({ ...store.loadRunCard("missing")!, phase: "completed" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dismissed' WHERE prompt_id = 'missing' AND state = 'pending'").run();
+    store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id IN ('history','lagging','pending','quarantine')").run();
+    store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static', state = 'active' WHERE prompt_id = 'lagging'").run();
+    store.saveRunCard({ ...store.loadRunCard("lagging")!, viewVersion: 3, answerDeliveredVersion: 1 });
+    store.enqueueOutboundReply({ id: "pending-update", idempotencyKey: "pending-update", bindingId: "b1", promptId: "pending", viewVersion: 1, cardRole: "answer", rootMessageId: "message-pending", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "uncertain-update", idempotencyKey: "uncertain-update", bindingId: "b1", promptId: "quarantine", viewVersion: 1, cardRole: "answer", rootMessageId: "message-quarantine", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine("uncertain-update", "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+
+    expect(store.listActionableStartupRunCards("b1").map(({ promptId }) => promptId).sort()).toEqual(["lagging", "live", "missing", "pending", "quarantine", "streaming"]);
+    expect(store.listActionableStartupRunCards("missing")).toEqual([]);
+  });
+
+  it("selects an active Run Card for Main restoration before the latest terminal card", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    for (const [promptId, phase, occurredAt] of [["active", "running", "2026-09-01T00:00:00.000Z"], ["latest", "completed", "2026-09-01T00:01:00.000Z"]] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 0, occurredAt });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, phase });
+    }
+
+    expect(store.loadStartupMainRunCard("b1", "latest")?.promptId).toBe("active");
+    store.saveRunCard({ ...store.loadRunCard("active")!, phase: "completed" });
+    expect(store.loadStartupMainRunCard("b1", "active")?.promptId).toBe("latest");
+    expect(store.loadStartupMainRunCard("missing", null)).toBeNull();
+  });
+
   it("backfills and persists orthogonal pane/thread lifecycle state", () => {
     store = new SqliteBindingStore(":memory:");
     const pending = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: null, rootMessageId: null, title: "Task" });

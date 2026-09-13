@@ -90,6 +90,66 @@ export class SqliteProjectionStore {
     return (this.context.database.prepare("SELECT state_json FROM run_cards_view WHERE binding_id = ? ORDER BY created_at, prompt_id").all(bindingId) as Array<{ state_json: string }>).map((row) => JSON.parse(row.state_json) as RunCardView);
   }
 
+  listActionableStartupRunCards(bindingId: string): RunCardView[] {
+    const rows = this.context.database.prepare(`
+      SELECT view.state_json
+      FROM run_cards AS card
+      JOIN run_cards_view AS view ON view.prompt_id = card.prompt_id
+      WHERE card.binding_id = ? AND (
+        card.phase IN ('queued','running','blocked')
+        OR card.answer_message_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM answer_pages page
+          WHERE page.prompt_id = card.prompt_id
+            AND (page.state = 'creating' OR (page.state = 'active' AND page.delivery_mode = 'streaming'))
+        )
+        OR (card.view_version > card.answer_delivered_version AND EXISTS (
+          SELECT 1 FROM answer_pages page
+          WHERE page.prompt_id = card.prompt_id AND page.state = 'active'
+        ))
+        OR EXISTS (
+          SELECT 1 FROM outbound_replies pending
+          WHERE pending.prompt_id = card.prompt_id AND pending.state = 'pending'
+        )
+        OR (card.answer_card_id IS NULL AND card.answer_message_id IS NOT NULL AND card.view_version > card.answer_delivered_version)
+        OR EXISTS (
+          SELECT 1 FROM delivery_recoveries recovery
+          JOIN outbound_replies failed ON failed.id = recovery.failed_reply_id
+          WHERE failed.prompt_id = card.prompt_id AND (
+            recovery.state = 'replacement_pending'
+            OR EXISTS (
+              SELECT 1 FROM outbox_lane_quarantines quarantine
+              WHERE quarantine.failed_reply_id = recovery.failed_reply_id AND quarantine.state = 'active'
+            )
+          )
+        )
+      )
+      ORDER BY card.created_at, card.prompt_id
+    `).all(bindingId) as Array<{ state_json: string }>;
+    return rows.map((row) => JSON.parse(row.state_json) as RunCardView);
+  }
+
+  loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null {
+    const row = this.context.database.prepare(`
+      SELECT view.state_json
+      FROM run_cards AS card
+      JOIN run_cards_view AS view ON view.prompt_id = card.prompt_id
+      WHERE card.binding_id = ?
+      ORDER BY
+        CASE
+          WHEN card.prompt_id = ? AND card.phase IN ('running','blocked') THEN 0
+          WHEN card.phase IN ('running','blocked') THEN 1
+          ELSE 2
+        END,
+        CASE WHEN card.phase IN ('running','blocked') THEN card.created_at END ASC,
+        CASE WHEN card.phase NOT IN ('running','blocked') THEN card.created_at END DESC,
+        CASE WHEN card.phase IN ('running','blocked') THEN card.prompt_id END ASC,
+        CASE WHEN card.phase NOT IN ('running','blocked') THEN card.prompt_id END DESC
+      LIMIT 1
+    `).get(bindingId, preferredPromptId) as { state_json: string } | undefined;
+    return row ? JSON.parse(row.state_json) as RunCardView : null;
+  }
+
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[] {
     if (phases.length === 0) return [];
     const placeholders = phases.map(() => "?").join(", " );

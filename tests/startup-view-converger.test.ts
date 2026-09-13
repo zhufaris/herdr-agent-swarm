@@ -121,6 +121,30 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
+  it("does not replay fully delivered historical Answer cards during startup", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "renamed task" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
+    for (let index = 0; index < 100; index += 1) {
+      const promptId = `history-${index}`;
+      const queued = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, sessionTitle: "old title", workspaceId: "wH", spaceName: "old-space", paneId: "wH:p1", requestText: promptId, queuePosition: 0, occurredAt: `2026-08-01T00:00:${String(index % 60).padStart(2, "0")}.000Z` });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view: queued, rootMessageId: "root", answerCard: {} });
+      const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId)!;
+      store.markOutboundReplyDelivered(create.id, `answer-${index}`, `card-${index}`);
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, phase: "completed", answer: "done", answerSegments: ["done"], workerContextFrozenAt: "2026-08-01T00:01:00.000Z", viewVersion: 1, answerDeliveredVersion: 1 });
+      store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = ?").run(promptId);
+    }
+    const enqueueCardUpdate = vi.fn<OutboundIntentPort["enqueueCardUpdate"]>();
+
+    await createConverger(store, { outbound: { enqueueCardUpdate } as unknown as OutboundIntentPort }).converge();
+
+    expect(enqueueCardUpdate).not.toHaveBeenCalled();
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.cardRole === "answer")).toEqual([]);
+    expect(store.loadRunCard("history-0")).toMatchObject({ sessionTitle: "old title", spaceName: "old-space", viewVersion: 1 });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", activePromptId: null });
+    store.close();
+  });
+
   it("restores the running prompt instead of a newer completed card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

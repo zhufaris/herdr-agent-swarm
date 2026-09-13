@@ -35,8 +35,9 @@ true:
 
 - phase is `queued`, `running`, or `blocked`;
 - no Answer message has been created;
-- an Answer page is `creating` or `active`;
-- an unresolved or replacement-pending delivery recovery references the Prompt;
+- an Answer page is `creating`, or is an unfinished streaming page;
+- an active quarantine or replacement-pending delivery recovery references the
+  Prompt;
 - a legacy non-CardKit Answer target has a desired version newer than its
   delivered version.
 
@@ -71,7 +72,9 @@ state predicates are safer than time alone.
 
 - No active, queued, or blocked Prompt is skipped.
 - Missing Answer creation and unfinished Answer pages remain recoverable.
-- Unresolved delivery recovery remains actionable regardless of age.
+- Active quarantines and replacement-pending delivery recovery remain actionable
+  regardless of age; released historical unresolved records do not trigger card
+  replay.
 - Frozen and finished Answer pages are not patched solely for title or space
   changes.
 - Main Card restoration still selects the active Prompt before the latest Prompt.

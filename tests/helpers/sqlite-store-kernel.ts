@@ -606,6 +606,14 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.projections.listRunCards(bindingId);
   }
 
+  listActionableStartupRunCards(bindingId: string): RunCardView[] {
+    return this.projections.listActionableStartupRunCards(bindingId);
+  }
+
+  loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null {
+    return this.projections.loadStartupMainRunCard(bindingId, preferredPromptId);
+  }
+
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[] {
     return this.projections.listRunCardsByPhases(bindingId, phases);
   }

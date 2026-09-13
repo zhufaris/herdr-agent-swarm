@@ -81,7 +81,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         paneId: binding.paneId
       };
       const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId });
-      const runCards = this.store.listRunCards(binding.id);
+      const runCards = this.store.listActionableStartupRunCards(binding.id);
       for (const view of runCards) {
         const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title;
         const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
@@ -89,9 +89,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
         else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId, "history");
       }
-      const activeRun = runCards.find((view) => view.phase === "running" || view.phase === "blocked")
-        ?? (reconciledTopicView.activePromptId ? runCards.find((view) => view.promptId === reconciledTopicView.activePromptId) : null);
-      const latestRun = activeRun ?? runCards.at(-1);
+      const latestRun = this.store.loadStartupMainRunCard(binding.id, reconciledTopicView.activePromptId);
       const terminal = binding.lifecycle === "draining" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed";
       const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
       await this.mainCardWorkflow.project(finalTopic, "history");

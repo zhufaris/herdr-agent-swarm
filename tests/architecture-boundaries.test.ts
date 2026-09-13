@@ -391,6 +391,19 @@ describe("application composition boundaries", () => {
     expect(composition).not.toContain("mainCardWorkflow:");
   });
 
+  it("bounds startup Answer convergence to durable actionable Run Cards", () => {
+    const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
+    const startupStore = readFileSync(new URL("../src/store/sqlite/recovery-capability-store.ts", import.meta.url), "utf8");
+    const projection = readFileSync(new URL("../src/store/sqlite/projection-store.ts", import.meta.url), "utf8");
+    expect(converger).toContain("listActionableStartupRunCards");
+    expect(converger).toContain("loadStartupMainRunCard");
+    expect(converger).not.toContain("listRunCards(binding.id)");
+    expect(startupStore).toContain("listActionableStartupRunCards");
+    expect(startupStore).toContain("loadStartupMainRunCard");
+    expect(projection).toContain("listActionableStartupRunCards(");
+    expect(projection).toContain("loadStartupMainRunCard(");
+  });
+
   it("gives instance workflows named consumer-shaped store interfaces", () => {
     const ports = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
     const consumers = [

@@ -31,7 +31,8 @@ export interface StartupRecoveryStore {
 export interface StartupViewStore {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void;
   listBindings(): Binding[];
-  listRunCards(bindingId: string): RunCardView[];
+  listActionableStartupRunCards(bindingId: string): RunCardView[];
+  loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   retireUndeliveredWorkerTaskCardIntents(): number;
   recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery;
