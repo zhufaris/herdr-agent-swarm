@@ -36,7 +36,7 @@ export class InstanceInteractionWorkflow {
     const reply = (message: IncomingLarkMessage, card: object) => this.reply(message, card);
     this.commands = new InstanceCommandActions({ projects: options.projects, store: options.store, messaging: options.messaging, context: this.context, views, presentation: options.presentation, reply });
     this.workerCards = new WorkerCardActions({ store: options.store, messaging: options.messaging, presentation: options.presentation, idFactory });
-    this.workerLifecycle = new WorkerLifecycleActions({ projects: options.projects, store: options.store, control: options.control, messaging: options.messaging, context: this.context, views, presentation: options.presentation, ...(options.workerCreation ? { workerCreation: options.workerCreation } : {}), ...(options.wakeOutbound ? { wakeOutbound: options.wakeOutbound } : {}) });
+    this.workerLifecycle = new WorkerLifecycleActions({ projects: options.projects, store: options.store, control: options.control, messaging: options.messaging, context: this.context, views, presentation: options.presentation, outbound: options.outbound, ...(options.workerCreation ? { workerCreation: options.workerCreation } : {}), ...(options.wakeOutbound ? { wakeOutbound: options.wakeOutbound } : {}) });
   }
 
   async handleCommand(message: IncomingLarkMessage, command: InstanceCommand): Promise<void> {

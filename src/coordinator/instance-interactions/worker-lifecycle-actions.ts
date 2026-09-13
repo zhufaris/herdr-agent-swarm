@@ -1,5 +1,6 @@
 import type { AgentKind, CreateWorkerResult } from "../../domain/agent-instance.js";
 import type { InstanceStore } from "../../domain/ports/instance.js";
+import type { OutboundIntentPort } from "../../domain/ports/outbox.js";
 import type { IncomingLarkCardAction, LarkCardActionResult, ProjectConfig } from "../../domain/types.js";
 import { decideWorkerCardBindingOwnership } from "../../domain/worker-card-ownership.js";
 import { safeLogError } from "../../runtime/safe-error.js";
@@ -26,7 +27,7 @@ export class WorkerLifecycleActions {
   private readonly projects: ReadonlySet<string>;
   constructor(private readonly options: {
     projects: readonly ProjectConfig[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow;
-    context: InstanceConversationContext; views: InstanceViewQuery; presentation: WorkerLifecyclePresentation; workerCreation?: WorkerCreationGateway; wakeOutbound?: () => void;
+    context: InstanceConversationContext; views: InstanceViewQuery; presentation: WorkerLifecyclePresentation; outbound: Pick<OutboundIntentPort, "enqueueCard">; workerCreation?: WorkerCreationGateway; wakeOutbound?: () => void;
   }) { this.projects = new Set(options.projects.map(({ id }) => id)); }
 
   async handle(action: IncomingLarkCardAction, command: Exclude<InstanceCardActionCommand, WorkerCardOnlyAction>): Promise<LarkCardActionResult> {
@@ -39,7 +40,12 @@ export class WorkerLifecycleActions {
     if (command.action === "instance_create_form") {
       if (!this.projects.has(command.projectId)) return warning("项目不存在或已移除。");
       if (bindingContext && bindingContext !== command.projectId) return warning("当前话题已固定到其他项目。");
-      return { card: this.options.presentation.instanceCreate({ projectId: command.projectId, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(command) }) };
+      const binding = command.bindingId ? this.options.store.getBinding(command.bindingId) : null;
+      const rootMessageId = binding?.rootMessageId ?? action.messageId;
+      const card = this.options.presentation.instanceCreate({ projectId: command.projectId, requestedBy: action.operatorOpenId, conversationKey, ...bindingCardContext(command) });
+      await this.options.outbound.enqueueCard(rootMessageId, `instance-create-form:${action.messageId}:${action.operatorOpenId}:${command.projectId}`, card, binding?.id ?? null, "operation_result");
+      this.options.wakeOutbound?.();
+      return { toast: { type: "success", content: "创建 Worker 表单已发送到当前话题。" } };
     }
     if (command.action === "instance_create_submit") {
       if (command.requestedBy !== action.operatorOpenId) return forbidden();

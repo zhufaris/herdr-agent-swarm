@@ -377,7 +377,9 @@ describe("instance routing", () => {
     expect(directory).toContain('"bindingGeneration":3');
 
     const createForm = await handleCardAction(workflow, { messageId: "create", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
-    expect(JSON.stringify(createForm)).toContain('"bindingGeneration":3');
+    expect(createForm).toEqual({ toast: { type: "success", content: "创建 Worker 表单已发送到当前话题。" } });
+    expect(outbound.enqueueCard).toHaveBeenLastCalledWith("root", "instance-create-form:create:u1:p1", expect.objectContaining({ schema: "2.0" }), "binding-1", "operation_result");
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain('"bindingGeneration":3');
     const detail = await handleCardAction(workflow, { messageId: "open", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_open", instanceId: worker.id, generation: worker.generation, conversationKey: "binding:binding-1", bindingId: "binding-1", bindingGeneration: 3 } });
     expect(JSON.stringify(detail)).toContain('"bindingGeneration":3');
   });
@@ -503,14 +505,15 @@ describe("instance routing", () => {
     await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { ...target, conversationKey: "binding:binding-other", bindingId: "binding-other", bindingGeneration: 1 } })).resolves.toEqual({ toast: { type: "warning", content: "Worker Task 卡片已过期或不属于当前 Primary。" } });
   });
   it("creates a Worker only when the form submitter matches the operator who opened it", async () => {
-    const { workflow, control, wakeOutbound } = setup(["u1", "u2"]);
+    const { workflow, control, wakeOutbound, outbound } = setup(["u1", "u2"]);
     const form = await handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_form", projectId: "p1", ...defaultBindingCard } });
-    expect(JSON.stringify(form)).toContain("instance_create_submit");
+    expect(form).toEqual({ toast: { type: "success", content: "创建 Worker 表单已发送到当前话题。" } });
+    expect(JSON.stringify(outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain("instance_create_submit");
     await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u2", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "worker", agent_kind: "traex", model: "", start: "false" } })).resolves.toEqual({ toast: { type: "error", content: "只有发起此操作的用户可以提交。" } });
     await expect(handleCardAction(workflow, { messageId: "card", chatId: "chat", operatorOpenId: "u1", value: { action: "instance_create_submit", projectId: "p1", requestedBy: "u1", ...defaultBindingCard }, formValues: { name: "reviewer", role: "primary", agent_kind: "traex", model: "", start: "false" } })).resolves.toMatchObject({ toast: { type: "success" } });
     expect(control.createWorker).toHaveBeenCalledWith(expect.not.objectContaining({ role: expect.anything() }));
     expect(store!.listAgentInstances("p1").find(({ name }) => name === "reviewer")).toBeDefined();
-    expect(wakeOutbound).toHaveBeenCalledOnce();
+    expect(wakeOutbound).toHaveBeenCalledTimes(2);
   });
   it("wakes durable card context after create so one canonical Worker Main thread is reserved", async () => {
     const work = new InProcessOutboundWorkNotifier();
