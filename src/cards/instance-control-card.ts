@@ -67,7 +67,7 @@ function card(title: string, template: string, elements: object[]): object {
 }
 function select(name: string, placeholder: string, values: Array<[string, string]>, initialValue?: string): object {
   const options = values.map(([content, value]) => ({ text: { tag: "plain_text", content }, value }));
-  const initialOption = options.find(({ value }) => value === initialValue);
+  const initialOption = options.find(({ value }) => value === initialValue)?.value;
   return { tag: "select_static", name, required: true, placeholder: { tag: "plain_text", content: placeholder }, ...(initialOption ? { initial_option: initialOption } : {}), options };
 }
 function escape(value: string): string { return value.replace(/[\`*_{}[\]()#+.!|>-]/g, "\\$&").slice(0, 300); }

@@ -34,6 +34,12 @@ describe("GatewayView", () => {
     expect(materialized).not.toContain('\"form_action_type\":\"submit\"');
   });
 
+  it("materializes form select defaults as CardKit value strings", () => {
+    const card = materializeFeishuView(cardKitToGatewayView(renderInstanceCreateCard({ projectId: "project", requestedBy: "user" }))) as { body: { elements: Array<{ elements?: Array<Record<string, unknown>> }> } };
+    const selects = card.body.elements[0]!.elements!.filter(({ tag }) => tag === "select_static");
+    expect(selects.map(({ initial_option }) => initial_option)).toEqual(["traex", "true"]);
+  });
+
   it("degrades a rich view deterministically to fallback text for a plain Gateway", async () => {
     const control: InMemoryGatewayControl = { delivered: [], fallbackMessages: [], async emit() { throw new Error("not started"); } };
     const session = createInMemoryGatewayPlugin(control).create({ gatewayId: "memory:test" }, {});

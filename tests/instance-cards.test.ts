@@ -182,8 +182,8 @@ describe("instance cards", () => {
     expect(create).not.toContain("\"name\":\"role\"");
     expect(create).toContain('"name":"agent_kind"');
     expect(create).toContain('"name":"start"');
-    expect(create).toContain('"initial_option":{"text":{"tag":"plain_text","content":"TraeX"},"value":"traex"}');
-    expect(create).toContain('"initial_option":{"text":{"tag":"plain_text","content":"立即启动"},"value":"true"}');
+    expect(create).toContain('"initial_option":"traex"');
+    expect(create).toContain('"initial_option":"true"');
     const inputs = createCard.body.elements[0]!.elements!.filter(({ tag }) => tag === "input");
     expect(inputs).toHaveLength(2);
     expect(inputs).toEqual(inputs.map((input) => expect.objectContaining({ input_type: "text" })));

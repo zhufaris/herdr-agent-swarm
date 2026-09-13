@@ -69,7 +69,7 @@ function materializeNode(node: GatewayViewNode): object {
   if (node.kind === "form") return { tag: "form", name: node.name, elements: node.nodes.map(materializeNode) };
   if (node.kind === "input") return { tag: "input", name: node.name, input_type: node.inputType, ...(node.required ? { required: true } : {}), placeholder: { tag: "plain_text", content: node.placeholder } };
   const options = node.options.map((option) => ({ text: { tag: "plain_text", content: option.label }, value: option.value }));
-  const initialOption = options.find(({ value }) => value === node.initialValue);
+  const initialOption = options.find(({ value }) => value === node.initialValue)?.value;
   return { tag: "select_static", name: node.name, ...(node.required ? { required: true } : {}), placeholder: { tag: "plain_text", content: node.placeholder }, ...(initialOption ? { initial_option: initialOption } : {}), options, ...(node.action === undefined ? {} : { behaviors: [{ type: "callback", value: structuredClone(node.action) }] }) };
 }
 
