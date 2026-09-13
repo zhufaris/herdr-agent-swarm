@@ -70,6 +70,19 @@ export class SqliteCommandIntentStore {
   registerWorkerThreadEntry(input: { commandIntentId: string; workerId: string; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; rootMessageId: string }): boolean {
     const timestamp = now();
     return this.context.transaction(() => {
+      const existing = this.context.database.prepare(`
+        SELECT worker_id, worker_session_generation, binding_id, binding_generation, root_message_id
+        FROM worker_thread_entry_requests WHERE command_intent_id = ?
+      `).get(input.commandIntentId) as { worker_id: string; worker_session_generation: number; binding_id: string; binding_generation: number; root_message_id: string } | undefined;
+      if (existing) {
+        const exact = existing.worker_id === input.workerId
+          && existing.worker_session_generation === input.workerSessionGeneration
+          && existing.binding_id === input.bindingId
+          && existing.binding_generation === input.bindingGeneration
+          && existing.root_message_id === input.rootMessageId;
+        if (exact) return false;
+        throw new Error(`Worker thread entry registration conflicts with existing command intent: ${input.commandIntentId}`);
+      }
       const inserted = this.context.database.prepare(`
         INSERT INTO worker_thread_entry_requests(command_intent_id, worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state, created_at, updated_at)
         SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?

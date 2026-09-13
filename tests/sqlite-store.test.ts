@@ -303,6 +303,11 @@ describe("SQLite store", () => {
       const command = store!.acceptCommandIntent({ id: "worker-create", idempotencyKey: "worker-create", laneKey: "binding:b1", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true }, context: { projectId: "p1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", actorOpenId: "operator", sourceMessageId: "source", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", terminalId: null, nativeSession: null, activePromptId: null } }, replayPolicy: "reconcilable", acceptedAt: "2026-09-13T00:00:00.000Z" }).intent;
       expect(store!.claimNextCommandIntent()).toMatchObject({ id: command.id });
       expect(store!.registerWorkerThreadEntry({ commandIntentId: command.id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "primary-root" })).toBe(true);
+      const revisionAfterRegistration = store!.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "worker-session" && targetId === "reviewer")!.requestedDependencyRevision;
+      expect(store!.registerWorkerThreadEntry({ commandIntentId: command.id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "primary-root" })).toBe(false);
+      expect(() => store!.registerWorkerThreadEntry({ commandIntentId: command.id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "different-root" })).toThrow("conflicts with existing command intent");
+      expect(store!.database.prepare("SELECT COUNT(*) AS count FROM worker_thread_entry_requests WHERE command_intent_id = 'worker-create'").get()).toEqual({ count: 1 });
+      expect(store!.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "worker-session" && targetId === "reviewer")).toMatchObject({ requestedDependencyRevision: revisionAfterRegistration });
       const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
       expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
       expect(store!.listPendingOutboundReplies()).toHaveLength(1);
@@ -344,7 +349,7 @@ describe("SQLite store", () => {
       expect(store!.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'late-worker-create'").get()).toEqual({ state: "reserved" });
     });
 
-    it("backfills only generation-current pending Primary entries on upgrade", () => {
+    it("converges generation-current pending Primary entries on every startup", () => {
       temporaryDirectory = mkdtempSync(join(tmpdir(), "worker-entry-backfill-"));
       const path = join(temporaryDirectory, "state.sqlite");
       store = new SqliteBindingStore(path);
@@ -363,12 +368,14 @@ describe("SQLite store", () => {
         expect(store.registerWorkerThreadEntry({ commandIntentId: id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "primary-root" })).toBe(true);
       }
       store.database.prepare("UPDATE worker_thread_entry_requests SET worker_session_generation = 2 WHERE command_intent_id = 'stale-entry'").run();
-      store.database.exec("DELETE FROM card_context_invalidations; DELETE FROM schema_migrations WHERE version = 43");
+      store.database.exec("DELETE FROM card_context_invalidations");
       store.close(); store = new SqliteBindingStore(path);
 
       expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1, reason: "startup.worker-thread-entry-backfill" })]);
-      expect(store.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'stale-entry'").get()).toEqual({ state: "pending" });
+      expect(store.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'stale-entry'").get()).toEqual({ state: "stale" });
       expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 43").get()).toEqual({ version: 43 });
+      store.close(); store = new SqliteBindingStore(path);
+      expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ requestedDependencyRevision: 1, projectedDependencyRevision: 0 })]);
     });
 
     it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {

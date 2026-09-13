@@ -46,10 +46,31 @@ export class WorkerMigrations {
 
   ensureWorkerThreadEntryInvalidations(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 43").get();
-    if (migrated) return;
     const timestamp = now();
     this.context.database.exec("BEGIN IMMEDIATE");
     try {
+      if (!migrated) this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (43)").run();
+      this.context.database.prepare(`
+        UPDATE worker_thread_entry_requests AS request SET state = 'stale', updated_at = ?
+        WHERE request.state = 'pending' AND NOT EXISTS (
+          SELECT 1
+          FROM agent_instances worker
+          JOIN bindings binding ON binding.id = request.binding_id
+          JOIN worker_session_threads thread ON thread.worker_id = request.worker_id
+            AND thread.worker_session_generation = request.worker_session_generation
+          JOIN worker_main_views main ON main.worker_id = request.worker_id
+            AND main.worker_session_generation = request.worker_session_generation
+          WHERE worker.id = request.worker_id AND worker.role = 'worker'
+            AND worker.worker_session_generation = request.worker_session_generation
+            AND worker.worker_session_lifecycle = 'active'
+            AND worker.parent_binding_id = request.binding_id
+            AND worker.parent_binding_generation = request.binding_generation
+            AND binding.generation = request.binding_generation
+            AND binding.root_message_id = request.root_message_id
+            AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
+            AND thread.state = 'active' AND main.message_id = thread.root_message_id
+        )
+      `).run(timestamp);
       this.context.database.prepare(`
         INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
         SELECT 'worker-session', request.worker_id, request.worker_session_generation, 1, 0, 'startup.worker-thread-entry-backfill', ?, ?
@@ -66,10 +87,13 @@ export class WorkerMigrations {
         WHERE request.state = 'pending'
           AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
         ON CONFLICT(target_kind, target_id, target_generation) DO UPDATE SET
-          requested_dependency_revision = card_context_invalidations.requested_dependency_revision + 1,
+          requested_dependency_revision = CASE
+            WHEN card_context_invalidations.requested_dependency_revision <= card_context_invalidations.projected_dependency_revision
+              THEN card_context_invalidations.projected_dependency_revision + 1
+            ELSE card_context_invalidations.requested_dependency_revision
+          END,
           reason = excluded.reason, updated_at = excluded.updated_at
       `).run(timestamp, timestamp);
-      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (43)").run();
       this.context.database.exec("COMMIT");
     } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
   }
