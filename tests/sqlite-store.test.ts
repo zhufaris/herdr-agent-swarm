@@ -900,6 +900,39 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'instance_turns_primary_source'").get()).toEqual({ name: "instance_turns_primary_source" });
   });
 
+  it("backfills inbound message scopes and upgrades the pending index on a legacy database", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-inbound-message-scope-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    const legacy = new DatabaseSync(path);
+    const message = (eventId: string, messageId: string, topicId: string | null, rootMessageId: string | null) => JSON.stringify({
+      eventId, messageId, parentMessageId: null, chatId: "chat", topicId, rootMessageId, actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false
+    });
+    legacy.exec(`
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+      CREATE TABLE inbound_messages(
+        event_id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', message_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('received','processing','accepted')), error TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX inbound_messages_pending ON inbound_messages(state, created_at);
+    `);
+    const insert = legacy.prepare("INSERT INTO inbound_messages(event_id, gateway_id, message_id, payload_json, state, error, created_at, updated_at) VALUES (?, 'feishu:primary', ?, ?, 'received', NULL, ?, ?)");
+    insert.run("topic-message", "topic-message-id", message("topic-message", "topic-message-id", "topic-a", "root-a"), "2026-09-13T00:00:00.000Z", "2026-09-13T00:00:00.000Z");
+    insert.run("root-message", "root-message-id", message("root-message", "root-message-id", null, "root-b"), "2026-09-13T00:00:01.000Z", "2026-09-13T00:00:01.000Z");
+    insert.run("standalone-message", "standalone-message-id", message("standalone-message", "standalone-message-id", null, null), "2026-09-13T00:00:02.000Z", "2026-09-13T00:00:02.000Z");
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT event_id, scope_key FROM inbound_messages ORDER BY event_id").all()).toEqual([
+      { event_id: "root-message", scope_key: "root:root-b" },
+      { event_id: "standalone-message", scope_key: "message:standalone-message-id" },
+      { event_id: "topic-message", scope_key: "topic:topic-a" }
+    ]);
+    expect((store.database.prepare("PRAGMA index_info(inbound_messages_pending)").all() as Array<{ name: string }>).map(({ name }) => name)).toEqual(["state", "scope_key", "created_at"]);
+    expect(store.claimNextInboundMessage(["topic:topic-a"])?.eventId).toBe("root-message");
+  });
+
   it("adds Primary-scoped Worker indexes only after upgrading a pre-parent identity schema", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-parent-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
