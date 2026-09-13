@@ -127,8 +127,8 @@ describe("WorkerTurnObserver", () => {
 
   it("bounds accumulated Worker deltas when completion has no authoritative final answer", async () => {
     const { observer } = setup();
-    await observer.observe("turn-1", { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "x".repeat(32_000), turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
-    for (let index = 0; index < 8; index += 1) await observer.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "y".repeat(32_000) });
+    await observer.observe("turn-1", { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "x".repeat(64_000), turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
+    for (let index = 0; index < 9; index += 1) await observer.observe("turn-1", { turnId: runtimeTurnId, answerDelta: String(index).repeat(64_000) });
     await observer.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt } });
 
     const result = store!.getInstanceTurn("turn-1")!.result!;

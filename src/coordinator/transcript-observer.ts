@@ -5,7 +5,7 @@ import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { abortableWait } from "../runtime/abortable-wait.js";
-import { appendTurnOutput, createBoundedTurnOutput } from "../runtime/bounded-turn-output.js";
+import { appendTurnOutput, createBoundedTurnOutput, legacyTruncatedTurnOutputPrefix } from "../runtime/bounded-turn-output.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 import { transcriptSessionFor } from "../domain/transcript-observer-identity.js";
 
@@ -69,6 +69,7 @@ export class TranscriptObserver {
 
   async openDetached(binding: Binding, prompt: PromptJob): Promise<TurnOutputSource> {
     const persistedAnswer = this.options.store.loadRunCard?.(prompt.id)?.answer ?? "";
+    const legacyPrefix = legacyTruncatedTurnOutputPrefix(persistedAnswer);
     const fallback = async () => {
       const source = await this.open(binding);
       if (source.mode === "typed") { source.output = createBoundedTurnOutput(persistedAnswer); source.emitted = Boolean(persistedAnswer); }
@@ -91,9 +92,18 @@ export class TranscriptObserver {
         if (observation.turnLifecycle?.state === "completed" || observation.turnLifecycle?.state === "aborted") source.terminalLifecycle = observation.turnLifecycle;
         return "continue" as const;
       } });
-      if (!replayedAnswer.truncated && replayedAnswer.text.startsWith(persistedAnswer) && replayedAnswer.text.length > persistedAnswer.length) {
-        const suffix = replayedAnswer.text.slice(persistedAnswer.length).trimStart();
-        if (suffix) { source.output = replayedAnswer; await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: suffix }, Date.parse(prompt.transcriptTurnStartedAt)); }
+      const persistedPrefix = legacyPrefix ?? persistedAnswer;
+      if (!replayedAnswer.truncated && replayedAnswer.text.startsWith(persistedPrefix) && replayedAnswer.text.length > persistedPrefix.length) {
+        source.output = replayedAnswer;
+        if (legacyPrefix !== null) {
+          await this.options.publishObservation(binding.id, prompt.id, {
+            answer: { snapshot: replayedAnswer.text, update: "replace-all", toolActivities: [] },
+            main: {}
+          });
+        } else {
+          const suffix = replayedAnswer.text.slice(persistedAnswer.length).trimStart();
+          if (suffix) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: suffix }, Date.parse(prompt.transcriptTurnStartedAt));
+        }
       }
       if (latestMainStatus) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: "", mainStatus: latestMainStatus }, Date.parse(prompt.transcriptTurnStartedAt));
       return source;

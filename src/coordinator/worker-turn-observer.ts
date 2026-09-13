@@ -59,7 +59,7 @@ export class WorkerTurnObserver {
       return;
     }
     if (lifecycle?.state === "completed") {
-      const answer = this.safeOutput(lifecycle.finalAnswer ?? accumulated);
+      const answer = lifecycle.finalAnswer === undefined ? accumulated : this.safeOutput(lifecycle.finalAnswer);
       const projected = view
         ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: this.options.presentation.workerTurn })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed" });

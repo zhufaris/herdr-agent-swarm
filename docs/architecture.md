@@ -1014,9 +1014,14 @@ baseline. Exact-turn lookup scans only the final 64 MiB of a larger transcript
 and ignores the partial record at the beginning of that bounded window. The
 replay keeps the durable RunCard answer as its baseline, appends transcript text
 only when the replay proves a strict missing suffix, and independently publishes
-the latest Main status snapshot. This restores plan steps and phase text written
-before the restart without duplicating Answer content or replaying a prompt. If
-the exact boundary is unavailable, observation falls back to the live EOF tail.
+the latest Main status snapshot. A Run Card ending at the legacy 64 KiB
+truncation marker is the narrow exception: replay removes only that exact marker,
+requires the exact owned transcript to match the remaining prefix, and then
+publishes the longer bounded snapshot as one `replace-all` update. If the prefix
+does not match, the old truncation fence remains intact. This restores plan steps
+and phase text written before the restart without duplicating Answer content or
+replaying a prompt. If the exact boundary is unavailable, observation falls back
+to the live EOF tail.
 
 Terminal content is not a control-plane source. Live pane/process/session
 identity uses Herdr; detached completion uses the canonical typed transcript;
@@ -1029,6 +1034,14 @@ a bounded, redacted suffix whose replayed canonical text begins with that exact
 answer. Unprovable historical transcript text is ignored; a later canonical
 completion still supplies the final answer or the fixed safe notice when no
 typed answer exists.
+
+Typed output uses one shared 512 KiB per-turn aggregate bound in the transcript
+reader and observer accumulator. Crossing that hard limit records a stable
+truncation marker and suppresses later prose while lifecycle and progress
+observation continue. The larger aggregate feeds the existing 9,000-character
+Answer pagination protocol; it does not increase any single CardKit page. Worker
+output retains its separate per-fragment sanitization before entering the shared
+bounded accumulator.
 
 Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A

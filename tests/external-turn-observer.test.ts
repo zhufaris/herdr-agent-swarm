@@ -255,9 +255,9 @@ describe("ExternalTurnObserver", () => {
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const startedAt = "2026-09-11T00:00:00.000Z";
     const observations: TraexTranscriptObservation[] = [
-      { turnId: "turn-large", freshTurnStart: true, requestText: "large", answerDelta: "x".repeat(40_000), turnLifecycle: { turnId: "turn-large", state: "active", startedAt } },
-      { turnId: "turn-large", answerDelta: "y".repeat(40_000) },
-      { turnId: "turn-large", answerDelta: "z".repeat(40_000) },
+      { turnId: "turn-large", freshTurnStart: true, requestText: "large", answerDelta: "x".repeat(200_000), turnLifecycle: { turnId: "turn-large", state: "active", startedAt } },
+      { turnId: "turn-large", answerDelta: "y".repeat(200_000) },
+      { turnId: "turn-large", answerDelta: "z".repeat(200_000) },
       { turnId: "turn-large", answerDelta: "", turnLifecycle: { turnId: "turn-large", state: "completed", startedAt } },
       { turnId: "turn-final", freshTurnStart: true, requestText: "authoritative", answerDelta: "a".repeat(40_000), turnLifecycle: { turnId: "turn-final", state: "active", startedAt: "2026-09-11T00:01:00.000Z" } },
       { turnId: "turn-final", answerDelta: "b".repeat(40_000), turnLifecycle: { turnId: "turn-final", state: "completed", startedAt: "2026-09-11T00:01:00.000Z", finalAnswer: "trusted final" } },

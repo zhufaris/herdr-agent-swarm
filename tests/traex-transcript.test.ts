@@ -814,6 +814,15 @@ describe("TraexTranscriptReader", () => {
     expect(output.length).toBeLessThanOrEqual(240);
   });
 
+  it("preserves a default typed delta beyond the legacy 64 KiB boundary", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const content = "x".repeat(70 * 1024);
+    await appendFile(path, mutation([{ type: "message", id: "long-message", role: "assistant", content: [{ type: "output_text", text: content }] }]));
+
+    await expect(cursor.readDelta()).resolves.toBe(content);
+  });
+
   it("redacts colon assignments and equals-form authorization in typed deltas", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

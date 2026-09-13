@@ -52,4 +52,14 @@ describe("owned transcript output projector", () => {
     expect(later.state.output).toBe(overflow.state.output);
     expect(later.observation?.answer).toMatchObject({ snapshot: "", update: "append", toolActivities: [expect.objectContaining({ key: "test" })] });
   });
+
+  it("continues publishing after the legacy 64 KiB boundary", () => {
+    const legacyBoundary = 64 * 1024;
+    const initial = { emitted: true, output: { text: "x".repeat(legacyBoundary), truncated: false } };
+
+    const result = projectOwnedTranscriptOutput({ state: initial, observation: { answerDelta: "continued output" } });
+
+    expect(result.state.output).toEqual({ text: `${"x".repeat(legacyBoundary)}\n\ncontinued output`, truncated: false });
+    expect(result.observation?.answer).toMatchObject({ snapshot: "continued output", update: "append" });
+  });
 });

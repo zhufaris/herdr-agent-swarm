@@ -6,10 +6,11 @@ import type { HerdrAgentSession } from "../domain/types.js";
 import type { TraexTranscriptCursorPort, TraexTranscriptObservation, TraexTranscriptOpenResult, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { redactSecrets } from "./redact-secrets.js";
 import { TraexTranscriptProjector } from "./traex-transcript-projector.js";
+import { MAX_TURN_OUTPUT_CHARS } from "./bounded-turn-output.js";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
-const DEFAULT_MAX_RENDERED_DELTA_CHARS = 64 * 1024;
+const DEFAULT_MAX_RENDERED_DELTA_CHARS = MAX_TURN_OUTPUT_CHARS;
 const DEFAULT_MAX_DISCOVERY_ENTRIES = 100_000;
 const DEFAULT_MAX_CACHED_PATHS = 256;
 const DEFAULT_NEGATIVE_CACHE_TTL_MS = 250;
