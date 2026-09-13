@@ -14,7 +14,8 @@ export function createOutboxTestDriver(outbox: SqliteOutboxStore) {
     },
     markOutboundReplyFailedWithQuarantine(target: string | OutboundDeliveryClaim, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number) {
       return typeof target === "string" ? outbox.markOutboundReplyFailedWithQuarantine(target, error, metadata, retryDelayMs) : outbox.markOutboundReplyFailedWithQuarantine(target.reply.id, error, metadata, retryDelayMs, target);
-    }
+    },
+    rejectUnclaimedOutboundReply: (id: string, error: string, metadata: DeliveryFailureMetadata) => outbox.markOutboundReplyFailedWithQuarantine(id, error, metadata)
   };
 }
 

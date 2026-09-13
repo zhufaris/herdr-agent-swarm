@@ -32,19 +32,22 @@ export class OutboundDeliveryExecutor {
 
   async deliver(candidate: OutboundReply, dueAt: string | null): Promise<OutboundDeliveryOutcome> {
     if ((candidate.kind === "stream_content" || candidate.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(candidate.id)) return "delivered";
-    let preparationError: unknown;
     if (candidate.gatewayPlanJson === null) {
-      try {
-        const plan = this.gateway.prepare(prepareOutboundGatewayIntent(this.store, candidate).intent);
-        this.store.prepareOutboundGatewayPlan(candidate.id, { gatewayId: plan.gatewayId, gatewayProfileId: plan.profileId, gatewayPlanJson: JSON.stringify(plan) });
-      } catch (error) { preparationError = error; }
+      let intent: ReturnType<typeof prepareOutboundGatewayIntent>["intent"];
+      try { intent = prepareOutboundGatewayIntent(this.store, candidate).intent; }
+      catch (error) {
+        if (!(error instanceof PermanentDeliveryError)) throw error;
+        this.store.rejectUnclaimedOutboundReply(candidate.id, safeLogError(error).message, { failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null });
+        return "failed";
+      }
+      const plan = this.gateway.prepare(intent);
+      this.store.prepareOutboundGatewayPlan(candidate.id, { gatewayId: plan.gatewayId, gatewayProfileId: plan.profileId, gatewayPlanJson: JSON.stringify(plan) });
     }
     const claim = this.store.claimOutboundReply(candidate.id, dueAt);
     if (!claim) return "failed";
     const reply = claim.reply;
     try {
       const prepared = prepareOutboundGatewayIntent(this.store, reply);
-      if (preparationError) throw preparationError;
       if (prepared.emptyStreamContent) {
         this.logger.info({ event: "gateway-outbox-empty-stream-content-skipped", gatewayId: reply.gatewayId, replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: reply.viewVersion, outcome: "checkpointed" }, "checkpointed empty Gateway stream content without an external call");
         this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, reply.rootMessageId!));

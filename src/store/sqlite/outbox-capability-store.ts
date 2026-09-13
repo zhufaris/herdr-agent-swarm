@@ -36,6 +36,7 @@ export class SqliteOutboxCapabilityStore implements OutboxStore {
   loadRunCard(promptId: string): ReturnType<OutboxStore["loadRunCard"]> { return this.projections.loadRunCard(promptId); }
   markOutboundReplyDelivered(claim: OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string): boolean { return this.outbox.markOutboundReplyDelivered(claim.reply.id, messageId, cardId, claim, topicId); }
   markOutboundReplyFailedWithQuarantine(claim: OutboundDeliveryClaim, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null { return this.outbox.markOutboundReplyFailedWithQuarantine(claim.reply.id, error, metadata, retryDelayMs, claim); }
+  rejectUnclaimedOutboundReply(id: string, error: string, metadata: DeliveryFailureMetadata): OutboundFailureTransition | null { return this.outbox.markOutboundReplyFailedWithQuarantine(id, error, metadata); }
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[] { return this.outbox.recoverEligibleDeadLetters(cutoff, limit); }
   recordBridgeMessage(messageId: string): void { this.inbound.recordBridgeMessage(messageId); }
   dismissSupersededAnswerStream(replyId: string): boolean { return this.outbox.dismissSupersededAnswerStream(replyId); }

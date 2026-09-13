@@ -93,6 +93,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   declare markOutboundReplyDelivered: OutboxTestDriver["markOutboundReplyDelivered"];
   declare checkpointOutboundReplyCard: OutboxTestDriver["checkpointOutboundReplyCard"];
   declare markOutboundReplyFailedWithQuarantine: OutboxTestDriver["markOutboundReplyFailedWithQuarantine"];
+  declare rejectUnclaimedOutboundReply: OutboxTestDriver["rejectUnclaimedOutboundReply"];
 
   getAgentInstance(id: string): AgentInstance | null {
     return this.instances.getAgentInstance(id);

@@ -469,6 +469,31 @@ describe("Lark channel publisher", () => {
     await publisher.stop(); store.close();
   });
 
+  it("leaves a row unclaimed when Gateway plan preparation fails before external delivery", async () => {
+    let fail = true;
+    const gateway: GatewayDeliveryPort = {
+      prepare: vi.fn((intent) => {
+        if (fail) throw new Error("renderer unavailable");
+        return { protocolVersion: 1, gatewayId: "feishu:primary", profileId: "feishu-cardkit-v1", rendererRevision: 1, operation: intent.kind, intent };
+      }),
+      execute: vi.fn(async () => ({ refs: [{ gatewayId: "feishu:primary", kind: "message", opaqueId: "message-1" }] }))
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "prepare-failure", idempotencyKey: "prepare-failure", rootMessageId: "root-1", kind: "card_reply", payload: '{"schema":"2.0"}' });
+    const publisher = new ProductionLarkOutboxDispatcher(store, gateway, pino({ enabled: false }), new InProcessOutboundWorkNotifier(pino({ enabled: false })));
+
+    await expect(publisher.requestScan(true)).rejects.toThrow("renderer unavailable");
+    expect(store.getOutboundReply("prepare-failure")).toMatchObject({ state: "pending", attemptCount: 0, gatewayPlanJson: null, failureClass: null, effectCertainty: null });
+    expect(store.database.prepare("SELECT * FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get("prepare-failure")).toBeUndefined();
+    expect(gateway.execute).not.toHaveBeenCalled();
+
+    fail = false;
+    await publisher.requestScan(true);
+    expect(store.getOutboundReply("prepare-failure")).toMatchObject({ state: "delivered", attemptCount: 1, gatewayPlanJson: expect.any(String) });
+    expect(gateway.execute).toHaveBeenCalledOnce();
+    await publisher.stop(); store.close();
+  });
+
   it("retries a failed final folded Answer Card update without recreating the answer", async () => {
     let fail = true;
     const updateCard = vi.fn(async () => { if (fail) throw Object.assign(new Error("temporary"), { response: { status: 503 } }); });

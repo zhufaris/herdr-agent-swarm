@@ -19,6 +19,7 @@ export interface OutboxStore {
   loadRunCard(promptId: string): RunCardView | null;
   markOutboundReplyDelivered(claim: OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string): boolean;
   markOutboundReplyFailedWithQuarantine(claim: OutboundDeliveryClaim, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;
+  rejectUnclaimedOutboundReply(id: string, error: string, metadata: DeliveryFailureMetadata): OutboundFailureTransition | null;
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
   recordBridgeMessage(messageId: string): void;
   dismissSupersededAnswerStream(replyId: string): boolean;
