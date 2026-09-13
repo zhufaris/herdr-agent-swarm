@@ -48,11 +48,22 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
 
   async handle(message: IncomingLarkMessage): Promise<void> {
     if (this.options.workerSessionThreads) {
-      const workerRoute = await this.options.workerSessionThreads.handleMessage(message);
-      if (workerRoute.handled) {
-        this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, decision: "worker-session-thread", outcome: "accepted" }, "routed persisted Lark message");
-        this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
-        return;
+      try {
+        const workerRoute = await this.options.workerSessionThreads.handleMessage(message);
+        if (workerRoute.handled) {
+          this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, decision: "worker-session-thread", outcome: "accepted" }, "routed persisted Lark message");
+          this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
+          return;
+        }
+      } catch (error) {
+        const rejection = permanentInstanceCommandRejection(error);
+        if (rejection) {
+          await this.reject(message, rejection);
+          this.options.logger.info({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, route: "worker-session-thread", reason: rejection, outcome: "accepted" }, "rejected unavailable Worker thread target");
+          throw new PermanentInboundMessageRejection(rejection);
+        }
+        this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, outcome: "failed" }, "Worker thread message handling failed");
+        throw error;
       }
     }
     const instanceCommand = parseInstanceCommand(message.text);
