@@ -56,7 +56,7 @@ export class LarkSdkAdapter implements LarkPort {
         if (!normalized || normalized.chatId !== this.options.chatId || !onCardAction) return;
         const startedAt = Date.now();
         const action = cardActionName(normalized.value);
-        this.logger?.info({ event: "lark-card-action-received", action, messageId: normalized.messageId, outcome: "accepted" }, "Lark card action received");
+        this.logger?.info({ event: "lark-card-action-received", action, messageId: normalized.messageId, cardDiagnostics: cardActionDiagnostics(data), outcome: "accepted" }, "Lark card action received");
         try {
           const result = await onCardAction(normalized);
           this.logger?.info({ event: "lark-card-action-completed", action, messageId: normalized.messageId, outcome: "responded", responseKind: cardActionResponseKind(result), durationMs: Date.now() - startedAt }, "Lark card action completed");
@@ -325,6 +325,20 @@ function normalizeFormValues(value: unknown): { formValues: Record<string, strin
 
 function cardActionName(value: unknown): string {
   return isRecord(value) && typeof value.action === "string" ? value.action.slice(0, 128) : "unknown";
+}
+
+function cardActionDiagnostics(data: lark.RawCardActionEvent): { tag: string | null; hasFormValue: boolean; formValueKeys: string[] } {
+  const action = data.action as { tag?: unknown; form_value?: unknown } | undefined;
+  return {
+    tag: typeof action?.tag === "string" ? action.tag.slice(0, 64) : null,
+    hasFormValue: action?.form_value !== undefined,
+    formValueKeys: safeFormValueKeys(action?.form_value)
+  };
+}
+
+function safeFormValueKeys(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  return Object.keys(value).filter((key) => /^[a-z][a-z0-9_]{0,64}$/.test(key)).slice(0, 16);
 }
 
 function cardActionResponseKind(result: LarkCardActionResult | void): "none" | "toast" | "card" | "toast_and_card" {

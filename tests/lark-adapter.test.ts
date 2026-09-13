@@ -439,7 +439,7 @@ describe("Lark card action normalization", () => {
       context: { open_message_id: "om_1", open_chat_id: "chat" }, operator: { open_id: "ou_1" },
       action: { value: { action: "submit_supplement" }, form_value: { supplement: "add tests" } }
     })).resolves.toEqual({ toast: { type: "success", content: "已加入当前执行" }, card: { type: "raw", data: { schema: "2.0" } } });
-    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-card-action-received", action: "submit_supplement", messageId: "om_1", outcome: "accepted" }), "Lark card action received");
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-card-action-received", action: "submit_supplement", messageId: "om_1", cardDiagnostics: { tag: null, hasFormValue: true, formValueKeys: ["supplement"] }, outcome: "accepted" }), "Lark card action received");
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-card-action-completed", action: "submit_supplement", messageId: "om_1", outcome: "responded", responseKind: "toast_and_card", durationMs: expect.any(Number) }), "Lark card action completed");
     expect(JSON.stringify(info.mock.calls)).not.toContain("add tests");
   });
