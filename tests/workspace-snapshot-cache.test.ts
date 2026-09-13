@@ -32,6 +32,24 @@ describe("workspace snapshot cache", () => {
     expect(cache.status().coalescedRefreshes).toBe(1);
   });
 
+  it("coalesces concurrent targeted pane reads without caching completed results", async () => {
+    let release!: (value: ReturnType<typeof pane>) => void;
+    const getPane = vi.fn(() => new Promise<ReturnType<typeof pane>>((resolve) => { release = resolve; }));
+    const cache = new WorkspaceSnapshotCache(adapter({ getPane }));
+
+    const first = cache.getPane("w1:p1");
+    const second = cache.getPane("w1:p1");
+    release(pane("w1", 1));
+    const [a, b] = await Promise.all([first, second]);
+    a!.label = "mutated";
+
+    expect(b?.label).toBe("v1");
+    expect(getPane).toHaveBeenCalledOnce();
+    getPane.mockResolvedValueOnce(pane("w1", 2));
+    expect((await cache.getPane("w1:p1"))?.label).toBe("v2");
+    expect(getPane).toHaveBeenCalledTimes(2);
+  });
+
   it("does not publish or coalesce onto a workspace refresh invalidated while in flight", async () => {
     const releases: Array<(panes: ReturnType<typeof pane>[]) => void> = [];
     const listPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { releases.push(resolve); }));

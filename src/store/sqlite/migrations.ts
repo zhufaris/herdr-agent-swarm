@@ -77,6 +77,7 @@ export class SqliteMigrations {
     this.worker.ensureWorkerParentIdentity();
     this.worker.ensurePrimaryScopedWorkerNames();
     this.worker.ensureCardContextProjectionTables();
+    this.worker.ensureCardContextPendingIndex();
     this.worker.ensureActiveWorkerScopedNames();
     this.worker.ensureWorkerTurnContextReferences();
     this.worker.ensureInstanceTurnActorProvenance();

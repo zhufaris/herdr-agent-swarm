@@ -35,6 +35,48 @@ describe("card context boundaries", () => {
     expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "card-context-rebuild-failed", outcome: "retry" }), expect.any(String));
   });
 
+  it("drains more than one bounded invalidation batch in a single scan", async () => {
+    const pending = Array.from({ length: 205 }, (_, index) => ({
+      targetKind: "worker-session" as const, targetId: `worker-${index}`, targetGeneration: 1,
+      requestedDependencyRevision: 1, projectedDependencyRevision: 0, reason: "turn.accepted",
+      createdAt: "2026-09-13T00:00:00.000Z", updatedAt: "2026-09-13T00:00:00.000Z"
+    }));
+    const listPendingCardContextInvalidations = vi.fn((limit: number) => pending.slice(0, limit));
+    const projectCardContext = vi.fn((invalidation: (typeof pending)[number]) => {
+      pending.splice(pending.indexOf(invalidation), 1);
+      return "current" as const;
+    });
+    const rebuilder = new CardContextRebuilder(
+      { listPendingCardContextInvalidations, projectCardContext },
+      () => {}, { debug() {}, error() {} } as never, applicationPresentation
+    );
+
+    await rebuilder.requestScan();
+
+    expect(projectCardContext).toHaveBeenCalledTimes(205);
+    expect(listPendingCardContextInvalidations).toHaveBeenCalledTimes(3);
+    expect(pending).toEqual([]);
+  });
+
+  it("stops draining when a full batch makes no durable progress", async () => {
+    const pending = Array.from({ length: 100 }, (_, index) => ({
+      targetKind: "worker-session" as const, targetId: `worker-${index}`, targetGeneration: 1,
+      requestedDependencyRevision: 1, projectedDependencyRevision: 0, reason: "turn.accepted",
+      createdAt: "2026-09-13T00:00:00.000Z", updatedAt: "2026-09-13T00:00:00.000Z"
+    }));
+    const listPendingCardContextInvalidations = vi.fn(() => pending);
+    const projectCardContext = vi.fn(() => "current" as const);
+    const rebuilder = new CardContextRebuilder(
+      { listPendingCardContextInvalidations, projectCardContext },
+      () => {}, { debug() {}, error() {} } as never, applicationPresentation
+    );
+
+    await rebuilder.requestScan();
+
+    expect(projectCardContext).toHaveBeenCalledTimes(100);
+    expect(listPendingCardContextInvalidations).toHaveBeenCalledTimes(2);
+  });
+
   it("isolates a background rebuild failure and retries on a later wake", async () => {
     const invalidation = {
       targetKind: "worker-session" as const, targetId: "reviewer", targetGeneration: 1,

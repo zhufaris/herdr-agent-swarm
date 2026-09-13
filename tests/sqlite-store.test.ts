@@ -538,6 +538,7 @@ describe("SQLite store", () => {
       { name: "card_context_invalidations" }, { name: "worker_main_views" }
     ]);
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 17").get()).toEqual({ version: 17 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 43").get()).toEqual({ version: 43 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 22").get()).toEqual({ version: 22 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 23").get()).toEqual({ version: 23 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 24").get()).toEqual({ version: 24 });
@@ -558,6 +559,40 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('outbound_replies_worker_pending','outbound_replies_worker_stream') ORDER BY name").all()).toEqual([
       { name: "outbound_replies_worker_pending" }, { name: "outbound_replies_worker_stream" }
     ]);
+  });
+
+  it("uses the partial ordering index for pending card-context scans", () => {
+    store = new SqliteBindingStore(":memory:");
+    const insert = store.database.prepare(`INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at) VALUES ('worker-session', ?, 1, ?, ?, 'test', ?, ?)`);
+    for (let index = 0; index < 1_000; index += 1) {
+      const pending = index % 100 === 0;
+      const timestamp = `2026-09-13T00:00:${String(index % 60).padStart(2, "0")}.${String(index).padStart(3, "0")}Z`;
+      insert.run(`worker-${index}`, pending ? 2 : 1, 1, timestamp, timestamp);
+    }
+    store.database.exec("ANALYZE");
+
+    const details = (store.database.prepare("EXPLAIN QUERY PLAN SELECT * FROM card_context_invalidations WHERE projected_dependency_revision < requested_dependency_revision ORDER BY updated_at, target_kind, target_id, target_generation LIMIT ?").all(100) as Array<{ detail: string }>).map(({ detail }) => detail.toLowerCase());
+
+    expect(details.some((detail) => detail.includes("card_context_invalidations_pending")), details.join(" | " )).toBe(true);
+    expect(details.some((detail) => detail.includes("temp b-tree")), details.join(" | " )).toBe(false);
+    expect(store.listPendingCardContextInvalidations()).toHaveLength(10);
+  });
+
+  it("upgrades the legacy card-context pending index in place", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-card-context-index-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.database.exec(`
+      DELETE FROM schema_migrations WHERE version = 43;
+      DROP INDEX card_context_invalidations_pending;
+      CREATE INDEX card_context_invalidations_pending ON card_context_invalidations(projected_dependency_revision, requested_dependency_revision, updated_at);
+    `);
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    const definition = store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'card_context_invalidations_pending'").get() as { sql: string };
+    expect(definition.sql).toContain("WHERE projected_dependency_revision < requested_dependency_revision");
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 43").get()).toEqual({ version: 43 });
   });
 
   it("terminalizes retired prompt steering exactly once without changing ordinary FIFO work", () => {

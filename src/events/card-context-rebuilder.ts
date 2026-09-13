@@ -6,6 +6,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 
 export class CardContextRebuilder {
+  private static readonly batchSize = 100;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running: Promise<void> | null = null;
   private stopping = false;
@@ -45,7 +46,18 @@ export class CardContextRebuilder {
   private async scan(): Promise<void> {
     let reserved = false;
     try {
-      for (const invalidation of this.store.listPendingCardContextInvalidations(100)) reserved = this.project(invalidation) || reserved;
+      let previousFullBatch = "";
+      for (;;) {
+        if (this.stopping) break;
+        const invalidations = this.store.listPendingCardContextInvalidations(CardContextRebuilder.batchSize);
+        if (invalidations.length === 0) break;
+        const batchIdentity = invalidations.map(({ targetKind, targetId, targetGeneration, requestedDependencyRevision }) => `${targetKind}:${targetId}:${targetGeneration}:${requestedDependencyRevision}`).join("\n");
+        if (batchIdentity === previousFullBatch) break;
+        for (const invalidation of invalidations) reserved = this.project(invalidation) || reserved;
+        if (invalidations.length < CardContextRebuilder.batchSize) break;
+        previousFullBatch = batchIdentity;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       if (reserved) this.wakeOutbound();
     } catch (error) {
       this.logger.error({ event: "card-context-rebuild-failed", err: safeLogError(error), outcome: "retry" }, "card context rebuild failed; durable invalidation retained");

@@ -5,6 +5,7 @@ import { safeLogError } from "./safe-error.js";
 
 interface Snapshot { panes: HerdrPane[]; capturedAt: number }
 interface Refresh<T> { generation: number; resetGeneration: number; promise: Promise<T> }
+const MAX_TARGETED_READS = 256;
 
 export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly snapshots = new Map<string, Snapshot>();
@@ -12,6 +13,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly refreshes = new Map<string, Refresh<HerdrPane[]>>();
   private readonly workspaceGenerations = new Map<string, number>();
   private allRefresh: Refresh<HerdrPane[]> | null = null;
+  private readonly paneReads = new Map<string, Promise<HerdrPane | null>>();
   private allSnapshot: Snapshot | null = null;
   private allGeneration = 0;
   private resetGeneration = 0;
@@ -120,6 +122,19 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     await (expectedSpaceName === undefined ? this.delegate.assertWorkspace(workspaceId) : this.delegate.assertWorkspace(workspaceId, expectedSpaceName));
   }
   async getPane(paneId: string): Promise<HerdrPane | null> {
+    let read = this.paneReads.get(paneId);
+    if (!read) {
+      read = this.readPane(paneId);
+      if (this.paneReads.size < MAX_TARGETED_READS) {
+        this.paneReads.set(paneId, read);
+        void read.finally(() => { if (this.paneReads.get(paneId) === read) this.paneReads.delete(paneId); }).catch(() => {});
+      }
+    }
+    const pane = await read;
+    return pane ? clonePane(pane) : null;
+  }
+
+  private async readPane(paneId: string): Promise<HerdrPane | null> {
     const pane = await this.delegate.getPane(paneId);
     if (pane) this.rememberPane(pane);
     return pane;
@@ -240,7 +255,11 @@ export class WorkspaceSnapshotCache implements HerdrPort {
 }
 
 function clonePanes(panes: readonly HerdrPane[]): HerdrPane[] {
-  return panes.map((pane) => ({ ...pane, ...(pane.agentSession ? { agentSession: { ...pane.agentSession } } : {}), foregroundExecutables: [...pane.foregroundExecutables] }));
+  return panes.map(clonePane);
+}
+
+function clonePane(pane: HerdrPane): HerdrPane {
+  return { ...pane, ...(pane.agentSession ? { agentSession: { ...pane.agentSession } } : {}), foregroundExecutables: [...pane.foregroundExecutables] };
 }
 
 function replaceCachedPane(snapshot: Snapshot, pane: HerdrPane): void {

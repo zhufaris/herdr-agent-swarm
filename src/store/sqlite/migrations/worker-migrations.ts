@@ -341,6 +341,22 @@ export class WorkerMigrations {
     } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
   }
 
+  ensureCardContextPendingIndex(): void {
+    const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 43").get();
+    if (migrated) return;
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.context.database.exec(`
+        DROP INDEX IF EXISTS card_context_invalidations_pending;
+        CREATE INDEX card_context_invalidations_pending
+          ON card_context_invalidations(updated_at, target_kind, target_id, target_generation)
+          WHERE projected_dependency_revision < requested_dependency_revision;
+        INSERT INTO schema_migrations(version) VALUES (43);
+      `);
+      this.context.database.exec("COMMIT");
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+  }
+
   ensureActiveWorkerScopedNames(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 21").get();
     if (migrated) return;
