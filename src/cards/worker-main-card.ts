@@ -25,7 +25,7 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   if (view.frozenAt) elements.push({ tag: "markdown", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` });
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },
-    header: { title: { tag: "plain_text", content: `🧭 ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: `HERDR WORKER · PRIMARY ${primaryPaneLabel(view)} · ${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}` }, template: runtimeTemplate(view.runtimeState) },
+    header: { title: { tag: "plain_text", content: `🧭 Worker · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: `HERDR WORKER · PRIMARY ${primaryPaneLabel(view)} · ${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}` }, template: runtimeTemplate(view.runtimeState) },
     body: { elements }
   };
 }
@@ -71,7 +71,11 @@ export function renderWorkerThreadEntryCard(view: WorkerMainView, generatedAt: s
 
 export function renderWorkerThreadEntryReadyCard(input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }): object {
   return {
-    schema: "2.0", config: { update_multi: false, summary: { content: `Worker 已就绪 · ${input.workerName}` } },
+    // This is a one-time application-level entry card, but Feishu rejects a
+    // reply-card payload with update_multi disabled on this delivery path.
+    // We simply never enqueue a replacement for it; the platform capability
+    // flag must remain enabled for the initial card to be accepted.
+    schema: "2.0", config: { update_multi: true, summary: { content: `Worker 已就绪 · ${input.workerName}` } },
     header: { title: { tag: "plain_text", content: `✅ Worker 已就绪 · ${safe(input.workerName)}` }, subtitle: { tag: "plain_text", content: "GROUP WORKER THREAD" }, template: "green" },
     body: { elements: [
       { tag: "markdown", content: "Worker 的实时状态、任务和后续交互都在群里的独立 Worker Thread 中。" },

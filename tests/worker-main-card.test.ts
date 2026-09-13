@@ -11,7 +11,8 @@ function view() {
 
 describe("Worker Main card", () => {
   it("renders a compact Primary entry that only opens the canonical Worker Thread", () => {
-    const rendered = JSON.stringify(renderWorkerThreadEntryReadyCard({ workerName: "reviewer", workerId: "worker-1", workerSessionGeneration: 3, messageId: "om_worker_main" }));
+    const card = renderWorkerThreadEntryReadyCard({ workerName: "reviewer", workerId: "worker-1", workerSessionGeneration: 3, messageId: "om_worker_main" }) as { config: { update_multi?: boolean } };
+    const rendered = JSON.stringify(card);
 
     expect(rendered).toContain("Worker 已就绪 · reviewer");
     expect(rendered).toContain("打开 Worker Thread");
@@ -22,6 +23,7 @@ describe("Worker Main card", () => {
     expect(rendered).toContain("om_worker_main");
     expect(rendered).not.toContain("worker_new_task_form");
     expect(rendered).not.toContain("worker_task_instruction_form");
+    expect(card.config.update_multi).toBe(true);
   });
 
   it("renders one immutable status snapshot with a stable timestamp and canonical-card target", () => {
@@ -65,7 +67,7 @@ describe("Worker Main card", () => {
     }, queueCount: 1, nextTaskTitle: "Run recovery tests", recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
     const rendered = JSON.stringify(renderWorkerMainCard({ ...projected, messageId: "om_worker_main" }));
 
-    expect(rendered).toContain("🧭 reviewer");
+    expect(rendered).toContain("🧭 Worker · reviewer");
     expect(rendered).toContain("Review auth boundary and summarize findings");
     expect(rendered).toContain("Inspecting ownership fences");
     expect(rendered).toContain("Read ownership policy");
@@ -82,7 +84,7 @@ describe("Worker Main card", () => {
     const rendered = JSON.stringify(card);
 
     expect(card.header).toEqual({
-      title: { tag: "plain_text", content: "🧭 reviewer" },
+      title: { tag: "plain_text", content: "🧭 Worker · reviewer" },
       subtitle: { tag: "plain_text", content: "HERDR WORKER · PRIMARY Primary Review · 🧠 工作中" },
       template: "blue"
     });
