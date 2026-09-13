@@ -69,7 +69,7 @@ export class InstanceInteractionWorkflow {
 
   async handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand): Promise<LarkCardActionResult> {
     if (!this.isOperator(action.operatorOpenId)) return { toast: { type: "error", content: "你没有 Agent 管理权限。" } };
-    if (command.action === "worker_thread_send" && this.options.workerSessionThreads) return this.options.workerSessionThreads.publishFromCard(action, { instanceId: command.instanceId, runtimeGeneration: command.generation, workerSessionGeneration: command.workerSessionGeneration, conversationKey: command.conversationKey, ...(command.bindingId ? { bindingId: command.bindingId, bindingGeneration: command.bindingGeneration } : {}) });
+    if (command.action === "worker_thread_send" && this.options.workerSessionThreads) return this.options.workerSessionThreads.publishFromCard(action, { instanceId: command.instanceId, runtimeGeneration: command.generation, workerSessionGeneration: command.workerSessionGeneration, conversationKey: command.conversationKey, ...(command.bindingId ? { bindingId: command.bindingId, bindingGeneration: command.bindingGeneration } : {}), ...(command.parentPaneId && command.sourceMainMessageId ? { parentPaneId: command.parentPaneId, sourceMainMessageId: command.sourceMainMessageId } : {}) });
     if (command.action === "worker_thread_send") return this.workerLifecycle.handle(action, command);
     if ("turnId" in command && "workerSessionGeneration" in command) return this.workerCards.handleTask(action, command);
     if ("workerSessionGeneration" in command) return this.workerCards.handleNewTask(action, command);

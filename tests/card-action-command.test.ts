@@ -37,6 +37,7 @@ describe("card action command parsing", () => {
       kind: "instance", action: "primary_worker_create_submit", bindingId: "b1", bindingGeneration: 2, conversationKey: "binding:b1"
     });
     expect(parseCardActionCommand({ action: "primary_worker_create_submit", bindingId: "b1", bindingGeneration: 2 })).toEqual({ kind: "unknown" });
+    expect(parseCardActionCommand({ action: "worker_thread_send", instanceId: "i1", generation: 1, workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 2, conversationKey: "binding:b1", parentPaneId: "pane-1" })).toEqual({ kind: "unknown" });
   });
 
   it("requires coherent optional binding context", () => {

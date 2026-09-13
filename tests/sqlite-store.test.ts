@@ -380,6 +380,9 @@ describe("SQLite store", () => {
 
     it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {
       const view = activeWorkerStore("canonical-worker-main");
+      const fencedTarget = { instanceId: "reviewer", runtimeGeneration: 1, workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, conversationKey: "binding:b1", parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
+      expect(store!.workerSessionThreads.reserveLegacyEntry({ actionMessageId: "stale-pane", chatId: "chat", target: { ...fencedTarget, parentPaneId: "w1:old" }, render: () => ({}) })).toEqual({ kind: "stale" });
+      expect(store!.workerSessionThreads.reserveLegacyEntry({ actionMessageId: "stale-main", chatId: "chat", target: { ...fencedTarget, sourceMainMessageId: "old-main" }, render: () => ({}) })).toEqual({ kind: "stale" });
       const input = { publicationKey: "worker-entry:reviewer:1", actionMessageId: "instances-card", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "legacy-entry" as const, sourceMainMessageId: "canonical-worker-main", card: { schema: "2.0" } };
       expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
       const reply = store!.listPendingOutboundReplies()[0]!;

@@ -21,6 +21,8 @@ describe("topic pane directory card", () => {
     expect(serialized).toContain("work:p2");
     expect(serialized).toContain('"action":"worker_thread_send"');
     expect(serialized).toContain('"generation":4');
+    expect(serialized).toContain('"parentPaneId":"work:p1"');
+    expect(serialized).toContain('"sourceMainMessageId":"om_main"');
     expect(serialized).toContain("打开 Thread");
   });
 

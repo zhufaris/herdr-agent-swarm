@@ -11,6 +11,7 @@ export type WorkerThreadResolution = { kind: "none" } | { kind: "stale"; threadI
 
 export interface WorkerThreadPublicationTarget {
   instanceId: string; runtimeGeneration: number; workerSessionGeneration: number; conversationKey: string | null; bindingId?: string; bindingGeneration?: number;
+  parentPaneId?: string; sourceMainMessageId?: string;
 }
 export type WorkerThreadPublicationDecision = { kind: "reserved" } | { kind: "pending" } | { kind: "existing"; rootMessageId: string } | { kind: "stale" };
 export type WorkerMainPlacementDecision = "reserved" | "waiting" | "current" | "stale";

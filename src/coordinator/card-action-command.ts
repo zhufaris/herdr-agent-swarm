@@ -23,7 +23,7 @@ interface SessionBindingContext { bindingId: string; bindingGeneration: number |
 interface InstanceIdentity extends BindingCardContext { instanceId: string; generation: number }
 interface WorkerMainIdentity { instanceId: string; generation: number; workerSessionGeneration: number; sourceCardMessageId: string }
 interface WorkerTaskIdentity extends WorkerMainIdentity { turnId: string }
-interface WorkerThreadIdentity extends InstanceIdentity { workerSessionGeneration: number }
+interface WorkerThreadIdentity extends InstanceIdentity { workerSessionGeneration: number; parentPaneId?: string; sourceMainMessageId?: string }
 type ActionVariants<Action extends string, Fields = object> = Action extends string ? { kind: "session"; action: Action } & Fields : never;
 type InstanceActionVariants<Action extends string, Fields> = Action extends string ? { kind: "instance"; action: Action } & Fields : never;
 
@@ -133,7 +133,12 @@ function parseInstance(action: string, item: Record<string, unknown>): InstanceC
   if (action === "worker_task_instruction_submit") { const interactionId = interaction(item.interactionId); const requestedBy = string(item.requestedBy); const intent = item.intent === "steer" || item.intent === "followup" ? item.intent : null; return task && interactionId && requestedBy && intent ? { kind: "instance", action, interactionId, requestedBy, intent, ...task } : null; }
   const identity = instanceIdentity(item, binding);
   if (!identity) return null;
-  if (action === "worker_thread_send") { const workerSessionGeneration = integer(item.workerSessionGeneration); return workerSessionGeneration !== null ? { kind: "instance", action, workerSessionGeneration, ...identity } : null; }
+  if (action === "worker_thread_send") {
+    const workerSessionGeneration = integer(item.workerSessionGeneration);
+    const parentPaneId = optionalString(item.parentPaneId); const sourceMainMessageId = optionalString(item.sourceMainMessageId);
+    if (parentPaneId === undefined || sourceMainMessageId === undefined || ((parentPaneId === null) !== (sourceMainMessageId === null))) return null;
+    return workerSessionGeneration !== null ? { kind: "instance", action, workerSessionGeneration, ...identity, ...(parentPaneId && sourceMainMessageId ? { parentPaneId, sourceMainMessageId } : {}) } : null;
+  }
   if (action === "instance_turn_open") { const turnId = string(item.turnId); return turnId ? { kind: "instance", action, turnId, ...identity } : null; }
   if (action === "instance_steer_submit") { const requestedBy = string(item.requestedBy); return requestedBy ? { kind: "instance", action, requestedBy, ...identity } : null; }
   if (action === "instance_confirm_removal") { const requestedBy = string(item.requestedBy); const planId = string(item.planId); return requestedBy && planId ? { kind: "instance", action, requestedBy, planId, ...identity } : null; }
