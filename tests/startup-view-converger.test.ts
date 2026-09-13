@@ -25,7 +25,7 @@ function createConverger(store: SqliteBindingStore, overrides: Partial<StartupVi
 describe("StartupViewConverger", () => {
   it("recovers stale outbox quarantines before projecting views and wakes delivery", async () => {
     const store = new SqliteBindingStore(":memory:");
-    const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 1, terminalizedQuarantines: 0 });
+    const recover = vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 1, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
     const wake = vi.fn();
 
     await createConverger(store, { outboundWork: { wake, subscribe: () => () => {} } }).converge();
@@ -38,7 +38,7 @@ describe("StartupViewConverger", () => {
   it("reports terminalized quarantines without waking an empty outbox", async () => {
     const store = new SqliteBindingStore(":memory:");
     vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({
-      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 2
+      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 2
     });
     const wake = vi.fn();
     const logger = { warn: vi.fn() };
@@ -48,6 +48,42 @@ describe("StartupViewConverger", () => {
     expect(wake).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ event: "startup-outbox-quarantines-recovered", terminalizedQuarantines: 2 }),
+      expect.any(String)
+    );
+    store.close();
+  });
+
+  it("reports a superseded Answer target and wakes its released snapshot lane", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({
+      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 1, terminalizedQuarantines: 0
+    });
+    const wake = vi.fn();
+    const logger = { warn: vi.fn() };
+
+    await createConverger(store, { outboundWork: { wake, subscribe: () => () => {} }, logger }).converge();
+
+    expect(wake).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "startup-outbox-quarantines-recovered", resolvedSupersededAnswerTargets: 1 }),
+      expect.any(String)
+    );
+    store.close();
+  });
+
+  it("reports rejected immutable cleanup without waking an empty outbox", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    vi.spyOn(store, "recoverStaleOutboxQuarantines").mockReturnValue({
+      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 2, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0
+    });
+    const wake = vi.fn();
+    const logger = { warn: vi.fn() };
+
+    await createConverger(store, { outboundWork: { wake, subscribe: () => () => {} }, logger }).converge();
+
+    expect(wake).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "startup-outbox-quarantines-recovered", dismissedRejectedImmutableEffects: 2 }),
       expect.any(String)
     );
     store.close();

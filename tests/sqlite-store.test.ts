@@ -22,6 +22,28 @@ afterEach(() => {
   temporaryDirectory = undefined;
 });
 
+function prepareSupersededAnswerCandidate(candidateStore: SqliteBindingStore): { replacementId: string; projectionKey: string } {
+  candidateStore.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+  const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+  candidateStore.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+  candidateStore.markOutboundReplyDelivered(candidateStore.listPendingOutboundReplies()[0]!.id, "answer-old", "card-old");
+  candidateStore.enqueueOutboundReply({ id: "old-update", idempotencyKey: "old-update", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "answer-old", kind: "card_update", payload: "{}" });
+  const oldClaim = candidateStore.claimOutboundReply("old-update", null)!;
+  candidateStore.markOutboundReplyFailedWithQuarantine(oldClaim, "response timeout", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+  candidateStore.database.prepare("UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
+  candidateStore.reserveStaticAnswerReplacement({
+    promptId: "p1", previousPageIndex: 0, nextPageIndex: 1, sourceStart: 0, nextElementId: answerElementId("p1", 1),
+    rootMessageId: "root-1", viewVersion: 3, card: {}
+  });
+  const replacement = candidateStore.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
+  candidateStore.checkpointOutboundReplyCard(replacement.id, "card-new");
+  candidateStore.markOutboundReplyDelivered(replacement.id, "answer-new", "card-new");
+  for (const revision of [1, 2, 3]) {
+    candidateStore.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 1, messageId: "answer-new", card: { revision } });
+  }
+  return { replacementId: replacement.id, projectionKey: "answer-static:p1:1:answer-new" };
+}
+
 describe("SQLite store", () => {
   describe("outbound delivery claims", () => {
     it("claims only a due lane head and rejects stale acknowledgements, failures and checkpoints", () => {
@@ -3936,7 +3958,7 @@ describe("SQLite store", () => {
     }
 
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0, byLaneClass: { answer_stream: 1 }, byFailureClass: { unknown: 1 } } });
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
     expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
@@ -3969,7 +3991,7 @@ describe("SQLite store", () => {
 
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(3);
     expect(store.recoverStaleOutboxQuarantines()).toEqual({
-      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 1
+      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 1
     });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'content-terminal'").get()).toEqual({
       state: "released", action: "startup_terminalized"
@@ -3982,7 +4004,7 @@ describe("SQLite store", () => {
       { failed_reply_id: "content-running", state: "active" }
     ]);
     expect(store.recoverStaleOutboxQuarantines()).toEqual({
-      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0
+      retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0
     });
   });
 
@@ -3999,6 +4021,88 @@ describe("SQLite store", () => {
     expect(store.retryDeadLetter("create", "c1", "u1")).toBe("retried");
     expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["create", "later"]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, latest: { action: "manual_retry" } } });
+  });
+
+  it("dismisses a rejected immutable quarantine with no pending lane work at startup", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.enqueueOutboundReply({ id: "rejected", idempotencyKey: "rejected", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine("rejected", "target rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedRejectedImmutableEffects: 1 });
+    expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = 'rejected'").get()).toEqual({
+      state: "dismissed", error: "Dismissed after durable Gateway rejection"
+    });
+    expect(store.database.prepare("SELECT state, action, resolved_at FROM delivery_recoveries WHERE failed_reply_id = 'rejected'").get()).toMatchObject({
+      state: "dismissed", action: "startup_dismiss_rejected", resolved_at: expect.any(String)
+    });
+    expect(store.database.prepare("SELECT state, action, released_at FROM outbox_lane_quarantines WHERE failed_reply_id = 'rejected'").get()).toMatchObject({
+      state: "released", action: "startup_dismiss_rejected", released_at: expect.any(String)
+    });
+  });
+
+  it("releases an uncertain old Answer target after its exact replacement is delivered", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-old", "card-old");
+    store.enqueueOutboundReply({ id: "old-update", idempotencyKey: "old-update", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "answer-old", kind: "card_update", payload: "{}" });
+    const oldClaim = store.claimOutboundReply("old-update", null)!;
+    store.markOutboundReplyFailedWithQuarantine(oldClaim, "response timeout", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+    store.database.prepare("UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
+    expect(store.reserveStaticAnswerReplacement({
+      promptId: "p1", previousPageIndex: 0, nextPageIndex: 1, sourceStart: 0, nextElementId: answerElementId("p1", 1),
+      rootMessageId: "root-1", viewVersion: 3, card: {}
+    })).toBe("reserved");
+    const replacement = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
+    store.checkpointOutboundReplyCard(replacement.id, "card-new");
+    store.markOutboundReplyDelivered(replacement.id, "answer-new", "card-new");
+    for (const revision of [1, 2, 3]) {
+      expect(store.reserveStaticAnswerCardUpdate({
+        promptId: "p1", pageIndex: 1, messageId: "answer-new", card: { revision }
+      })).toBe("reserved");
+    }
+
+    expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([]);
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 1 });
+    expect(store.getOutboundReply("old-update")).toMatchObject({ state: "dead_letter", effectCertainty: "uncertain" });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({
+      state: "recovered", action: "startup_superseded_answer", replacement_reply_id: replacement.id, resolved_by_reply_id: replacement.id, resolved_message_id: "answer-new"
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({
+      state: "released", action: "startup_superseded_answer"
+    });
+    expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all("answer-static:p1:1:answer-new")).toEqual([
+      { snapshot_revision: 1, state: "dismissed" },
+      { snapshot_revision: 2, state: "dismissed" },
+      { snapshot_revision: 3, state: "pending" }
+    ]);
+    expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([
+      expect.objectContaining({ idempotencyKey: "answer-static:p1:1:answer-new:revision:3", rootMessageId: "answer-new" })
+    ]);
+  });
+
+  it("keeps a superseded Answer quarantine blocked when replacement identity disagrees", () => {
+    store = new SqliteBindingStore(":memory:");
+    prepareSupersededAnswerCandidate(store);
+    store.database.prepare("UPDATE run_cards SET answer_card_id = 'different-card' WHERE prompt_id = 'p1'").run();
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all("answer-static:p1:1:answer-new")).toEqual([{ state: "pending", count: 3 }]);
+  });
+
+  it("keeps a superseded Answer quarantine blocked when a pending snapshot was claimed", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { projectionKey } = prepareSupersededAnswerCandidate(store);
+    store.database.prepare("UPDATE outbound_replies SET claim_attempt_id = 'active-claim', first_claimed_at = 'now' WHERE projection_key = ? AND snapshot_revision = 3").run(projectionKey);
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all(projectionKey)).toEqual([{ state: "pending", count: 3 }]);
   });
 
   it("isolates independent replies to the same root message", () => {
@@ -4184,7 +4288,7 @@ describe("SQLite store", () => {
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine(create.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
 
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
     expect(store.database.prepare("SELECT state, attempt_count, auto_recovery_count FROM outbound_replies WHERE id = ?").get(create.id)).toEqual({ state: "dead_letter", attempt_count: 5, auto_recovery_count: 1 });
     const replacement = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
     expect(replacement.idempotencyKey).toBe(`startup-lite:${create.id}`);
@@ -4193,7 +4297,7 @@ describe("SQLite store", () => {
     expect(replacement.payload).toContain("正在恢复本页内容");
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(create.id)).toEqual({ state: "released", action: "startup_rebuild" });
     expect(store.getOperationalSummary().deadLetters).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
   });
 
   it("rolls back an invalid recovery page reserved across dead-lettered canonical content", () => {
@@ -4214,7 +4318,7 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "rebuild-14", idempotencyKey: "stream-rebuild:p1:14", bindingId: "b1", promptId: "p1", viewVersion: 20, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: {}, stream: { pageIndex: 14, pageStart: 109267, elementId: answerElementId("p1", 14) } }) });
     store.markOutboundReplyFailedWithQuarantine("rebuild-14", "Answer continuation target mismatch for prompt p1", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
 
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: ["p1"], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: ["p1"], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
     expect(store.listAnswerPages("p1")).toEqual([
       expect.objectContaining({ pageIndex: 0, state: "frozen" }),
       expect.objectContaining({ pageIndex: 13, sourceStart: 109267, state: "active", messageId: "answer-13", cardId: "card-13" })
@@ -4226,7 +4330,7 @@ describe("SQLite store", () => {
     expect(JSON.parse(replacement!.payload)).toMatchObject({ pageIndex: 13, elementId: answerElementId("p1", 13), sequence: 2, sourceEnd: expect.any(Number) });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'rebuild-14'").get()).toEqual({ state: "released", action: "startup_rollback" });
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(0);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
   });
 
   it("replaces an exhausted active-page content update with one bounded canonical chunk", () => {
@@ -4244,7 +4348,7 @@ describe("SQLite store", () => {
       store.markOutboundReplyFailedWithQuarantine(failed.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
     }
 
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
     const replacement = store.listPendingOutboundReplies()[0]!;
     const payload = JSON.parse(replacement.payload) as { content: string; sourceEnd: number; sequence: number };
     expect(replacement).toMatchObject({ idempotencyKey: `startup-lite-content:${failed.id}`, kind: "stream_content", autoRecoveryCount: 2 });
@@ -4253,23 +4357,22 @@ describe("SQLite store", () => {
     expect(payload.sourceEnd).toBeLessThan(canonicalAnswer.length);
     expect(payload.sequence).toBe(2);
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failed.id)).toEqual({ state: "released", action: "startup_rebuild" });
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
   });
 
-  it("dismisses stale disconnected-topic notices but preserves unrelated immutable quarantines", () => {
+  it("dismisses stale disconnected-topic notices but preserves uncertain immutable quarantines", () => {
     store = new SqliteBindingStore(":memory:");
     store.enqueueOutboundReply({ id: "notice", idempotencyKey: "disconnected-topic:message-1", rootMessageId: "message-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "other", idempotencyKey: "important:message-2", rootMessageId: "message-2", kind: "card_reply", payload: "{}" });
-    for (const id of ["notice", "other"]) {
-      store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(id);
-      for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine(id, "unavailable", { failureClass: "transient", httpStatus: 500, larkErrorCode: "2200" });
-    }
+    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = 'notice'").run();
+    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine("notice", "unavailable", { failureClass: "transient", httpStatus: 500, larkErrorCode: "2200" });
+    store.markOutboundReplyFailedWithQuarantine("other", "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
 
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 1, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 1, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
     expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'notice'").get()).toEqual({ state: "dismissed" });
     expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'other'").get()).toEqual({ state: "dead_letter" });
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
   });
 
   it("atomically releases an immutable quarantine when the failed head is dismissed", () => {

@@ -618,7 +618,7 @@ describe("Lark channel publisher", () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       store.markOutboundReplyFailedWithQuarantine(failedCreate.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
     }
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, terminalizedQuarantines: 0 });
 
     const create = vi.fn(async () => ({ messageId: "answer-13", cardId: "cardkit-13" }));
     const publisher = new LarkOutboxDispatcher(store, fakeLark({

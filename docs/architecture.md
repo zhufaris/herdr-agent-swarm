@@ -1261,9 +1261,11 @@ never allow a later content sequence or finish operation to skip the failed
 head: unsafe successors are dismissed and `AnswerPageWorkflow` reconstructs
 delivery from the canonical RunCard state. Main Card and other replaceable card
 lanes may advance only to a newer durable snapshot. Immutable card creation,
-text, and unknown work remain blocked until an operator retries or dismisses the
-failed head. The dead letter, quarantine decision, successor changes, and lane
-head update are committed in one SQLite transaction.
+text, and unknown work normally remain blocked until an operator retries or
+dismisses the failed head. Startup may automatically dismiss an immutable
+`card_reply` only when the Gateway durably rejected it and its isolated lane has
+no pending work. The dead letter, recovery ledger, quarantine decision,
+successor changes, and lane-head update are committed in one SQLite transaction.
 
 ### Recovery evidence versus lane release
 
@@ -1310,6 +1312,18 @@ quarantine plus a matching delivered successor can prove recovery; missing or
 ambiguous evidence remains unresolved. Unknown effects and cross-Answer-page
 rebuilds are not inferred from lane release or card creation. The ledger is not
 a per-attempt event log.
+
+Startup can close one narrower class of uncertain old Answer updates when a
+replacement target is already authoritative end to end. The failed update must
+target an older message; the current Run Card and active static Answer page must
+agree on a different message, card, and page; and a later delivered
+`stream_card_create` on the same Gateway must carry matching message and card
+checkpoints. Every pending row behind the quarantine must be an unclaimed
+revision of the same current static-Answer projection. Recovery then records the
+replacement create as proof, releases the quarantine, dismisses all but the
+newest pending revision, and refreshes the lane head atomically. The uncertain
+failed update remains a dead letter and is never retried. Missing identity, an
+unrelated pending row, or any prior claim keeps the whole candidate blocked.
 
 For a closed Primary Answer stream replaced by one static page, migration 32
 adds explicit content-coverage evidence. Before claiming a stream update or a

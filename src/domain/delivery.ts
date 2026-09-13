@@ -11,7 +11,7 @@ export interface DeliveryFailureMetadata {
   recoveryKind?: GatewayRecoveryKind;
 }
 export type OutboxLaneClass = "answer_stream" | "main_card" | "replaceable_card" | "immutable";
-export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "expired_view_target" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_terminalized";
+export type OutboxQuarantineAction = "retry" | "blocked" | "rebuild_answer" | "rebuild_main" | "released_newer_snapshot" | "expired_view_target" | "startup_rebuild" | "startup_rollback" | "startup_dismiss" | "startup_dismiss_rejected" | "startup_superseded_answer" | "startup_terminalized";
 export type OutboundReplyKind = "text" | "card_reply" | "card_update" | "group_card_create" | "stream_card_create" | "stream_content" | "stream_finish";
 export type RequestCardRole = "task" | "answer";
 export type OutboundTargetRole = "session_status" | "operation_result";
@@ -47,6 +47,13 @@ export interface BindingThreadAlias {
 }
 
 export interface OutboundFailureTransition { state: OutboundReplyState; action: OutboxQuarantineAction; laneClass: OutboxLaneClass; promptId: string | null; reply: OutboundReply }
-export interface StaleOutboxQuarantineRecovery { retriedAnswerPromptIds: string[]; rolledBackAnswerPromptIds: string[]; dismissedNotices: number; terminalizedQuarantines: number }
+export interface StaleOutboxQuarantineRecovery {
+  retriedAnswerPromptIds: string[];
+  rolledBackAnswerPromptIds: string[];
+  dismissedNotices: number;
+  dismissedRejectedImmutableEffects: number;
+  resolvedSupersededAnswerTargets: number;
+  terminalizedQuarantines: number;
+}
 export interface AnswerPage { promptId: string; pageIndex: number; messageId: string | null; cardId: string | null; elementId: string; sourceStart: number; sequence: number; state: AnswerPageState; deliveryMode: AnswerPageDeliveryMode; createdAt: string; updatedAt: string }
 export interface AnswerPageDeliveryFacts { latestContent: { content: string; sequence: number; state: OutboundReplyState; sourceEnd?: number | null } | null; finishPending: boolean; continuationPending: boolean; finalUpdateState: OutboundReplyState | null }
