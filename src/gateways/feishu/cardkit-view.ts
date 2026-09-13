@@ -50,7 +50,13 @@ function parseNode(value: unknown): GatewayViewNode {
   if (tag === "collapsible_panel") { const border = optionalRecord(node.border); return { kind: "panel", title: textContent(optionalRecord(optionalRecord(node.header)?.title)) ?? "Details", expanded: node.expanded === true, nodes: array(node.elements, "panel elements").map(parseNode), ...(typeof border?.color === "string" ? { borderColor: border.color } : {}), ...(typeof border?.corner_radius === "string" ? { cornerRadius: border.corner_radius } : {}) }; }
   if (tag === "form") return { kind: "form", name: string(node.name, "form name"), nodes: array(node.elements, "form elements").map(parseNode) };
   if (tag === "input") return { kind: "input", name: string(node.name, "input name"), inputType: string(node.input_type, "input type"), placeholder: textContent(record(node.placeholder, "input placeholder")) ?? "", required: node.required === true };
-  if (tag === "select_static") { const behavior = Array.isArray(node.behaviors) ? node.behaviors.map((item) => record(item, "select behavior")).find((item) => item.type === "callback") : undefined; return { kind: "select", name: string(node.name, "select name"), placeholder: textContent(record(node.placeholder, "select placeholder")) ?? "", required: node.required === true, options: array(node.options, "select options").map((item) => { const option = record(item, "select option"); return { label: textContent(record(option.text, "select option text")) ?? "", value: string(option.value, "select option value") }; }), ...(typeof node.initial_option === "string" ? { initialValue: node.initial_option } : {}), ...(behavior && "value" in behavior ? { action: structuredClone(behavior.value) } : {}) }; }
+  if (tag === "select_static") {
+    const behavior = Array.isArray(node.behaviors) ? node.behaviors.map((item) => record(item, "select behavior")).find((item) => item.type === "callback") : undefined;
+    const initial = typeof node.initial_option === "string"
+      ? node.initial_option
+      : optionalRecord(node.initial_option)?.value;
+    return { kind: "select", name: string(node.name, "select name"), placeholder: textContent(record(node.placeholder, "select placeholder")) ?? "", required: node.required === true, options: array(node.options, "select options").map((item) => { const option = record(item, "select option"); return { label: textContent(record(option.text, "select option text")) ?? "", value: string(option.value, "select option value") }; }), ...(typeof initial === "string" ? { initialValue: initial } : {}), ...(behavior && "value" in behavior ? { action: structuredClone(behavior.value) } : {}) };
+  }
   throw new Error(`Unsupported CardKit element: ${tag}`);
 }
 
@@ -62,7 +68,9 @@ function materializeNode(node: GatewayViewNode): object {
   if (node.kind === "panel") return { tag: "collapsible_panel", expanded: node.expanded, ...(node.borderColor || node.cornerRadius ? { border: { ...(node.borderColor ? { color: node.borderColor } : {}), ...(node.cornerRadius ? { corner_radius: node.cornerRadius } : {}) } } : {}), header: { title: { tag: "plain_text", content: node.title } }, elements: node.nodes.map(materializeNode) };
   if (node.kind === "form") return { tag: "form", name: node.name, elements: node.nodes.map(materializeNode) };
   if (node.kind === "input") return { tag: "input", name: node.name, input_type: node.inputType, ...(node.required ? { required: true } : {}), placeholder: { tag: "plain_text", content: node.placeholder } };
-  return { tag: "select_static", name: node.name, ...(node.required ? { required: true } : {}), placeholder: { tag: "plain_text", content: node.placeholder }, ...(node.initialValue ? { initial_option: node.initialValue } : {}), options: node.options.map((option) => ({ text: { tag: "plain_text", content: option.label }, value: option.value })), ...(node.action === undefined ? {} : { behaviors: [{ type: "callback", value: structuredClone(node.action) }] }) };
+  const options = node.options.map((option) => ({ text: { tag: "plain_text", content: option.label }, value: option.value }));
+  const initialOption = options.find(({ value }) => value === node.initialValue);
+  return { tag: "select_static", name: node.name, ...(node.required ? { required: true } : {}), placeholder: { tag: "plain_text", content: node.placeholder }, ...(initialOption ? { initial_option: initialOption } : {}), options, ...(node.action === undefined ? {} : { behaviors: [{ type: "callback", value: structuredClone(node.action) }] }) };
 }
 
 function fallbackText(card: Record<string, unknown>): string { const config = optionalRecord(card.config); const header = optionalRecord(card.header); return textContent(optionalRecord(config?.summary)) ?? textContent(optionalRecord(header?.title)) ?? (plainText(array(optionalRecord(card.body)?.elements ?? [], "CardKit body elements")) || "Herdr update"); }

@@ -4,9 +4,9 @@ import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 export function renderInstanceCreateCard(input: { projectId: string; requestedBy: string; conversationKey?: string; bindingId?: string; bindingGeneration?: number }): object {
   return card("创建 Worker", "blue", [{ tag: "form", name: "instance_create_form", elements: [
     { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "实例名，例如 reviewer" } },
-    select("agent_kind", "选择底层 Agent", [["TraeX", "traex"], ["Codex", "codex"], ["Claude Code", "claude-code"], ["Pi", "pi"]]),
+    select("agent_kind", "选择底层 Agent", [["TraeX", "traex"], ["Codex", "codex"], ["Claude Code", "claude-code"], ["Pi", "pi"]], "traex"),
     { tag: "input", name: "model", input_type: "text", placeholder: { tag: "plain_text", content: "可选模型名" } },
-    select("start", "创建后是否启动", [["暂不启动", "false"], ["立即启动", "true"]]),
+    select("start", "创建后是否启动", [["暂不启动", "false"], ["立即启动", "true"]], "true"),
     formSubmitButton("创建 Worker", "instance_create_submit", { action: "instance_create_submit", projectId: input.projectId, requestedBy: input.requestedBy, ...(input.bindingId ? { bindingId: input.bindingId, bindingGeneration: input.bindingGeneration } : {}), ...(input.conversationKey ? { conversationKey: input.conversationKey } : {}) }, "primary")
   ] }]);
 }
@@ -65,7 +65,9 @@ export function renderInstanceRemovalPlanCard(input: { instance: AgentInstance; 
 function card(title: string, template: string, elements: object[]): object {
   return { schema: "2.0", config: { update_multi: true, summary: { content: title } }, header: { title: { tag: "plain_text", content: title }, template }, body: { elements } };
 }
-function select(name: string, placeholder: string, values: Array<[string, string]>): object {
-  return { tag: "select_static", name, required: true, placeholder: { tag: "plain_text", content: placeholder }, options: values.map(([content, value]) => ({ text: { tag: "plain_text", content }, value })) };
+function select(name: string, placeholder: string, values: Array<[string, string]>, initialValue?: string): object {
+  const options = values.map(([content, value]) => ({ text: { tag: "plain_text", content }, value }));
+  const initialOption = options.find(({ value }) => value === initialValue);
+  return { tag: "select_static", name, required: true, placeholder: { tag: "plain_text", content: placeholder }, ...(initialOption ? { initial_option: initialOption } : {}), options };
 }
 function escape(value: string): string { return value.replace(/[\`*_{}[\]()#+.!|>-]/g, "\\$&").slice(0, 300); }
