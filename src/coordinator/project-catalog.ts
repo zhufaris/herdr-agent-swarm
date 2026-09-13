@@ -31,7 +31,11 @@ export class ProjectCatalog {
   }
 
   projectForWorkspaceAndCwd(workspaceId: string, cwd: string | null | undefined): ProjectConfig | undefined {
-    return unique(this.byWorkspaceAndCwd.get(workspaceCwdKey(workspaceId, cwd)));
+    return unique(this.projectsForWorkspaceAndCwd(workspaceId, cwd));
+  }
+
+  projectsForWorkspaceAndCwd(workspaceId: string, cwd: string | null | undefined): readonly ProjectConfig[] {
+    return this.byWorkspaceAndCwd.get(workspaceCwdKey(workspaceId, cwd)) ?? [];
   }
 
   projectForBinding(binding: BindingProjectRoute): ProjectConfig | undefined {

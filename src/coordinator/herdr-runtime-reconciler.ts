@@ -154,13 +154,14 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
       }
       if (!existing) {
         if (!pane.foregroundExecutables.includes("traex")) continue;
-        const project = this.projects.projectForWorkspaceAndCwd(pane.workspaceId, pane.cwd);
+        const matchingProjects = this.projects.projectsForWorkspaceAndCwd(pane.workspaceId, pane.cwd);
+        const project = matchingProjects.length === 1 ? matchingProjects[0] : undefined;
         if (!project) {
-          const projects = this.options.projects.filter((candidate) => candidate.workspaceId === pane.workspaceId && candidate.cwd === pane.cwd);
-          const reason = projects.length === 0 ? "unregistered" : "ambiguous";
-          const signature = `${reason}:${projects.map((project) => project.id).sort().join(",")}`;
+          const matchingProjectIds = matchingProjects.map((candidate) => candidate.id).sort();
+          const reason = matchingProjects.length === 0 ? "unregistered" : "ambiguous";
+          const signature = `${reason}:${matchingProjectIds.join(",")}`;
           nextSkippedPaneReasons.set(pane.paneId, signature);
-          if (this.skippedPaneReasons.get(pane.paneId) !== signature) this.options.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, matchingProjects: projects.map((project) => project.id), reason }, "skipping unregistered or ambiguous Herdr pane");
+          if (this.skippedPaneReasons.get(pane.paneId) !== signature) this.options.logger.warn({ event: "herdr-pane-skipped", workspaceId: pane.workspaceId, paneId: pane.paneId, matchingProjects: matchingProjectIds, reason }, "skipping unregistered or ambiguous Herdr pane");
           continue;
         }
         if (!interruptedProvisioningByProjectId) {

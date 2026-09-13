@@ -115,6 +115,7 @@ describe("coordinator concurrency controls", () => {
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const startupConfig = { ...config(), projects: [
       { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+      { id: "one-copy", displayName: "One Copy", spaceName: "one", description: "One Copy", workspaceId: "w1", cwd: "/one-copy" },
       { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
     ], defaultProjectId: "one" };
     const coordinator = createTestRouter(startupConfig, store, herdr, lark, bus, publisher, pino({ enabled: false }));

@@ -47,7 +47,12 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     await this.runStage("view-convergence", () => startupViews.converge());
     const recoveredInbound = inboundDispatcher.recoverProcessingMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
-    await Promise.all(config.projects.map((project) => herdr.assertWorkspace(project.workspaceId, projectSpaceName(project))));
+    const workspaceAssertions = new Map<string, { workspaceId: string; spaceName: string }>();
+    for (const project of config.projects) {
+      const spaceName = projectSpaceName(project);
+      workspaceAssertions.set(`${project.workspaceId}\u0000${spaceName}`, { workspaceId: project.workspaceId, spaceName });
+    }
+    await Promise.all([...workspaceAssertions.values()].map(({ workspaceId, spaceName }) => herdr.assertWorkspace(workspaceId, spaceName)));
     await this.runStage("runtime-baselines", () => reconciler.captureBaselines());
     this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
       if (event.kind === "control-ready") void paneControl.drainPaneControls(event.bindingId).catch((error) => logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));

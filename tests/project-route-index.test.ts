@@ -55,4 +55,12 @@ describe("ProjectCatalog", () => {
     expect(routes.projectForWorkspaceAndCwd("shared", "/repos/beta")).toBe(projects[1]);
     expect(routes.projectForWorkspaceAndCwd("shared", "/repos/missing")).toBeUndefined();
   });
+
+  it("returns the indexed route bucket for diagnostics without rescanning projects", () => {
+    const duplicate = { ...projects[1]!, id: "beta-copy" };
+    const indexed = new ProjectCatalog([...projects, duplicate]);
+
+    expect(indexed.projectsForWorkspaceAndCwd("shared", "/repos/beta")).toEqual([projects[1], duplicate]);
+    expect(indexed.projectsForWorkspaceAndCwd("missing", "/repos/beta")).toEqual([]);
+  });
 });

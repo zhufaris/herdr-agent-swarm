@@ -3,6 +3,12 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
+  it("runs the architecture check exactly once through the Vitest suite", () => {
+    const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> };
+    expect(packageJson.scripts.test).toBe("vitest run");
+    expect(packageJson.scripts["architecture:check"]).toBe("node scripts/check-architecture-imports.mjs");
+  });
+
   it("enforces the source import graph", () => {
     expect(execFileSync(process.execPath, ["scripts/check-architecture-imports.mjs"], { cwd: new URL("..", import.meta.url), encoding: "utf8" }))
       .toMatch(/Architecture imports valid/);
