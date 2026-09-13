@@ -226,7 +226,8 @@ export class HerdrCliAdapter implements HerdrPort {
         this.executable,
         ["agent", "prompt", paneId, text, "--wait", "--until", "working", "--until", "blocked", "--until", "done", "--timeout", String(this.commandTimeoutMs)],
         this.commandTimeoutMs * 2,
-        () => { commandStarted = true; }
+        () => { commandStarted = true; },
+        signal
       );
       await reportDispatched();
       const accepted = promptResultState(stdout);
@@ -247,7 +248,9 @@ export class HerdrCliAdapter implements HerdrPort {
     const { stdout } = await this.runner.run(
       this.executable,
       ["agent", "wait", paneId, "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", String(timeoutMs)],
-      timeoutMs + this.commandTimeoutMs
+      timeoutMs + this.commandTimeoutMs,
+      undefined,
+      signal
     );
     const state = promptResultState(stdout) ?? (await this.getPane(paneId))?.agentState ?? "unknown";
     const settled = state === "idle" ? "done" : state;

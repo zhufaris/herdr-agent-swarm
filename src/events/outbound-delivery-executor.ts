@@ -37,7 +37,7 @@ export class OutboundDeliveryExecutor {
       try { intent = prepareOutboundGatewayIntent(this.store, candidate).intent; }
       catch (error) {
         if (!(error instanceof PermanentDeliveryError)) throw error;
-        this.store.rejectUnclaimedOutboundReply(candidate.id, safeLogError(error).message, { failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null });
+        this.store.rejectUnclaimedOutboundReply(candidate.id, safeLogError(error).message, { failureClass: "permanent", effectCertainty: "rejected", larkErrorCode: null, httpStatus: null });
         return "failed";
       }
       const plan = this.gateway.prepare(intent);

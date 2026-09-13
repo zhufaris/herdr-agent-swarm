@@ -11,6 +11,21 @@ describe("Herdr adapter structured control", () => {
     expect(Array.from({ length: 8 }, (_, attempt) => herdrRetryDelay(attempt))).toEqual([100, 200, 400, 800, 1000, 1000, 1000, 1000]);
   });
 
+  it("passes prompt cancellation to the command runner", async () => {
+    const controller = new AbortController();
+    const signals: Array<AbortSignal | undefined> = [];
+    const runner: CommandRunner = { async run(_executable, args, _timeout, _started, signal) {
+      signals.push(signal);
+      if (args[1] === "prompt") return { stdout: JSON.stringify({ state: "working" }), stderr: "" };
+      controller.abort(new Error("shutdown"));
+      signal?.throwIfAborted();
+      return { stdout: "", stderr: "" };
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000).runPrompt("w1:p1", "hello", 2000, undefined, controller.signal)).rejects.toThrow("shutdown");
+    expect(signals).toEqual([controller.signal, controller.signal]);
+  });
+
   it("rejects a configured workspace whose live Space label differs", async () => {
     const runner: CommandRunner = { async run() {
       return json({ workspace: { workspace_id: "wH", label: "herdr-lark-bridge" } });

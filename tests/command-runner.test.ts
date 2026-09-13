@@ -29,6 +29,24 @@ describe("command error redaction", () => {
     await expect(new ExecFileCommandRunner(1000).run("/definitely/missing/herdr", [], undefined, () => { started = true; })).rejects.toThrow();
     expect(started).toBe(false);
   });
+
+  it("terminates the exact running child when its abort signal fires", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const command = new ExecFileCommandRunner(30_000).run(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      undefined,
+      started,
+      controller.signal
+    );
+
+    await didStart;
+    controller.abort(new Error("shutdown"));
+
+    await expect(command).rejects.toThrow();
+  });
   it("never exposes agent prompt content through error fields", () => {
     const secret = "private Lark prompt";
     const error = new CommandError("herdr", ["agent", "prompt", "w1:p1", secret], `failed to submit ${secret}`, false);

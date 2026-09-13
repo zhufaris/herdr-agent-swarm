@@ -1,17 +1,17 @@
 import { execFile } from "node:child_process";
 
 export interface CommandRunner {
-  run(executable: string, args: string[], timeoutMs?: number, onStarted?: () => void | Promise<void>): Promise<{ stdout: string; stderr: string }>;
+  run(executable: string, args: string[], timeoutMs?: number, onStarted?: () => void | Promise<void>, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }>;
 }
 
 export class ExecFileCommandRunner implements CommandRunner {
   constructor(private readonly defaultTimeoutMs: number) {}
 
-  run(executable: string, args: string[], timeoutMs = this.defaultTimeoutMs, onStarted?: () => void | Promise<void>): Promise<{ stdout: string; stderr: string }> {
+  run(executable: string, args: string[], timeoutMs = this.defaultTimeoutMs, onStarted?: () => void | Promise<void>, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let startReceipt: Promise<void> | null = null;
-      const child = execFile(executable, args, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, encoding: "utf8" }, (cause, stdout, stderr) => {
+      const child = execFile(executable, args, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, encoding: "utf8", signal }, (cause, stdout, stderr) => {
         if (settled) return;
         const finish = () => {
           if (settled) return;
