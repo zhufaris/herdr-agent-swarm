@@ -84,12 +84,16 @@ describe("Primary tool gateway", () => {
     const socketPath = join(directory, "tools.sock");
     const workerCards = { show: vi.fn((input) => ({ accepted: true, delivery: "queued", scope: input })) };
     gateway = new PrimaryToolGateway(socketPath, process.execPath, ["dist/cli/primary-tools-mcp.js"], store, messaging, pino({ enabled: false }), [], {}, workerCards as never);
+    const workerCreation = { createWorkerFromPrimaryTool: vi.fn(async (input) => ({ status: "created", instance: { id: "created", name: input.command.name } })) };
+    gateway.setWorkerCreation(workerCreation);
     const launch = gateway.issueBinding("binding", 1);
     store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "w", paneId: "q", nativeSessionId: null });
     await gateway.start();
     const capability = launch.environment.SWARM_PRIMARY_CAPABILITY!;
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "promptInstance", arguments: { instanceId: "worker", task: "review", idempotencyKey: "child", projectId: "forged", parentPromptId: "forged" } })).resolves.toMatchObject({ ok: true, result: { accepted: true, turn: { actor: { kind: "thread-primary", parentPromptId: "parent-server-owned" } } } });
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "showWorkerCards", arguments: { workerName: "worker", idempotencyKey: "show", projectId: "forged", rootMessageId: "forged" } })).resolves.toMatchObject({ ok: true, result: { accepted: true, scope: { projectId: "p1", bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent-server-owned", sourceMessageId: "message-parent-server-owned", rootMessageId: "root", workerName: "worker", idempotencyKey: "show" } } });
+    await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "createWorker", arguments: { name: "reviewer", agentKind: "traex", idempotencyKey: "create", projectId: "forged", rootMessageId: "forged" } })).resolves.toMatchObject({ ok: true, result: { status: "created" } });
+    expect(workerCreation.createWorkerFromPrimaryTool).toHaveBeenCalledWith({ projectId: "p1", bindingId: "binding", bindingGeneration: 1, parentPromptId: "parent-server-owned", sourceMessageId: "message-parent-server-owned", rootMessageId: "root", idempotencyKey: "create", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true } });
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability: "0".repeat(64), tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
     await expect(call(socketPath, { bindingId: "binding", generation: 2, capability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "inspectInstance", arguments: { instanceId: "other-worker" } })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/authorized current thread Primary/) });

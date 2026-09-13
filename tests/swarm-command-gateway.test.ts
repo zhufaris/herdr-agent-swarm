@@ -4,6 +4,7 @@ import { SwarmCommandContextResolver } from "../src/coordinator/swarm-command-co
 import { SwarmCommandGateway } from "../src/coordinator/swarm-command-gateway.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { applicationPresentation } from "./helpers/presentation.js";
+import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 
 const project = { id: "project", displayName: "Project", spaceName: "space", description: "project", workspaceId: "w1", cwd: "/repo", maxInstances: 4 };
 const config = { projects: [project], defaultProjectId: "project", lark: { adminOpenIds: ["admin"] } } as never;
@@ -23,7 +24,7 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
   };
   const worker = { id: "worker", name: "reviewer", workerSessionGeneration: 1 }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
-  const gateway = new SwarmCommandGateway({ store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, presentation: applicationPresentation } as never);
+  const gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, presentation: applicationPresentation } as never);
   return { store, gateway, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound };
 }
 
@@ -60,6 +61,22 @@ describe("SwarmCommandGateway", () => {
 
     expect(fixture.store.database.prepare("SELECT worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state FROM worker_thread_entry_requests").all())
       .toEqual([{ worker_id: "worker", worker_session_generation: 1, binding_id: "binding", binding_generation: 1, root_message_id: "root", state: "pending" }]);
+    fixture.store.close();
+  });
+
+  it("creates a Worker from the active Primary tool context and preserves its entry request", async () => {
+    const fixture = setup();
+    const view = createQueuedRunCard({ promptId: "primary-tool-prompt", bindingId: "binding", title: "Primary", workspaceId: "w1", paneId: "w1:p1", requestText: "coordinate", queuePosition: 1, occurredAt: "2026-09-13T00:00:00.000Z" });
+    fixture.store.acceptPrompt({ prompt: { id: "primary-tool-prompt", bindingId: "binding", larkMessageId: "primary-tool-message", actorOpenId: "admin", body: "coordinate" }, view, rootMessageId: "root", answerCard: {} });
+    fixture.store.updatePrompt("primary-tool-prompt", "running");
+    const worker = fixture.store.createWorkerAgentInstance({ id: "worker-tool", projectId: "project", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: null }, workspace: { id: "worker-tool-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    fixture.instanceControl.createWorker.mockResolvedValueOnce({ status: "created", instance: worker });
+    const input = { bindingId: "binding", bindingGeneration: 1, parentPromptId: "primary-tool-prompt", sourceMessageId: "primary-tool-message", rootMessageId: "root", idempotencyKey: "create-reviewer", command: { kind: "worker_create" as const, name: "reviewer", agentKind: "traex" as const, model: null, start: true } };
+    await fixture.gateway.createWorkerFromPrimaryTool(input);
+    await fixture.gateway.createWorkerFromPrimaryTool(input);
+    expect(fixture.instanceControl.createWorker).toHaveBeenCalledOnce();
+    expect(fixture.store.database.prepare("SELECT worker_id, root_message_id, state FROM worker_thread_entry_requests").all()).toEqual([{ worker_id: "worker-tool", root_message_id: "root", state: "pending" }]);
+    await expect(fixture.gateway.createWorkerFromPrimaryTool({ ...input, sourceMessageId: "forged" })).rejects.toThrow(/active prompt changed/);
     fixture.store.close();
   });
 

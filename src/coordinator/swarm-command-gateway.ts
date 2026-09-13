@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { CreateWorkerResult } from "../domain/agent-instance.js";
 import type { CommandIntent, CommandIntentOutcome } from "../domain/command-intent.js";
 import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { swarmCommandPolicy } from "../domain/swarm-command.js";
@@ -19,7 +20,7 @@ import type { SessionAdministrationWorkflowPort } from "./session-administration
 import { SwarmCommandContextResolver } from "./swarm-command-context-resolver.js";
 
 interface Options {
-  store: CommandIntentWorkflowStore;
+  store: CommandIntentWorkflowStore; primaryPrompts: Pick<InstanceStore, "getActiveOrdinaryPrompt">;
   resolver: SwarmCommandContextResolver; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger;
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
@@ -30,6 +31,7 @@ interface Options {
 export interface SwarmCommandGatewayPort {
   handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void>;
   createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult>;
+  createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult>;
   recover(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -61,10 +63,28 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     const requestFingerprint = createHash("sha256").update(JSON.stringify(command)).digest("hex");
     const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey: `lark-card:${action.messageId}:worker-create:${action.operatorOpenId}:${requestFingerprint}`, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: "reconcilable", acceptedAt: new Date().toISOString() });
     if (accepted.outcome === "conflict") throw new Error("命令幂等标识已用于不同请求。");
-    await this.drainLane(accepted.intent.laneKey);
-    const result = this.workerResults.get(accepted.intent.id);
+    return this.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey);
+  }
+
+  async createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult> {
+    const binding = this.options.store.getBinding(input.bindingId);
+    if (!binding || binding.generation !== input.bindingGeneration || binding.rootMessageId !== input.rootMessageId) throw new Error("Primary tool context is stale");
+    const prompt = this.options.primaryPrompts.getActiveOrdinaryPrompt(input.bindingId, input.bindingGeneration);
+    if (!prompt || prompt.id !== input.parentPromptId || prompt.larkMessageId !== input.sourceMessageId) throw new Error("Primary tool active prompt changed");
+    const message: IncomingLarkMessage = { eventId: `primary-tool:${input.parentPromptId}:${input.idempotencyKey}`, messageId: input.sourceMessageId, parentMessageId: null, chatId: binding.chatId, topicId: binding.topicId, rootMessageId: input.rootMessageId, actorOpenId: prompt.actorOpenId, text: "Primary tool worker create", mentionsBot: true, isRootMessage: false };
+    const resolved = this.options.resolver.resolve(message, input.command, input.bindingId);
+    if (resolved.outcome === "rejected") throw new Error(resolved.message);
+    const context = { ...resolved.context, primary: { ...resolved.context.primary!, activePromptId: input.parentPromptId } };
+    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey: `primary-tool:${input.bindingId}:${input.bindingGeneration}:${input.parentPromptId}:${input.idempotencyKey}`, laneKey: resolved.laneKey, command: input.command, context, replayPolicy: "reconcilable", acceptedAt: new Date().toISOString() });
+    if (accepted.outcome === "conflict") throw new Error("Idempotency key was already used for a different Worker creation request");
+    return this.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey);
+  }
+
+  private async resultForWorkerCreate(intentId: string, laneKey: string): Promise<CreateWorkerResult> {
+    await this.drainLane(laneKey);
+    const result = this.workerResults.get(intentId);
     if (result) return result;
-    const current = this.options.store.getCommandIntent(accepted.intent.id);
+    const current = this.options.store.getCommandIntent(intentId);
     const workerId = current?.outcome?.operationKind === "worker" ? current.outcome.operationId : null;
     if (workerId) {
       const instance = this.options.instanceControl.inspect(workerId).instance;
@@ -105,6 +125,12 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
         this.finish(intent, "rejected", "stale_context", "Primary context changed before command execution"); return;
       }
       const command = intent.command; let ok = true; let outcomeCode = "completed"; let outcomeDetail: string | null = null;
+      if (intent.idempotencyKey.startsWith("primary-tool:") && intent.context.primary) {
+        const current = this.options.primaryPrompts.getActiveOrdinaryPrompt(intent.context.primary.bindingId, intent.context.primary.bindingGeneration);
+        if (!current || current.id !== intent.context.primary.activePromptId) {
+          this.finish(intent, "rejected", "stale_context", "Primary tool turn changed before command execution"); return;
+        }
+      }
       if (swarmCommandPolicy(command).scope === "active-turn" && command.kind !== "skip") {
         const current = this.options.resolver.resolve(message, command);
         if (current.outcome !== "resolved" || current.context.primary?.activePromptId !== intent.context.primary?.activePromptId) {

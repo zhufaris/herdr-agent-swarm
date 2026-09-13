@@ -6,6 +6,7 @@ type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number; method: string; pa
 export const MAX_PRIMARY_TOOL_RESPONSE_BYTES = 1024 * 1024;
 export const PRIMARY_TOOLS_VERSION = packageVersion();
 const definitions = [
+  tool("create_worker", "Create one new Worker under this active Primary thread. The server fixes project, Primary binding, parent turn, and Lark topic scope. Use a stable idempotency key. The resulting Worker has its own group thread and Main Card; this Primary thread receives only its entry link.", required({ name: stringField("Lowercase Worker name."), agentKind: { type: "string", enum: ["traex", "codex", "claude-code", "pi"], description: "Worker agent runtime." }, model: { type: ["string", "null"], description: "Optional model name." }, start: { type: "boolean", description: "Start the Worker immediately; defaults to true." }, idempotencyKey: stringField("Stable unique key for this intended creation.") }, ["name", "agentKind", "idempotencyKey"])),
   tool("list_instances", "List existing agent instances in this Primary's project. Use this before choosing a Worker. This cannot create or retarget instances.", { state: { type: "string", description: "Optional observed-state filter." } }),
   tool("prompt_instance", "Send a new FIFO task to an existing same-project Worker. Use an idempotency key stable for this intended call. This never creates a Worker.", required({ instanceId: stringField("Worker instance ID from list_instances."), task: stringField("Complete task for the Worker."), idempotencyKey: stringField("Stable unique key for this intended submission.") })),
   tool("follow_up_instance", "Queue a follow-up to one explicit settled turn on an existing same-project Worker. It runs in FIFO order and does not imply steering.", required({ instanceId: stringField("Worker instance ID."), parentTurnId: stringField("Settled parent turn ID from inspect_instance."), text: stringField("Follow-up instruction."), idempotencyKey: stringField("Stable unique key for this intended submission.") })),
@@ -15,11 +16,11 @@ const definitions = [
   tool("interrupt_instance", "Interrupt a currently active same-project Worker. Use only when the user or task requires interruption; this does not stop or remove the instance.", required({ instanceId: stringField("Active Worker instance ID."), idempotencyKey: stringField("Stable unique key for this intended operation.") })),
   tool("show_worker_cards", "Queue one one-time status snapshot for an exact-name Worker owned by this Primary. The snapshot does not update automatically and never prompts or controls the Worker.", required({ workerName: stringField("Exact Worker display name."), idempotencyKey: stringField("Stable unique key for this intended display request.") }))
 ];
-const methodNames: Record<string, string> = { list_instances: "listInstances", prompt_instance: "promptInstance", follow_up_instance: "followUpInstance", steer_instance: "steerInstance", inspect_instance: "inspectInstance", wait_instance: "waitInstance", interrupt_instance: "interruptInstance", show_worker_cards: "showWorkerCards" };
+const methodNames: Record<string, string> = { create_worker: "createWorker", list_instances: "listInstances", prompt_instance: "promptInstance", follow_up_instance: "followUpInstance", steer_instance: "steerInstance", inspect_instance: "inspectInstance", wait_instance: "waitInstance", interrupt_instance: "interruptInstance", show_worker_cards: "showWorkerCards" };
 
 export async function handlePrimaryMcpRequest(request: JsonRpcRequest, invoke: (tool: string, args: Record<string, unknown>) => Promise<unknown>): Promise<object | null> {
   if (request.method === "notifications/initialized") return null;
-  if (request.method === "initialize") return result(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "herdr-agent-swarm-primary-tools", version: PRIMARY_TOOLS_VERSION }, instructions: "Use these tools only to coordinate existing Workers in this Primary's project. Never create, remove, promote, retarget, merge, push, deploy, or delete through this server." });
+  if (request.method === "initialize") return result(request.id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "herdr-agent-swarm-primary-tools", version: PRIMARY_TOOLS_VERSION }, instructions: "Use these tools only inside this active Primary turn. You may create a Worker with create_worker; all project, binding, topic, and parent-turn scope is server-owned. Never remove, promote, retarget, merge, push, deploy, or delete through this server." });
   if (request.method === "tools/list") return result(request.id, { tools: definitions });
   if (request.method === "tools/call") {
     const name = typeof request.params?.name === "string" ? request.params.name : "";
@@ -69,7 +70,7 @@ function stringField(description: string) { return { type: "string", minLength: 
 function objectValue(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function result(id: unknown, value: unknown) { return { jsonrpc: "2.0", id: id ?? null, result: value }; }
 function failure(id: unknown, code: number, message: string) { return { jsonrpc: "2.0", id: id ?? null, error: { code, message } }; }
-function actionableError(error: unknown): string { return `${error instanceof Error ? error.message : String(error)}. Inspect the target instance or ask the user to repair its lifecycle; do not create or retarget Workers.`; }
+function actionableError(error: unknown): string { return `${error instanceof Error ? error.message : String(error)}. Inspect the target instance or ask the user to repair its lifecycle; do not remove or retarget Workers.`; }
 function packageVersion(): string {
   const value = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: unknown };
   if (typeof value.version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.version)) throw new Error("Primary MCP package version is invalid");

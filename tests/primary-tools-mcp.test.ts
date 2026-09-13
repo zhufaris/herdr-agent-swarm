@@ -16,11 +16,17 @@ describe("Primary tools MCP surface", () => {
     expect(response).toMatchObject({ result: { serverInfo: { name: "herdr-agent-swarm-primary-tools", version: packageJson.version } } });
   });
 
-  it("advertises only the fixed non-topology tools with model-facing guidance", async () => {
+  it("advertises the scoped Worker creation and coordination tools with model-facing guidance", async () => {
     const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string; description: string }> } };
-    expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "show_worker_cards", "steer_instance", "wait_instance"].sort());
+    expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["create_worker", "follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "show_worker_cards", "steer_instance", "wait_instance"].sort());
     expect(response.result.tools.every(({ description }) => description.length > 40)).toBe(true);
     expect(response.result.tools.find(({ name }) => name === "show_worker_cards")?.description).toMatch(/one-time.*does not update/i);
+  });
+
+  it("maps Worker creation without accepting caller-owned scope", async () => {
+    const invoke = vi.fn(async () => ({ status: "created" }));
+    await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: "create", method: "tools/call", params: { name: "create_worker", arguments: { name: "reviewer", agentKind: "traex", idempotencyKey: "create-reviewer", projectId: "forged", rootMessageId: "forged" } } }, invoke);
+    expect(invoke).toHaveBeenCalledWith("createWorker", { name: "reviewer", agentKind: "traex", idempotencyKey: "create-reviewer", projectId: "forged", rootMessageId: "forged" });
   });
 
   it("maps an exact-name Worker card display request", async () => {

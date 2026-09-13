@@ -36,5 +36,5 @@ export function createApplicationRuntime(options: {
   const bindingSession = createBindingSessionRuntime({ ...shared, bus });
   const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession });
   const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl });
-  return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter };
+  return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter, swarmCommands: commandControl.swarmCommands };
 }

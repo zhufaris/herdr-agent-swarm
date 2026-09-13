@@ -24,7 +24,8 @@ function setup() {
   const driver = { kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }), steer: async () => ({ status: "delivered" as const }), interrupt: async () => ({ status: "interrupted" as const }) } satisfies AgentRuntimeDriver;
   const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([driver]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "turn-1", presentation: workerPresentation });
   const workerCards = { show: vi.fn((input) => ({ accepted: true as const, delivery: "queued" as const, worker: { id: "worker", name: input.workerName, workerSessionGeneration: 1 }, cards: ["worker-snapshot"] as ["worker-snapshot"], taskTurnId: null })) };
-  return { create, primary, workerCards, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }) => new PrimaryToolBroker(identity, messaging, workerCards) };
+  const workerCreation = { createWorkerFromPrimaryTool: vi.fn(async (input) => ({ status: "created" as const, instance: { id: "created", name: input.command.name } })) };
+  return { create, primary, workerCards, workerCreation, broker: (identity: { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }) => new PrimaryToolBroker(identity, messaging, workerCards, workerCreation) };
 }
 
 describe("PrimaryToolBroker", () => {
@@ -47,9 +48,15 @@ describe("PrimaryToolBroker", () => {
     await expect(broker(identity).promptInstance({ instanceId: kind === "cross-project" ? other.id : worker.id, task: "work", idempotencyKey: kind })).rejects.toThrow(/authorized current thread Primary|requested project/);
   });
 
-  it("exposes only the fixed non-topology tool surface", () => {
+  it("exposes a narrowly scoped Worker creation tool", () => {
     const { primary, broker } = setup();
-    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(broker(primary()))).filter((name) => name !== "constructor").sort()).toEqual(["followUpInstance", "inspectInstance", "interruptInstance", "listInstances", "promptInstance", "showWorkerCards", "steerInstance", "waitInstance"].sort());
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(broker(primary()))).filter((name) => name !== "constructor").sort()).toEqual(["createWorker", "followUpInstance", "inspectInstance", "interruptInstance", "listInstances", "promptInstance", "showWorkerCards", "steerInstance", "waitInstance"].sort());
+  });
+
+  it("passes only server-owned Primary identity to durable Worker creation", async () => {
+    const { primary, broker, workerCreation } = setup(); const identity = primary();
+    await expect(broker(identity).createWorker({ name: "reviewer", agentKind: "traex", idempotencyKey: "create-1" })).resolves.toMatchObject({ status: "created" });
+    expect(workerCreation.createWorkerFromPrimaryTool).toHaveBeenCalledWith({ ...identity, idempotencyKey: "create-1", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true } });
   });
 
   it("passes only server-owned Primary scope to Worker card display", () => {

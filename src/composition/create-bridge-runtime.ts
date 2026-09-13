@@ -32,7 +32,8 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   channelPublisher.connectPromptScheduler(scheduler);
   const primary = createPrimaryRuntime({ config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
   const { externalTurns, promptRun } = primary;
-  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation });
+  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter, swarmCommands } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation });
+  primaryToolGateway.setWorkerCreation(swarmCommands);
   events.connectHerdrHints(herdrEventRouter);
   events.seal();
   const instanceWorker = { snapshot() { const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot(); return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure }; } };
