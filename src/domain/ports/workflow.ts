@@ -56,7 +56,7 @@ export interface DeliveryRecoveryStore {
   getBinding(id: string): Binding | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   listFailures(chatId: string): FailureSummary[];
-  reservePaneThreadAlias(input: { publicationKey: string; actionMessageId: string; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; targetChatId: string; card: object }): "reserved" | "duplicate" | "stale";
+  reservePaneThreadAlias(input: { publicationKey: string; actionMessageId: string; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; targetChatId: string; viewVersion: number; card: object }): "reserved" | "duplicate" | "stale";
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
 }
 
@@ -115,7 +115,7 @@ export interface SessionAdministrationStore {
   countPendingPrompts(bindingId: string): number;
   loadTopicView(bindingId: string): TopicViewState | null;
   transitionBinding(id: string, transition: SessionTransition): Binding;
-  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
+  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: TopicViewState; messageId: string; card: object; paneEntryCard: object }): Binding;
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding;
 }
 

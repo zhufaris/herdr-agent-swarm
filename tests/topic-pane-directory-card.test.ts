@@ -22,6 +22,8 @@ describe("topic pane directory card", () => {
     const card = renderPaneThreadEntryCard({ ...initialTopicView("b1"), title: "Task", spaceName: "core", paneId: "w1:p1", workers: [{ instanceId: "worker", name: "reviewer", state: "idle", currentTaskTitle: null, queueCount: 0, workerMain: { aggregateKind: "worker-session", aggregateId: "worker", generation: 1, messageId: "worker-main" } }] });
     const serialized = JSON.stringify(card);
     expect(serialized).toContain("回复此话题继续交互");
+    expect(serialized).toContain("同步当前 Pane 状态");
+    expect(serialized).not.toContain("主状态请以原始 Main Card 为准");
     expect(serialized).not.toContain('"tag":"button"');
     expect(serialized).not.toContain("card_target_open");
   });

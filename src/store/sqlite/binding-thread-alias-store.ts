@@ -6,7 +6,7 @@ import type { SqliteOutboxQueueStore } from "./outbox-queue-store.js";
 
 export interface ReservePaneThreadAliasInput {
   publicationKey: string; actionMessageId: string; bindingId: string; bindingGeneration: number; paneId: string;
-  sourceMainMessageId: string; targetChatId: string; card: object;
+  sourceMainMessageId: string; targetChatId: string; viewVersion?: number; card: object;
 }
 
 export class SqliteBindingThreadAliasStore {
@@ -20,7 +20,7 @@ export class SqliteBindingThreadAliasStore {
       if (!binding || binding.chat_id !== input.targetChatId || Number(binding.generation) !== input.bindingGeneration || binding.pane_id !== input.paneId || binding.status_message_id !== input.sourceMainMessageId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return "stale";
       const timestamp = now(); const aliasId = randomUUID();
       this.context.database.prepare("INSERT INTO binding_thread_aliases(id, publication_key, binding_id, binding_generation, chat_id, pane_id, source_main_message_id, action_message_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserving', ?, ?)").run(aliasId, input.publicationKey, input.bindingId, input.bindingGeneration, input.targetChatId, input.paneId, input.sourceMainMessageId, input.actionMessageId, timestamp, timestamp);
-      queue.enqueue({ id: randomUUID(), idempotencyKey: input.publicationKey, bindingId: input.bindingId, threadAliasId: aliasId, targetChatId: input.targetChatId, rootMessageId: null, kind: "group_card_create", payload: JSON.stringify(input.card) });
+      queue.enqueue({ id: randomUUID(), idempotencyKey: input.publicationKey, bindingId: input.bindingId, threadAliasId: aliasId, targetChatId: input.targetChatId, viewVersion: input.viewVersion ?? null, rootMessageId: null, kind: "group_card_create", payload: JSON.stringify(input.card) });
       return "reserved";
     });
   }

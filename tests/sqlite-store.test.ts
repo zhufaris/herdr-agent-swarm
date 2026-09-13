@@ -3643,6 +3643,38 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
+  it("rolls back the canonical Main projection when a Pane Entry reservation fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", viewVersion: 0, card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "alias-root", undefined, "alias-topic");
+    store.database.exec("CREATE TEMP TRIGGER reject_pane_entry BEFORE INSERT ON outbound_replies WHEN NEW.lane_key LIKE '%:pane-entry:%' BEGIN SELECT RAISE(ABORT, 'forced_pane_entry_failure'); END");
+    const view = { ...initialTopicView("b1"), title: "Never committed", viewVersion: 2 };
+
+    expect(() => store!.reserveMainCard(view, "root-1", { main: 2 }, undefined, { entry: 2 })).toThrow("forced_pane_entry_failure");
+
+    expect(store.loadTopicView("b1")).toBeNull();
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+  });
+
+  it("isolates an uncertain Pane Entry update from the canonical Main lane", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", viewVersion: 0, card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "alias-root", undefined, "alias-topic");
+    store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2 }, "root-1", { main: 2 }, undefined, { entry: 2 });
+    const pending = store.listPendingOutboundReplies();
+    const alias = pending.find((reply) => reply.rootMessageId === "alias-root")!;
+    const canonical = pending.find((reply) => reply.rootMessageId === "main-1")!;
+
+    store.markOutboundReplyFailedWithQuarantine(alias.id, "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+
+    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toContain(canonical.id);
+    expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(alias.id)).toEqual({ state: "active" });
+  });
+
   it("does not recreate or wake a dead-lettered Main Card version", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

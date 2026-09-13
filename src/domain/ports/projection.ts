@@ -24,7 +24,7 @@ export interface MainCardStore {
   getBinding(id: string): Binding | null;
   getModelPreference(bindingId: string): ModelPreference | null;
   loadTopicView(bindingId: string): TopicViewState | null;
-  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass): MainCardReservationOutcome;
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass, paneEntryCard?: object): MainCardReservationOutcome;
   saveTopicView(view: TopicViewState): void;
 }
 

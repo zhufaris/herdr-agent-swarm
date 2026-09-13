@@ -58,7 +58,7 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     const view = this.options.store.loadTopicView(binding.id);
     if (!view) return "stale";
     const publicationKey = `pane-card-send:${action.messageId}:${binding.id}:${binding.generation}:${entry.sourceMainMessageId}`;
-    const reserved = this.options.store.reservePaneThreadAlias({ publicationKey, actionMessageId: action.messageId, bindingId: binding.id, bindingGeneration: binding.generation, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId, targetChatId: action.chatId, card: this.options.presentation.paneEntryCard(view) });
+    const reserved = this.options.store.reservePaneThreadAlias({ publicationKey, actionMessageId: action.messageId, bindingId: binding.id, bindingGeneration: binding.generation, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId, targetChatId: action.chatId, viewVersion: view.viewVersion, card: this.options.presentation.paneEntryCard(view) });
     if (reserved === "stale") return "stale";
     if (reserved === "reserved") this.options.outboundWork.wake();
     this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: reserved });

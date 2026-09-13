@@ -41,7 +41,7 @@ export class ConversationViewProjector {
     private readonly channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
-    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
+    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
     answerPages?: AnswerPageWorkflowPort,
     mainCards?: MainCardWorkflowPort,
     options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}

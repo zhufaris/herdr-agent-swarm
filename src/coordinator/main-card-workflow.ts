@@ -12,7 +12,7 @@ export interface MainCardWorkflowPort {
 export class MainCardWorkflow implements MainCardWorkflowPort {
   private readonly tails = new Map<string, Promise<void>>();
 
-  constructor(private readonly store: MainCardStore, private readonly wake: () => void, private readonly presentation: Pick<PrimaryPresentation, "mainCard">, private readonly logger?: Logger) {}
+  constructor(private readonly store: MainCardStore, private readonly wake: () => void, private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard">, private readonly logger?: Logger) {}
 
   converge(bindingId: string, workClass?: OutboundWorkClass): Promise<void> { return this.enqueue(bindingId, undefined, workClass); }
   project(view: TopicViewState, workClass?: OutboundWorkClass): Promise<void> { return this.enqueue(view.bindingId, view, workClass); }
@@ -35,7 +35,7 @@ export class MainCardWorkflow implements MainCardWorkflowPort {
       if (desired) this.store.saveTopicView(view);
       return;
     }
-    const outcome = this.store.reserveMainCard(view, binding.rootMessageId, this.presentation.mainCard(view), workClass);
+    const outcome = this.store.reserveMainCard(view, binding.rootMessageId, this.presentation.mainCard(view), workClass, this.presentation.paneEntryCard(view));
     this.logger?.debug({ event: "main-card-converged", bindingId, viewVersion: view.viewVersion, outcome }, "converged Main Card delivery");
     if (outcome === "reserved") this.wake();
   }

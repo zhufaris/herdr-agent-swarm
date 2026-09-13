@@ -26,7 +26,7 @@ export interface StartupViewConvergerOptions {
   stores: StartupViewProjectionStores;
   outbound: OutboundIntentPort;
   outboundWork: OutboundWorkNotifier;
-  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">;
   answerPageWorkflow?: AnswerPageWorkflowPort;
   mainCardWorkflow?: MainCardWorkflowPort;
   logger?: Pick<Logger, "warn">;

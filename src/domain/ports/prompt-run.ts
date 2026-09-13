@@ -42,5 +42,5 @@ export interface PromptSessionStore {
   getBinding(id: string): Binding | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   transitionBinding(id: string, transition: SessionTransition): Binding;
-  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: import("../events.js").BridgeEvent; view: TopicViewState; messageId: string; card: object }): Binding;
+  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: import("../events.js").BridgeEvent; view: TopicViewState; messageId: string; card: object; paneEntryCard: object }): Binding;
 }

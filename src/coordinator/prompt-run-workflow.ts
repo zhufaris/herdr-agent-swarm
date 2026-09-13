@@ -48,7 +48,7 @@ interface PromptRunWorkflowOptions {
   scheduler: PromptWorkScheduler;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
-  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard">;
   turnTimeoutMs: number;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
@@ -391,7 +391,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       await this.options.bus.publish(event);
       return;
     }
-    this.options.stores.session.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view) });
+    this.options.stores.session.transitionBindingWithOutbox({ id: binding.id, transition: { type: "drain_completed" }, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view), paneEntryCard: this.options.presentation.paneEntryCard(view) });
     this.options.outboundWork.wake();
     await this.options.bus.publish(event);
   }

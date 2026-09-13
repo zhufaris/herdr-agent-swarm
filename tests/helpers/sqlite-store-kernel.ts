@@ -590,8 +590,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.projections.loadTopicView(bindingId);
   }
 
-  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass): MainCardReservationOutcome {
-    return this.projections.reserveMainCard(view, rootMessageId, card, workClass);
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass, paneEntryCard?: object): MainCardReservationOutcome {
+    return this.projections.reserveMainCard(view, rootMessageId, card, workClass, paneEntryCard);
   }
 
   saveRunCard(view: RunCardView): RunCardView {

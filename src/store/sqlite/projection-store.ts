@@ -48,29 +48,52 @@ export class SqliteProjectionStore {
     };
   }
 
-  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass): MainCardReservationOutcome {
+  reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass, paneEntryCard?: object): MainCardReservationOutcome {
     return this.context.transaction(() => {
       this.saveTopicView(view);
-      return this.reserveMainCardIntent(view, rootMessageId, card, workClass);
+      return this.reserveMainCardIntent(view, rootMessageId, card, workClass, paneEntryCard);
     });
   }
 
-  reserveMainCardIntent(view: TopicViewState, rootMessageId: string | null, card: object, workClass?: OutboundWorkClass): MainCardReservationOutcome {
+  reserveMainCardIntent(view: TopicViewState, rootMessageId: string | null, card: object, workClass?: OutboundWorkClass, paneEntryCard?: object): MainCardReservationOutcome {
     if (!rootMessageId) return "current";
     const current = this.loadTopicView(view.bindingId);
     if (!current || current.viewVersion !== view.viewVersion) return "waiting";
     const binding = this.requireBinding(view.bindingId);
-    if (current.viewVersion <= current.deliveredVersion) return "current";
-    const replacementPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
-    if (replacementPending) return "waiting";
-    const existingCurrent = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND view_version >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
-    if (existingCurrent) return "waiting";
-    if (!binding.statusMessageId) {
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", ...outboundWorkClass(workClass), rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
-    } else {
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, cardSequence: this.nextMainCardSequence(binding), targetRole: "session_status", ...outboundWorkClass(workClass), rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
+    let reserved = false;
+    let waiting = false;
+    if (current.viewVersion > current.deliveredVersion) {
+      const replacementPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND kind = 'card_reply' AND state = 'pending' LIMIT 1").get(view.bindingId);
+      const existingCurrent = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE binding_id = ? AND target_role = 'session_status' AND view_version >= ? LIMIT 1").get(view.bindingId, current.viewVersion);
+      if (replacementPending || existingCurrent) waiting = true;
+      else if (!binding.statusMessageId) {
+        this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `status-card:${view.bindingId}`, bindingId: view.bindingId, viewVersion: current.viewVersion, targetRole: "session_status", ...outboundWorkClass(workClass), rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+        reserved = true;
+      } else {
+        this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${view.bindingId}:${current.viewVersion}`, bindingId: view.bindingId, viewVersion: current.viewVersion, cardSequence: this.nextMainCardSequence(binding), targetRole: "session_status", ...outboundWorkClass(workClass), rootMessageId: binding.statusMessageId, kind: "card_update", payload: JSON.stringify(card) });
+        reserved = true;
+      }
     }
-    return "reserved";
+    for (const alias of paneEntryCard ? this.listActivePaneEntryTargets(binding) : []) {
+      const idempotencyKey = `pane-entry:update:${alias.id}:${current.viewVersion}`;
+      const existing = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(idempotencyKey);
+      if (existing) { waiting = true; continue; }
+      const createAtCurrentVersion = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE thread_alias_id = ? AND kind = 'group_card_create' AND view_version >= ? LIMIT 1").get(alias.id, current.viewVersion);
+      if (createAtCurrentVersion) continue;
+      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey, bindingId: binding.id, viewVersion: current.viewVersion, ...outboundWorkClass(workClass), rootMessageId: alias.rootMessageId, kind: "card_update", payload: JSON.stringify(paneEntryCard), laneKeyOverride: `pane-entry:${alias.id}` });
+      reserved = true;
+    }
+    return reserved ? "reserved" : waiting ? "waiting" : "current";
+  }
+
+  private listActivePaneEntryTargets(binding: Binding): Array<{ id: string; rootMessageId: string }> {
+    if (!binding.paneId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return [];
+    return this.context.database.prepare(`SELECT id, root_message_id
+      FROM binding_thread_aliases
+      WHERE binding_id = ? AND binding_generation = ? AND pane_id = ?
+        AND state = 'active' AND root_message_id IS NOT NULL
+      ORDER BY created_at, id`).all(binding.id, binding.generation, binding.paneId)
+      .map((row) => ({ id: String((row as { id: string }).id), rootMessageId: String((row as { root_message_id: string }).root_message_id) }));
   }
 
   saveRunCard(view: RunCardView): RunCardView {

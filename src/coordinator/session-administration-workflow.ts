@@ -23,7 +23,7 @@ interface Options {
   outboundWork: OutboundWorkNotifier;
   scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
-  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard" | "requestRejected">;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "requestRejected">;
 }
 export interface SessionAdministrationWorkflowPort {
   emitStatus(binding: Binding): Promise<void>;
@@ -70,7 +70,7 @@ export class SessionAdministrationWorkflow implements SessionAdministrationWorkf
   private async transitionAndPublish(binding: Binding, transition: import("../domain/pane-thread-lifecycle.js").SessionTransition, type: "BindingDraining" | "BindingArchived", reason: string): Promise<{ binding: Binding; outboxReserved: boolean }> {
     const event = createBridgeEvent(binding.id, type, "lark", { reason }); const current = this.options.store.loadTopicView(binding.id) ?? initialTopicView(binding.id); const view = reduceTopicView(current, event);
     if (!binding.statusMessageId) { const next = this.options.store.transitionBinding(binding.id, transition); await this.options.lifecycleEvents.publish(event); return { binding: next, outboxReserved: false }; }
-    const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view) }); await this.options.lifecycleEvents.publish(event); return { binding: next, outboxReserved: true };
+    const next = this.options.store.transitionBindingWithOutbox({ id: binding.id, transition, event, view, messageId: binding.statusMessageId, card: this.options.presentation.mainCard(view), paneEntryCard: this.options.presentation.paneEntryCard(view) }); await this.options.lifecycleEvents.publish(event); return { binding: next, outboxReserved: true };
   }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }

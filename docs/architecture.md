@@ -1156,8 +1156,13 @@ dead letters that an operator can retry or dismiss.
 pane. Unlike a reply intent, it carries a validated chat target and durable
 thread-alias identity while leaving `root_message_id` null. Its accepted ACK
 atomically records the returned group root/thread IDs and activates the alias.
-The published card is a passive Main Card snapshot; canonical Main Card
-convergence continues to update only the Binding's original status card.
+The published card remains a passive interaction surface, but it mirrors each
+new durable TopicView alongside the Binding's canonical Main Card. Each active
+alias uses an isolated `pane-entry:<aliasId>` lane and a versioned idempotency
+key, so one failed alias cannot block the canonical Main Card or another alias.
+The TopicView plus canonical and alias delivery intents are reserved in one
+SQLite transaction; startup can repair a missing alias version even when the
+canonical target already delivered it.
 
 An active alias resolves to its exact Binding generation and pane. Ordinary
 replies use the alias root for their Answer Card while sharing the Binding's

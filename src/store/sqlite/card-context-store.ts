@@ -24,7 +24,7 @@ export interface SqliteCardContextStoreDependencies {
   saveTopicView(view: TopicViewState): void;
   loadRunCard(promptId: string): RunCardView | null;
   saveRunCard(view: RunCardView): RunCardView;
-  reserveMainCard(view: TopicViewState, rootMessageId: string | null, card: object): MainCardReservationOutcome;
+  reserveMainCard(view: TopicViewState, rootMessageId: string | null, card: object, paneEntryCard: object): MainCardReservationOutcome;
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
   reserveWorkerMainPlacement(view: WorkerMainView, card: object): "reserved" | "waiting" | "current" | "stale";
 }
@@ -116,7 +116,7 @@ export class SqliteCardContextStore {
     return this.database.prepare(`UPDATE card_context_invalidations SET projected_dependency_revision = MAX(projected_dependency_revision, MIN(requested_dependency_revision, ?)), updated_at = ? WHERE target_kind = ? AND target_id = ? AND target_generation = ?`).run(dependencyRevision, now(), target.targetKind, target.targetId, target.targetGeneration).changes === 1;
   }
 
-  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
+  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryPaneEntry(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
     return this.context.transaction(() => {
       const current = this.loadCardContextInvalidation(invalidation);
       if (!current || current.projectedDependencyRevision >= invalidation.requestedDependencyRevision) return "current";
@@ -143,7 +143,7 @@ export class SqliteCardContextStore {
         const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
         const next = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
         this.dependencies.saveTopicView(next);
-        reserved = this.dependencies.reserveMainCard(next, binding.rootMessageId, renderers.primaryMain(next)) === "reserved";
+        reserved = this.dependencies.reserveMainCard(next, binding.rootMessageId, renderers.primaryMain(next), renderers.primaryPaneEntry(next)) === "reserved";
       } else {
         const previous = this.dependencies.loadRunCard(invalidation.targetId);
         const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;

@@ -30,7 +30,7 @@ export class SqliteBindingProjectionStore {
       this.database.prepare("UPDATE bindings SET title = ?, updated_at = ? WHERE id = ?").run(input.title, now(), input.bindingId);
       binding = this.requireBinding(input.bindingId);
       this.projections.saveTopicView(input.view);
-      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.card);
+      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.card, undefined, input.paneEntryCard);
       return { outcome: "projected", binding, outboxReserved: reservation === "reserved" };
     });
   }
@@ -44,7 +44,7 @@ export class SqliteBindingProjectionStore {
       if (current.viewVersion > input.view.viewVersion) return { outcome: "stale", binding, view: current, outboxReserved: false };
       binding = this.bindings.transitionBinding(input.bindingId, { type: "agent_unregistered" });
       this.projections.saveTopicView(input.view);
-      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.mainCard);
+      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.mainCard, undefined, input.paneEntryCard);
       return { outcome: "degraded", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
     });
   }
@@ -74,7 +74,7 @@ export class SqliteBindingProjectionStore {
         }
       }
       this.projections.saveTopicView(input.view);
-      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.mainCard);
+      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.mainCard, undefined, input.paneEntryCard);
       return { outcome: "orphaned", binding, view: this.projections.loadTopicView(input.bindingId), updatedPromptIds, outboxReserved: answerOutboxReserved || reservation === "reserved" };
     });
   }
@@ -90,17 +90,17 @@ export class SqliteBindingProjectionStore {
       binding = this.bindings.transitionBinding(input.bindingId, { type: "pane_reattached", replacement: false });
       binding = this.bindings.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.pane.agentState });
       this.projections.saveTopicView(input.view);
-      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.mainCard);
+      const reservation = this.projections.reserveMainCardIntent(input.view, input.rootMessageId, input.mainCard, undefined, input.paneEntryCard);
       return { outcome: "recovered", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: reservation === "reserved" };
     });
   }
 
-  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: import("../../domain/topic-view.js").TopicViewState; messageId: string; card: object }): Binding {
+  transitionBindingWithOutbox(input: { id: string; transition: SessionTransition; event: BridgeEvent; view: import("../../domain/topic-view.js").TopicViewState; messageId: string; card: object; paneEntryCard: object }): Binding {
     return this.context.transaction(() => {
       const binding = this.bindings.transitionBinding(input.id, input.transition);
       this.database.prepare("INSERT OR IGNORE INTO lifecycle_events(event_id, binding_id, event_type, payload_json, occurred_at) VALUES (?, ?, ?, ?, ?)").run(input.event.eventId, input.id, input.event.type, JSON.stringify(input.event.payload), input.event.occurredAt);
       this.projections.saveTopicView(input.view);
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `main-card:update:${input.id}:${input.view.viewVersion}`, bindingId: input.id, viewVersion: input.view.viewVersion, targetRole: "session_status", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card) });
+      this.projections.reserveMainCardIntent(input.view, input.messageId, input.card, undefined, input.paneEntryCard);
       return binding;
     });
   }

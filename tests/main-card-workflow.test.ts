@@ -106,4 +106,62 @@ describe("MainCardWorkflow", () => {
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "main-1", viewVersion: 2 })]);
     store.close();
   });
+
+  it("projects one TopicView version to the canonical Main Card and an active Pane Entry", async () => {
+    const { stores, store } = setupStore();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", card: {} });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "alias-root", undefined, "alias-topic");
+    const wake = vi.fn();
+
+    await new MainCardWorkflow(stores.mainCards, wake, primaryPresentation).project({ ...initialTopicView("b1"), title: "Newest", viewVersion: 2 });
+
+    const pending = store.listPendingOutboundReplies();
+    expect(pending).toHaveLength(2);
+    expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", rootMessageId: "main-1", targetRole: "session_status", viewVersion: 2 }));
+    expect(pending).toContainEqual(expect.objectContaining({
+      kind: "card_update", rootMessageId: "alias-root", viewVersion: 2, laneKey: expect.stringContaining("pane-entry:")
+    }));
+    expect(pending.find((reply) => reply.rootMessageId === "alias-root")?.payload).toContain("HERDR PANE ENTRY");
+    expect(wake).toHaveBeenCalledOnce();
+    store.close();
+  });
+
+  it("repairs a missing Pane Entry version after the canonical Main Card is current", async () => {
+    const { stores, store } = setupStore();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    const current = { ...initialTopicView("b1"), title: "Current", viewVersion: 4, deliveredVersion: 4 };
+    store.saveTopicView(current);
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", card: {} });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "alias-root", undefined, "alias-topic");
+    const wake = vi.fn();
+    const workflow = new MainCardWorkflow(stores.mainCards, wake, primaryPresentation);
+
+    await workflow.converge("b1", "history");
+    await workflow.converge("b1", "history");
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+      kind: "card_update", rootMessageId: "alias-root", viewVersion: 4, workClass: "history", laneKey: expect.stringContaining("pane-entry:")
+    })]);
+    expect(wake).toHaveBeenCalledOnce();
+    store.close();
+  });
+
+  it("does not project a Pane Entry after its binding generation changes", async () => {
+    const { stores, store } = setupStore();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "alias-root", undefined, "alias-topic");
+    store.updateBinding("b1", { generation: 2 });
+
+    await new MainCardWorkflow(stores.mainCards, vi.fn(), primaryPresentation).project({ ...initialTopicView("b1"), title: "New generation", viewVersion: 2 });
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ rootMessageId: "main-1", targetRole: "session_status" })]);
+    store.close();
+  });
 });

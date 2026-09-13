@@ -170,7 +170,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
 export function renderPaneThreadEntryCard(input: TopicViewState): object {
   const card = renderProjectEntryCard(input) as { body: { elements: object[] }; header: { subtitle: { content: string } } };
   const passiveElements = passiveCardElements(card.body.elements);
-  return { ...card, header: { ...card.header, subtitle: { tag: "plain_text", content: "HERDR PANE ENTRY · 回复此话题继续交互" } }, body: { elements: [...passiveElements, { tag: "hr" }, { tag: "markdown", content: "回复此话题即可向该 Pane 的 Agent 发送新请求。主状态请以原始 Main Card 为准。" }] } };
+  return { ...card, header: { ...card.header, subtitle: { tag: "plain_text", content: "HERDR PANE ENTRY · 回复此话题继续交互" } }, body: { elements: [...passiveElements, { tag: "hr" }, { tag: "markdown", content: "回复此话题即可向该 Pane 的 Agent 发送新请求；此卡片会同步当前 Pane 状态。" }] } };
 }
 
 export function renderRequestRunCard(input: RunCardView): object {

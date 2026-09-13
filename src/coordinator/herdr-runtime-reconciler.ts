@@ -27,7 +27,7 @@ interface HerdrRuntimeReconcilerOptions {
   isBindingBusy(bindingId: string): boolean;
   worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>;
   externalTurnObserver?: { observe(binding: Binding): Promise<void> };
-  presentation: Pick<PrimaryPresentation, "mainCard" | "answerCard">;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard">;
 }
 
 export interface HerdrRuntimeReconcilerPort {

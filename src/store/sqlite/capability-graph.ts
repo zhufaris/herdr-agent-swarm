@@ -141,7 +141,7 @@ export class SqliteCapabilityGraph {
       saveTopicView: (view) => this.projections.saveTopicView(view),
       loadRunCard: (id) => this.projections.loadRunCard(id),
       saveRunCard: (view) => this.projections.saveRunCard(view),
-      reserveMainCard: (view, rootMessageId, card) => this.projections.reserveMainCardIntent(view, rootMessageId, card),
+      reserveMainCard: (view, rootMessageId, card, paneEntryCard) => this.projections.reserveMainCardIntent(view, rootMessageId, card, undefined, paneEntryCard),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
       reserveWorkerMainPlacement: (view, card) => this.workerThreads.reserveCanonicalMain(view, card)
     });

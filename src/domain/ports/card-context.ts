@@ -6,5 +6,5 @@ import type { WorkerTurnCardView } from "../worker-turn-card-view.js";
 
 export interface CardContextProjectionStore {
   listPendingCardContextInvalidations(limit?: number): CardContextInvalidation[];
-  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale";
+  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryPaneEntry(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale";
 }

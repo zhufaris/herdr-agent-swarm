@@ -247,6 +247,7 @@ export interface BindingTitleProjectionInput {
   view: import("./topic-view.js").TopicViewState;
   rootMessageId: string | null;
   card: object;
+  paneEntryCard: object;
 }
 
 export interface BindingTitleProjectionResult {
@@ -262,6 +263,7 @@ export interface RuntimeDegradationInput {
   view: import("./topic-view.js").TopicViewState;
   rootMessageId: string | null;
   mainCard: object;
+  paneEntryCard: object;
 }
 
 export interface RuntimeDegradationResult {
@@ -280,6 +282,7 @@ export interface OrphanBindingProjectionInput {
   view: import("./topic-view.js").TopicViewState;
   rootMessageId: string | null;
   mainCard: object;
+  paneEntryCard: object;
   renderRunCard(view: import("./run-card-view.js").RunCardView): object;
 }
 
@@ -299,6 +302,7 @@ export interface RecoverOrphanBindingProjectionInput {
   view: import("./topic-view.js").TopicViewState;
   rootMessageId: string | null;
   mainCard: object;
+  paneEntryCard: object;
 }
 
 export interface RecoverOrphanBindingProjectionResult {
