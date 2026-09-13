@@ -84,7 +84,10 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   private async resultForWorkerCreate(intentId: string, laneKey: string): Promise<CreateWorkerResult> {
     await this.drainLane(laneKey);
     const result = this.workerResults.get(intentId);
-    if (result) return result;
+    if (result) {
+      this.workerResults.delete(intentId);
+      return result;
+    }
     const current = this.options.store.getCommandIntent(intentId);
     const workerId = current?.outcome?.operationKind === "worker" ? current.outcome.operationId : null;
     if (workerId) {

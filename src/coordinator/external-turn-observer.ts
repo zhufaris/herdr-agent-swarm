@@ -47,6 +47,7 @@ export class ExternalTurnObserver {
   private readonly bindings = new Map<string, ObservedBinding>();
   private readonly handedOffBindings = new Map<string, { identity: string; state: TurnProjectionState }>();
   private readonly observations = new Map<string, Promise<void>>();
+  private readonly handedOffInFlight = new Set<string>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly idFactory: () => string;
   private readonly exactTurns: ExactTurnObserver;
@@ -91,7 +92,11 @@ export class ExternalTurnObserver {
 
   observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
     if (this.stopping) return Promise.resolve("ignored");
-    return this.track(() => this.observeSupersedingTurnInLifecycle(binding, prompt, observation));
+    return this.track(async () => {
+      this.handedOffInFlight.add(binding.id);
+      try { return await this.observeSupersedingTurnInLifecycle(binding, prompt, observation); }
+      finally { this.handedOffInFlight.delete(binding.id); }
+    });
   }
 
   private async observeSupersedingTurnInLifecycle(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
@@ -144,12 +149,25 @@ export class ExternalTurnObserver {
   async scanActiveBindings(): Promise<void> {
     if (this.stopping) return;
     if (this.scan) return this.scan;
-    const scan = this.track(() => Promise.all(this.options.store.listBindingsByState("active").map((binding) => this.observe(binding))).then(() => undefined));
+    const scan = this.track(async () => {
+      const active = this.options.store.listBindingsByState("active");
+      await Promise.all(active.map((binding) => this.observe(binding)));
+      this.releaseInactiveBindings(new Set(active.map(({ id }) => id)));
+    });
     this.scan = scan;
     try { await scan; }
     catch (error) {
       this.options.logger.warn({ event: "external-turn-scan-failed", err: safeLogError(error), outcome: "deferred" }, "failed to scan active bindings for external Herdr turns");
     } finally { if (this.scan === scan) this.scan = null; }
+  }
+
+  private releaseInactiveBindings(activeBindingIds: ReadonlySet<string>): void {
+    for (const bindingId of this.bindings.keys()) {
+      if (!activeBindingIds.has(bindingId) && !this.observations.has(bindingId)) this.bindings.delete(bindingId);
+    }
+    for (const bindingId of this.handedOffBindings.keys()) {
+      if (!activeBindingIds.has(bindingId) && !this.handedOffInFlight.has(bindingId)) this.handedOffBindings.delete(bindingId);
+    }
   }
 
   private async observeBinding(binding: Binding, force = false): Promise<void> {

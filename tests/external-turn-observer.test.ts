@@ -249,6 +249,24 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
+  it("releases cached observers for bindings that are no longer active", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }));
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
+
+    await observer.scanActiveBindings();
+    store.updateBinding("b1", { state: "archived", lifecycle: "archived", attachment: "unattached" });
+    await observer.scanActiveBindings();
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached" });
+    await observer.scanActiveBindings();
+
+    expect(open).toHaveBeenCalledTimes(2);
+    await observer.stop();
+    store.close();
+  });
+
   it("bounds adopted-turn fallback output and lets a trusted final answer replace it", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

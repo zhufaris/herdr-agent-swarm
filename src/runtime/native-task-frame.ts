@@ -10,15 +10,23 @@ const META = /\([^)]*(?:tokens?|esc to)[^)]*\)/i;
 const STATES = { "✔": "done", "✓": "done", "■": "active", "◻": "pending", "□": "pending", "✕": "failed", "✖": "failed", "✘": "failed", "×": "failed" } as const;
 
 function findNativeTaskFrameLines(lines: readonly string[]): NativeTaskFrame | null {
+  const blockStarts = new Array<number>(lines.length);
+  const hasMetaBefore = new Array<boolean>(lines.length);
+  let blockStart = 0;
+  let blockHasMeta = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index]!.trim()) {
+      blockStart = index + 1;
+      blockHasMeta = false;
+    }
+    blockStarts[index] = blockStart;
+    hasMetaBefore[index] = blockHasMeta;
+    if (META.test(lines[index]!)) blockHasMeta = true;
+  }
   for (let taskCount = lines.length - 1; taskCount >= 0; taskCount -= 1) {
     if (!TASK_COUNT.test(lines[taskCount]!)) continue;
-    let start = taskCount;
-    while (start > 0 && lines[start - 1]!.trim()) start -= 1;
-    let hasMeta = false;
-    for (let index = start; index < taskCount; index += 1) {
-      if (META.test(lines[index]!)) { hasMeta = true; break; }
-    }
-    if (!hasMeta) continue;
+    const start = blockStarts[taskCount]!;
+    if (!hasMetaBefore[taskCount]) continue;
 
     const steps: NativeTaskStep[] = [];
     let end = taskCount + 1;

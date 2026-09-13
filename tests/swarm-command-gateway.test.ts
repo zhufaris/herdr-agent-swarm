@@ -206,6 +206,7 @@ describe("SwarmCommandGateway", () => {
     await gateway.createWorkerFromCard(action, "binding", reviewer);
     await gateway.createWorkerFromCard(action, "binding", tester);
     expect(instanceControl.createWorker).toHaveBeenCalledTimes(2);
+    expect(instanceControl.inspect).toHaveBeenCalledTimes(1);
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 2 });
     store.close();
   });

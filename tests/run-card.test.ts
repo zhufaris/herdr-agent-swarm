@@ -4,6 +4,7 @@ import { renderMoreActionsCard } from "../src/cards/interaction-card.js";
 import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
+import { stripNativeTaskFrame } from "../src/runtime/native-task-frame.js";
 
 function findTaggedNodes(value: unknown, tag: string): Array<Record<string, unknown>> {
   if (Array.isArray(value)) return value.flatMap((item) => findTaggedNodes(item, tag));
@@ -669,6 +670,12 @@ describe("run card", () => {
     expect(serialized).not.toContain("Rebuild Query Log");
     expect(serialized).not.toContain("2 tasks");
   });
+
+  it("scans a large terminal block with many task-count lookalikes without quadratic rescans", () => {
+    const answer = Array.from({ length: 20_000 }, (_, index) => `${index + 1} tasks (status only)`).join("\n");
+
+    expect(stripNativeTaskFrame(answer)).toBe(answer);
+  }, 1_000);
 
   it("shows phase-aware status and elapsed duration instead of a queue dash", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "Run", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
