@@ -57,13 +57,17 @@ describe("instance cards", () => {
     expect(JSON.stringify(renderWorkerMainCard(view))).not.toContain('\"tag\":\"note\"');
   });
 
-  it("includes its Primary pane and project in the continuously updated Worker Main title", () => {
+  it("includes its Primary pane and project in the continuously updated Worker Main identity", () => {
     const view = {
       workerId: "i1", workerName: "reviewer", workerSessionGeneration: 1, ownerName: "owner", parentPaneId: "w1:p0", primaryPaneName: "primary-review", projectId: "swarm",
       workspace: "/repo", branch: null, model: null, runtimeState: "idle" as const, runtimeGeneration: 2, currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [], messageId: "worker-main-message", cardId: "worker-main-card",
       viewVersion: 1, deliveredVersion: 1, frozenAt: null, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
     };
-    expect(JSON.stringify(renderWorkerMainCard(view, { projectDisplayName: "Herdr Agent Swarm" }))).toContain("🤖 Worker · reviewer · primary-review · Herdr Agent Swarm");
+    const rendered = JSON.stringify(renderWorkerMainCard(view, { projectDisplayName: "Herdr Agent Swarm" }));
+    expect(rendered).toContain("🧭 reviewer");
+    expect(rendered).toContain("HERDR WORKER · PRIMARY primary-review · ✅ 空闲");
+    expect(rendered).toContain("Project Herdr Agent Swarm (`swarm`)");
+    expect(rendered).toContain("Primary primary-review (`w1:p0`)");
   });
 
   it("never binds continuation-card actions to an earlier page message", () => {

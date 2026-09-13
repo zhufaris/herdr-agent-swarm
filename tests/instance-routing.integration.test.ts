@@ -489,7 +489,7 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
     taskCard(worker.id, "completed", "owned-task");
 
-    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🤖 Worker · reviewer · w1:primary-default · Unknown project" } } } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🧭 reviewer" }, subtitle: { content: "HERDR WORKER · PRIMARY w1:primary-default · ⚠️ 未配置" } } } });
   });
 
   it("rejects stale and cross-Primary Worker card targets", async () => {

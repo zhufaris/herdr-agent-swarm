@@ -10,7 +10,7 @@ const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovis
 
 export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?: boolean; projectDisplayName?: string } = {}): object {
   const elements: object[] = [
-    { tag: "markdown", content: compactMetadata([`${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}`, `队列 \`${view.queueCount}\``, view.model ? `模型 \`${safe(view.model)}\`` : null]) },
+    { tag: "markdown", content: compactMetadata([`${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}`, `Worker \`${workerPaneLabel(view)}\``, `队列 \`${view.queueCount}\``, view.model ? `模型 \`${safe(view.model)}\`` : null]) },
   ];
   if (view.currentTask?.notice) elements.push({ tag: "markdown", content: `⚠️ ${safe(view.currentTask.notice)}` });
   elements.push({ tag: "markdown", content: currentTaskContent(view.currentTask) });
@@ -21,11 +21,11 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   if (view.recentTasks.length > 0) {
     elements.push({ tag: "markdown", content: `${cardSection("🕘", "最近任务")}\n${recentItems(view.recentTasks, 5).map(taskLine).join("\n")}` });
   }
-  elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeDetails(view) });
+  elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeDetails(view, options.projectDisplayName) });
   if (view.frozenAt) elements.push({ tag: "markdown", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` });
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },
-    header: { title: { tag: "plain_text", content: `🤖 Worker · ${safe(view.workerName)} · ${safe(view.primaryPaneName ?? view.parentPaneId)} · ${safe(options.projectDisplayName ?? view.projectId ?? "Unknown project")}` }, subtitle: { tag: "plain_text", content: "HERDR WORKER SESSION" }, template: view.runtimeState === "failed" ? "red" : view.runtimeState === "blocked" ? "orange" : view.runtimeState === "terminated" ? "grey" : "blue" },
+    header: { title: { tag: "plain_text", content: `🧭 ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: `HERDR WORKER · PRIMARY ${primaryPaneLabel(view)} · ${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}` }, template: runtimeTemplate(view.runtimeState) },
     body: { elements }
   };
 }
@@ -106,7 +106,26 @@ function pushActions(elements: object[], view: WorkerMainView, snapshot: boolean
 function progressLines(task: WorkerMainTaskSummary): string[] {
   return recentItems(task.progressEvents ?? [], 3).map((event) => `\n${lifecycleMarker(event.state === "done" ? "completed" : event.state === "active" ? "running" : event.state)} ${safe(event.label)}`);
 }
-function runtimeDetails(view: WorkerMainView): string { return [cardSection("🖥️", "运行环境"), compactMetadata([`Owner ${safe(view.ownerName)}`, `Primary \`${safe(view.parentPaneId)}\``, `Session \`${view.workerSessionGeneration}\``, `Runtime \`${view.runtimeGeneration}\``]), `Workspace  ${safe(view.workspace)}${view.branch ? `\nBranch  \`${safe(view.branch)}\`` : ""}`].join("\n"); }
+function runtimeDetails(view: WorkerMainView, projectDisplayName?: string): string {
+  const project = projectDisplayName
+    ? `Project ${safe(projectDisplayName)}${view.projectId ? ` (\`${safe(view.projectId)}\`)` : ""}`
+    : `Project ${safe(view.projectId ?? view.parentBindingId ?? "未关联项目")}`;
+  return [
+    cardSection("🖥️", "运行环境"),
+    compactMetadata([project, `Primary ${primaryPaneLabel(view)} (\`${safe(view.parentPaneId)}\`)`, `Worker \`${workerPaneLabel(view)}\``]),
+    compactMetadata([`Owner ${safe(view.ownerName)}`, `Session \`${view.workerSessionGeneration}\``, `Runtime \`${view.runtimeGeneration}\``]),
+    `Workspace  ${safe(view.workspace)}${view.branch ? `\nBranch  \`${safe(view.branch)}\`` : ""}`
+  ].join("\n");
+}
+
+function primaryPaneLabel(view: WorkerMainView): string { return safe(view.primaryPaneName ?? view.parentPaneId); }
+function workerPaneLabel(view: WorkerMainView): string { return safe(view.paneId ?? "未绑定"); }
+function runtimeTemplate(state: WorkerMainView["runtimeState"]): string {
+  if (state === "failed") return "red";
+  if (state === "blocked" || state === "detached") return "orange";
+  if (state === "stopped" || state === "terminated") return "grey";
+  return "blue";
+}
 function safeOutput(value: string): string { return truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(value)), 6_000); }
 
 function safe(value: string): string { return truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(value)), 300); }
