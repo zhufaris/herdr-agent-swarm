@@ -47,19 +47,22 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   }
 
   async handle(message: IncomingLarkMessage): Promise<void> {
-    if (this.options.workerSessionThreads) {
-      const workerRoute = await this.options.workerSessionThreads.handleMessage(message);
-      if (workerRoute.handled) {
-        this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, decision: "worker-session-thread", outcome: "accepted" }, "routed persisted Lark message");
-        this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
-        return;
-      }
-    }
-    const instanceCommand = parseInstanceCommand(message.text);
-    const command = parseCommand(message.text); const binding = this.options.stores.routing.findBindingByLarkScope(message.topicId, message.rootMessageId); const alias = this.options.stores.routing.isBindingThreadAlias(message.topicId, message.rootMessageId);
+    let binding: Binding | null = null;
     let decision = "unresolved";
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
     try {
+      if (this.options.workerSessionThreads) {
+        decision = "worker-session-thread";
+        const workerRoute = await this.options.workerSessionThreads.handleMessage(message);
+        if (workerRoute.handled) {
+          this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, decision, outcome: "accepted" }, "routed persisted Lark message");
+          this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
+          return;
+        }
+        decision = "unresolved";
+      }
+      const instanceCommand = parseInstanceCommand(message.text);
+      const command = parseCommand(message.text); binding = this.options.stores.routing.findBindingByLarkScope(message.topicId, message.rootMessageId); const alias = this.options.stores.routing.isBindingThreadAlias(message.topicId, message.rootMessageId);
       if (instanceCommand && alias) { decision = `alias-instance-command-rejected:${instanceCommand.kind}`; await this.reject(message, "这个入口话题固定连接当前 Pane 的 Primary Agent；请回到原始 Main Card 话题管理项目或 Worker。"); disposition = "rejected"; }
       else if (instanceCommand) { decision = `instance-command:${instanceCommand.kind}`; if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
       else if (command && alias && rejectsAliasCommand(command)) { decision = `alias-command-rejected:${command.kind}`; await this.reject(message, "这个入口话题只用于当前 Agent 交互；请回到原始 Main Card 话题执行会话或拓扑管理命令。"); disposition = "rejected"; }
@@ -69,7 +72,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       else if (message.isRootMessage && message.mentionsBot) { decision = "create_binding"; await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
       else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, this.options.presentation.disconnectedTopic(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
     } catch (error) {
-      const rejection = this.options.instanceInteractions ? permanentInstanceCommandRejection(error) : null;
+      const rejection = decision === "worker-session-thread" || this.options.instanceInteractions ? permanentInstanceCommandRejection(error) : null;
       if (rejection) {
         await this.reject(message, rejection);
         this.options.logger.info({ event: "lark-message-rejected", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, route: decision, reason: rejection, outcome: "accepted" }, "rejected unavailable instance command");

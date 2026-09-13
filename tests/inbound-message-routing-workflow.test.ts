@@ -40,6 +40,51 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     expect(provisioning.selectProject).not.toHaveBeenCalled();
   });
 
+  it("turns an unavailable Worker Session Thread target into a durable terminal disposition", async () => {
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      outbound, workerSessionThreads, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "worker-event", messageId: "worker-message", parentMessageId: "worker-root", chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
+
+    await expect(workflow.handle(message)).rejects.toEqual(expect.objectContaining({
+      name: PermanentInboundMessageRejection.name, message: "Target instance is not running"
+    }));
+    expect(outbound.enqueueCard).toHaveBeenCalledWith("worker-root", "rejected:worker-message", expect.any(Object));
+  });
+
+  it("keeps an unavailable Worker Session Thread message retryable when rejection reservation fails", async () => {
+    const reservationFailure = new Error("database unavailable");
+    const outbound = { enqueueCard: vi.fn(async () => { throw reservationFailure; }) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw new Error("Target instance is not running"); }) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      outbound, workerSessionThreads, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "worker-event", messageId: "worker-message", parentMessageId: "worker-root", chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
+
+    await expect(workflow.handle(message)).rejects.toBe(reservationFailure);
+  });
+
+  it("keeps an unknown Worker Session Thread failure retryable", async () => {
+    const workerFailure = new Error("database unavailable");
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const workerSessionThreads = { handleMessage: vi.fn(async () => { throw workerFailure; }) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      outbound, workerSessionThreads, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "worker-event", messageId: "worker-message", parentMessageId: "worker-root", chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
+
+    await expect(workflow.handle(message)).rejects.toBe(workerFailure);
+    expect(outbound.enqueueCard).not.toHaveBeenCalled();
+  });
+
   it("routes an active-topic reply to the Primary FIFO without consulting Worker targeting", async () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
     const store = {
