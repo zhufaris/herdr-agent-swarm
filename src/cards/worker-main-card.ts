@@ -64,7 +64,9 @@ export function renderWorkerThreadEntryCard(view: WorkerMainView, generatedAt: s
   };
   return {
     ...card,
-    config: { ...card.config, update_multi: false, summary: { content: `${view.workerName} · Worker 对话入口` } },
+    // This is immutable at the application layer, but Feishu rejects reply-card
+    // payloads with update_multi disabled on this delivery path.
+    config: { ...card.config, update_multi: true, summary: { content: `${view.workerName} · Worker 对话入口` } },
     header: { ...card.header, title: { tag: "plain_text", content: `🤖 Worker 对话 · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: "LEGACY SESSION ENTRY · READ-ONLY" } },
     body: { elements: [
       { tag: "markdown", content: `**此入口卡是一次性快照，不会自动更新**  ·  生成于 ${safe(generatedAt)}\n在本 Thread 直接发消息可为该 Worker 创建新任务；使用 \`/status\` 获取最新状态。` },

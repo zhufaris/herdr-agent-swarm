@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderWorkerMainCard, renderWorkerStatusSnapshot, renderWorkerThreadEntryReadyCard } from "../src/cards/worker-main-card.js";
+import { renderWorkerMainCard, renderWorkerStatusSnapshot, renderWorkerThreadEntryCard, renderWorkerThreadEntryReadyCard } from "../src/cards/worker-main-card.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 
 function view() {
@@ -40,6 +40,11 @@ describe("Worker Main card", () => {
     expect(rendered).not.toContain("worker_new_task_form");
     expect(rendered).not.toContain("worker_task_instruction_form");
     expect(rendered).not.toContain("worker_task_interrupt");
+  });
+
+  it("keeps the immutable Worker Thread entry compatible with Feishu reply cards", () => {
+    const card = renderWorkerThreadEntryCard(view(), "2026-09-09T13:00:00.000Z") as { config: { update_multi?: boolean } };
+    expect(card.config.update_multi).toBe(true);
   });
 
   it("preserves current task details in the status snapshot", () => {
