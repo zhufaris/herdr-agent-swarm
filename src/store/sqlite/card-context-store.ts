@@ -116,7 +116,7 @@ export class SqliteCardContextStore {
     return this.database.prepare(`UPDATE card_context_invalidations SET projected_dependency_revision = MAX(projected_dependency_revision, MIN(requested_dependency_revision, ?)), updated_at = ? WHERE target_kind = ? AND target_id = ? AND target_generation = ?`).run(dependencyRevision, now(), target.targetKind, target.targetId, target.targetGeneration).changes === 1;
   }
 
-  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryPaneEntry(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
+  projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerThreadEntryReady(input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryPaneEntry(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
     return this.context.transaction(() => {
       const current = this.loadCardContextInvalidation(invalidation);
       if (!current || current.projectedDependencyRevision >= invalidation.requestedDependencyRevision) return "current";
@@ -132,6 +132,9 @@ export class SqliteCardContextStore {
         const placement = this.dependencies.reserveWorkerMainPlacement(next, renderers.workerMain(next));
         if (placement === "stale") return this.markStale(invalidation);
         reserved = placement === "reserved";
+        if (invalidation.reason === "worker-main.delivered" && next.messageId) {
+          reserved = this.reserveWorkerThreadEntries(next, renderers.workerThreadEntryReady) || reserved;
+        }
       } else if (invalidation.targetKind === "worker-turn") {
         // Legacy Task Cards are immutable historical artifacts. Mark old
         // invalidations converged without creating or patching visible cards.
@@ -159,6 +162,33 @@ export class SqliteCardContextStore {
       this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
       return reserved ? "reserved" : "current";
     });
+  }
+
+  private reserveWorkerThreadEntries(view: WorkerMainView, render: (input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }) => object): boolean {
+    if (!view.messageId) return false;
+    const requests = this.database.prepare(`
+      SELECT request.command_intent_id, request.binding_id, request.root_message_id
+      FROM worker_thread_entry_requests request
+      JOIN worker_session_threads thread ON thread.worker_id = request.worker_id AND thread.worker_session_generation = request.worker_session_generation
+      JOIN bindings binding ON binding.id = request.binding_id
+      WHERE request.worker_id = ? AND request.worker_session_generation = ? AND request.state = 'pending'
+        AND request.binding_id = ? AND request.binding_generation = ?
+        AND thread.state = 'active' AND thread.root_message_id = ?
+        AND binding.generation = request.binding_generation AND binding.root_message_id = request.root_message_id
+        AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
+    `).all(view.workerId, view.workerSessionGeneration, view.parentBindingId, view.parentBindingGeneration, view.messageId) as Array<{ command_intent_id: string; binding_id: string; root_message_id: string }>;
+    let reserved = false;
+    for (const request of requests) {
+      const changed = this.database.prepare("UPDATE worker_thread_entry_requests SET state = 'reserved', updated_at = ? WHERE command_intent_id = ? AND state = 'pending'").run(now(), request.command_intent_id).changes;
+      if (changed !== 1) continue;
+      this.dependencies.enqueueOutboundReply({
+        id: randomUUID(), idempotencyKey: `worker-thread-entry:${request.command_intent_id}`, bindingId: request.binding_id, rootMessageId: request.root_message_id, kind: "card_reply",
+        payload: JSON.stringify(render({ workerName: view.workerName, workerId: view.workerId, workerSessionGeneration: view.workerSessionGeneration, messageId: view.messageId })),
+        laneKeyOverride: `worker-thread-entry:${request.command_intent_id}`
+      });
+      reserved = true;
+    }
+    return reserved;
   }
 
   loadCardContextInvalidation(target: CardContextTarget): CardContextInvalidation | null {

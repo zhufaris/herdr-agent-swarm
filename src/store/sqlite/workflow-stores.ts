@@ -20,6 +20,7 @@ export class SqliteCommandIntentStoreAdapter implements CommandIntentWorkflowSto
   finishCommandIntent: CommandIntentStore["finishCommandIntent"] = (id, state, outcome) => this.store.finish(id, state, outcome);
   listRecoverableCommandIntents: CommandIntentStore["listRecoverableCommandIntents"] = () => this.store.listRecoverable();
   recoverExecutingCommandIntents: CommandIntentStore["recoverExecutingCommandIntents"] = (recoveredAt) => this.store.recoverExecuting(recoveredAt);
+  registerWorkerThreadEntry: CommandIntentStore["registerWorkerThreadEntry"] = (input) => this.store.registerWorkerThreadEntry(input);
   audit: CommandIntentWorkflowStore["audit"] = (input) => this.dependencies.audit(input);
   getBinding: CommandIntentWorkflowStore["getBinding"] = (id) => this.dependencies.getBinding(id);
 }

@@ -69,6 +69,17 @@ export function renderWorkerThreadEntryCard(view: WorkerMainView, generatedAt: s
   };
 }
 
+export function renderWorkerThreadEntryReadyCard(input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }): object {
+  return {
+    schema: "2.0", config: { update_multi: false, summary: { content: `Worker 已就绪 · ${input.workerName}` } },
+    header: { title: { tag: "plain_text", content: `✅ Worker 已就绪 · ${safe(input.workerName)}` }, subtitle: { tag: "plain_text", content: "GROUP WORKER THREAD" }, template: "green" },
+    body: { elements: [
+      { tag: "markdown", content: "Worker 的实时状态、任务和后续交互都在群里的独立 Worker Thread 中。" },
+      { tag: "column_set", flex_mode: "none", columns: [{ tag: "column", width: "auto", elements: [callbackButton("打开 Worker Thread", { action: "card_target_open", aggregateKind: "worker-session", aggregateId: input.workerId, generation: input.workerSessionGeneration, messageId: input.messageId }, "primary")] }] }
+    ] }
+  };
+}
+
 function currentTaskContent(task: WorkerMainTaskSummary | null): string {
   return task ? `${cardSection("🎯", "当前任务")}\n${lifecycleMarker(task.phase)} ${safe(task.title)}  ·  ${PHASE_LABEL[task.phase]}${task.durationSeconds === null ? "" : `  ·  ${formatDuration(task.durationSeconds)}`}${task.requestText ? `\n\n${safeOutput(task.requestText)}` : ""}` : `${cardSection("🎯", "当前任务")}\n暂无任务记录`;
 }

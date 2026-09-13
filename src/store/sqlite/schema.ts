@@ -49,6 +49,12 @@ export function createLatestSchema(context: SqliteContext): void {
     CHECK((state IN ('legacy-unpublished','reserving') AND topic_id IS NULL AND root_message_id IS NULL AND activated_at IS NULL) OR (state = 'active' AND topic_id IS NOT NULL AND root_message_id IS NOT NULL AND activated_at IS NOT NULL AND stale_at IS NULL) OR (state = 'stale' AND stale_at IS NOT NULL))
   );
   CREATE INDEX IF NOT EXISTS worker_session_threads_parent ON worker_session_threads(parent_binding_id, parent_binding_generation, state);
+  CREATE TABLE IF NOT EXISTS worker_thread_entry_requests(
+    command_intent_id TEXT PRIMARY KEY REFERENCES swarm_command_intents(id) ON DELETE CASCADE, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER NOT NULL,
+    binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL, root_message_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','reserved','stale')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS worker_thread_entry_requests_pending ON worker_thread_entry_requests(worker_id, worker_session_generation, state);
   CREATE TABLE IF NOT EXISTS workspace_leases(
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, instance_id TEXT NOT NULL UNIQUE REFERENCES agent_instances(id) ON DELETE RESTRICT,
     kind TEXT NOT NULL CHECK(kind IN ('main-checkout','git-worktree','shared-read-only')), cwd TEXT NOT NULL, branch TEXT, base_commit TEXT NOT NULL,

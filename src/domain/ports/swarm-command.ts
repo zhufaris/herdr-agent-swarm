@@ -8,6 +8,7 @@ export interface CommandIntentStore {
   finishCommandIntent(id: string, state: CommandIntentTerminalState, outcome: CommandIntent["outcome"]): CommandIntent | null;
   listRecoverableCommandIntents(): CommandIntent[];
   recoverExecutingCommandIntents(recoveredAt: string): number;
+  registerWorkerThreadEntry(input: { commandIntentId: string; workerId: string; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; rootMessageId: string }): boolean;
 }
 
 export interface CommandIntentWorkflowStore extends CommandIntentStore {

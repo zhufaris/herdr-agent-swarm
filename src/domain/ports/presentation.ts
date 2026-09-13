@@ -77,5 +77,6 @@ export interface ApplicationPresentation extends PrimaryPresentation, WorkerPres
   workerMain(view: WorkerMainView): object;
   workerStatusSnapshot(view: WorkerMainView, generatedAt: string): object;
   workerThreadEntry(view: WorkerMainView, generatedAt: string): object;
+  workerThreadEntryReady(input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }): object;
   workerThreadAccepted(input: { workerName: string; queuePosition: number; duplicate: boolean }): object;
 }

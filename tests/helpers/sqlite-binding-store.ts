@@ -52,7 +52,7 @@ export const SqliteBindingStore: StoreConstructor = class {
       pruneAcceptedInboundMessages: modules.retention.pruneAcceptedInboundMessages.bind(modules.retention),
       pruneTerminalSessionOperations: modules.retention.pruneTerminalSessionOperations.bind(modules.retention),
       reserveWorkerCardDisplay: modules.workerCardDisplay.reserveWorkerCardDisplay.bind(modules.workerCardDisplay),
-      ...bindMethods(modules.commandIntents, ["acceptCommandIntent", "getCommandIntent", "claimNextCommandIntent", "finishCommandIntent", "listRecoverableCommandIntents", "recoverExecutingCommandIntents"]),
+      ...bindMethods(modules.commandIntents, ["acceptCommandIntent", "getCommandIntent", "claimNextCommandIntent", "finishCommandIntent", "listRecoverableCommandIntents", "recoverExecutingCommandIntents", "registerWorkerThreadEntry"]),
       ...bindMethods(modules.sessionOperations, ["acceptSessionOperation", "claimNextSessionOperation", "finishSessionOperation", "getSessionOperation", "listRecoverableSessionOperations"])
     });
   }

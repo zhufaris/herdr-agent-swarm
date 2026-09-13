@@ -11,7 +11,7 @@ export class CardContextRebuilder {
   private stopping = false;
   private unsubscribe: (() => void) | null = null;
 
-  constructor(private readonly store: CardContextProjectionStore, private readonly wakeOutbound: () => void, private readonly logger: Pick<Logger, "debug" | "error">, private readonly presentation: Pick<ApplicationPresentation, "workerMain" | "workerTurn" | "mainCard" | "paneEntryCard" | "answerCard">, private readonly work?: OutboundWorkNotifier) {}
+  constructor(private readonly store: CardContextProjectionStore, private readonly wakeOutbound: () => void, private readonly logger: Pick<Logger, "debug" | "error">, private readonly presentation: Pick<ApplicationPresentation, "workerMain" | "workerThreadEntryReady" | "workerTurn" | "mainCard" | "paneEntryCard" | "answerCard">, private readonly work?: OutboundWorkNotifier) {}
 
   start(intervalMs: number): void {
     if (this.timer) return;
@@ -54,7 +54,7 @@ export class CardContextRebuilder {
   }
 
   private project(invalidation: CardContextInvalidation): boolean {
-    const renderers = { workerMain: this.presentation.workerMain, workerTask: this.presentation.workerTurn, primaryMain: this.presentation.mainCard, primaryPaneEntry: this.presentation.paneEntryCard, primaryAnswer: this.presentation.answerCard };
+    const renderers = { workerMain: this.presentation.workerMain, workerThreadEntryReady: this.presentation.workerThreadEntryReady, workerTask: this.presentation.workerTurn, primaryMain: this.presentation.mainCard, primaryPaneEntry: this.presentation.paneEntryCard, primaryAnswer: this.presentation.answerCard };
     const outcome = this.store.projectCardContext(invalidation, renderers);
     this.logger.debug({ event: "card-context-rebuilt", targetKind: invalidation.targetKind, targetId: invalidation.targetId, targetGeneration: invalidation.targetGeneration, dependencyRevision: invalidation.requestedDependencyRevision, outcome }, "rebuilt card context projection");
     return outcome === "reserved";

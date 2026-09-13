@@ -298,6 +298,30 @@ describe("SQLite store", () => {
       expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     });
 
+    it("releases one Primary entry only after canonical Worker Thread activation", () => {
+      const view = activeWorkerStore(null);
+      const command = store!.acceptCommandIntent({ id: "worker-create", idempotencyKey: "worker-create", laneKey: "binding:b1", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true }, context: { projectId: "p1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", actorOpenId: "operator", sourceMessageId: "source", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", terminalId: null, nativeSession: null, activePromptId: null } }, replayPolicy: "reconcilable", acceptedAt: "2026-09-13T00:00:00.000Z" }).intent;
+      expect(store!.claimNextCommandIntent()).toMatchObject({ id: command.id });
+      expect(store!.registerWorkerThreadEntry({ commandIntentId: command.id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "primary-root" })).toBe(true);
+      const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
+      expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
+      expect(store!.listPendingOutboundReplies()).toHaveLength(1);
+      const group = store!.listPendingOutboundReplies()[0]!;
+      expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(group.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
+
+      const invalidation = store!.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "worker-session" && targetId === "reviewer");
+      expect(invalidation).toBeDefined();
+      const outcome = store!.projectCardContext(invalidation!, { workerMain: () => ({ schema: "2.0" }), workerThreadEntryReady: (entry) => ({ entry }), workerTask: () => ({ schema: "2.0" }), primaryMain: () => ({ schema: "2.0" }), primaryPaneEntry: () => ({ schema: "2.0" }), primaryAnswer: () => ({ schema: "2.0" }) });
+      expect(outcome).toBe("reserved");
+      const entries = store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "worker-thread-entry:worker-create");
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ bindingId: "b1", rootMessageId: "primary-root", kind: "card_reply" });
+      expect(JSON.parse(entries[0]!.payload)).toEqual({ entry: { workerName: "reviewer", workerId: "reviewer", workerSessionGeneration: 1, messageId: "worker-root" } });
+      expect(store!.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'worker-create'").get()).toEqual({ state: "reserved" });
+      store!.projectCardContext(invalidation!, { workerMain: () => ({ schema: "2.0" }), workerThreadEntryReady: (entry) => ({ entry }), workerTask: () => ({ schema: "2.0" }), primaryMain: () => ({ schema: "2.0" }), primaryPaneEntry: () => ({ schema: "2.0" }), primaryAnswer: () => ({ schema: "2.0" }) });
+      expect(store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "worker-thread-entry:worker-create")).toHaveLength(1);
+    });
+
     it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {
       const view = activeWorkerStore("canonical-worker-main");
       const input = { publicationKey: "worker-entry:reviewer:1", actionMessageId: "instances-card", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "legacy-entry" as const, sourceMainMessageId: "canonical-worker-main", card: { schema: "2.0" } };

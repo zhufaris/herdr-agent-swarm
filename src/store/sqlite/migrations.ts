@@ -97,6 +97,7 @@ export class SqliteMigrations {
     this.prompt.ensureSwarmCommandIntents();
     this.worker.ensureWorkerCardDisplayRequests();
     this.worker.ensureWorkerSessionThreads();
+    this.worker.ensureWorkerThreadEntryRequests();
     if (runCardViewNeedsRebuild) this.cards.recreateRunCardsView();
     this.cards.ensureQueryIndexes();
     const answerTargetMigration = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();

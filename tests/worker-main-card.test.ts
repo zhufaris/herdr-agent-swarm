@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderWorkerMainCard, renderWorkerStatusSnapshot } from "../src/cards/worker-main-card.js";
+import { renderWorkerMainCard, renderWorkerStatusSnapshot, renderWorkerThreadEntryReadyCard } from "../src/cards/worker-main-card.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 
 function view() {
@@ -10,6 +10,20 @@ function view() {
 }
 
 describe("Worker Main card", () => {
+  it("renders a compact Primary entry that only opens the canonical Worker Thread", () => {
+    const rendered = JSON.stringify(renderWorkerThreadEntryReadyCard({ workerName: "reviewer", workerId: "worker-1", workerSessionGeneration: 3, messageId: "om_worker_main" }));
+
+    expect(rendered).toContain("Worker 已就绪 · reviewer");
+    expect(rendered).toContain("打开 Worker Thread");
+    expect(rendered).toContain('\"action\":\"card_target_open\"');
+    expect(rendered).toContain('\"aggregateKind\":\"worker-session\"');
+    expect(rendered).toContain('\"aggregateId\":\"worker-1\"');
+    expect(rendered).toContain('\"generation\":3');
+    expect(rendered).toContain("om_worker_main");
+    expect(rendered).not.toContain("worker_new_task_form");
+    expect(rendered).not.toContain("worker_task_instruction_form");
+  });
+
   it("renders one immutable status snapshot with a stable timestamp and canonical-card target", () => {
     const card = renderWorkerStatusSnapshot({ ...view(), messageId: "om_worker_main" }, "2026-09-09T13:00:00.000Z") as { config: { update_multi?: boolean } };
     const rendered = JSON.stringify(card);

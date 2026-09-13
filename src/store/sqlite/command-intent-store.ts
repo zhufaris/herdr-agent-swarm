@@ -66,6 +66,16 @@ export class SqliteCommandIntentStore {
     return Number(this.context.database.prepare("UPDATE swarm_command_intents SET state = 'uncertain', outcome_json = COALESCE(outcome_json, ?), updated_at = ? WHERE state = 'executing'")
       .run(outcome, recoveredAt).changes);
   }
+
+  registerWorkerThreadEntry(input: { commandIntentId: string; workerId: string; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; rootMessageId: string }): boolean {
+    const timestamp = now();
+    return this.context.database.prepare(`
+      INSERT INTO worker_thread_entry_requests(command_intent_id, worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state, created_at, updated_at)
+      SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+      WHERE EXISTS (SELECT 1 FROM swarm_command_intents WHERE id = ? AND state = 'executing')
+        AND EXISTS (SELECT 1 FROM agent_instances WHERE id = ? AND role = 'worker' AND worker_session_generation = ? AND parent_binding_id = ? AND parent_binding_generation = ?)
+    `).run(input.commandIntentId, input.workerId, input.workerSessionGeneration, input.bindingId, input.bindingGeneration, input.rootMessageId, timestamp, timestamp, input.commandIntentId, input.workerId, input.workerSessionGeneration, input.bindingId, input.bindingGeneration).changes === 1;
+  }
 }
 
 function now(): string { return new Date().toISOString(); }

@@ -30,6 +30,20 @@ export class WorkerMigrations {
     this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (35)").run();
   }
 
+  ensureWorkerThreadEntryRequests(): void {
+    const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 42").get();
+    if (migrated) return;
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS worker_thread_entry_requests(
+        command_intent_id TEXT PRIMARY KEY REFERENCES swarm_command_intents(id) ON DELETE CASCADE, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, worker_session_generation INTEGER NOT NULL,
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE, binding_generation INTEGER NOT NULL, root_message_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','reserved','stale')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS worker_thread_entry_requests_pending ON worker_thread_entry_requests(worker_id, worker_session_generation, state);
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (42);
+    `);
+  }
+
   ensureWorkerCardDisplayRequests(): void {
     this.context.database.exec(`
       CREATE TABLE IF NOT EXISTS worker_card_display_requests(

@@ -21,7 +21,7 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
     awake: vi.fn(async () => ({ outcome: "none", reason: "no_detached_prompt" })),
     skipDetached: vi.fn(() => ({ outcome: "skipped" as const, promptId: "detached-prompt", outboxReserved: true }))
   };
-  const worker = { id: "worker", name: "reviewer" }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
+  const worker = { id: "worker", name: "reviewer", workerSessionGeneration: 1 }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
   const gateway = new SwarmCommandGateway({ store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, presentation: applicationPresentation } as never);
   return { store, gateway, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound };
@@ -50,6 +50,17 @@ describe("SwarmCommandGateway", () => {
     await gateway.handle(message, command); await gateway.handle(message, command);
     expect(sessionAdministration.rename).toHaveBeenCalledOnce();
     expect(store.database.prepare("SELECT state, attempt_count FROM swarm_command_intents").all()).toEqual([{ state: "succeeded", attempt_count: 1 }]); store.close();
+  });
+
+  it("persists one Primary Worker-thread entry request with the durable create command", async () => {
+    const fixture = setup();
+    const worker = fixture.store.createWorkerAgentInstance({ id: "worker", projectId: "project", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: null }, workspace: { id: "worker-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    fixture.instanceControl.createWorker.mockResolvedValueOnce({ status: "created", instance: worker });
+    await fixture.gateway.handle({ ...message, messageId: "worker-entry" }, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true });
+
+    expect(fixture.store.database.prepare("SELECT worker_id, worker_session_generation, binding_id, binding_generation, root_message_id, state FROM worker_thread_entry_requests").all())
+      .toEqual([{ worker_id: "worker", worker_session_generation: 1, binding_id: "binding", binding_generation: 1, root_message_id: "root", state: "pending" }]);
+    fixture.store.close();
   });
 
   it.each([
@@ -182,7 +193,7 @@ describe("SwarmCommandGateway", () => {
 
   it("reconstructs a durable start-failed Worker result after gateway restart", async () => {
     const fixture = setup();
-    const failed = { id: "worker", name: "reviewer" };
+    const failed = { id: "worker", name: "reviewer", workerSessionGeneration: 1 };
     fixture.instanceControl.createWorker.mockResolvedValueOnce({ status: "created-start-failed", instance: failed, error: "runtime unavailable" });
     const action = { messageId: "card", chatId: "chat", operatorOpenId: "admin", value: {} };
     const command = { kind: "worker_create" as const, name: "reviewer", agentKind: "traex" as const, model: null, start: true };
