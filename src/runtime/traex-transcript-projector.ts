@@ -34,7 +34,7 @@ export class TraexTranscriptProjector {
       const envelope = parseEnvelope(line); if (!envelope) continue;
       if (envelope.type === "event_msg") {
         const started = taskStartedEventSchema.safeParse(envelope.payload);
-        if (started.success) { observationTurnId = started.data.turn_id; freshTurnStart = true; this.callsById.clear(); this.emittedUserMessageIds.clear(); }
+        if (started.success) { observationTurnId = started.data.turn_id; freshTurnStart = true; this.callsById.clear(); this.emittedItemIds.clear(); this.emittedUserMessageIds.clear(); }
         lifecycle = reduceTurnLifecycle(lifecycle, envelope, input.maxRenderedDeltaChars);
         const userMessage = userMessageEventSchema.safeParse(envelope.payload);
         if (userMessage.success && observationTurnId && lifecycle?.turnId === observationTurnId) requestText = boundMarkdown(redactSecrets(userMessage.data.message), input.maxRenderedDeltaChars);
