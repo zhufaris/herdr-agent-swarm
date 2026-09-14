@@ -7,6 +7,7 @@ export interface PrimaryIdentity { projectId: string; bindingId: string; binding
 export interface PrimaryWorkerCreationPort {
   createWorkerFromPrimaryTool(input: PrimaryIdentity & { idempotencyKey: string; command: { kind: "worker_create"; name: string; agentKind: AgentKind; model: string | null; start: boolean } }): Promise<CreateWorkerResult>;
 }
+export const MAX_PRIMARY_WAIT_MS = 29_000;
 
 export class PrimaryToolBroker {
   private readonly actor: Extract<ControlActor, { kind: "thread-primary" }>;
@@ -16,7 +17,13 @@ export class PrimaryToolBroker {
   followUpInstance(input: { instanceId: string; parentTurnId: string; text: string; idempotencyKey: string }) { return this.messaging.submit({ idempotencyKey: input.idempotencyKey, actor: this.actor, projectId: this.actor.projectId, targetInstanceId: input.instanceId, content: { kind: "followup", text: input.text }, source: { messageId: this.identity.sourceMessageId, rootMessageId: this.identity.rootMessageId, parentTurnId: input.parentTurnId } }); }
   steerInstance(input: { instanceId: string; text: string; idempotencyKey: string }) { return this.messaging.steer({ ...input, actor: this.actor, targetInstanceId: input.instanceId }); }
   inspectInstance(input: { instanceId: string }) { return this.messaging.inspect(this.actor, input.instanceId); }
-  waitInstance(input: { instanceId: string; afterCursor?: string; timeoutMs?: number }) { const events = this.messaging.events(this.actor, input.instanceId, Number(input.afterCursor ?? 0)); return Promise.resolve({ events, cursor: String(events.at(-1)?.id ?? input.afterCursor ?? "0") }); }
+  async waitInstance(input: { instanceId: string; afterCursor?: string; timeoutMs?: number }) {
+    const afterId = nonNegativeInteger(input.afterCursor ?? "0", "afterCursor");
+    const timeoutMs = nonNegativeInteger(input.timeoutMs ?? 0, "timeoutMs");
+    if (timeoutMs > MAX_PRIMARY_WAIT_MS) throw new Error(`timeoutMs must be at most ${MAX_PRIMARY_WAIT_MS}`);
+    const events = await this.messaging.waitForEvents(this.actor, input.instanceId, afterId, timeoutMs);
+    return { events, cursor: String(events.at(-1)?.id ?? afterId) };
+  }
   interruptInstance(input: { instanceId: string; idempotencyKey: string }) { return this.messaging.interrupt({ ...input, actor: this.actor, targetInstanceId: input.instanceId }); }
   showWorkerCards(input: { workerName: string; idempotencyKey: string }) {
     if (!this.workerCards) throw new Error("Worker card display is unavailable");
@@ -30,4 +37,11 @@ export class PrimaryToolBroker {
     if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey) throw new Error("Worker creation requires an idempotencyKey");
     return this.workerCreation.createWorkerFromPrimaryTool({ ...this.identity, idempotencyKey: input.idempotencyKey, command: { kind: "worker_create", name: input.name, agentKind: input.agentKind, model: input.model ?? null, start: input.start ?? true } });
   }
+}
+
+function nonNegativeInteger(value: string | number, name: string): number {
+  if ((typeof value === "string" && !/^(?:0|[1-9]\d*)$/.test(value)) || (typeof value !== "string" && typeof value !== "number")) throw new Error(`${name} must be a non-negative integer`);
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
+  return parsed;
 }

@@ -17,10 +17,11 @@ describe("Primary tools MCP surface", () => {
   });
 
   it("advertises the scoped Worker creation and coordination tools with model-facing guidance", async () => {
-    const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string; description: string }> } };
+    const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string; description: string; inputSchema: { properties: Record<string, { maximum?: number }> } }> } };
     expect(response.result.tools.map(({ name }) => name).sort()).toEqual(["create_worker", "follow_up_instance", "inspect_instance", "interrupt_instance", "list_instances", "prompt_instance", "show_worker_cards", "steer_instance", "wait_instance"].sort());
     expect(response.result.tools.every(({ description }) => description.length > 40)).toBe(true);
     expect(response.result.tools.find(({ name }) => name === "show_worker_cards")?.description).toMatch(/one-time.*does not update/i);
+    expect(response.result.tools.find(({ name }) => name === "wait_instance")?.inputSchema.properties.timeoutMs?.maximum).toBe(29_000);
   });
 
   it("maps Worker creation without accepting caller-owned scope", async () => {

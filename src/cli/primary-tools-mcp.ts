@@ -1,6 +1,7 @@
 import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import { readFileSync } from "node:fs";
+import { MAX_PRIMARY_WAIT_MS } from "../runtime/primary-tool-broker.js";
 
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number; method: string; params?: Record<string, unknown> };
 export const MAX_PRIMARY_TOOL_RESPONSE_BYTES = 1024 * 1024;
@@ -12,7 +13,7 @@ const definitions = [
   tool("follow_up_instance", "Queue a follow-up to one explicit settled turn on an existing same-project Worker. It runs in FIFO order and does not imply steering.", required({ instanceId: stringField("Worker instance ID."), parentTurnId: stringField("Settled parent turn ID from inspect_instance."), text: stringField("Follow-up instruction."), idempotencyKey: stringField("Stable unique key for this intended submission.") })),
   tool("steer_instance", "Explicitly steer a currently active Worker turn. It never falls back to queueing an ordinary turn.", required({ instanceId: stringField("Active Worker instance ID."), text: stringField("Priority steering instruction."), idempotencyKey: stringField("Stable unique key for this intended operation.") })),
   tool("inspect_instance", "Inspect one existing same-project Worker and its bounded durable turn/event history.", required({ instanceId: stringField("Worker instance ID.") })),
-  tool("wait_instance", "Poll durable events for one Worker after an opaque cursor. Use this to observe completion; completion never triggers a Primary turn automatically.", required({ instanceId: stringField("Worker instance ID."), afterCursor: stringField("Cursor returned by a previous call."), timeoutMs: { type: "integer", minimum: 0, maximum: 30000, description: "Maximum wait hint in milliseconds." } }, ["instanceId"])),
+  tool("wait_instance", "Wait for durable events for one Worker after an opaque cursor. Use this to observe completion; completion never triggers a Primary turn automatically.", required({ instanceId: stringField("Worker instance ID."), afterCursor: stringField("Cursor returned by a previous call."), timeoutMs: { type: "integer", minimum: 0, maximum: MAX_PRIMARY_WAIT_MS, description: "Maximum wait in milliseconds; defaults to an immediate poll." } }, ["instanceId"])),
   tool("interrupt_instance", "Interrupt a currently active same-project Worker. Use only when the user or task requires interruption; this does not stop or remove the instance.", required({ instanceId: stringField("Active Worker instance ID."), idempotencyKey: stringField("Stable unique key for this intended operation.") })),
   tool("show_worker_cards", "Queue one one-time status snapshot for an exact-name Worker owned by this Primary. The snapshot does not update automatically and never prompts or controls the Worker.", required({ workerName: stringField("Exact Worker display name."), idempotencyKey: stringField("Stable unique key for this intended display request.") }))
 ];

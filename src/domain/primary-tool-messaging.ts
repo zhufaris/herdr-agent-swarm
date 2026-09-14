@@ -10,5 +10,6 @@ export interface PrimaryToolMessagingPort {
   inspect(actor: ControlActor, instanceId: string): { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] };
   list(actor: ControlActor, projectId: string): AgentInstance[];
   events(actor: ControlActor, instanceId: string, afterId?: number): InstanceEvent[];
+  waitForEvents(actor: ControlActor, instanceId: string, afterId: number, timeoutMs: number): Promise<InstanceEvent[]>;
   interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string }): Promise<unknown>;
 }
