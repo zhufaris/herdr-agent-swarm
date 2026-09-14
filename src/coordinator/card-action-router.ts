@@ -63,8 +63,9 @@ export class CardActionRouter implements CardActionRouterPort {
       case "open-thread":
         return this.options.deliveryRecovery.openThread(action, command.bindingId);
       case "pane-directory": {
-        const outcome = await this.options.deliveryRecovery.sendPaneCard(action, command);
-        return { toast: { type: outcome === "stale" ? "warning" : "success", content: outcome === "sent" ? "已发送原始 Primary Thread 入口。" : outcome === "duplicate" ? "该 Primary Thread 入口已受理。" : "该 Pane 已变化，请刷新目录后重试。" } };
+        const outcome = await this.options.deliveryRecovery.forwardPaneThread(action, command);
+        if (outcome === "stale") return { toast: { type: "warning", content: "该 Thread 尚未就绪或已失效，请刷新 `/swarm panes` 后重试。" } };
+        return { toast: { type: "success", content: command.action === "pane_primary_thread_forward" ? "已将原始 Primary Thread 发送到群底部。" : "已将原始 Worker Thread 发送到群底部。" } };
       }
       case "dead-letter":
         return this.options.deliveryRecovery.decideDeadLetter(action, command.replyId, command.decision);

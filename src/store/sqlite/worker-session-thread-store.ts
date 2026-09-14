@@ -58,6 +58,28 @@ export class SqliteWorkerSessionThreadStore {
     } };
   }
 
+  resolveCanonicalDirectoryTarget(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { conversationId: string } | null {
+    const row = this.context.database.prepare(`
+      SELECT thread.topic_id, thread.root_message_id
+      FROM worker_session_threads thread
+      JOIN agent_instances worker ON worker.id = thread.worker_id
+      JOIN bindings binding ON binding.id = thread.parent_binding_id
+      WHERE thread.worker_id = ? AND thread.worker_session_generation = ?
+        AND thread.parent_binding_id = ? AND thread.parent_binding_generation = ? AND thread.parent_pane_id = ?
+        AND thread.chat_id = ? AND thread.mode = 'canonical-main' AND thread.state = 'active'
+        AND worker.role = 'worker' AND worker.generation = ? AND worker.worker_session_lifecycle = 'active'
+        AND worker.worker_session_generation = thread.worker_session_generation
+        AND worker.parent_binding_id = thread.parent_binding_id AND worker.parent_binding_generation = thread.parent_binding_generation
+        AND worker.parent_pane_id = thread.parent_pane_id
+        AND binding.chat_id = thread.chat_id AND binding.generation = thread.parent_binding_generation
+        AND binding.pane_id = thread.parent_pane_id AND binding.status_message_id = ?
+        AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
+      LIMIT 1
+    `).get(input.workerId, input.workerSessionGeneration, input.parentBindingId, input.parentBindingGeneration, input.parentPaneId, input.chatId, input.runtimeGeneration, input.sourceMainMessageId) as { topic_id: string | null; root_message_id: string | null } | undefined;
+    const conversationId = row?.topic_id ?? row?.root_message_id ?? null;
+    return conversationId ? { conversationId } : null;
+  }
+
   reserveLegacyEntry(input: Parameters<WorkerSessionThreadApplicationStore["reserveLegacyEntry"]>[0]): WorkerThreadPublicationDecision {
     return this.context.transaction(() => {
       const worker = this.context.database.prepare("SELECT generation, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id FROM agent_instances WHERE id = ? AND role = 'worker' AND worker_session_lifecycle = 'active'").get(input.target.instanceId) as { generation: number; worker_session_generation: number; parent_binding_id: string | null; parent_binding_generation: number | null; parent_pane_id: string | null } | undefined;

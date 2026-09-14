@@ -11,19 +11,21 @@ describe("topic pane directory card", () => {
     }]);
 
     const serialized = JSON.stringify(card);
-    expect(serialized).toContain("pane_card_send");
+    expect(serialized).toContain("pane_primary_thread_forward");
     expect(serialized).toContain("\"bindingGeneration\":4");
     expect(serialized).toContain("\"sourceMainMessageId\":\"om_main\"");
     expect(serialized).toContain("Build \\\\* release");
-    expect(serialized).toContain("打开 Primary");
+    expect(serialized).toContain("转发 Primary Thread");
     expect(serialized).toContain("🧭 Swarm Panes");
     expect(serialized).toContain("🤖 **reviewer**");
     expect(serialized).toContain("work:p2");
-    expect(serialized).toContain('"action":"worker_thread_send"');
+    expect(serialized).toContain('"action":"pane_worker_thread_forward"');
     expect(serialized).toContain('"generation":4');
     expect(serialized).toContain('"parentPaneId":"work:p1"');
     expect(serialized).toContain('"sourceMainMessageId":"om_main"');
-    expect(serialized).toContain("打开 Thread");
+    expect(serialized).toContain("转发 Worker Thread");
+    expect(serialized).not.toContain('"action":"pane_card_send"');
+    expect(serialized).not.toContain('"action":"worker_thread_send"');
   });
 
   it("renders a passive pane entry snapshot without canonical navigation buttons", () => {
@@ -44,7 +46,7 @@ describe("topic pane directory card", () => {
       title: `Task ${index}`, spaceName: "core", agentState: "idle" as const, workers: []
     }));
     const serialized = JSON.stringify(renderTopicPaneDirectoryCard(entries));
-    expect((serialized.match(/pane_card_send/g) ?? [])).toHaveLength(40);
+    expect((serialized.match(/pane_primary_thread_forward/g) ?? [])).toHaveLength(40);
     expect(serialized).toContain("仅展示前 40 个 active Pane。");
   });
 

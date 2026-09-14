@@ -6,7 +6,7 @@ function harness() {
   const cardInteractions = { handle: vi.fn(async () => ({ toast: { type: "success" as const, content: "session" } })) };
   const instanceInteractions = { handleCardAction: vi.fn(async () => ({ toast: { type: "success" as const, content: "instance" } })) };
   const modelSelection = { selectModel: vi.fn(async () => {}), selectModelMode: vi.fn(async () => {}) };
-  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}), sendPaneCard: vi.fn(async () => "sent" as "sent" | "duplicate" | "stale") };
+  const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}), forwardPaneThread: vi.fn(async () => "sent" as "sent" | "stale") };
   const provisioning = { attach: vi.fn(async () => true), completeSelection: vi.fn(async () => null) };
   const router = new CardActionRouter({
     chatId: "chat", allowedOpenIds: ["user"], adminOpenIds: ["user"],
@@ -40,10 +40,12 @@ describe("card action router", () => {
     expect(stopped).toBe(true);
   });
 
-  it("reports an idempotently accepted pane publication without promising another thread", async () => {
+  it("reports exact Primary and Worker canonical forwarding outcomes", async () => {
     const h = harness();
-    h.deliveryRecovery.sendPaneCard.mockResolvedValueOnce("duplicate");
-    await expect(h.router.handle(action({ action: "pane_card_send", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "success", content: expect.stringContaining("已受理") } });
+    await expect(h.router.handle(action({ action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "success", content: "已将原始 Primary Thread 发送到群底部。" } });
+    await expect(h.router.handle(action({ action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 1, parentPaneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "success", content: "已将原始 Worker Thread 发送到群底部。" } });
+    h.deliveryRecovery.forwardPaneThread.mockResolvedValueOnce("stale");
+    await expect(h.router.handle(action({ action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "warning", content: "该 Thread 尚未就绪或已失效，请刷新 `/swarm panes` 后重试。" } });
   });
 
   it.each([
@@ -56,7 +58,8 @@ describe("card action router", () => {
     ["dismiss_dead_letter", { action: "dismiss_dead_letter", replyId: "r1" }, undefined, "dead-letter"],
     ["select_project", { action: "select_project", selectionId: "s1", projectId: "p1" }, undefined, "project-selection"],
     ["claim_pane", { action: "claim_pane", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }, undefined, "pane-claim"],
-    ["pane_card_send", { action: "pane_card_send", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }, undefined, "pane-directory"],
+    ["pane_primary_thread_forward", { action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }, undefined, "pane-directory"],
+    ["pane_worker_thread_forward", { action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 1, parentPaneId: "pane-1", sourceMainMessageId: "om-main" }, undefined, "pane-directory"],
   ] as const)("dispatches %s to exactly one owner", async (_name, value, option, owner) => {
     const h = harness();
     await h.router.handle(action(value, option));
@@ -69,7 +72,7 @@ describe("card action router", () => {
       "dead-letter": h.deliveryRecovery.decideDeadLetter,
       "project-selection": h.provisioning.completeSelection,
       "pane-claim": h.provisioning.attach,
-      "pane-directory": h.deliveryRecovery.sendPaneCard,
+      "pane-directory": h.deliveryRecovery.forwardPaneThread,
     };
     expect(owners[owner]).toHaveBeenCalledOnce();
     expect(Object.values(owners).reduce((count, mock) => count + mock.mock.calls.length, 0)).toBe(1);

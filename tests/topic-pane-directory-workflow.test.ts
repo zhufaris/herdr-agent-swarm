@@ -50,17 +50,40 @@ describe("topic pane directory workflow", () => {
     const audit = vi.fn();
     const shareConversation = vi.fn(async () => undefined);
     const workflow = new DeliveryRecoveryWorkflow({
-      store: { getBinding: () => binding, loadTopicView: () => topic("selected"), reservePaneThreadAlias, audit, dismissDeadLetter: vi.fn(), listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
+      store: { getBinding: () => binding, resolveCanonicalWorkerThread: vi.fn(() => null), loadTopicView: () => topic("selected"), reservePaneThreadAlias, audit, dismissDeadLetter: vi.fn(), listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
       gatewayEffects: { createConversation: vi.fn(), replyText: vi.fn(), shareConversation }, outbound: { enqueueCardUpdate: vi.fn(async () => {}) }, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
       presentation: { paneEntryCard: vi.fn(() => ({ card: "main-entry" })), failures: vi.fn(() => []) }, logger: pino({ enabled: false })
     });
 
-    await expect(workflow.sendPaneCard(action, { bindingId: "selected", bindingGeneration: 3, paneId: "work:p1", sourceMainMessageId: "om-main" })).resolves.toBe("sent");
+    await expect(workflow.forwardPaneThread(action, { kind: "pane-directory", action: "pane_primary_thread_forward", bindingId: "selected", bindingGeneration: 3, paneId: "work:p1", sourceMainMessageId: "om-main" })).resolves.toBe("sent");
     expect(shareConversation).toHaveBeenCalledWith({ conversationId: "topic", messageId: "directory-card", targetConversationId: "chat", purpose: "group-thread" });
     expect(reservePaneThreadAlias).not.toHaveBeenCalled();
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: "pane.card.send", outcome: "shared" }));
 
-    await expect(workflow.sendPaneCard(action, { bindingId: "selected", bindingGeneration: 2, paneId: "work:p1", sourceMainMessageId: "om-main" })).resolves.toBe("stale");
+    await expect(workflow.forwardPaneThread(action, { kind: "pane-directory", action: "pane_primary_thread_forward", bindingId: "selected", bindingGeneration: 2, paneId: "work:p1", sourceMainMessageId: "om-main" })).resolves.toBe("stale");
+    expect(shareConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares only an exact active canonical Worker thread and never reserves a legacy entry", async () => {
+    const reservePaneThreadAlias = vi.fn(() => "reserved" as const);
+    const resolveCanonicalWorkerThread = vi.fn(() => ({ conversationId: "worker-topic" }));
+    const audit = vi.fn();
+    const shareConversation = vi.fn(async () => undefined);
+    const workflow = new DeliveryRecoveryWorkflow({
+      store: { getBinding: vi.fn(), resolveCanonicalWorkerThread, loadTopicView: vi.fn(), reservePaneThreadAlias, audit, dismissDeadLetter: vi.fn(), listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
+      gatewayEffects: { createConversation: vi.fn(), replyText: vi.fn(), shareConversation }, outbound: { enqueueCardUpdate: vi.fn(async () => {}) }, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
+      presentation: { paneEntryCard: vi.fn(), failures: vi.fn(() => []) }, logger: pino({ enabled: false })
+    });
+    const target = { kind: "pane-directory" as const, action: "pane_worker_thread_forward" as const, instanceId: "worker-1", generation: 4, workerSessionGeneration: 2, bindingId: "selected", bindingGeneration: 3, parentPaneId: "work:p1", sourceMainMessageId: "om-main" };
+
+    await expect(workflow.forwardPaneThread(action, target)).resolves.toBe("sent");
+    expect(resolveCanonicalWorkerThread).toHaveBeenCalledWith({ chatId: "chat", workerId: "worker-1", runtimeGeneration: 4, workerSessionGeneration: 2, parentBindingId: "selected", parentBindingGeneration: 3, parentPaneId: "work:p1", sourceMainMessageId: "om-main" });
+    expect(shareConversation).toHaveBeenCalledWith({ conversationId: "worker-topic", messageId: "directory-card", targetConversationId: "chat", purpose: "group-thread" });
+    expect(reservePaneThreadAlias).not.toHaveBeenCalled();
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: "pane.worker.thread.forward", outcome: "shared" }));
+
+    resolveCanonicalWorkerThread.mockReturnValueOnce(null);
+    await expect(workflow.forwardPaneThread(action, target)).resolves.toBe("stale");
     expect(shareConversation).toHaveBeenCalledTimes(1);
   });
 });

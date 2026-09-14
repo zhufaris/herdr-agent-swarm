@@ -22,7 +22,7 @@ function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[
 function primaryPaneRow(entry: TopicPaneDirectoryEntry): object {
   return { tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
     { tag: "column", width: "weighted", weight: 7, elements: [{ tag: "markdown", content: "**🧭 " + escapeMarkdown(entry.title) + "**  ·  " + escapeMarkdown(entry.agentState) + "\n" + escapeMarkdown(entry.spaceName) + " · Primary `" + escapeCode(entry.paneId) + "`" }] },
-    { tag: "column", width: "auto", elements: [callbackButton("打开 Primary", { action: "pane_card_send", bindingId: entry.bindingId, bindingGeneration: entry.bindingGeneration, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId }, "primary", { size: "small" })] }
+    { tag: "column", width: "auto", elements: [callbackButton("转发 Primary Thread", { action: "pane_primary_thread_forward", bindingId: entry.bindingId, bindingGeneration: entry.bindingGeneration, paneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId }, "primary", { size: "small" })] }
   ] };
 }
 function workerPaneElements(entry: TopicPaneDirectoryEntry): object[] {
@@ -31,7 +31,7 @@ function workerPaneElements(entry: TopicPaneDirectoryEntry): object[] {
   const elements: object[] = visible.flatMap((worker) => {
     return [{ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: [
       { tag: "column", width: "weighted", weight: 7, elements: [{ tag: "markdown", content: `↳ 🤖 **${escapeMarkdown(worker.workerName)}**  ·  ${escapeMarkdown(worker.state)}\n　 Pane \`${escapeCode(worker.paneId ?? "未分配")}\`` }] },
-      { tag: "column", width: "auto", elements: [callbackButton("打开 Thread", { action: "worker_thread_send", instanceId: worker.workerId, generation: worker.runtimeGeneration, workerSessionGeneration: worker.workerSessionGeneration, bindingId: entry.bindingId, bindingGeneration: entry.bindingGeneration, parentPaneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId, conversationKey: `binding:${entry.bindingId}` }, "default", { size: "small" })] }
+      { tag: "column", width: "auto", elements: [callbackButton("转发 Worker Thread", { action: "pane_worker_thread_forward", instanceId: worker.workerId, generation: worker.runtimeGeneration, workerSessionGeneration: worker.workerSessionGeneration, bindingId: entry.bindingId, bindingGeneration: entry.bindingGeneration, parentPaneId: entry.paneId, sourceMainMessageId: entry.sourceMainMessageId }, "default", { size: "small" })] }
     ] }];
   });
   if (entry.workers.length > visible.length) elements.push({ tag: "markdown", content: `↳ … 另有 ${entry.workers.length - visible.length} 个 Worker Pane 未展示。` });

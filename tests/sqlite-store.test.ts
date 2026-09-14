@@ -298,6 +298,22 @@ describe("SQLite store", () => {
       expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     });
 
+    it("resolves only the exact active canonical Worker thread for directory forwarding", () => {
+      const view = activeWorkerStore(null);
+      expect(store!.workerSessionThreads.reserve({ publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: {} })).toBe("reserved");
+      const reply = store!.listPendingOutboundReplies()[0]!;
+      expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(reply.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
+      const target = { chatId: "chat", workerId: "reviewer", runtimeGeneration: 1, workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
+
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget(target)).toEqual({ conversationId: "worker-topic" });
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, runtimeGeneration: 2 })).toBeNull();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, chatId: "other-chat" })).toBeNull();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, parentPaneId: "w1:old" })).toBeNull();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, sourceMainMessageId: "old-main" })).toBeNull();
+      store!.database.prepare("UPDATE worker_session_threads SET mode = 'legacy-entry', source_main_message_id = 'worker-root' WHERE worker_id = 'reviewer'").run();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget(target)).toBeNull();
+    });
+
     it("releases one Primary entry only after canonical Worker Thread activation", () => {
       const view = activeWorkerStore(null);
       const command = store!.acceptCommandIntent({ id: "worker-create", idempotencyKey: "worker-create", laneKey: "binding:b1", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true }, context: { projectId: "p1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", actorOpenId: "operator", sourceMessageId: "source", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", terminalId: null, nativeSession: null, activePromptId: null } }, replayPolicy: "reconcilable", acceptedAt: "2026-09-13T00:00:00.000Z" }).intent;

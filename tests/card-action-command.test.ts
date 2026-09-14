@@ -22,7 +22,8 @@ describe("card action command parsing", () => {
     [{ action: "dismiss_dead_letter", replyId: "r1" }, null, { kind: "dead-letter", decision: "dismiss_dead_letter", replyId: "r1" }],
     [{ action: "select_project", selectionId: "s1", projectId: "p1" }, null, { kind: "project-selection", selectionId: "s1", projectId: "p1" }],
     [{ action: "claim_pane", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }, null, { kind: "pane-claim", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }],
-    [{ action: "pane_card_send", bindingId: "b1", bindingGeneration: "2", paneId: "pane-1", sourceMainMessageId: "om-main" }, null, { kind: "pane-directory", action: "pane_card_send", bindingId: "b1", bindingGeneration: 2, paneId: "pane-1", sourceMainMessageId: "om-main" }],
+    [{ action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: "2", paneId: "pane-1", sourceMainMessageId: "om-main" }, null, { kind: "pane-directory", action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 2, paneId: "pane-1", sourceMainMessageId: "om-main" }],
+    [{ action: "pane_worker_thread_forward", instanceId: "i1", generation: "4", workerSessionGeneration: "3", bindingId: "b1", bindingGeneration: "2", parentPaneId: "pane-1", sourceMainMessageId: "om-main" }, null, { kind: "pane-directory", action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 2, parentPaneId: "pane-1", sourceMainMessageId: "om-main" }],
   ] as const)("normalizes an owned action %#", (value, option, expected) => {
     expect(parseCardActionCommand(value, option)).toEqual(expected);
   });
@@ -52,7 +53,8 @@ describe("card action command parsing", () => {
     { action: "open_project_thread" },
     { action: "select_project", selectionId: "s1" },
     { action: "claim_pane", projectId: "p1", workspaceId: "w1" },
-    { action: "pane_card_send", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1" },
+    { action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1" },
+    { action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 2, parentPaneId: "pane-1" },
     { action: "session_archive", bindingId: "b1", bindingGeneration: 1 },
     { action: "instance_create_submit", projectId: "p1" },
     { action: "instance_open", instanceId: "i1", generation: -1 },

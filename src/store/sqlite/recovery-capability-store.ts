@@ -8,6 +8,7 @@ import type { SqlitePromptStore } from "./prompt-store.js";
 import type { SqliteExternalTurnAdoptionStore } from "./external-turn-adoption-store.js";
 import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
+import type { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
 
 export class SqliteInboundRoutingCapabilityStore implements InboundRoutingStore {
   constructor(
@@ -58,7 +59,8 @@ export class SqliteDeliveryRecoveryCapabilityStore implements DeliveryRecoverySt
     private readonly outbox: SqliteOutboxStore,
     private readonly bindings: SqliteBindingLifecycleStore,
     private readonly projections: SqliteProjectionStore,
-    private readonly operations: SqliteOperationsStore
+    private readonly operations: SqliteOperationsStore,
+    private readonly workerThreads: SqliteWorkerSessionThreadStore
   ) {}
 
   audit: DeliveryRecoveryStore["audit"] = (input) => this.operations.audit(input);
@@ -66,6 +68,7 @@ export class SqliteDeliveryRecoveryCapabilityStore implements DeliveryRecoverySt
   getBinding: DeliveryRecoveryStore["getBinding"] = (id) => this.bindings.getBinding(id);
   loadTopicView: DeliveryRecoveryStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
   listFailures: DeliveryRecoveryStore["listFailures"] = (chatId) => this.bindings.listFailures(chatId);
+  resolveCanonicalWorkerThread: DeliveryRecoveryStore["resolveCanonicalWorkerThread"] = (input) => this.workerThreads.resolveCanonicalDirectoryTarget(input);
   reservePaneThreadAlias: DeliveryRecoveryStore["reservePaneThreadAlias"] = (input) => this.outbox.reservePaneThreadAlias(input);
   retryDeadLetter: DeliveryRecoveryStore["retryDeadLetter"] = (id, chatId, actorOpenId) => this.outbox.retryDeadLetter(id, chatId, actorOpenId);
 }

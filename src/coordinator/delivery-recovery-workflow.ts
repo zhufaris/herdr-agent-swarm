@@ -4,9 +4,9 @@ import type { GatewayEffectPort } from "../gateways/effect-client.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { DeliveryRecoveryStore } from "../domain/ports/workflow.js";
 import type { IncomingLarkCardAction } from "../domain/types.js";
-import type { TopicPaneDirectoryEntry } from "../domain/ports/presentation.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import type { CardActionCommand } from "./card-action-command.js";
 
 interface Options {
   store: DeliveryRecoveryStore;
@@ -20,7 +20,7 @@ interface Options {
 export interface DeliveryRecoveryWorkflowPort {
   openThread(action: IncomingLarkCardAction, bindingId: string): Promise<void>;
   decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void>;
-  sendPaneCard(action: IncomingLarkCardAction, entry: Pick<TopicPaneDirectoryEntry, "bindingId" | "bindingGeneration" | "paneId" | "sourceMainMessageId">): Promise<"sent" | "duplicate" | "stale">;
+  forwardPaneThread(action: IncomingLarkCardAction, entry: Extract<CardActionCommand, { kind: "pane-directory" }>): Promise<"sent" | "stale">;
 }
 
 export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
@@ -51,7 +51,8 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     await outbound.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${replyId}:${outcome}`, this.options.presentation.failures(store.listFailures(action.chatId), notice)[0]!);
   }
 
-  async sendPaneCard(action: IncomingLarkCardAction, entry: Pick<TopicPaneDirectoryEntry, "bindingId" | "bindingGeneration" | "paneId" | "sourceMainMessageId">): Promise<"sent" | "duplicate" | "stale"> {
+  async forwardPaneThread(action: IncomingLarkCardAction, entry: Extract<CardActionCommand, { kind: "pane-directory" }>): Promise<"sent" | "stale"> {
+    if (entry.action === "pane_worker_thread_forward") return this.forwardWorkerThread(action, entry);
     const binding = this.options.store.getBinding(entry.bindingId);
     if (!binding || binding.chatId !== action.chatId || binding.generation !== entry.bindingGeneration || binding.paneId !== entry.paneId
       || binding.statusMessageId !== entry.sourceMainMessageId || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return "stale";
@@ -64,6 +65,23 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     } catch (error) {
       this.options.logger.error({ event: "pane-card-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share canonical Primary thread");
       this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: "failed" });
+      return "stale";
+    }
+  }
+
+  private async forwardWorkerThread(action: IncomingLarkCardAction, entry: Extract<CardActionCommand, { action: "pane_worker_thread_forward" }>): Promise<"sent" | "stale"> {
+    const target = this.options.store.resolveCanonicalWorkerThread({
+      chatId: action.chatId, workerId: entry.instanceId, runtimeGeneration: entry.generation, workerSessionGeneration: entry.workerSessionGeneration,
+      parentBindingId: entry.bindingId, parentBindingGeneration: entry.bindingGeneration, parentPaneId: entry.parentPaneId, sourceMainMessageId: entry.sourceMainMessageId
+    });
+    if (!target) return "stale";
+    try {
+      await this.options.gatewayEffects.shareConversation({ conversationId: target.conversationId, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
+      this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.worker.thread.forward", target: entry.instanceId, outcome: "shared" });
+      return "sent";
+    } catch (error) {
+      this.options.logger.error({ event: "pane-worker-thread-share-failed", err: safeLogError(error), workerId: entry.instanceId, actionMessageId: action.messageId, outcome: "failed" }, "failed to share canonical Worker thread");
+      this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.worker.thread.forward", target: entry.instanceId, outcome: "failed" });
       return "stale";
     }
   }

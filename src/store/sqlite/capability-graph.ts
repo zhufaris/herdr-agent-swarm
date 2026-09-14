@@ -214,7 +214,7 @@ export class SqliteCapabilityGraph {
       inboundRouting: routing,
       startupRecovery: new SqliteStartupRecoveryCapabilityStore(routing, this.operations, (timestamp) => this.migrations.canonicalizeLegacyAnswerTargets(timestamp)),
       startupViews: new SqliteStartupViewCapabilityStore(this.bindings, this.prompts, this.projections, this.outbox),
-      deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.projections, this.operations),
+      deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(this.outbox, this.bindings, this.projections, this.operations, this.workerThreads),
       externalTurns: new SqliteExternalTurnCapabilityStore(this.prompts, this.promptDispatch, this.externalTurnAdoption, this.bindings),
       instance: new SqliteInstanceCapabilityStore(this.bindings, this.instances, this.workerTurns, this.cardContexts, this.projections, this.promptDispatch, this.instanceOperations),
       outbox: new SqliteOutboxCapabilityStore(this.outbox, this.bindings, this.threadAliases, this.projections, this.promptDispatch, this.inboundProjects, this.workerTurns, this.cardContexts),
