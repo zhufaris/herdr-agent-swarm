@@ -97,7 +97,7 @@ class FeishuGatewayDelivery {
       await performFeishuDelivery(intent, "finish_streaming_card", () => this.transport.finishStreamingCard!(intent.surfaceId, intent.sequence, intent.summary));
       return { refs: [] };
     }
-    return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "share_thread", () => this.transport.shareThread(intent.conversationId, { messageId: intent.messageId, chatId: intent.targetConversationId }))).messageId)] };
+    return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "share_thread", () => this.transport.shareThread(intent.conversationId, { messageId: intent.messageId, chatId: intent.targetConversationId, ...(intent.rootMessageId ? { sourceRootMessageId: intent.rootMessageId } : {}) }))).messageId)] };
   }
 }
 

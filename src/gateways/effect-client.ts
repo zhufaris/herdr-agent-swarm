@@ -5,7 +5,7 @@ import { isGatewayView, legacyGatewayView } from "./contract/view.js";
 export interface GatewayEffectPort {
   createConversation(input: { conversationId: string; view: object; idempotencyKey: string; purpose: GatewayDeliveryPurpose }): Promise<{ threadId: string; rootMessageId: string }>;
   replyText(input: { rootMessageId: string; text: string; idempotencyKey: string; purpose: GatewayDeliveryPurpose }): Promise<{ messageId: string }>;
-  shareConversation(input: { conversationId: string; messageId: string; targetConversationId: string; purpose: GatewayDeliveryPurpose }): Promise<{ messageId: string }>;
+  shareConversation(input: { conversationId: string; rootMessageId?: string; messageId: string; targetConversationId: string; purpose: GatewayDeliveryPurpose }): Promise<{ messageId: string }>;
 }
 
 export class GatewayEffectClient implements GatewayEffectPort {
@@ -21,7 +21,7 @@ export class GatewayEffectClient implements GatewayEffectPort {
     return { messageId: requiredRef(receipt.refs, "message") };
   }
 
-  async shareConversation(input: { conversationId: string; messageId: string; targetConversationId: string; purpose: GatewayDeliveryPurpose }): Promise<{ messageId: string }> {
+  async shareConversation(input: { conversationId: string; rootMessageId?: string; messageId: string; targetConversationId: string; purpose: GatewayDeliveryPurpose }): Promise<{ messageId: string }> {
     const receipt = await this.execute({ kind: "conversation.share", ...input });
     return { messageId: requiredRef(receipt.refs, "message") };
   }

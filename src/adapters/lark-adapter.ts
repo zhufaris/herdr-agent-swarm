@@ -163,12 +163,24 @@ export class LarkSdkAdapter implements LarkPort {
     assertCardKitSuccess("settings update", response);
   }
 
-  async shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }> {
+  async shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string; sourceRootMessageId?: string }): Promise<{ messageId: string }> {
     const threadId = topicOrRootMessageId.startsWith("omt_")
       ? topicOrRootMessageId
       : await this.resolveThreadId(topicOrRootMessageId);
-    const response = await this.client.im.v1.thread.forward({
-      path: { thread_id: threadId },
+    try {
+      const response = await this.client.im.v1.thread.forward({
+        path: { thread_id: threadId },
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: target.chatId }
+      });
+      const messageId = response.data?.message_id;
+      if (messageId) return { messageId };
+      if (!target.sourceRootMessageId) return { messageId: requireMessageId(messageId) };
+    } catch (error) {
+      if (!target.sourceRootMessageId || !isInvalidThreadForward(error)) throw error;
+    }
+    const response = await this.client.im.v1.message.forward({
+      path: { message_id: target.sourceRootMessageId! },
       params: { receive_id_type: "chat_id" },
       data: { receive_id: target.chatId }
     });
@@ -237,6 +249,11 @@ function isUnsupportedFenceLanguage(error: unknown): boolean {
   const messages = [candidate?.message, candidate?.response?.data?.msg, candidate?.response?.data?.message]
     .filter((value): value is string => typeof value === "string");
   return messages.some((message) => /unsupported[^\n]*(?:fence|language)|(?:fence|language)[^\n]*unsupported/i.test(message));
+}
+
+function isInvalidThreadForward(error: unknown): boolean {
+  const candidate = error as { response?: { status?: unknown; data?: { code?: unknown } } };
+  return candidate?.response?.status === 400 && Number(candidate.response.data?.code) === 230001;
 }
 
 type MessageEvent = Parameters<NonNullable<lark.EventHandles["im.message.receive_v1"]>>[0];

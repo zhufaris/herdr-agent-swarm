@@ -269,7 +269,7 @@ describe("project selection flow", () => {
 
     const openButton = findActionButton(completedCard, "open_project_thread");
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value: openButton.value });
-    expect(shareThread).toHaveBeenCalledWith("project-topic-1", { messageId: "selector-card-1", chatId: "chat" });
+    expect(shareThread).toHaveBeenCalledWith("project-topic-1", { messageId: "selector-card-1", chatId: "chat", sourceRootMessageId: "project-root-1" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

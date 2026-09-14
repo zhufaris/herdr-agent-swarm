@@ -174,7 +174,7 @@ describe("space directory command", () => {
     await coordinator.handleMessage({ eventId: "spaces-bound", messageId: "spaces-bound-message", chatId: "chat", topicId: null, rootMessageId: "spaces-bound-message", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
     const open = findAction(cards.at(-1)!, "open_project_thread");
     await onAction!({ messageId: "spaces-bound-card", chatId: "chat", operatorOpenId: "user", value: open });
-    expect(shareThread).toHaveBeenCalledWith("omt-new", { messageId: "spaces-bound-card", chatId: "chat" });
+    expect(shareThread).toHaveBeenCalledWith("omt-new", { messageId: "spaces-bound-card", chatId: "chat", sourceRootMessageId: "root-new" });
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });

@@ -33,7 +33,7 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     const target = binding.topicId ?? binding.rootMessageId;
     if (!target) return;
     try {
-      await gatewayEffects.shareConversation({ conversationId: target, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
+      await gatewayEffects.shareConversation({ conversationId: target, ...(binding.rootMessageId ? { rootMessageId: binding.rootMessageId } : {}), messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
       store.audit({ actorOpenId: action.operatorOpenId, action: "thread.open", target: binding.id, outcome: "shared" });
     } catch (error) {
       logger.error({ event: "thread-entry-share-failed", err: safeLogError(error), bindingId: binding.id, actionMessageId: action.messageId, outcome: "failed" }, "failed to share project thread entry");
@@ -59,7 +59,7 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     const target = binding.topicId ?? binding.rootMessageId;
     if (!target) return "stale";
     try {
-      await this.options.gatewayEffects.shareConversation({ conversationId: target, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
+      await this.options.gatewayEffects.shareConversation({ conversationId: target, ...(binding.rootMessageId ? { rootMessageId: binding.rootMessageId } : {}), messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
       this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.card.send", target: binding.id, outcome: "shared" });
       return "sent";
     } catch (error) {
@@ -76,7 +76,7 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
     });
     if (!target) return "stale";
     try {
-      await this.options.gatewayEffects.shareConversation({ conversationId: target.conversationId, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
+      await this.options.gatewayEffects.shareConversation({ conversationId: target.conversationId, rootMessageId: target.rootMessageId, messageId: action.messageId, targetConversationId: action.chatId, purpose: "group-thread" });
       this.options.store.audit({ actorOpenId: action.operatorOpenId, action: "pane.worker.thread.forward", target: entry.instanceId, outcome: "shared" });
       return "sent";
     } catch (error) {

@@ -85,7 +85,7 @@ export type GatewayDeliveryIntent =
   | { kind: "stream.create"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "stream.append"; purpose: GatewayDeliveryPurpose; surfaceId: string; slot: string; content: string; sequence: number }
   | { kind: "stream.finish"; purpose: GatewayDeliveryPurpose; surfaceId: string; sequence: number; summary: string }
-  | { kind: "conversation.share"; purpose: GatewayDeliveryPurpose; conversationId: string; messageId: string; targetConversationId: string };
+  | { kind: "conversation.share"; purpose: GatewayDeliveryPurpose; conversationId: string; rootMessageId?: string; messageId: string; targetConversationId: string };
 export type GatewayDeliveryPurpose = "primary-main" | "primary-answer" | "worker-main" | "worker-turn" | "group-thread" | "operation-result";
 
 export interface PreparedGatewayDelivery {

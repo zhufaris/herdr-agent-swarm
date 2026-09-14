@@ -58,7 +58,7 @@ export class SqliteWorkerSessionThreadStore {
     } };
   }
 
-  resolveCanonicalDirectoryTarget(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { conversationId: string } | null {
+  resolveCanonicalDirectoryTarget(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { conversationId: string; rootMessageId: string } | null {
     const row = this.context.database.prepare(`
       SELECT thread.topic_id, thread.root_message_id
       FROM worker_session_threads thread
@@ -76,8 +76,9 @@ export class SqliteWorkerSessionThreadStore {
         AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
       LIMIT 1
     `).get(input.workerId, input.workerSessionGeneration, input.parentBindingId, input.parentBindingGeneration, input.parentPaneId, input.chatId, input.runtimeGeneration, input.sourceMainMessageId) as { topic_id: string | null; root_message_id: string | null } | undefined;
-    const conversationId = row?.topic_id ?? row?.root_message_id ?? null;
-    return conversationId ? { conversationId } : null;
+    const rootMessageId = row?.root_message_id ?? null;
+    const conversationId = row?.topic_id ?? rootMessageId;
+    return conversationId && rootMessageId ? { conversationId, rootMessageId } : null;
   }
 
   reserveLegacyEntry(input: Parameters<WorkerSessionThreadApplicationStore["reserveLegacyEntry"]>[0]): WorkerThreadPublicationDecision {

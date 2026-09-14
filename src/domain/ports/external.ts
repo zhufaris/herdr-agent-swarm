@@ -27,7 +27,7 @@ export interface LarkPort {
   replyStreamingCardReference?(rootMessageId: string, cardId: string, idempotencyKey: string): Promise<{ messageId: string }>;
   streamCardContent?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   finishStreamingCard?(cardId: string, sequence: number, summary: string): Promise<void>;
-  shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string }): Promise<{ messageId: string }>;
+  shareThread(topicOrRootMessageId: string, target: { messageId: string; chatId: string; sourceRootMessageId?: string }): Promise<{ messageId: string }>;
   updateCard(messageId: string, card: object): Promise<void>;
   updateCardKit?(messageId: string, card: object, sequence: number): Promise<void>;
 }

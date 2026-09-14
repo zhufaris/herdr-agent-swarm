@@ -5,6 +5,7 @@ const replyMessage = vi.fn();
 const patchMessage = vi.fn();
 const getMessage = vi.fn();
 const forwardThread = vi.fn();
+const forwardMessage = vi.fn();
 const createCard = vi.fn();
 const streamContent = vi.fn();
 const updateSettings = vi.fn();
@@ -15,7 +16,7 @@ let registeredHandlers: Record<string, (data: unknown) => Promise<unknown>> = {}
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
     constructor(options: Record<string, unknown>) { clientOptions = options; }
-    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage }, thread: { forward: forwardThread } } };
+    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage, forward: forwardMessage }, thread: { forward: forwardThread } } };
     cardkit = { v1: { card: { create: createCard, settings: updateSettings, update: updateCardEntity, idConvert: convertCardId }, cardElement: { content: streamContent } } };
   },
   defaultHttpInstance: { request: vi.fn(), get: vi.fn(), delete: vi.fn(), head: vi.fn(), options: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn() },
@@ -26,7 +27,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
 beforeEach(() => {
-  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset();
+  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); forwardMessage.mockReset();
   createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset(); updateCardEntity.mockReset(); convertCardId.mockReset();
   clientOptions = undefined;
   registeredHandlers = {};
@@ -275,6 +276,28 @@ describe("Lark topic sharing", () => {
     expect(getMessage).not.toHaveBeenCalled();
     expect(forwardThread).toHaveBeenCalledWith({
       path: { thread_id: "omt_thread" }, params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_target" }
+    });
+  });
+
+  it("falls back to forwarding the canonical root message when Feishu rejects a reply thread", async () => {
+    forwardThread.mockRejectedValue({ response: { status: 400, data: { code: 230001 } } });
+    forwardMessage.mockResolvedValue({ data: { message_id: "om_forwarded_root" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.shareThread("omt_reply_thread", { messageId: "om_directory", chatId: "oc_target", sourceRootMessageId: "om_canonical_root" })).resolves.toEqual({ messageId: "om_forwarded_root" });
+    expect(forwardMessage).toHaveBeenCalledWith({
+      path: { message_id: "om_canonical_root" }, params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_target" }
+    });
+  });
+
+  it("falls back to forwarding the canonical root message when thread forwarding returns no message id", async () => {
+    forwardThread.mockResolvedValue({ data: {} });
+    forwardMessage.mockResolvedValue({ data: { message_id: "om_forwarded_root" } });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.shareThread("omt_reply_thread", { messageId: "om_directory", chatId: "oc_target", sourceRootMessageId: "om_canonical_root" })).resolves.toEqual({ messageId: "om_forwarded_root" });
+    expect(forwardMessage).toHaveBeenCalledWith({
+      path: { message_id: "om_canonical_root" }, params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_target" }
     });
   });
 

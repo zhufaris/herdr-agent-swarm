@@ -305,7 +305,7 @@ describe("SQLite store", () => {
       expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(reply.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
       const target = { chatId: "chat", workerId: "reviewer", runtimeGeneration: 1, workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
 
-      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget(target)).toEqual({ conversationId: "worker-topic" });
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget(target)).toEqual({ conversationId: "worker-topic", rootMessageId: "worker-root" });
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, runtimeGeneration: 2 })).toBeNull();
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, chatId: "other-chat" })).toBeNull();
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, parentPaneId: "w1:old" })).toBeNull();

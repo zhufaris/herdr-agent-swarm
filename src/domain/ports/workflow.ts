@@ -58,7 +58,7 @@ export interface DeliveryRecoveryStore {
   getBinding(id: string): Binding | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   listFailures(chatId: string): FailureSummary[];
-  resolveCanonicalWorkerThread(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { conversationId: string } | null;
+  resolveCanonicalWorkerThread(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { conversationId: string; rootMessageId: string } | null;
   reservePaneThreadAlias(input: { publicationKey: string; actionMessageId: string; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; targetChatId: string; viewVersion: number; card: object }): "reserved" | "duplicate" | "stale";
   retryDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome;
 }
