@@ -65,4 +65,58 @@ describe("PrimaryToolBroker", () => {
     expect(workerCards.show).toHaveBeenCalledWith({ ...identity, workerName: "reviewer", idempotencyKey: "display-1" });
     expect(() => broker(identity).showWorkerCards({ workerName: 1 as never, idempotencyKey: "display-2" })).toThrow(/requires workerName/);
   });
+
+  it("returns existing Worker events immediately and advances the cursor", async () => {
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    store!.acceptInstanceTurn({ id: "existing-turn", idempotencyKey: "existing-key", actor: { kind: "human", userId: "u" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
+
+    await expect(broker(actor).waitInstance({ instanceId: worker.id, timeoutMs: 1_000 })).resolves.toMatchObject({ events: [{ kind: "turn.accepted" }], cursor: "1" });
+  });
+
+  it("waits for a later Worker event and returns it with the next cursor", async () => {
+    vi.useFakeTimers();
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    const waiting = broker(actor).waitInstance({ instanceId: worker.id, afterCursor: "0", timeoutMs: 1_000 });
+    store!.acceptInstanceTurn({ id: "later-turn", idempotencyKey: "later-key", actor: { kind: "human", userId: "u" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
+    await vi.advanceTimersByTimeAsync(250);
+
+    await expect(waiting).resolves.toMatchObject({ events: [{ kind: "turn.accepted" }], cursor: "1" });
+  });
+
+  it("returns an unchanged cursor when the Worker event wait expires", async () => {
+    vi.useFakeTimers();
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    const waiting = broker(actor).waitInstance({ instanceId: worker.id, afterCursor: "7", timeoutMs: 500 });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(waiting).resolves.toEqual({ events: [], cursor: "7" });
+  });
+
+  it("preserves immediate polling when timeoutMs is zero", async () => {
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    await expect(broker(actor).waitInstance({ instanceId: worker.id, afterCursor: "3", timeoutMs: 0 })).resolves.toEqual({ events: [], cursor: "3" });
+  });
+
+  it("rechecks Primary authority while waiting for Worker events", async () => {
+    vi.useFakeTimers();
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    const waiting = broker(actor).waitInstance({ instanceId: worker.id, timeoutMs: 1_000 });
+    const rejected = expect(waiting).rejects.toThrow(/authorized current thread Primary/);
+    store!.updatePrompt("parent", "delivered");
+    await vi.advanceTimersByTimeAsync(250);
+
+    await rejected;
+  });
+
+  it.each([
+    { afterCursor: "-1" },
+    { afterCursor: "1.5" },
+    { afterCursor: "not-a-cursor" },
+    { timeoutMs: -1 },
+    { timeoutMs: 29_001 },
+    { timeoutMs: 1.5 }
+  ])("rejects invalid wait input %#", async (input) => {
+    const { create, primary, broker } = setup(); const actor = primary(); const worker = create("worker", "p1");
+    await expect(broker(actor).waitInstance({ instanceId: worker.id, ...input })).rejects.toThrow(/non-negative integer|at most/);
+  });
 });

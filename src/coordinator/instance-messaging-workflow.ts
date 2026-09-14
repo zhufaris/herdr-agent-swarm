@@ -10,6 +10,7 @@ import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 
 interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
 export interface InstanceConversationView { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] }
+const INSTANCE_EVENT_POLL_INTERVAL_MS = 250;
 
 export class InstanceMessagingWorkflow {
   constructor(private readonly options: Options) {}
@@ -91,6 +92,15 @@ export class InstanceMessagingWorkflow {
 
   events(actor: ControlActor, instanceId: string, afterId = 0): InstanceEvent[] { const target = this.authorize(actor, undefined, instanceId); return this.options.store.listInstanceEvents(target.id, afterId); }
 
+  async waitForEvents(actor: ControlActor, instanceId: string, afterId: number, timeoutMs: number): Promise<InstanceEvent[]> {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const events = this.events(actor, instanceId, afterId);
+      if (events.length > 0 || Date.now() >= deadline) return events;
+      await delay(Math.min(INSTANCE_EVENT_POLL_INTERVAL_MS, deadline - Date.now()));
+    }
+  }
+
   private authorize(actor: ControlActor, requestedProjectId: string | undefined, targetId: string): AgentInstance {
     const target = this.options.store.getAgentInstance(targetId);
     if (!target) throw new InstanceTargetError("instance_not_found");
@@ -109,6 +119,10 @@ export class InstanceMessagingWorkflow {
     if (!binding || binding.projectId !== actor.projectId || binding.projectId !== projectId || binding.generation !== actor.bindingGeneration || prompt?.id !== actor.parentPromptId) throw new Error("Caller is not the authorized current thread Primary");
     return binding;
   }
+}
+
+function delay(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => { const timer = setTimeout(resolve, timeoutMs); timer.unref?.(); });
 }
 
 function turnControlSteerReceipt(state: import("../domain/turn-control.js").TurnControlState, result: Record<string, unknown> | null): SteerReceipt {
