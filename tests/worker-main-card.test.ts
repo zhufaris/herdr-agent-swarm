@@ -84,6 +84,64 @@ describe("Worker Main card", () => {
     expect(rendered).toContain("worker_new_task_form");
   });
 
+  it("separates explicit plan progress from tool and legacy activity", () => {
+    const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
+      turnId: "turn-current", title: "Review auth boundary", phase: "running", durationSeconds: 74, updatedAt: "2026-09-05T00:01:00.000Z",
+      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null },
+      statusTitle: "Inspecting ownership fences",
+      progressEvents: [
+        { key: "plan:inspect", kind: "step", label: "Inspect current state", state: "active", occurredAt: "2026-09-05T00:00:20.000Z" },
+        { key: "tool:read", kind: "read", label: "Read ownership policy", state: "done", occurredAt: "2026-09-05T00:00:30.000Z" },
+        { key: "legacy:event", kind: "step", label: "Legacy activity", state: "done", occurredAt: "2026-09-05T00:00:40.000Z" }
+      ]
+    }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
+    const elements = (renderWorkerMainCard(projected) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } }; elements?: Array<{ content?: string }> }> } }).body.elements;
+    const progress = elements.find((element) => element.header?.title?.content?.startsWith("📈 当前进展"));
+    const activity = elements.find((element) => element.header?.title?.content?.startsWith("⚙️ 最近活动"));
+
+    expect(progress?.elements?.map(({ content }) => content).join("\n")).toContain("Inspect current state");
+    expect(progress?.elements?.map(({ content }) => content).join("\n")).not.toMatch(/Read ownership policy|Legacy activity/);
+    expect(activity?.elements?.map(({ content }) => content).join("\n")).toMatch(/Read ownership policy|Legacy activity/);
+  });
+
+  it("renders tool-only progress as recent activity without a misleading current-progress panel", () => {
+    const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
+      turnId: "turn-current", title: "Run tests", phase: "running", durationSeconds: 10, updatedAt: "now",
+      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null },
+      progressEvents: [{ key: "tool:test", kind: "test", label: "Command · npm test", state: "active", occurredAt: "now" }]
+    }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "now" });
+    const rendered = JSON.stringify(renderWorkerMainCard(projected));
+
+    expect(rendered).not.toContain("📈 当前进展");
+    expect(rendered).toContain("⚙️ 最近活动");
+    expect(rendered).toContain("Command · npm test");
+  });
+
+  it("uses the Primary actionable-notice hierarchy for a blocked Worker", () => {
+    const projected = reduceWorkerMainView({ ...view(), runtimeState: "blocked" }, { type: "tasks", currentTask: {
+      turnId: "turn-current", title: "Review auth boundary", phase: "blocked", durationSeconds: 74, updatedAt: "now",
+      taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null },
+      notice: "Approve the exact command in Herdr.", answer: "stale output",
+      progressEvents: [{ key: "plan:review", kind: "step", label: "Wait for review", state: "active", occurredAt: "now" }]
+    }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "now" });
+    const card = renderWorkerMainCard(projected) as { config: { summary: { content: string } }; header: { template: string }; body: { elements: Array<{ content?: string; header?: { title?: { content?: string } }; elements?: Array<{ content?: string }> }> } };
+    const elements = card.body.elements;
+    const noticeIndex = elements.findIndex((element) => element.header?.title?.content === "需要处理");
+    const progressIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("📈 当前进展"));
+    const outputIndex = elements.findIndex((element) => element.content?.includes("当前输出"));
+
+    expect(card.header.template).toBe("orange");
+    expect(card.config.summary.content).toBe("reviewer · 等待用户处理");
+    expect(noticeIndex).toBeGreaterThanOrEqual(0);
+    expect(noticeIndex).toBeLessThan(progressIndex);
+    expect(noticeIndex).toBeLessThan(outputIndex);
+    expect(JSON.stringify(elements[noticeIndex])).toContain("Approve the exact command in Herdr.");
+
+    const fallback = JSON.stringify(renderWorkerMainCard({ ...projected, currentTask: { ...projected.currentTask!, notice: null } }));
+    expect(fallback).toContain("请前往 Herdr Pane");
+    expect(fallback).toContain("pane-worker");
+  });
+
   it("aligns the canonical header and runtime identity with Primary cards", () => {
     const card = renderWorkerMainCard(view(), { projectDisplayName: "Herdr Agent Swarm" }) as { header: { title: { content: string }; subtitle: { content: string }; template: string }; body: { elements: Array<{ content?: string }> } };
     const rendered = JSON.stringify(card);

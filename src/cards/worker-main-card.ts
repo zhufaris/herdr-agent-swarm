@@ -10,16 +10,18 @@ const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "�
 const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovisioned: "未配置", starting: "启动中", idle: "空闲", working: "工作中", blocked: "阻塞", detached: "已脱离", stopped: "已停止", failed: "失败", terminated: "已终止" };
 
 export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?: boolean; projectDisplayName?: string } = {}): object {
+  const progressEvents = view.currentTask?.progressEvents ?? [];
+  const planProgress = progressEvents.filter(({ key }) => key.startsWith("plan:"));
+  const recentActivity = progressEvents.filter(({ key }) => !key.startsWith("plan:"));
   const elements: object[] = [
     { tag: "markdown", content: compactMetadata([`${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}`, `Worker \`${workerPaneLabel(view)}\``, `队列 \`${view.queueCount}\``, view.model ? `模型 \`${safe(view.model)}\`` : null]) },
   ];
-  if (view.currentTask?.notice) elements.push({ tag: "markdown", content: `⚠️ ${safe(view.currentTask.notice)}` });
+  if (view.currentTask?.phase === "blocked") elements.push(actionableNotice(view));
+  else if (view.currentTask?.notice) elements.push({ tag: "markdown", content: `⚠️ ${safe(view.currentTask.notice)}` });
   elements.push({ tag: "markdown", content: currentTaskContent(view.currentTask) });
-  if (view.currentTask?.progressEvents?.length) {
-    if (view.currentTask.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "当前进展")}  ${safe(view.currentTask.statusTitle)}` });
-    elements.push(...renderProgressTimeline(view.currentTask.progressEvents, timelinePhase(view.currentTask.phase), { title: "📈 当前进展", visibleCount: 5 }));
-  }
-  else if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "当前进展")}  ${safe(view.currentTask.statusTitle)}` });
+  if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "当前进展")}  ${safe(view.currentTask.statusTitle)}` });
+  if (planProgress.length && view.currentTask) elements.push(...renderProgressTimeline(planProgress, timelinePhase(view.currentTask.phase), { title: "📈 当前进展", visibleCount: 5 }));
+  if (recentActivity.length && view.currentTask) elements.push(...renderProgressTimeline(recentActivity, timelinePhase(view.currentTask.phase), { title: "⚙️ 最近活动", visibleCount: 5 }));
   if (view.currentTask?.answer) elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("📝", "当前输出")}\n\n${safeOutput(view.currentTask.answer)}` });
   pushActions(elements, view, options.snapshot === true);
   elements.push({ tag: "markdown", content: `${cardSection("📨", "队列")}\n${view.queueCount} 条等待${view.nextTaskTitle ? `  ·  下一项 ${safe(view.nextTaskTitle)}` : ""}` });
@@ -29,10 +31,25 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeDetails(view, options.projectDisplayName) });
   if (view.frozenAt) elements.push({ tag: "markdown", content: `📦 Worker session 已终止并冻结 · ${view.frozenAt}` });
   return {
-    schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${RUNTIME_LABEL[view.runtimeState]}` } },
+    schema: "2.0", config: { update_multi: true, summary: { content: `${view.workerName} · ${workerSummaryLabel(view)}` } },
     header: { title: { tag: "plain_text", content: `🧭 Worker · ${safe(view.workerName)}` }, subtitle: { tag: "plain_text", content: `HERDR WORKER · PRIMARY ${primaryPaneLabel(view)} · ${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}` }, template: runtimeTemplate(view.runtimeState) },
     body: { elements }
   };
+}
+
+function actionableNotice(view: WorkerMainView): object {
+  const content = view.currentTask?.notice
+    ? safe(view.currentTask.notice)
+    : `Worker 正在等待本地处理。请前往 Herdr Pane \`${workerPaneLabel(view)}\` 完成审批或输入。`;
+  return {
+    tag: "collapsible_panel", expanded: true, border: { color: "orange", corner_radius: "6px" },
+    header: { title: { tag: "plain_text", content: "需要处理" } },
+    elements: [{ tag: "markdown", content }]
+  };
+}
+
+function workerSummaryLabel(view: WorkerMainView): string {
+  return view.currentTask?.phase === "blocked" ? "等待用户处理" : RUNTIME_LABEL[view.runtimeState];
 }
 
 export function renderWorkerStatusSnapshot(view: WorkerMainView, generatedAt: string): object {
