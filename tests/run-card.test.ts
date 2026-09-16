@@ -207,7 +207,7 @@ describe("run card", () => {
     });
     const serialized = JSON.stringify(card);
 
-    expect(serialized).toContain("当前进展 · 1/3");
+    expect(serialized).toContain("当前任务 · 1/3");
     expect(serialized).toContain("Considering package installation");
     expect(serialized).toContain("2m 57s · ↑ 4.57K tokens");
     expect(serialized).toContain("✔ 确认部署版本");
@@ -235,16 +235,20 @@ describe("run card", () => {
     });
     const elements = (card as { body: { elements: Array<{ tag: string; content?: string; header?: { title?: { content?: string } } }> } }).body.elements;
     const serialized = JSON.stringify(card);
-    const liveIndex = elements.findIndex((element) => element.header?.title?.content === "📈 当前进展 · 1/2");
-    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 最近活动"));
+    const liveIndex = elements.findIndex((element) => element.header?.title?.content === "🎯 当前任务 · 1/2");
+    const workersIndex = elements.findIndex((element) => element.content?.startsWith("**🤖 Workers**"));
+    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 最新活动"));
     const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息**"));
     const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
 
     expect(liveIndex).toBeGreaterThanOrEqual(0);
     expect(previewIndex).toBeGreaterThan(liveIndex);
-    expect(activityIndex).toBeGreaterThan(previewIndex);
+    expect(workersIndex).toBeGreaterThan(previewIndex);
+    expect(activityIndex).toBeGreaterThan(workersIndex);
     expect(footerIndex).toBe(elements.length - 1);
     expect(serialized).not.toContain("**📊 状态**");
+    expect(serialized).not.toContain("当前进展");
+    expect(serialized).not.toContain("最近活动");
     expect(serialized.match(/确认部署版本/g)).toHaveLength(1);
     expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-1", "line-2", "line-3", "line-4", "line-5", "line-6"]);
     expect(serialized).toContain("`GPT-5.4` · context `36%` · queue `0`");
@@ -252,7 +256,9 @@ describe("run card", () => {
   });
 
   it("keeps the legacy current-work fallback when no live status exists", () => {
-    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running" }))).toContain("**📊 状态**");
+    const rendered = JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running" }));
+    expect(rendered).toContain("**🎯 当前任务**");
+    expect(rendered).not.toContain("**📊 状态**");
   });
 
   it("renders a frozen Answer Card green even when no code block needs folding", () => {
@@ -282,7 +288,7 @@ describe("run card", () => {
     expect(serialized).toContain("newest conclusion");
     expect(serialized).toContain("old answer");
     expect(serialized).toContain("✓ 🛠️ changed secret.ts");
-    expect(serialized).toContain("最近活动");
+    expect(serialized).toContain("最新活动");
   });
 
   it("keeps both ends of a long JSON message in main-card previews without mutating state", () => {
@@ -382,7 +388,7 @@ describe("run card", () => {
     expect(previewBody.length).toBeLessThanOrEqual(3_000);
   });
 
-  it("falls back to the newest formatted activity when the project has no answer prose", () => {
+  it("keeps tool activity out of latest message when the project has no answer prose", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running", answer: null,
       recentProgress: [{ key: "test:focused", kind: "test", label: "正在运行聚焦测试", state: "active", occurredAt: "now" }]
@@ -390,7 +396,9 @@ describe("run card", () => {
     const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
       .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content;
 
-    expect(latestMessage).toContain("🛠️ 正在运行聚焦测试");
+    expect(latestMessage).toBeUndefined();
+    expect(JSON.stringify(card)).toContain("⚙️ 最新活动");
+    expect(JSON.stringify(card)).toContain("正在运行聚焦测试");
   });
 
   it("prioritizes actionable notices over answer previews", () => {

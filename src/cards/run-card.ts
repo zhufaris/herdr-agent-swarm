@@ -136,9 +136,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
   const progress = input.recentProgress ?? [];
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
-  const preview = actionable
-    ? null
-    : latestLines(visibleAnswer, PROJECT_ENTRY_PREVIEW_LINE_LIMIT) ?? (progress.at(-1) ? projectProgressLine(progress.at(-1)!) : null);
+  const preview = actionable ? null : latestLines(visibleAnswer, PROJECT_ENTRY_PREVIEW_LINE_LIMIT);
   const elements: object[] = [];
   if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
@@ -166,7 +164,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     if (canCreateWorker) elements.push(createWorker);
   } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, ...(canCreateWorker ? [createWorker] : []));
   const recentActivity = recentItems(progress.filter((event) => !planKeys.has(event.key)), 5);
-  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最近活动", summary: summarizeProgress(recentActivity), visibleCount: 5 }));
+  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最新活动", summary: summarizeProgress(recentActivity), visibleCount: 5 }));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
@@ -314,7 +312,7 @@ function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, pha
   });
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: phase === "done" ? "green" : phase === "error" || phase === "blocked" ? "orange" : "blue", corner_radius: "6px" },
-    header: { title: { tag: "plain_text", content: lines.length ? `📈 当前进展 · ${done}/${lines.length}` : "📈 当前进展" } },
+    header: { title: { tag: "plain_text", content: lines.length ? `🎯 当前任务 · ${done}/${lines.length}` : "🎯 当前任务" } },
     elements: content
   }];
 }
@@ -536,14 +534,11 @@ function latestLines(source: string, limit: number): string | null {
   const tail = lines.slice(-limit).join("\n").trim();
   return tail || null;
 }
-function projectProgressLine(event: RunCardView["progressEvents"][number]): string {
-  return event.kind === "step" ? progressLine(event) : `🛠️ ${progressLabel(event.label)}`;
-}
 function projectWorkSummary(input: TopicViewState): string {
-  if (input.phase === "running") return `${cardSection("📊", "状态")}\nTraeX 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
-  if (input.phase === "queued") return `${cardSection("📊", "状态")}\n当前请求正在 FIFO 队列中等待${input.queueDepth > 0 ? `（队列共 ${input.queueDepth} 条）。` : "。"}`;
-  if (input.phase === "done") return `${cardSection("📊", "状态")}\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
-  return `${cardSection("📊", "状态")}\n${STATE_VIEW[input.phase].label}`;
+  if (input.phase === "running") return `${cardSection("🎯", "当前任务")}\nTraeX 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
+  if (input.phase === "queued") return `${cardSection("🎯", "当前任务")}\n当前请求正在 FIFO 队列中等待${input.queueDepth > 0 ? `（队列共 ${input.queueDepth} 条）。` : "。"}`;
+  if (input.phase === "done") return `${cardSection("🎯", "当前任务")}\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
+  return `${cardSection("🎯", "当前任务")}\n${STATE_VIEW[input.phase].label}`;
 }
 function progressLine(event: RunCardView["progressEvents"][number]): string {
   const label = progressLabel(event.label);
