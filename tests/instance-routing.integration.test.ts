@@ -259,6 +259,34 @@ describe("instance routing", () => {
     expect(keys).toEqual(["card:interaction-1:task-followup:turn-repeat", "card:interaction-1:task-followup:turn-repeat", "card:interaction-2:task-followup:turn-repeat"]);
   });
 
+  it("continues the current terminal task from its canonical Worker Main Card", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "completed", "turn-main-followup");
+    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true, card: { queuePosition: 1 } } as never);
+    const main = store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!;
+    const open = callbackValue(renderWorkerMainCard(main), "worker_task_instruction_form");
+
+    const form = await handleCardAction(workflow, { messageId: task.mainCardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    expect(form).toHaveProperty("card");
+    const submit = callbackValue(form, "worker_task_instruction_submit");
+    await expect(handleCardAction(workflow, { messageId: task.mainCardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "continue from the result" } })).resolves.toMatchObject({ toast: { type: "success" } });
+    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ content: { kind: "followup", text: "continue from the result" }, source: expect.objectContaining({ parentTurnId: task.turnId }) }));
+  });
+
+  it("rejects a Worker Main continuation after its current task changes", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    const first = taskCard(worker.id, "completed", "turn-main-stale");
+    const staleOpen = callbackValue(renderWorkerMainCard(store!.loadWorkerMainView(worker.id, worker.workerSessionGeneration)!), "worker_task_instruction_form");
+    taskCard(worker.id, "completed", "turn-main-new");
+
+    await expect(handleCardAction(workflow, { messageId: first.mainCardMessageId, chatId: "chat", operatorOpenId: "u1", value: staleOpen })).resolves.toEqual({
+      toast: { type: "warning", content: "Worker Task 卡片已过期、状态已变化或不属于当前 Primary。" }
+    });
+    expect(messaging.submit).not.toHaveBeenCalled();
+  });
+
   it("gives each Worker Main new-task form its own idempotency scope", async () => {
     const { create, workflow, messaging } = setup(); let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;

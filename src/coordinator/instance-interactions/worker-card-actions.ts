@@ -61,8 +61,23 @@ export class WorkerCardActions {
     const view = this.options.store.loadWorkerTurnCard(command.turnId);
     const instance = turn ? this.options.store.getAgentInstance(turn.instanceId) : null;
     const binding = instance?.parent ? this.options.store.getBinding(instance.parent.bindingId) : null;
-    const decision = decideWorkerTaskCardOwnership({ chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId: command.sourceCardMessageId, expectedInstanceGeneration: command.generation, expectedWorkerSessionGeneration: command.workerSessionGeneration, instance, turn, view, binding });
-    return decision.allowed && turn && view && instance && view.messageId ? { instance, turn, view, sourceCardMessageId: view.messageId, intent: workerTaskInteraction(view.phase).replyIntent } : null;
+    if (!turn || !view || !instance || !view.messageId) return null;
+    const taskDecision = decideWorkerTaskCardOwnership({
+      chatId: action.chatId, actionMessageId: view.messageId, sourceCardMessageId: view.messageId, expectedInstanceGeneration: command.generation,
+      expectedWorkerSessionGeneration: command.workerSessionGeneration, instance, turn, view, binding
+    });
+    if (!taskDecision.allowed) return null;
+    if (command.sourceCardMessageId === view.messageId) {
+      if (action.messageId !== command.sourceCardMessageId) return null;
+    } else {
+      const main = this.options.store.loadWorkerMainView(command.instanceId, command.workerSessionGeneration);
+      const mainDecision = decideWorkerMainCardOwnership({
+        chatId: action.chatId, actionMessageId: action.messageId, sourceCardMessageId: command.sourceCardMessageId, expectedInstanceGeneration: command.generation,
+        expectedWorkerSessionGeneration: command.workerSessionGeneration, expectedTurnId: command.turnId, requireTaskSubmission: false, instance, view: main, binding
+      });
+      if (!mainDecision.allowed) return null;
+    }
+    return { instance, turn, view, sourceCardMessageId: command.sourceCardMessageId, intent: workerTaskInteraction(view.phase).replyIntent };
   }
 
   private resolveMain(action: IncomingLarkCardAction, command: WorkerNewTaskCommand): { instance: AgentInstance; view: NonNullable<ReturnType<InstanceStore["loadWorkerMainView"]>> } | null {
