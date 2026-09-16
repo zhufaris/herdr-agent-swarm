@@ -19,10 +19,9 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   if (view.currentTask?.phase === "blocked") elements.push(actionableNotice(view));
   else if (view.currentTask?.notice) elements.push({ tag: "markdown", content: `⚠️ ${safe(view.currentTask.notice)}` });
   elements.push({ tag: "markdown", content: currentTaskContent(view.currentTask) });
-  if (view.currentTask?.statusTitle) elements.push({ tag: "markdown", content: `${cardSection("📈", "当前进展")}  ${safe(view.currentTask.statusTitle)}` });
-  if (planProgress.length && view.currentTask) elements.push(...renderProgressTimeline(planProgress, timelinePhase(view.currentTask.phase), { title: "📈 当前进展", visibleCount: 5 }));
+  if (planProgress.length && view.currentTask) elements.push(...renderProgressTimeline(planProgress, timelinePhase(view.currentTask.phase), { title: "📋 任务清单", visibleCount: 5 }));
+  if (view.currentTask?.answer) elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("📝", "最新消息")}\n\n${safeOutput(view.currentTask.answer)}` });
   if (recentActivity.length && view.currentTask) elements.push(...renderProgressTimeline(recentActivity, timelinePhase(view.currentTask.phase), { title: "⚙️ 最近活动", visibleCount: 5 }));
-  if (view.currentTask?.answer) elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("📝", "当前输出")}\n\n${safeOutput(view.currentTask.answer)}` });
   pushActions(elements, view, options.snapshot === true);
   elements.push({ tag: "markdown", content: `${cardSection("📨", "队列")}\n${view.queueCount} 条等待${view.nextTaskTitle ? `  ·  下一项 ${safe(view.nextTaskTitle)}` : ""}` });
   if (view.recentTasks.length > 0) {
@@ -109,7 +108,9 @@ export function renderWorkerThreadEntryReadyCard(input: { workerName: string; wo
 }
 
 function currentTaskContent(task: WorkerMainTaskSummary | null): string {
-  return task ? `${cardSection("🎯", "当前任务")}\n${lifecycleMarker(task.phase)} ${safe(task.title)}  ·  ${PHASE_LABEL[task.phase]}${task.durationSeconds === null ? "" : `  ·  ${formatDuration(task.durationSeconds)}`}${task.requestText ? `\n\n${safeOutput(task.requestText)}` : ""}` : `${cardSection("🎯", "当前任务")}\n暂无任务记录`;
+  if (!task) return `${cardSection("🎯", "当前任务")}\n暂无任务记录`;
+  const metadata = compactMetadata([PHASE_LABEL[task.phase], task.durationSeconds === null ? null : formatDuration(task.durationSeconds), formatTokenCount(task.tokenCount)]);
+  return `${cardSection("🎯", "当前任务")}\n${lifecycleMarker(task.phase)} ${safe(task.title)}${metadata ? `  ·  ${metadata}` : ""}${task.statusTitle ? `\n◈ **${safe(task.statusTitle)}**` : ""}${task.requestText ? `\n\n${safeOutput(task.requestText)}` : ""}`;
 }
 
 function taskLine(task: WorkerMainTaskSummary): string {
@@ -161,3 +162,4 @@ function safeOutput(value: string): string { return truncateLarkMarkdown(normali
 
 function safe(value: string): string { return truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(value)), 300); }
 function formatDuration(seconds: number): string { const minutes = Math.floor(seconds / 60); const rest = seconds % 60; return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`; }
+function formatTokenCount(tokens: number | null | undefined): string | null { return tokens === null || tokens === undefined ? null : `↑ ${tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 1 : 2)}K` : tokens} tokens`; }

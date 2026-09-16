@@ -43,6 +43,7 @@ export class WorkerTurnObserver {
     const occurredAt = new Date().toISOString();
     const progressEvents = observedProgress(observation, occurredAt, (value) => this.safeOutput(value));
     const statusTitle = observation.mainStatus?.statusTitle === undefined ? undefined : this.safeOutput(observation.mainStatus.statusTitle);
+    const tokenCount = observation.mainStatus?.tokenCount;
     if (view && lifecycle?.state === "active" && ["queued", "preparing", "dispatch-uncertain"].includes(view.phase)) {
       view = this.options.store.applyInstanceTurnProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "running", occurredAt }, render: this.options.presentation.workerTurn });
       if (view) this.options.wakeOutbound();
@@ -61,15 +62,15 @@ export class WorkerTurnObserver {
     if (lifecycle?.state === "completed") {
       const answer = lifecycle.finalAnswer === undefined ? accumulated : this.safeOutput(lifecycle.finalAnswer);
       const projected = view
-        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer }, render: this.options.presentation.workerTurn })
+        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer, ...(tokenCount === undefined ? {} : { tokenCount }) }, render: this.options.presentation.workerTurn })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed" });
       this.headlessOutput.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }
       return;
     }
-    if ((delta || progressEvents.length > 0 || statusTitle !== undefined) && view) {
+    if ((delta || progressEvents.length > 0 || statusTitle !== undefined || tokenCount !== undefined) && view) {
       const projected = this.options.store.applyInstanceTurnProjection({
-        turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "output", occurredAt, answer: accumulated, ...(statusTitle === undefined ? {} : { statusTitle }), progressEvents }, render: this.options.presentation.workerTurn
+        turnId, expectedGeneration: turn.instanceGeneration, ...expected, change: { type: "output", occurredAt, answer: accumulated, ...(statusTitle === undefined ? {} : { statusTitle }), ...(tokenCount === undefined ? {} : { tokenCount }), progressEvents }, render: this.options.presentation.workerTurn
       });
       if (projected) this.options.wakeOutbound();
     }

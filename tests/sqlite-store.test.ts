@@ -860,13 +860,14 @@ describe("SQLite store", () => {
     const queued = createQueuedWorkerTurnCard({ turnId: "queued", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Queued task", queuePosition: 2, occurredAt: "2026-09-05T00:00:01.000Z" });
     for (const view of [running, queued]) store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, render: renderWorkerTurnCard });
     store.transitionInstanceTurnWithProjection({ turnId: running.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-05T00:00:02.000Z" }, render: renderWorkerTurnCard });
+    store.applyInstanceTurnProjection({ turnId: running.turnId, expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-05T00:00:03.000Z", answer: "Working", tokenCount: 4_570 }, render: renderWorkerTurnCard });
     for (let index = 0; index < 4; index += 1) store.createWorkerAgentInstance({
       id: `idle-${index}`, projectId: "p1", name: `idle-${index}`, role: "worker", agentKind: "traex", model: null, desiredState: "running",
       parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
       workspace: { id: `ws-idle-${index}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 8);
 
-    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running" }, queueCount: 1, nextTaskTitle: "Queued task" });
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "running", tokenCount: 4_570 }, queueCount: 1, nextTaskTitle: "Queued task" });
     const prepare = vi.spyOn(store.database, "prepare");
     const summaries = store.loadPrimaryWorkerSummaries("binding-1", 1);
     expect(summaries).toHaveLength(5);

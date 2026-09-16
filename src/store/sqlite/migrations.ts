@@ -73,6 +73,7 @@ export class SqliteMigrations {
     this.worker.ensureWorkerTurnCardPageStates();
     this.worker.ensureWorkerTurnCardProgress();
     this.worker.ensureWorkerTurnProgressSequence();
+    this.worker.ensureWorkerTurnTokenCount();
     this.worker.ensureWorkerSourcePrimaryPaneLabel();
     this.worker.ensureWorkerParentIdentity();
     this.worker.ensurePrimaryScopedWorkerNames();

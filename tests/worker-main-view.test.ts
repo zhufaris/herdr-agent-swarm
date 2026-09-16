@@ -52,4 +52,12 @@ describe("WorkerMainView", () => {
     expect(reduceWorkerMainView(current, { type: "runtime", runtimeGeneration: 4, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: null, occurredAt: "later" })).toBe(current);
     expect(reduceWorkerMainView(current, { type: "tasks", currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [], dependencyRevision: 2, occurredAt: "later" })).toMatchObject({ viewVersion: 1, dependencyRevision: 2 });
   });
+
+  it("advances the view when structured token usage changes", () => {
+    const first = reduceWorkerMainView(initial(), { type: "tasks", currentTask: { ...task(9, "running"), tokenCount: 100 }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "first" });
+    const second = reduceWorkerMainView(first, { type: "tasks", currentTask: { ...task(9, "running"), tokenCount: 200 }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "second" });
+
+    expect(second.currentTask?.tokenCount).toBe(200);
+    expect(second.viewVersion).toBe(first.viewVersion + 1);
+  });
 });

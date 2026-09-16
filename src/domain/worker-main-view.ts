@@ -17,6 +17,7 @@ export interface WorkerMainTaskSummary {
   requestText?: string;
   answer?: string;
   statusTitle?: string | null;
+  tokenCount?: number | null;
   progressEvents?: RunProgressEvent[];
   notice?: string | null;
   resultCapture?: WorkerTurnResultCapture;
@@ -112,7 +113,7 @@ function sameTask(left: WorkerMainTaskSummary | null, right: WorkerMainTaskSumma
   if (left === right) return true;
   if (!left || !right) return false;
   return left.turnId === right.turnId && left.title === right.title && left.phase === right.phase && left.durationSeconds === right.durationSeconds
-    && left.updatedAt === right.updatedAt && left.requestText === right.requestText && left.answer === right.answer && left.statusTitle === right.statusTitle
+    && left.updatedAt === right.updatedAt && left.requestText === right.requestText && left.answer === right.answer && left.statusTitle === right.statusTitle && left.tokenCount === right.tokenCount
     && left.notice === right.notice && left.resultCapture === right.resultCapture && sameProgress(left.progressEvents, right.progressEvents)
     && sameCardTargetRef(left.taskCard, right.taskCard);
 }

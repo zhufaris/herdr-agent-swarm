@@ -30,6 +30,7 @@ export interface WorkerTurnCardView {
   requestText: string;
   answer: string;
   statusTitle: string | null;
+  tokenCount: number | null;
   progressEvents: RunProgressEvent[];
   progressSummary: RunProgressSummary;
   queuePosition: number;
@@ -67,8 +68,8 @@ export type WorkerTurnCardChange =
   | { type: "preparing"; occurredAt: string }
   | { type: "running"; occurredAt: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answer: string; statusTitle?: string | null; progressEvents?: RunProgressEvent[] }
-  | { type: "completed"; occurredAt: string; answer: string }
+  | { type: "output"; occurredAt: string; answer: string; statusTitle?: string | null; tokenCount?: number | null; progressEvents?: RunProgressEvent[] }
+  | { type: "completed"; occurredAt: string; answer: string; tokenCount?: number | null }
   | { type: "completed-without-output"; occurredAt: string; notice: string }
   | { type: "failed" | "cancelled" | "dispatch-uncertain"; occurredAt: string; notice: string };
 
@@ -90,7 +91,7 @@ export function createQueuedWorkerTurnCard(input: {
     turnId: input.turnId, instanceId: input.instanceId, instanceGeneration: input.instanceGeneration, workerSessionGeneration: input.workerSessionGeneration ?? 1,
     workerName: input.workerName, parentTurnId: input.parentTurnId, rootMessageId: input.rootMessageId,
     messageId: null, cardId: null, elementId: workerTurnElementId(input.turnId, 0), progressSequence: 0, phase: "queued",
-    requestText: input.requestText, answer: "", statusTitle: null, progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
+    requestText: input.requestText, answer: "", statusTitle: null, tokenCount: null, progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
     notice: null, resultCapture: input.resultCapture ?? "pending", workerMain: { aggregateKind: "worker-session", aggregateId: input.instanceId, generation: input.workerSessionGeneration ?? 1, messageId: null }, primaryAnswer: input.primaryAnswer ?? null, pageIndex: 0, pageStart: 0, sequence: 0,
     viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
@@ -134,13 +135,17 @@ export function reduceWorkerTurnCard(state: WorkerTurnCardView, change: WorkerTu
       {
         const progress = mergeRecentProgress(state.progressEvents, state.progressSummary, change.progressEvents ?? []);
         const statusTitle = change.statusTitle === undefined ? state.statusTitle : change.statusTitle;
-        if (state.answer === change.answer && state.statusTitle === statusTitle && sameProgress(state.progressEvents, progress.events)) return state;
-        patch = { answer: change.answer, statusTitle, progressEvents: progress.events, progressSummary: progress.summary };
+        const tokenCount = change.tokenCount === undefined ? state.tokenCount : change.tokenCount;
+        if (state.answer === change.answer && state.statusTitle === statusTitle && state.tokenCount === tokenCount && sameProgress(state.progressEvents, progress.events)) return state;
+        patch = { answer: change.answer, statusTitle, tokenCount, progressEvents: progress.events, progressSummary: progress.summary };
       }
       break;
     case "completed":
-      if (state.phase === "completed" && state.answer === change.answer && state.resultCapture === "captured") return state;
-      patch = { phase: "completed", answer: change.answer, resultCapture: "captured", queuePosition: 0, finishedAt: change.occurredAt, notice: null };
+      {
+        const tokenCount = change.tokenCount === undefined ? state.tokenCount : change.tokenCount;
+        if (state.phase === "completed" && state.answer === change.answer && state.tokenCount === tokenCount && state.resultCapture === "captured") return state;
+        patch = { phase: "completed", answer: change.answer, tokenCount, resultCapture: "captured", queuePosition: 0, finishedAt: change.occurredAt, notice: null };
+      }
       break;
     case "completed-without-output":
       if (state.phase === "completed" && state.resultCapture === "unavailable" && state.notice === change.notice) return state;

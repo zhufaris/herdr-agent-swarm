@@ -225,7 +225,7 @@ export class SqliteCardContextStore {
     const currentRow = active ?? terminal ?? queued;
     const currentTask = currentRow ? (() => {
       const card = mapWorkerTurnCard(currentRow);
-      return card ? { ...summary(currentRow as unknown as WorkerTaskSummaryRow), requestText: card.requestText, answer: card.answer, statusTitle: card.statusTitle, progressEvents: card.progressEvents, notice: card.notice, resultCapture: card.resultCapture } : null;
+      return card ? { ...summary(currentRow as unknown as WorkerTaskSummaryRow), requestText: card.requestText, answer: card.answer, statusTitle: card.statusTitle, tokenCount: card.tokenCount, progressEvents: card.progressEvents, notice: card.notice, resultCapture: card.resultCapture } : null;
     })() : null;
     return {
       workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,

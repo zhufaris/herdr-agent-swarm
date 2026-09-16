@@ -76,7 +76,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE INDEX IF NOT EXISTS instance_turns_instance_history ON instance_turns(instance_id, created_at, id);
   CREATE TABLE IF NOT EXISTS worker_turn_cards(
     turn_id TEXT PRIMARY KEY REFERENCES instance_turns(id) ON DELETE CASCADE, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, worker_session_generation INTEGER NOT NULL DEFAULT 1, worker_name TEXT NOT NULL, parent_turn_id TEXT, root_message_id TEXT NOT NULL,
-    message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, status_title TEXT, progress_json TEXT NOT NULL DEFAULT '[]', queue_position INTEGER NOT NULL,
+    message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, status_title TEXT, token_count INTEGER, progress_json TEXT NOT NULL DEFAULT '[]', queue_position INTEGER NOT NULL,
     started_at TEXT, finished_at TEXT, notice TEXT, result_capture TEXT NOT NULL CHECK(result_capture IN ('pending','captured','unavailable')), page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, sequence INTEGER NOT NULL, view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS worker_turn_card_pages(

@@ -190,7 +190,7 @@ export class WorkerMigrations {
         CREATE INDEX IF NOT EXISTS instance_turns_runtime_turn ON instance_turns(runtime_turn_id) WHERE runtime_turn_id IS NOT NULL;
         CREATE TABLE IF NOT EXISTS worker_turn_cards(
           turn_id TEXT PRIMARY KEY REFERENCES instance_turns(id) ON DELETE CASCADE, instance_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, worker_name TEXT NOT NULL, parent_turn_id TEXT, root_message_id TEXT NOT NULL,
-          message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, progress_sequence INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, status_title TEXT, progress_json TEXT NOT NULL DEFAULT '[]', queue_position INTEGER NOT NULL,
+          message_id TEXT UNIQUE, card_id TEXT, element_id TEXT NOT NULL, progress_sequence INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL CHECK(phase IN ('queued','preparing','running','blocked','completed','failed','cancelled','dispatch-uncertain')), request_text TEXT NOT NULL, answer TEXT NOT NULL, status_title TEXT, token_count INTEGER, progress_json TEXT NOT NULL DEFAULT '[]', queue_position INTEGER NOT NULL,
           started_at TEXT, finished_at TEXT, notice TEXT, result_capture TEXT NOT NULL CHECK(result_capture IN ('pending','captured','unavailable')), page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, sequence INTEGER NOT NULL, view_version INTEGER NOT NULL, delivered_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS worker_turn_cards_instance ON worker_turn_cards(instance_id, created_at, turn_id);
@@ -245,6 +245,18 @@ export class WorkerMigrations {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("progress_sequence")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (12)").run();
+      this.context.database.exec("COMMIT");
+    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+  }
+
+  ensureWorkerTurnTokenCount(): void {
+    const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 44").get();
+    if (migrated) return;
+    this.context.database.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
+      if (!columns.has("token_count")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN token_count INTEGER");
+      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (44)").run();
       this.context.database.exec("COMMIT");
     } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
   }

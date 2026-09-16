@@ -55,24 +55,25 @@ describe("WorkerTurnObserver", () => {
 
     await observer.observe("turn-1", {
       turnId: runtimeTurnId, answerDelta: "second",
+      mainStatus: { tokenCount: 5_000 },
       turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "trusted final" }
     });
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted final" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted final", resultCapture: "captured" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted final", tokenCount: 5_000, resultCapture: "captured" });
   });
 
   it("persists and publishes visible progress only for the exact owned transcript", async () => {
     const { observer } = setup();
     await observer.observe("turn-1", {
       turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "",
-      mainStatus: { statusTitle: "Inspecting transaction boundaries", planSteps: [{ key: "inspect", label: "Read the store", state: "active" }] },
+      mainStatus: { statusTitle: "Inspecting transaction boundaries", tokenCount: 4_570, planSteps: [{ key: "inspect", label: "Read the store", state: "active" }] },
       toolActivities: [{ key: "tool:read", kind: "read", label: "Read src/store/sqlite-store.ts", state: "done" }],
       turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt }
     });
 
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({
-      phase: "running", statusTitle: "Inspecting transaction boundaries",
+      phase: "running", statusTitle: "Inspecting transaction boundaries", tokenCount: 4_570,
       progressEvents: expect.arrayContaining([
         expect.objectContaining({ key: "plan:inspect", kind: "step", state: "active" }),
         expect.objectContaining({ key: "tool:read", kind: "read", state: "done" })

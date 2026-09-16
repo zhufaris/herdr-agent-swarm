@@ -16,7 +16,7 @@ describe("WorkerTurnCardView", () => {
     expect(queued()).toEqual({
       turnId: "turn-a", instanceId: "worker-1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null,
       rootMessageId: "root-1", messageId: null, cardId: null, elementId: "worker_turn_turn_a_0", progressSequence: 0,
-      phase: "queued", requestText: "Review the transaction boundary", answer: "", statusTitle: null, progressEvents: [], progressSummary: { total: 0, stepTotal: 0, stepDone: 0 }, queuePosition: 2,
+      phase: "queued", requestText: "Review the transaction boundary", answer: "", statusTitle: null, tokenCount: null, progressEvents: [], progressSummary: { total: 0, stepTotal: 0, stepDone: 0 }, queuePosition: 2,
       startedAt: null, finishedAt: null, notice: null, resultCapture: "pending",
       workerSessionGeneration: 1, workerMain: { aggregateKind: "worker-session", aggregateId: "worker-1", generation: 1, messageId: null }, primaryAnswer: null, pageIndex: 0, pageStart: 0,
       sequence: 0, viewVersion: 1, deliveredVersion: 0, createdAt, updatedAt: createdAt
@@ -52,5 +52,13 @@ describe("WorkerTurnCardView", () => {
   it("does not increment the version for an unchanged queue position", () => {
     const current = queued();
     expect(reduceWorkerTurnCard(current, { type: "queue-position", occurredAt: "later", queuePosition: 2 })).toBe(current);
+  });
+
+  it("preserves structured token usage and treats token changes as visible output", () => {
+    const counted = reduceWorkerTurnCard(queued(), { type: "output", occurredAt: "later", answer: "", tokenCount: 4_570 });
+    const unchanged = reduceWorkerTurnCard(counted, { type: "output", occurredAt: "latest", answer: "", tokenCount: 4_570 });
+
+    expect(counted).toMatchObject({ tokenCount: 4_570, viewVersion: 2 });
+    expect(unchanged).toBe(counted);
   });
 });
