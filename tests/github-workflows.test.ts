@@ -19,6 +19,10 @@ function commands(value: Workflow): string {
   return Object.values(value.jobs).flatMap((job) => job.steps.map((step) => step.run ?? "")).join("\n");
 }
 
+function commandOrder(value: Workflow): string[] {
+  return Object.values(value.jobs).flatMap((job) => job.steps.map((step) => step.run ?? ""));
+}
+
 function actionReferences(value: Workflow): string[] {
   return Object.values(value.jobs).flatMap((job) => job.steps.flatMap((step) => step.uses ? [step.uses] : []));
 }
@@ -34,6 +38,7 @@ describe("GitHub workflows", () => {
     expect(commands(ci)).toContain("npm test");
     expect(commands(ci)).toContain("npm run typecheck");
     expect(commands(ci)).toContain("npm run build");
+    expect(commandOrder(ci).indexOf("npm run build")).toBeLessThan(commandOrder(ci).indexOf("npm test"));
   });
 
   it("publishes only tagged verified builds as GitHub assets", () => {
@@ -43,6 +48,7 @@ describe("GitHub workflows", () => {
     expect(release.concurrency?.["cancel-in-progress"]).toBe(false);
     expect(commands(release)).toContain("npm run release:package");
     expect(commands(release)).toContain("npm test");
+    expect(commandOrder(release).indexOf("npm run build")).toBeLessThan(commandOrder(release).indexOf("npm test"));
     expect(commands(release)).toContain("sha256sum --check SHA256SUMS");
     expect(actionReferences(release).some((reference) => reference.startsWith("softprops/action-gh-release@"))).toBe(true);
   });
