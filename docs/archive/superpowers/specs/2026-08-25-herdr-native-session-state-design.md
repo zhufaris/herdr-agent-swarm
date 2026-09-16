@@ -3,7 +3,7 @@
 ## Status
 
 Approved implementation direction. This specification incorporates the official
-Herdr 0.8.2 documentation while treating the installed Herdr 0.7.5 schema as the
+the then-supported Herdr release documentation while treating the installed the then-supported Herdr release schema as the
 runtime compatibility baseline.
 
 ## Source-of-truth boundary
@@ -37,9 +37,9 @@ On each connection the subscriber sends one `events.subscribe` request for:
 - `pane.created`, `pane.updated`, `pane.closed`, `pane.exited`, and `pane.moved`;
 - `pane.agent_detected` and `pane.agent_status_changed`;
 - `pane.agent_status_changed` is registered once per currently known Pane because
-  Herdr 0.7.5 does not support a wildcard subscription for this event.
+  the then-supported Herdr release does not support a wildcard subscription for this event.
 
-Herdr 0.7.5 emits `pane_output_changed` to plugin hooks but rejects
+the then-supported Herdr release emits `pane_output_changed` to plugin hooks but rejects
 `pane.output_changed` as a Socket subscription type. The existing bounded UDP
 plugin hook therefore remains the output-change wake-up source. Snapshot
 `revision` suppresses unchanged terminal reads after either wake-up path.
@@ -56,7 +56,7 @@ requests reconciliation so `session.snapshot` repairs events missed while offlin
 Periodic reconciliation remains enabled for the same reason.
 
 Plugin UDP hooks remain as a compatibility wake-up path and are required for
-output changes on Herdr 0.7.5. Duplicate Socket and UDP wake-ups are harmless
+output changes on the then-supported Herdr release. Duplicate Socket and UDP wake-ups are harmless
 because reconciliation is coalesced and state transitions are idempotent.
 
 ## Snapshot and session model

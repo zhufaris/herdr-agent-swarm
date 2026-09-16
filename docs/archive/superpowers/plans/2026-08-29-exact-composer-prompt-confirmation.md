@@ -103,4 +103,4 @@ If the supported action cannot express a justified force restart, run: `bash plu
 
 - [ ] **Step 6: Verify deployment convergence**
 
-Read `/status` and require `status=ok`, `readiness=ready`, the deployed `gitCommit` equal to the implementation commit, zero active workers/instance turns, and a drained outbox. Confirm `wH:p5Z` is not mutated during verification.
+Read `/status` and require `status=ok`, `readiness=ready`, the deployed `gitCommit` equal to the implementation commit, zero active workers/instance turns, and a drained outbox. Confirm `<pane-id>` is not mutated during verification.

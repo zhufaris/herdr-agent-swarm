@@ -12,7 +12,7 @@ An orphaned binding has a related mismatch. Its Main Card correctly offers
 recovery, but the More Actions card currently derives controls from
 `lifecycle=active` before considering `attachment=orphaned`. It consequently
 offers pane-dependent operations that cannot succeed. The reported binding
-`c749d357-34cf-4d8a-bdb7-eb0191236321` (`herdr-lark-bridge / task-4lrk`) is in
+`<binding-id>` (`herdr-lark-bridge / task-4lrk`) is in
 exactly this state because pane `wH:p3N` no longer exists.
 
 ## Design

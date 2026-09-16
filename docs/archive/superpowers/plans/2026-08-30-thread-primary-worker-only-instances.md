@@ -77,7 +77,7 @@ Expected: PASS.
 
 ```bash
 git add src/config.ts src/domain/types.ts src/setup/setup-workflow.ts src/setup/setup-checks.ts src/setup/setup-summary.ts config/projects.example.json tests/config.test.ts tests/setup-workflow.test.ts tests/setup-checks.test.ts README.md docs/feishu-group-usage.md
-git commit -m "refactor: remove primary instance templates" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "refactor: remove primary instance templates"
 ```
 
 ---
@@ -176,7 +176,7 @@ Expected: PASS.
 
 ```bash
 git add src/domain/commands.ts src/domain/agent-instance.ts src/coordinator/instance-control-workflow.ts src/coordinator/instance-interaction-workflow.ts src/cards/instance-directory-card.ts src/cards/instance-control-card.ts src/cards/instance-detail-card.ts tests/instance-control.integration.test.ts tests/instance-routing.integration.test.ts tests/instance-cards.test.ts tests/sqlite-store.test.ts
-git commit -m "fix: make thread primary and instances workers" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "fix: make thread primary and instances workers"
 ```
 
 ---
@@ -270,7 +270,7 @@ Expected: every command exits `0`; no test is skipped.
 
 ```bash
 git add src/domain/commands.ts src/domain/ports.ts src/store/sqlite-store.ts src/runtime/primary-tool-gateway.ts src/runtime/primary-tool-broker.ts src/cli/primary-tools-mcp.ts src/coordinator/instance-messaging-workflow.ts src/coordinator/binding-provisioning-workflow.ts src/main.ts tests/sqlite-store.test.ts tests/primary-tool-broker.test.ts tests/primary-tool-gateway.integration.test.ts tests/primary-tools-mcp.test.ts tests/primary-worker-flow.integration.test.ts tests/herdr-adapter.test.ts tests/project-selection-integration.test.ts tests/provisioning-recovery.test.ts tests/pane-thread-lifecycle-integration.test.ts
-git commit -m "refactor: bind primary tools to threads" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "refactor: bind primary tools to threads"
 ```
 
 ---

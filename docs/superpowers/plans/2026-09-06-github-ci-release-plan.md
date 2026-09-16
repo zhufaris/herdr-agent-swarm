@@ -95,7 +95,7 @@ Gate: documentation audit and diff check.
 
 Use thematic commits: plan, packaging/tests, workflows, and documentation. Every
 implementation commit includes the required
-`Co-authored-by: TRAE CLI <noreply@trae.ai>` trailer. Before handoff run:
+AI co-author trailer. Before handoff run:
 
 ```text
 npx vitest run tests/package-release.test.ts tests/github-workflows.test.ts

@@ -50,6 +50,5 @@ cooldown snapshot. Publish counts and the oldest claim time through
 - Run focused SQLite and health tests.
 - Run `npm run typecheck`, `npm run build`, `npm run architecture:check`,
   `npm test`, and `git diff --check`.
-- Review and commit the implementation independently with the TRAE CLI co-author
-  trailer.
+- Review and commit the implementation independently.
 - Do not push, install, restart, deploy, or send real Lark messages.

@@ -24,9 +24,9 @@ its `function_call_output`. A call is a skill load only when its structured
 arguments contain an absolute path ending in `/SKILL.md` beneath a recognized
 TraeX skill root:
 
-- `/data00/home/<user>/.trae/skills/`
-- `/data00/home/<user>/.agents/skills/`
-- `/data00/home/<user>/.trae/plugins/`
+- `/path/to/<user>/.trae/skills/`
+- `/path/to/<user>/.agents/skills/`
+- `/path/to/<user>/.trae/plugins/`
 
 The displayed name is the directory immediately containing `SKILL.md`. Plugin
 paths may contain version directories, but the containing skill directory is

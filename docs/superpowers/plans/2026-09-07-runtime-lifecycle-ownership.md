@@ -343,7 +343,6 @@ live unit as part of this implementation.
 Every implementation commit uses the repository's required trailer:
 
 ```text
-Co-authored-by: TRAE CLI <noreply@trae.ai>
 ```
 
 ## Completion checklist

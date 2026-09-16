@@ -117,4 +117,4 @@ Stage only `docs/superpowers/plans/2026-08-28-card-interaction-consistency.md`, 
 
 Run: `herdr plugin action invoke restart --plugin herdr-lark-bridge`
 
-Then inspect `/health`, `/ready`, `/status`, expected versus observed build identity, and SQLite projections for `c749d357-34cf-4d8a-bdb7-eb0191236321`. Confirm no TraeX prompt was replayed and no historical state was deleted.
+Then inspect `/health`, `/ready`, `/status`, expected versus observed build identity, and SQLite projections for `<binding-id>`. Confirm no TraeX prompt was replayed and no historical state was deleted.

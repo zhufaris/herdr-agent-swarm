@@ -38,6 +38,7 @@ describe("GitHub workflows", () => {
     expect(commands(ci)).toContain("npm test");
     expect(commands(ci)).toContain("npm run typecheck");
     expect(commands(ci)).toContain("npm run build");
+    expect(commands(ci)).toContain("npm run public:audit");
     expect(commandOrder(ci).indexOf("npm run build")).toBeLessThan(commandOrder(ci).indexOf("npm test"));
   });
 
@@ -48,6 +49,7 @@ describe("GitHub workflows", () => {
     expect(release.concurrency?.["cancel-in-progress"]).toBe(false);
     expect(commands(release)).toContain("npm run release:package");
     expect(commands(release)).toContain("npm test");
+    expect(commands(release)).toContain("npm run public:audit");
     expect(commandOrder(release).indexOf("npm run build")).toBeLessThan(commandOrder(release).indexOf("npm test"));
     expect(commands(release)).toContain("sha256sum --check SHA256SUMS");
     expect(actionReferences(release).some((reference) => reference.startsWith("softprops/action-gh-release@"))).toBe(true);

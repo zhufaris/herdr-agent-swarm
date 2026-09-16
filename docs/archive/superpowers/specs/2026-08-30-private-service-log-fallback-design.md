@@ -3,7 +3,7 @@
 ## Problem
 
 The canonical user unit sends stdout to journald, and `swarm:logs` delegates
-unconditionally to `journalctl`. On this host the runtime journal directory is
+unconditionally to `journalctl`. In the deployment environment the runtime journal directory is
 owned by `nobody:nogroup` with mode `2750`, the operator is not in
 `systemd-journal`, and `/run` is mounted read-only in the current environment.
 The service remains healthy, but its supported diagnostic command cannot read

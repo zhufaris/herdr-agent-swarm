@@ -6,7 +6,7 @@
 
 **Architecture:** `HerdrCliAdapter` becomes a narrow structured-control adapter: snapshots provide identity/state, `agent prompt --wait` owns submission and settlement, and `agent send-keys` owns interruption. The reconciler consumes only structured pane/Agent facts, the typed TraeX transcript remains the sole answer source, and the shim reporter retains only process fencing plus display metadata.
 
-**Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, SQLite, Herdr 0.7.5 CLI/native request API, TraeX JSONL transcript.
+**Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, SQLite, the then-supported Herdr release CLI/native request API, TraeX JSONL transcript.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-terminal-read-free-herdr-control-design.md`
 
@@ -16,7 +16,7 @@
 - Never fall back from Agent commands to Pane text or key commands.
 - Preserve no-replay semantics after a prompt command may have started.
 - Keep the real TraeX executable and public `agent: "traex"` projection.
-- Keep the shim reversible and version-gated for Herdr 0.7.5.
+- Keep the shim reversible and version-gated for the then-supported Herdr release.
 - Answers come only from the validated typed TraeX transcript or the bounded structured-output-unavailable notice.
 - Do not force a production restart while durable work is active.
 

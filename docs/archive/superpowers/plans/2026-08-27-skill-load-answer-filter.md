@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Render one `已加载技能：<name>` line per distinct recognized skill path, in argument traversal order.
-- Recognize only absolute `/data00/home/<user>/.trae/skills/`, `/data00/home/<user>/.agents/skills/`, and `/data00/home/<user>/.trae/plugins/` paths ending in `/SKILL.md`.
+- Recognize only absolute `/path/to/<user>/.trae/skills/`, `/path/to/<user>/.agents/skills/`, and `/path/to/<user>/.trae/plugins/` paths ending in `/SKILL.md`.
 - Suppress only the output paired by the recognized call's non-empty `call_id`.
 - Preserve existing rendering for ordinary calls, results, assistant prose, malformed arguments, and relative paths.
 - Do not change transcript files, cursor offsets, answer storage, pagination, or outbox behavior.
@@ -32,7 +32,7 @@
 
 - [ ] **Step 1: Write failing recognition tests.**
 
-  Add transcript calls covering a direct `{ path: "/data00/home/user/.agents/skills/test/SKILL.md" }`, a real nested `exec` argument whose `input` contains two absolute skill paths, and duplicate paths. Assert summaries are exactly `已加载技能：test` and one line per distinct name.
+  Add transcript calls covering a direct skill path, a real nested `exec` argument whose `input` contains two absolute skill paths, and duplicate paths. Assert summaries are exactly `已加载技能：test` and one line per distinct name.
 
 - [ ] **Step 2: Write failing false-positive tests.**
 

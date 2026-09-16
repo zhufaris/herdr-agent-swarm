@@ -5,7 +5,7 @@
 The bridge currently uses Herdr's structured snapshot for Pane identity and agent
 state, but several hot paths still poll and parse terminal text to infer lifecycle.
 This couples workflow correctness to TraeX screen rendering and causes unnecessary
-`pane read` calls. Herdr 0.7.5 already exposes native Pane/Agent state, output
+`pane read` calls. the then-supported Herdr release already exposes native Pane/Agent state, output
 revision events, and optional native agent-session references.
 
 ## Outcome
@@ -27,7 +27,7 @@ that a particular Lark prompt completed.
    the default session path.
 2. A reconnecting Socket API subscriber listens for supported Pane and Agent
    lifecycle events and routes them into targeted reconciliation; the plugin hook
-   remains the output-change wake-up source on Herdr 0.7.5.
+   remains the output-change wake-up source on the then-supported Herdr release.
 3. Socket loss never stops the bridge. Startup and periodic snapshot
    reconciliation remain the convergence path.
 4. Snapshot parsing retains `agent_session` as an optional, typed reference

@@ -169,7 +169,7 @@ diff check.
 
 Use one or more thematic commits per stage. Never combine a schema migration with
 unrelated coordinator decomposition. Every commit includes the required
-`Co-authored-by: TRAE CLI <noreply@trae.ai>` trailer.
+AI co-author trailer.
 
 ## Final completion audit
 

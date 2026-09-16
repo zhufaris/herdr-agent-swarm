@@ -20,7 +20,7 @@ Add focused tests for plugin-owned absolute paths and validation failures.
 
 ## Task 2: Add the Herdr plugin manifest and launchers
 
-Create `herdr-plugin.toml` for Linux and Herdr 0.7.5+. Declare the build step,
+Create `herdr-plugin.toml` for Linux and the then-supported Herdr release+. Declare the build step,
 service-control actions, and managed setup/status/logs/project-configuration
 panes. Add a shared shell library that resolves and validates
 `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, binaries, config files, and

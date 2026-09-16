@@ -6,7 +6,7 @@
 
 **Architecture:** Extend only the private `projects.json` registry with two unique project routes. Reuse the existing primary/worker instance policy, validate against the production environment, restart the sole supported service, and verify both health and visible project data.
 
-**Tech Stack:** JSON, Node.js configuration validation, Herdr 0.7.5, user systemd, Feishu/Lark CardKit.
+**Tech Stack:** JSON, Node.js configuration validation, the then-supported Herdr release, user systemd, Feishu/Lark CardKit.
 
 **Spec:** `docs/superpowers/specs/2026-08-30-datasage-project-registration-design.md`
 
@@ -22,8 +22,8 @@
 ### Task 1: Update and validate the private registry
 
 **Files:**
-- Modify: `/home/feiyu.zhu/.config/herdr-agent-swarm/projects.json`
-- Read: `/home/feiyu.zhu/.config/herdr-agent-swarm/.env`
+- Modify: `/home/your-user/.config/herdr-agent-swarm/projects.json`
+- Read: `/home/your-user/.config/herdr-agent-swarm/.env`
 
 **Interfaces:**
 - Consumes: the project schema loaded by `src/config.ts`.
@@ -32,12 +32,12 @@
 - [ ] Back up the current registry to a temporary file.
 - [ ] Add `datasage-semantic-knowledge` with workspace `w5`, its absolute checkout, and the existing primary/worker instance template.
 - [ ] Add `datasage-fabric2onetable` with workspace `wD`, its absolute checkout, and the existing primary/worker instance template.
-- [ ] Run `npm run config:validate -- /home/feiyu.zhu/.config/herdr-agent-swarm/.env /home/feiyu.zhu/.config/herdr-agent-swarm/projects.json` and require a successful exit.
+- [ ] Run `npm run config:validate -- /home/your-user/.config/herdr-agent-swarm/.env /home/your-user/.config/herdr-agent-swarm/projects.json` and require a successful exit.
 
 ### Task 2: Deploy and verify the project list
 
 **Files:**
-- Read: `/home/feiyu.zhu/.config/herdr-agent-swarm/projects.json`
+- Read: `/home/your-user/.config/herdr-agent-swarm/projects.json`
 
 **Interfaces:**
 - Consumes: the validated production registry.

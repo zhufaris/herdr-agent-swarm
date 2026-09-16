@@ -15,7 +15,7 @@ alias so the command remains discoverable in the bridge help card.
 
 ## TraeX contract
 
-TraeX 0.201.5 opens an interactive selector when `/model` is submitted. Text
+the configured TraeX build opens an interactive selector when `/model` is submitted. Text
 following `/model` is not a supported direct argument and may become an ordinary
 agent prompt. The bridge therefore translates `/model <name>` and card selection
 into the native selector sequence: open `/model`, type the exact model filter,

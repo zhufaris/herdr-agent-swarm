@@ -27,6 +27,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - run: npm run public:audit
       - run: npm audit --omit=dev --audit-level=high
       - name: Scan tracked content for credential material
         run: |

@@ -32,7 +32,7 @@
 ### Task 2: Validate and restore the service
 
 **Files:**
-- Read: `/home/feiyu.zhu/.local/state/herdr-agent-swarm/bridge.db`
+- Read: `/home/your-user/.local/state/herdr-agent-swarm/bridge.db`
 
 - [ ] Copy the live SQLite database together with its WAL/SHM state using SQLite's backup mechanism.
 - [ ] Open the copy with the rebuilt store and confirm schema migration plus integrity checks succeed.

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create `/data00/home/feiyu.zhu/work/herdr-agent-swarm` as an independent, history-preserving repository whose active product and standalone service identity is Herdr Agent Swarm.
+**Goal:** Create an independent, history-preserving repository whose active product and standalone service identity is Herdr Agent Swarm.
 
 **Architecture:** Clone the completed `solo-app` branch into a normal repository, remove its generated remote, and rename the branch to `main`. Apply a compatibility-aware rename only to current product/package/standalone surfaces, retaining `/swarm`, durable identifiers, historical documents, and the legacy plugin ID.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Preserve the complete reachable Git history and the source `solo-app` head.
-- Destination path is exactly `/data00/home/feiyu.zhu/work/herdr-agent-swarm`.
+- Destination path is the selected standalone repository checkout.
 - Destination branch is `main` and `git remote -v` must be empty.
 - Do not copy private configuration, credentials, databases, WAL/SHM files, logs, generated runtime state, `node_modules`, or tracked `dist`.
 - Keep `/swarm`, durable compatibility identifiers, and the legacy Herdr plugin ID unchanged.
@@ -24,7 +24,7 @@
 ### Task 1: Create the independent history-preserving repository
 
 **Files:**
-- Create repository: `/data00/home/feiyu.zhu/work/herdr-agent-swarm`
+- Create the standalone repository checkout.
 
 **Interfaces:**
 - Consumes: source branch `solo-app` at the commit containing this plan.
@@ -32,12 +32,12 @@
 
 - [x] **Step 1: Assert the destination does not exist and source is clean**
 
-Run `test ! -e /data00/home/feiyu.zhu/work/herdr-agent-swarm && git status --short`.
+Run `git status --short` in the new checkout.
 Expected: destination assertion succeeds and source status is empty.
 
 - [x] **Step 2: Clone the selected branch with history**
 
-Run `git clone --branch solo-app --single-branch /data00/home/feiyu.zhu/work/herdr-lark-bridge /data00/home/feiyu.zhu/work/herdr-agent-swarm`.
+Clone the source repository's standalone branch into the selected checkout.
 Expected: clone succeeds and destination HEAD equals source `solo-app` HEAD.
 
 - [x] **Step 3: Detach repository ownership**

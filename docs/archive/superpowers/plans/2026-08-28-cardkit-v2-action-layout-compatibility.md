@@ -62,4 +62,4 @@ Stage the two renderer files, two focused test files, and this plan. Confirm `gi
 
 - [ ] **Step 7: Deploy and verify the durable checkpoint**
 
-Restart with `herdr plugin action invoke restart --plugin herdr-lark-bridge`. Query SQLite and Herdr to verify selection `66b21074-93af-431c-955c-aee0e8acab57` is completed, Binding `c749d357-34cf-4d8a-bdb7-eb0191236321` is active on existing Pane `wH:p3N`, and no second Pane was created.
+Restart with `herdr plugin action invoke restart --plugin herdr-lark-bridge`. Query SQLite and Herdr to verify selection `<selection-id>` is completed, Binding `<binding-id>` is active on existing Pane `wH:p3N`, and no second Pane was created.

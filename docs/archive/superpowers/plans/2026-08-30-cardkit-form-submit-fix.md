@@ -71,7 +71,7 @@ Expected: every command exits `0`; no test is skipped.
 
 ```bash
 git add src/cards/cardkit-button.ts tests/instance-cards.test.ts tests/run-card.test.ts tests/lark-adapter.test.ts tests/instance-routing.integration.test.ts docs/superpowers/specs/2026-08-30-cardkit-form-submit-fix-design.md docs/superpowers/plans/2026-08-30-cardkit-form-submit-fix.md
-git commit -m "fix: submit CardKit forms with the v2 contract" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "fix: submit CardKit forms with the v2 contract"
 ```
 
 - [ ] **Step 6: Gate and perform live verification**

@@ -136,7 +136,7 @@ The reporter forms a small structured compatibility layer:
 
 It removes `readPane`, temporary snapshot files, `agent explain --file`, and all
 terminal-derived `report-agent` state updates. No TraeX lifecycle hook is
-installed. Live evidence showed that Herdr 0.7.5's Codex detector can remain
+installed. Live evidence showed that the then-supported Herdr release's Codex detector can remain
 `idle` throughout a TraeX turn and ignores competing reporter state, while a
 real TraeX argv0 fails the native prompt foreground guard. Therefore Herdr idle
 is not detached-completion evidence; the exact canonical JSONL must contain a

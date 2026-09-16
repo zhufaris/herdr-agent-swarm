@@ -85,6 +85,5 @@ Tests do not call executor private methods or mock internal store modules.
 - Run `npm run typecheck`, `npm run build`, `npm run architecture:check`,
   `npm test`, and `git diff --check`.
 - Review the final diff for only this semantic-policy slice.
-- Commit the implementation independently with the required TRAE CLI co-author
-  trailer.
+- Commit the implementation independently.
 - Do not push, install, restart, deploy, or send real Lark messages.

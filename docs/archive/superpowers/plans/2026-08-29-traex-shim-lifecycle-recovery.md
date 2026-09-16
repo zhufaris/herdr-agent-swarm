@@ -6,7 +6,7 @@
 
 **Architecture:** The process-fenced shim reporter claims an initial Codex-compatible `idle` authority and projects it as TraeX. A separate stdin-driven TraeX hook maps only `UserPromptSubmit` to `working` and `Stop` to `idle`, while official `herdr agent prompt --wait` remains the sole prompt submission and settlement mechanism.
 
-**Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, TraeX hooks, Herdr 0.7.5 CLI.
+**Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, TraeX hooks, the then-supported Herdr release CLI.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-terminal-read-free-herdr-control-design.md`
 

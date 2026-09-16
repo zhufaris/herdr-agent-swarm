@@ -88,7 +88,7 @@ Expected: every command exits `0`; no test is skipped.
 
 ```bash
 git add src/cli/service-lifecycle.ts tests/service-lifecycle.test.ts AGENTS.md README.md
-git commit -m "fix: provide private bounded service logs" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "fix: provide private bounded service logs"
 ```
 
 ---

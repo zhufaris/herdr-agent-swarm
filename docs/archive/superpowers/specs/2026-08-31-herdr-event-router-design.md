@@ -37,7 +37,7 @@ idempotent and periodic scans remain active.
 ## Normalized event model
 
 The subscriber converts protocol spellings into a small internal vocabulary. It
-accepts the dotted and underscore spellings currently observed in Herdr 0.7.5,
+accepts the dotted and underscore spellings currently observed in the then-supported Herdr release,
 but downstream code never branches on raw strings.
 
 ```ts

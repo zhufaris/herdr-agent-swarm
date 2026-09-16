@@ -345,7 +345,7 @@ operator supplies valid credentials.
 
 The migration is complete when:
 
-- the repository links as an enabled Herdr plugin on Herdr 0.7.5 or newer;
+- the repository links as an enabled Herdr plugin on the then-supported Herdr release or newer;
 - setup can create valid private configuration and a working user service;
 - start, stop, restart, status, logs, project configuration, and service removal
   are reachable as plugin actions;

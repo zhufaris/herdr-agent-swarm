@@ -141,12 +141,12 @@ Against the database path from the port-8787 process environment, query queued/r
 
 - [ ] **Step 3: Restart only the owning legacy plugin instance**
 
-Use the Herdr plugin lifecycle action associated with `HERDR_PLUGIN_CONFIG_DIR=/home/feiyu.zhu/.config/herdr/plugins/config/herdr-lark-bridge`. Do not restart `herdr-agent-swarm.service` on port 8788 and do not terminate `wH:p5Z`.
+Use the Herdr plugin lifecycle action associated with `HERDR_PLUGIN_CONFIG_DIR=/home/your-user/.config/herdr/plugins/config/herdr-lark-bridge`. Do not restart `herdr-agent-swarm.service` on port 8788 and do not terminate `<pane-id>`.
 
 - [ ] **Step 4: Verify deployed convergence**
 
-Confirm the port-8787 `/ready` endpoint, expected/observed build identity, lease, SQLite integrity, zero pending outbox, and the `task-ulqf` binding's durable degraded state and Main Card update. Confirm `wH:p5Z` still exists and remains absent from `herdr agent list`.
+Confirm the port-8787 `/ready` endpoint, expected/observed build identity, lease, SQLite integrity, zero pending outbox, and the `task-ulqf` binding's durable degraded state and Main Card update. Confirm `<pane-id>` still exists and remains absent from `herdr agent list`.
 
 - [ ] **Step 5: Recover the topic without prompt replay**
 
-Have the binding creator invoke `/swarm reset` in `task-ulqf`. Verify the replacement Pane is present in `herdr agent list`, the topic binding points to it, the old binding is archived, no old failed prompt was requeued, and the old `wH:p5Z` was retained because its native Agent state was unknown.
+Have the binding creator invoke `/swarm reset` in `task-ulqf`. Verify the replacement Pane is present in `herdr agent list`, the topic binding points to it, the old binding is archived, no old failed prompt was requeued, and the old `<pane-id>` was retained because its native Agent state was unknown.

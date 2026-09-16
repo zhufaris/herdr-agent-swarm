@@ -83,7 +83,7 @@ Verify the implementation commit exists and the only remaining worktree changes 
 ### Task 3: Deploy and recover the live backlog without replay
 
 **Files:**
-- Runtime database: `/home/feiyu.zhu/.local/state/herdr-agent-swarm/bridge.db` plus WAL/SHM companions
+- Runtime database: the configured state-directory database plus its WAL/SHM companions
 - Runtime service: `herdr-agent-swarm.service`
 
 **Interfaces:**

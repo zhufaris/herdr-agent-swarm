@@ -15,7 +15,7 @@ that TraeX already provides.
 
 ## Current constraints
 
-Herdr 0.7.5 accepts only a compiled set of values for `agent.start.kind`;
+the then-supported Herdr release accepts only a compiled set of values for `agent.start.kind`;
 `traex` is not one of them. Detection manifests can change state matching for a
 known kind but cannot register a new start kind. The socket API does accept an
 arbitrary `agent` string through `pane.report_agent` and
@@ -89,7 +89,7 @@ does not start a second process automatically.
 
 ### State reporter
 
-Herdr 0.7.5 does not detect the real TraeX executable as a native Agent. A small
+the then-supported Herdr release does not detect the real TraeX executable as a native Agent. A small
 compatibility layer establishes initial process-fenced identity without reading
 terminal content. Its authority is scoped by a unique source name and increasing
 sequence.

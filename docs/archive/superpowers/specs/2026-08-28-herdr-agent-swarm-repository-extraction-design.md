@@ -10,7 +10,7 @@ the source repository as a remote and excluding all private runtime state.
 The resulting repository lives at:
 
 ```text
-/data00/home/feiyu.zhu/work/herdr-agent-swarm
+/path/to/herdr-agent-swarm
 ```
 
 ## Chosen approach

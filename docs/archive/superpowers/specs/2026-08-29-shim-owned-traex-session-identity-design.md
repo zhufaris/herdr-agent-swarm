@@ -26,7 +26,7 @@ is absent, leaving SQLite without a usable transcript identity. The hook
 entrypoint also intentionally suppresses errors, making that divergence hard to
 diagnose.
 
-Herdr 0.7.5 accepts session identity through the dedicated
+the then-supported Herdr release accepts session identity through the dedicated
 `pane report-agent-session` command. Live verification exposed an additional
 authority rule: Herdr acknowledges an arbitrary source with `ok`, but only an
 installed integration source such as `herdr:codex` becomes the pane's projected
@@ -78,7 +78,7 @@ Three approaches were considered:
 ## Shim launch correlation and canonical identity
 
 Before launching TraeX, the shim generates a lowercase launch correlation UUID
-with `crypto.randomUUID()`. TraeX 0.201.6 documents `--session-id` as a legacy
+with `crypto.randomUUID()`. the configured TraeX build documents `--session-id` as a legacy
 session selection or naming option; live validation proves it becomes
 `threadName`, while TraeX independently generates the canonical `threadId`
 stored in `session_meta.payload.id` and the JSONL filename. The shim rejects

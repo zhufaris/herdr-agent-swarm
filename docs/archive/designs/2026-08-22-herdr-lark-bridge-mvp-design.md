@@ -109,7 +109,7 @@ Responsibilities:
 - Observe working, blocked, idle, and done transitions.
 - Derive a final assistant response from TraeX session metadata/hooks and bounded pane snapshots.
 
-Herdr 0.7.5 does not expose a distinct `traex` agent kind on this host, and compatibility detection may label TraeX as `codex`. The bridge therefore treats its own persisted `runtime = traex` field as authoritative for existing bindings. For discovery, it requires `herdr pane process-info --pane <id>` to report a foreground process whose executable name is exactly `traex`; it must never adopt a pane merely because Herdr reports `agent = codex`.
+the then-supported Herdr release does not expose a distinct `traex` agent kind in the deployment environment, and compatibility detection may label TraeX as `codex`. The bridge therefore treats its own persisted `runtime = traex` field as authoritative for existing bindings. For discovery, it requires `herdr pane process-info --pane <id>` to report a foreground process whose executable name is exactly `traex`; it must never adopt a pane merely because Herdr reports `agent = codex`.
 
 ### 4.4 `BindingStore`
 

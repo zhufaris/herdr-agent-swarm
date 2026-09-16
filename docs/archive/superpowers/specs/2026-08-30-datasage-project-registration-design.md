@@ -10,8 +10,8 @@ The production project registry gains these routes:
 
 | Project ID | Display name | Herdr workspace | Checkout |
 | --- | --- | --- | --- |
-| `datasage-semantic-knowledge` | DataSage Semantic Knowledge | `w5` | `/data00/home/feiyu.zhu/work/datasage_semantic_knowledge` |
-| `datasage-fabric2onetable` | DataSage Fabric2OneTable | `wD` | `/data00/home/feiyu.zhu/work/datasage_fabric2onetable` |
+| `datasage-semantic-knowledge` | DataSage Semantic Knowledge | `w5` | `/path/to/example-project` |
+| `datasage-fabric2onetable` | DataSage Fabric2OneTable | `wD` | `/path/to/example-fabric-project` |
 
 Both directories and workspace mappings were observed on the target host before configuration. The existing `herdr-agent-swarm` project remains the `defaultProjectId`.
 
@@ -27,7 +27,7 @@ This keeps project behavior consistent and allows isolated worker tasks without 
 
 ## Deployment and safety
 
-The change applies only to the private production registry at `/home/feiyu.zhu/.config/herdr-agent-swarm/projects.json`. No credentials, runtime database, or generated state enter Git. Before restart, validate the environment and registry with the repository's `config:validate` command.
+The change applies only to the private production registry at `/home/your-user/.config/herdr-agent-swarm/projects.json`. No credentials, runtime database, or generated state enter Git. Before restart, validate the environment and registry with the repository's `config:validate` command.
 
 Restart only `herdr-agent-swarm.service`. The obsolete `herdr-agent-swarm-multiproject.service` and `herdr-lark-bridge.service` remain inactive and disabled. If validation or readiness fails, restore the previous registry and restart the same service; no prompt is replayed.
 

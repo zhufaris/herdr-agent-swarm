@@ -41,7 +41,7 @@ retry unknown dead letters or weaken outbox ordering.
 - Run the focused card renderer and project-selection recovery tests.
 - Run TypeScript type checking, the full Vitest suite, and the production build.
 - After restart, verify the paused selection becomes completed, Binding
-  `c749d357-34cf-4d8a-bdb7-eb0191236321` becomes active on Pane `wH:p3N`, and no
+  `<binding-id>` becomes active on Pane `wH:p3N`, and no
   duplicate Pane appears.
 
 ## Non-goals

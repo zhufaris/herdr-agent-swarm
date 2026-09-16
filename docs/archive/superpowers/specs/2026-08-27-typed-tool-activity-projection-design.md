@@ -89,9 +89,9 @@ copy the surrounding output.
 A skill load is recognized only from structured call arguments containing an
 absolute path ending in `/SKILL.md` beneath one of these roots:
 
-- `/data00/home/<user>/.trae/skills/`
-- `/data00/home/<user>/.agents/skills/`
-- `/data00/home/<user>/.trae/plugins/`
+- `/path/to/<user>/.trae/skills/`
+- `/path/to/<user>/.agents/skills/`
+- `/path/to/<user>/.trae/plugins/`
 
 The projector emits no call entry. When the exact paired result arrives it emits
 one `✓ Skill · <names>` entry containing distinct skill names in source order. It

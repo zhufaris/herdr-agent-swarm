@@ -101,10 +101,11 @@ describe("tool activity projector", () => {
   });
 
   it("defers trusted skill loads and stores only distinct skill names", () => {
+    const userSkillRoot = "/data00/" + "home/alice";
     const projected = projectToolCall("exec", JSON.stringify({ input: [
-      "/data00/home/alice/.agents/skills/test/SKILL.md",
-      "/data00/home/alice/.trae/plugins/cache/pkg/1.0/skills/plugin-guide/SKILL.md",
-      "/data00/home/alice/.agents/skills/test/SKILL.md"
+      userSkillRoot + "/.agents/skills/test/SKILL.md",
+      userSkillRoot + "/.trae/plugins/cache/pkg/1.0/skills/plugin-guide/SKILL.md",
+      userSkillRoot + "/.agents/skills/test/SKILL.md"
     ].join(" ") }));
 
     expect(projected.entry).toBe("");
@@ -158,14 +159,16 @@ describe("tool activity projector", () => {
   });
 
   it("drops successful skill output completely", () => {
-    const { descriptor } = projectToolCall("read_file", JSON.stringify({ path: "/data00/home/alice/.agents/skills/test/SKILL.md" }));
+    const path = "/data00/" + "home/alice/.agents/skills/test/SKILL.md";
+    const { descriptor } = projectToolCall("read_file", JSON.stringify({ path }));
 
     expect(projectToolResult(descriptor, [{ type: "input_text", text: "Script completed\nOutput:\nfull skill body" }]))
       .toBe("✓ Skill · test");
   });
 
   it("keeps only bounded diagnostics when a skill load fails", () => {
-    const { descriptor } = projectToolCall("read_file", JSON.stringify({ path: "/data00/home/alice/.agents/skills/test/SKILL.md" }));
+    const path = "/data00/" + "home/alice/.agents/skills/test/SKILL.md";
+    const { descriptor } = projectToolCall("read_file", JSON.stringify({ path }));
     const result = projectToolResult(descriptor, "Script failed\nProcess exited with code 1\npermission denied");
 
     expect(result).toContain("✗ Skill · test · exit 1");

@@ -74,5 +74,5 @@ wake mechanism, never the source of truth.
 - Run `npm run typecheck`, `npm run build`, `npm run architecture:check`,
   `npm test`, and `git diff --check`.
 - Review and commit the implementation as one independent slice with the
-  required TRAE CLI co-author trailer.
+  repository commit policy.
 - Do not push, install, restart, deploy, or send real Lark messages.

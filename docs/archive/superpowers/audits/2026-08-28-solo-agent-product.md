@@ -11,8 +11,8 @@ worker creation/selection, automatic Primary continuation, merge, push, deploy,
 and destructive cleanup remain out of scope.
 
 Live evidence in this audit is intentionally narrower than executable
-discovery. The user-selected production acceptance is TraeX Primary plus TraeX
-Worker. Codex and Claude Code executables are present on this host, but Codex is
+discovery. The user-selected acceptance scenario is TraeX Primary plus TraeX
+Worker. Codex and Claude Code executables are present in the deployment environment, but Codex is
 affected by unrelated global hook/MCP configuration and Claude Code is not
 authenticated. Pi is not installed. None is claimed as live-verified.
 
@@ -20,7 +20,7 @@ authenticated. Pi is not installed. None is claimed as live-verified.
 
 | # | Requirement | Implementation | Tests and live evidence | Result |
 |---|---|---|---|---|
-| 1 | Headless daemon; TUI/plugin optional | `scripts/solo-agent.sh`, `src/cli/plugin-lifecycle.ts`, `service/solo-agent.service` | `plugin-lifecycle.test.ts`; smoke ran from CLI against Herdr 0.7.5 | Complete |
+| 1 | Headless daemon; TUI/plugin optional | `scripts/solo-agent.sh`, `src/cli/plugin-lifecycle.ts`, `service/solo-agent.service` | `plugin-lifecycle.test.ts`; CLI smoke validation in the deployment environment | Complete |
 | 2 | Multiple projects; one Primary and named Workers | `config.ts`, `agent-instance.ts`, `sqlite-store.ts` | `config.test.ts`, `sqlite-store.test.ts`, `instance-control.integration.test.ts` | Complete |
 | 3 | Human-controlled create/start/stop/select/promote/remove | `instance-control-workflow.ts`, `instance-interaction-workflow.ts`, Feishu cards/router | `instance-control.integration.test.ts`, `instance-routing.integration.test.ts`, `instance-cards.test.ts` | Complete |
 | 4 | TraeX, Codex, Claude Code, Pi with honest availability | `runtime/agents/*-driver.ts`, `agent-availability.ts` | `agent-driver-contract.test.ts`; live status documented above | Complete |
@@ -53,7 +53,7 @@ authenticated. Pi is not installed. None is claimed as live-verified.
 components: SQLite store, control workflow, worktree manager, Primary capability
 gateway, stdio MCP shim, Herdr panes, and TraeX processes. Evidence:
 
-- Herdr `0.7.5`; TraeX `0.201.6` internal edition.
+- Herdr and TraeX versions were validated against the deployment environment available at the time.
 - Primary instance `4952a73d-904b-47c6-af5f-32b12bd702af`, pane `wH:p5E`,
   turn `d29944c5-0c99-4d5a-bee5-79ed407f9475`: completed.
 - Worker instance `74251acc-4fa1-4857-8c48-835d29d4854e`, pane `wH:p5F`,

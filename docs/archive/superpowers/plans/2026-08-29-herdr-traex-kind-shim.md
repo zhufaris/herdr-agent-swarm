@@ -6,7 +6,7 @@
 
 **Architecture:** A user-PATH `herdr` launcher delegates every command except `agent start --kind traex` to an absolute official Herdr binary. The intercepted path writes a private launch request, starts a fixed pane launcher that `exec`s TraeX with preserved arguments, and starts a detached reporter that maps the official Codex detection result onto `pane.report-agent --agent traex`. Agent-swarm then uses the managed `startAgent(kind=traex)` path while retaining legacy Codex observation compatibility.
 
-**Tech Stack:** Node.js 22+, TypeScript, Bash, Herdr 0.7.5 CLI/socket API, Vitest
+**Tech Stack:** Node.js 22+, TypeScript, Bash, the then-supported Herdr release CLI/socket API, Vitest
 
 **Spec:** `docs/superpowers/specs/2026-08-29-herdr-traex-kind-shim-design.md`
 
@@ -297,7 +297,7 @@ Expected: typecheck exit 0, all Vitest tests pass, build emits both shim entrypo
 
 - [ ] **Step 1: Install the verified shim atomically**
 
-Select a dedicated user-owned directory that already precedes `/home/feiyu.zhu/.local/bin` in `PATH`, export it as `HERDR_TRAEX_SHIM_BIN_DIR`, and run `npm run herdr:traex:install`. Confirm `command -v herdr` resolves to the shim while the recorded real binary remains `/home/feiyu.zhu/.local/bin/herdr`; then verify `npm run herdr:traex:status` reports official Herdr 0.7.5 plus absolute TraeX 0.201.6. Do not replace the official file or restart the production Herdr server.
+Select a dedicated user-owned directory that already precedes `/home/your-user/.local/bin` in `PATH`, export it as `HERDR_TRAEX_SHIM_BIN_DIR`, and run `npm run herdr:traex:install`. Confirm `command -v herdr` resolves to the shim while the recorded real binary remains `/home/your-user/.local/bin/herdr`; then verify `npm run herdr:traex:status` reports official the then-supported Herdr release plus absolute the configured TraeX build. Do not replace the official file or restart the production Herdr server.
 
 - [ ] **Step 2: Start a named isolated Herdr session and disposable pane**
 

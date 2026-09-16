@@ -6,7 +6,7 @@
 
 **Architecture:** The installed shim generates one correlation UUID per managed start and supplies it to TraeX's legacy `--session-id` naming option. The process-fenced reporter resolves the canonical thread ID from TraeX's peer registry, keeps process state under `herdr-traex-shim`, and publishes the canonical identity through the trusted `herdr:codex` session authority. The bridge normalizes shim-marked Codex protocol sessions to TraeX at the adapter boundary, persists only canonical `agent_session_*`, and passes only that identity to the transcript reader.
 
-**Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, better-sqlite3, Bash, Herdr 0.7.5, TraeX hooks
+**Tech Stack:** TypeScript ESM, Node.js 22+, Vitest, better-sqlite3, Bash, the then-supported Herdr release, TraeX hooks
 
 **Spec:** `docs/superpowers/specs/2026-08-29-shim-owned-traex-session-identity-design.md`
 
@@ -158,7 +158,7 @@
 - Modify: `docs/superpowers/specs/2026-08-29-herdr-traex-kind-shim-design.md`
 
 **Interfaces:**
-- Consumes: the process-fenced generated UUID and official Herdr 0.7.5 CLI.
+- Consumes: the process-fenced generated UUID and official the then-supported Herdr release CLI.
 - Produces: state under `herdr-traex-shim` and session identity under the trusted `herdr:codex` integration source.
 
 - [ ] Add failing reporter tests requiring separate `reportAgent` and `reportAgentSession` calls with distinct sources.

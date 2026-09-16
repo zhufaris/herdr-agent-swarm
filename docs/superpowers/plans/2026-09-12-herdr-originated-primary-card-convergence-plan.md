@@ -67,6 +67,5 @@ route all observed transcript lifecycle through the existing `BridgeEventBus`,
   shutdown tests.
 - Run `npm run typecheck`, `npm run build`, `npm run architecture:check`,
   `npm test`, and `git diff --check`.
-- Review and commit the implementation independently with the TRAE CLI co-author
-  trailer.
+- Review and commit the implementation independently.
 - Do not push, install, restart, deploy, or send real Lark messages.

@@ -140,7 +140,7 @@ Expected: PASS.
 
 ```bash
 git add src/setup/setup-types.ts src/setup/setup-checks.ts src/config.ts tests/setup-checks.test.ts tests/config.test.ts
-git commit -m "feat: define setup validation policy" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "feat: define setup validation policy"
 ```
 
 ---
@@ -242,7 +242,7 @@ Expected: PASS, including forced second-replacement rollback and secret-absence 
 
 ```bash
 git add src/setup/setup-config.ts src/setup/setup-summary.ts src/runtime/environment-file.ts tests/setup-config.test.ts tests/config.test.ts
-git commit -m "feat: persist setup configuration safely" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "feat: persist setup configuration safely"
 ```
 
 ---
@@ -315,7 +315,7 @@ Expected: PASS and no fake command uses a mutating Herdr verb.
 
 ```bash
 git add src/adapters/herdr-setup-probe.ts src/setup/setup-checks.ts src/setup/setup-types.ts tests/herdr-setup-probe.test.ts tests/setup-checks.test.ts
-git commit -m "feat: add read-only Herdr setup checks" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "feat: add read-only Herdr setup checks"
 ```
 
 ---
@@ -391,7 +391,7 @@ Expected: PASS, with all request methods and redaction assertions satisfied.
 
 ```bash
 git add src/adapters/lark-setup-probe.ts src/setup/setup-types.ts tests/lark-setup-probe.test.ts
-git commit -m "feat: verify Lark setup connectivity" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "feat: verify Lark setup connectivity"
 ```
 
 ---
@@ -491,7 +491,7 @@ Expected: PASS.
 
 ```bash
 git add src/setup/setup-workflow.ts src/setup/setup-prompts.ts src/setup/setup-summary.ts tests/setup-workflow.test.ts tests/setup-prompts.test.ts
-git commit -m "feat: guide first-run swarm setup" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "feat: guide first-run swarm setup"
 ```
 
 ---
@@ -589,7 +589,7 @@ Expected: PASS, including all legacy lifecycle assertions.
 
 ```bash
 git add src/cli/setup.ts src/cli/doctor.ts src/cli/plugin-lifecycle.ts tests/setup-cli.integration.test.ts tests/plugin-lifecycle.test.ts scripts/swarm-service.sh package.json plugin/setup.sh tests/plugin-manifest.test.ts
-git commit -m "feat: expose swarm setup and doctor commands" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "feat: expose swarm setup and doctor commands"
 ```
 
 ---
@@ -669,7 +669,7 @@ Expected: all commands exit `0`.
 
 ```bash
 git add install.sh tests/plugin-manifest.test.ts README.md docs/architecture.md docs/feishu-group-usage.md
-git commit -m "docs: guide first-run swarm setup" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "docs: guide first-run swarm setup"
 ```
 
 ---

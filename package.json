@@ -11,6 +11,7 @@
     "release:package": "node scripts/package-release.mjs",
     "config:validate": "node dist/cli/validate-config.js",
     "docs:audit": "node scripts/audit-superpowers-docs.mjs",
+    "public:audit": "node scripts/audit-public-release.mjs",
     "service": "node dist/cli/service-lifecycle.js",
     "primary-tools:mcp": "node dist/cli/primary-tools-mcp.js",
     "swarm:init": "bash scripts/swarm-service.sh init",

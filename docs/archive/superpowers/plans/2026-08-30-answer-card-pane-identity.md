@@ -152,7 +152,6 @@ Run `git diff --check`, inspect `git diff --stat` and the feature diff, then sta
 ```text
 feat: identify pane on answer cards
 
-Co-authored-by: TRAE CLI <traecli@bytedance.com>
 ```
 
 - [ ] **Step 5: Inspect deployment safety without restarting**

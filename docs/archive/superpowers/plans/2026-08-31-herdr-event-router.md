@@ -6,7 +6,7 @@
 
 **Architecture:** `HerdrSocketSubscriber` owns the socket protocol, acknowledgement lifecycle, event normalization, and bounded hint coalescing. A new `HerdrEventRouter` owns best-effort wake-up policy and calls narrow coordinator methods; coordinators continue to read Herdr and SQLite before applying transitions. Existing startup and periodic scans remain unchanged as the convergence safety net.
 
-**Tech Stack:** TypeScript 5.9, Node.js 22+, Zod, Vitest, Herdr 0.7.5 socket protocol, SQLite.
+**Tech Stack:** TypeScript 5.9, Node.js 22+, Zod, Vitest, the then-supported Herdr release socket protocol, SQLite.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-herdr-event-router-design.md`
 

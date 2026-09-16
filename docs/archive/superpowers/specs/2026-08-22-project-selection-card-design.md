@@ -52,7 +52,7 @@ shape is:
       "displayName": "Herdr Lark Bridge",
       "description": "Bridge service and Lark integration",
       "workspaceId": "wH",
-      "cwd": "/data00/home/feiyu.zhu/work/herdr-lark-bridge"
+      "cwd": "/path/to/herdr-lark-bridge"
     }
   ]
 }

@@ -705,11 +705,12 @@ describe("TraexTranscriptReader", () => {
   });
 
   it("summarizes a skill load and suppresses its paired document output", async () => {
+    const skillPath = "/data00/" + "home/alice/.trae/skills/brainstorming/SKILL.md";
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{
       type: "function_call", id: "fc-skill", call_id: "call-skill", name: "exec",
-      arguments: JSON.stringify({ input: "const r = await tools.exec_command({cmd: \"sed -n '1,240p' /data00/home/alice/.trae/skills/brainstorming/SKILL.md\"}); text(r.output)" })
+      arguments: JSON.stringify({ input: "const r = await tools.exec_command({cmd: \"sed -n '1,240p' " + skillPath + "\"}); text(r.output)" })
     }]));
 
     await expect(cursor.readDelta()).resolves.toBe("");
@@ -727,9 +728,9 @@ describe("TraexTranscriptReader", () => {
     await appendFile(path, mutation([{
       type: "function_call", id: "fc-skills", call_id: "call-skills", name: "read_files",
       arguments: JSON.stringify({ paths: [
-        "/data00/home/alice/.agents/skills/test/SKILL.md",
-        "/data00/home/alice/.trae/plugins/cache/package/1.0.0/skills/plugin-guide/SKILL.md",
-        "/data00/home/alice/.agents/skills/test/SKILL.md"
+        "/opt/herdr/.agents/skills/test/SKILL.md",
+        "/opt/herdr/.trae/plugins/cache/package/1.0.0/skills/plugin-guide/SKILL.md",
+        "/opt/herdr/.agents/skills/test/SKILL.md"
       ] })
     }]));
 

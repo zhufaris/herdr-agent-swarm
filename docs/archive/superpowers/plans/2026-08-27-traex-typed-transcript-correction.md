@@ -88,7 +88,7 @@ Expected: failures show that `history_mutation` is currently ignored and `open()
 
 ```bash
 git add src/domain/ports.ts tests/fixtures/task-jz33-transcript.jsonl tests/traex-transcript.test.ts
-git commit -m "test: define typed transcript message contract" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "test: define typed transcript message contract"
 ```
 
 ### Task 2: Implement stateful typed-item rendering
@@ -158,7 +158,7 @@ Expected: all transcript tests pass, including real fixture pairing and duplicat
 
 ```bash
 git add src/runtime/traex-transcript.ts tests/traex-transcript.test.ts
-git commit -m "fix: consume typed TraeX transcript items" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "fix: consume typed TraeX transcript items"
 ```
 
 ### Task 3: Make turn source selection explicit and non-mixing
@@ -214,7 +214,7 @@ Expected: typed, terminal fallback, and no-mixing cases all pass.
 
 ```bash
 git add src/coordinator/prompt-run-workflow.ts tests/concurrency-controls.integration.test.ts tests/helpers/create-test-router.ts
-git commit -m "fix: enforce typed transcript turn mode" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "fix: enforce typed transcript turn mode"
 ```
 
 ### Task 4: Align active architecture documentation
@@ -249,7 +249,7 @@ Expected: no active architecture claim contradicts the spec and no whitespace er
 
 ```bash
 git add docs/architecture.md
-git commit -m "docs: align typed transcript architecture" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "docs: align typed transcript architecture"
 ```
 
 ### Task 5: Verify build and live rollout boundaries

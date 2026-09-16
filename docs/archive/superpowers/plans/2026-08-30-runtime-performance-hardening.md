@@ -469,7 +469,7 @@ Commit: `build: trim production service artifacts`
 
 **Files:**
 - No source changes expected.
-- Preserve: `/home/feiyu.zhu/.config/herdr-agent-swarm/projects.json` and `/home/feiyu.zhu/.local/state/herdr-agent-swarm/bridge.db`.
+- Preserve: `/home/your-user/.config/herdr-agent-swarm/projects.json` and `/home/your-user/.local/state/herdr-agent-swarm/bridge.db`.
 
 **Interfaces:**
 - Consumes: verified commits from Tasks 1-11.

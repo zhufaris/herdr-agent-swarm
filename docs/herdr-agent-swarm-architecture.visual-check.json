@@ -6,7 +6,7 @@
   "status": "pass",
   "visualReview": "pending",
   "artifact": {
-    "path": "/data00/home/feiyu.zhu/work/herdr-agent-swarm/docs/herdr-agent-swarm-architecture.html",
+    "path": "docs/herdr-agent-swarm-architecture.html",
     "sha256": "049643b7a19afe2cfbaba7fcdd79f47dc6da11258d7fcde0f304b4f6884611b6",
     "bytes": 720400
   },

@@ -34,7 +34,7 @@
 ### Task 2: Correct and deploy the production registry
 
 **Files:**
-- Modify outside Git: `/home/feiyu.zhu/.config/herdr-agent-swarm/projects.json`
+- Modify outside Git: `/home/your-user/.config/herdr-agent-swarm/projects.json`
 
 - [ ] Change `herdr-agent-swarm.workspaceId` from `wH` to `wN` without changing project cwd or instance definitions.
 - [ ] Run `npm run config:validate` against the private files.

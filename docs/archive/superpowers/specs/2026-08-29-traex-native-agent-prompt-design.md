@@ -14,7 +14,7 @@ details belong to Herdr's Agent integration. A false terminal interpretation can
 cross the durable dispatch boundary even though the requested prompt was not
 submitted.
 
-Herdr 0.7.5 does not accept `herdr agent start --kind traex`; the supported kind
+the then-supported Herdr release does not accept `herdr agent start --kind traex`; the supported kind
 list has no `traex` value. It can, however, recognize the installed TraeX TUI as
 a Codex-compatible Agent after TraeX is launched with `herdr pane run`. This
 mapping is already represented by `matchesHerdrAgentKind("traex", "codex")`.
@@ -83,7 +83,7 @@ retry.
 
 ## Steering and interactive controls
 
-Raw terminal steering is disabled as part of this change. Herdr 0.7.5 has no
+Raw terminal steering is disabled as part of this change. the then-supported Herdr release has no
 separate structured steering transaction, and using `agent prompt` while an
 Agent is already working does not identify which turn receives the input. The
 runtime reports steering as unsupported until Herdr exposes an operation with

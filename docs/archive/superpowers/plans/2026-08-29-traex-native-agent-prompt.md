@@ -6,7 +6,7 @@
 
 **Architecture:** TraeX remains a product-level Agent kind launched with the configured executable through `herdr pane run`, while Herdr observes it through its Codex-compatible Agent detector. `HerdrCliAdapter` owns the strict detection and prompt-result classification; runtime drivers consume only `runPrompt`, and unsupported steering fails before terminal input. Terminal reads remain available only for explicitly retained model-selection and bounded diagnostic/state fallback paths.
 
-**Tech Stack:** TypeScript, Node.js 22+, Herdr 0.7.5 CLI/native socket API, Vitest, SQLite-backed durable workflows
+**Tech Stack:** TypeScript, Node.js 22+, the then-supported Herdr release CLI/native socket API, Vitest, SQLite-backed durable workflows
 
 **Spec:** `docs/superpowers/specs/2026-08-29-traex-native-agent-prompt-design.md`
 

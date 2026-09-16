@@ -43,7 +43,7 @@ HerdrSocketClient events -> coalesced reconciliation -> authoritative snapshot
 This phase enables `session.snapshot`, `agent.read`, `pane.process_info`, and
 `pane.wait_for_output`. Prompt submission and topology/control commands remain
 CLI-backed until they have an independently tested migration. The client owns a persistent event-stream connection and one
-short-lived connection per RPC because Herdr 0.7.5 dedicates a connection after
+short-lived connection per RPC because the then-supported Herdr release dedicates a connection after
 `events.subscribe` and closes an RPC connection after one response. Request IDs
 remain opaque correlation keys and responses are never interpreted as events.
 

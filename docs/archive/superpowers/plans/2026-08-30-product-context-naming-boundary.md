@@ -82,7 +82,7 @@ Expected: the new title and compatibility wording are present, all three plugin 
 ```bash
 git add AGENTS.md
 git diff --cached --check
-git commit -m "docs: identify agent swarm in repository guidance" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "docs: identify agent swarm in repository guidance"
 ```
 
 ### Task 2: Correct active architecture and usage introductions
@@ -161,5 +161,5 @@ Expected: the placeholder search returns no newly introduced matches and `git di
 ```bash
 git add docs/architecture-reference.md docs/feishu-group-usage.md
 git diff --cached --check
-git commit -m "docs: clarify bridge compatibility naming" -m "Co-authored-by: TRAE CLI <traecli@bytedance.com>"
+git commit -m "docs: clarify bridge compatibility naming"
 ```

@@ -139,7 +139,7 @@ Expected: all commands exit `0`; the migration test proves existing row state is
 
 ```bash
 git add src/domain/types.ts src/domain/ports.ts src/store/sqlite-records.ts src/store/sqlite-store.ts tests/sqlite-store.test.ts
-git commit -m "feat: persist prompt transcript ownership" -m "Co-authored-by: TRAE CLI <noreply@trae.ai>"
+git commit -m "feat: persist prompt transcript ownership"
 ```
 
 ---
@@ -252,7 +252,7 @@ Expected: all commands exit `0`; adjacent transcript turns remain separate and a
 
 ```bash
 git add src/domain/ports.ts src/runtime/traex-transcript.ts src/coordinator/prompt-run-workflow.ts tests/traex-transcript.test.ts tests/concurrency-controls.integration.test.ts
-git commit -m "fix: fence attached output by turn identity" -m "Co-authored-by: TRAE CLI <noreply@trae.ai>"
+git commit -m "fix: fence attached output by turn identity"
 ```
 
 ---
@@ -328,7 +328,7 @@ Expected: every command exits `0`; the full suite has no skipped or failed tests
 
 ```bash
 git add src/coordinator/prompt-run-workflow.ts docs/architecture.md tests/pane-thread-lifecycle-integration.test.ts tests/sqlite-store.test.ts
-git commit -m "fix: require exact identity for detached turns" -m "Co-authored-by: TRAE CLI <noreply@trae.ai>"
+git commit -m "fix: require exact identity for detached turns"
 ```
 
 ---

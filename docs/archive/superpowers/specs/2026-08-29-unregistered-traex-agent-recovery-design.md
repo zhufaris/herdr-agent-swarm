@@ -10,7 +10,7 @@ The current runtime reconciliation treats the live pane and TraeX process as a
 successful observation. It therefore keeps the binding `attached`, even though
 ordinary prompt delivery deterministically fails with `agent_not_found`. The
 failure is discovered only after a user sends work. Restarting the bridge does
-not repair Herdr's Agent registry, and Herdr 0.7.5 exposes no operation that
+not repair Herdr's Agent registry, and the then-supported Herdr release exposes no operation that
 adopts an already-running process as an Agent. `herdr agent attach` attaches a
 client to an existing registered Agent; it is not a registration API.
 
