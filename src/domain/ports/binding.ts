@@ -2,6 +2,7 @@ import type { Binding, BindingMetadataPatch, BindingTitleProjectionInput, Bindin
 import type { ProjectSelection, ProjectSelectionClaim, RetiredPaneCleanupOperation, RuntimeObservationApplication } from "../types.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { SessionTransition } from "../pane-thread-lifecycle.js";
+import type { AgentKind } from "../agent-instance.js";
 
 export interface RuntimeReconciliationStore {
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication;
@@ -23,8 +24,8 @@ export interface BindingProvisioningStore {
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim;
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   countPendingPrompts(bindingId: string): number;
-  createPendingBinding(input: { id: string; gatewayId?: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; creatorOpenId?: string | null }): Binding;
-  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection;
+  createPendingBinding(input: { id: string; gatewayId?: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; agentKind?: AgentKind; creatorOpenId?: string | null }): Binding;
+  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; expiresAt: string; card: object }): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
   findBindingByPane(paneId: string): Binding | null;

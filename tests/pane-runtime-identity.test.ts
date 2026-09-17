@@ -39,4 +39,14 @@ describe("pane runtime identity", () => {
     await expect(requireMatchingPane({ observeRuntime: async () => ({ pane: pane({ terminalId: "terminal-2" }), traexProcess: true, composerReady: true, evidenceSource: "structured" }) } as never, projects, binding, "w1:p1"))
       .rejects.toThrow(/pane identity changed/);
   });
+
+  it("accepts only the exact persisted non-TraeX Agent kind and session", async () => {
+    const piBinding = { ...binding, agentKind: "pi", agentSessionSource: "herdr:pi", agentSessionAgent: "pi", agentSessionValue: "pi-session" } as never;
+    const matching = pane({ foregroundExecutables: ["pi"], agentKind: "pi", agentSession: { source: "herdr:pi", agent: "pi", kind: "id", value: "pi-session" } });
+
+    await expect(requireMatchingPane({ observeRuntime: async () => ({ pane: matching, traexProcess: false, composerReady: false, evidenceSource: "structured" }) } as never, projects, piBinding, "w1:p1"))
+      .resolves.toMatchObject({ agentKind: "pi" });
+    await expect(requireMatchingPane({ observeRuntime: async () => ({ pane: { ...matching, agentKind: "codex" }, traexProcess: false, composerReady: false, evidenceSource: "structured" }) } as never, projects, piBinding, "w1:p1"))
+      .rejects.toThrow(/Agent kind changed/);
+  });
 });

@@ -64,6 +64,62 @@ describe("project selection flow", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
+  it("persists the requested Primary Agent kind before project selection", async () => {
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
+      async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "selector-card" }; }, async updateCard() {}
+    };
+    const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} } as HerdrPort;
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+
+    await coordinator.handleMessage({ eventId: "event-pi", messageId: "message-pi", chatId: "chat", topicId: null, rootMessageId: "message-pi", actorOpenId: "user-1", text: "/swarm new investigate --agent pi", mentionsBot: true, isRootMessage: true });
+
+    expect(store.database.prepare("SELECT requested_title, agent_kind FROM project_selections WHERE command_message_id = ?").get("message-pi")).toEqual({ requested_title: "investigate", agent_kind: "pi" });
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("starts the selected Primary Agent driver and preserves its kind on the binding", async () => {
+    let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
+    let selectorCard: object | undefined;
+    let paneCreated = false;
+    const startAgent = vi.fn(async () => undefined);
+    const runPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, _observation: unknown, _signal: unknown, onDispatched: () => Promise<void>) => { await onDispatched(); return "done" as const; });
+    const lark: LarkPort = {
+      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "pi-topic", rootMessageId: "pi-root" }; }, async replyText() { return { messageId: "text" }; },
+      async replyCard(_root, card) { selectorCard = card; return { messageId: "selector-card" }; }, async updateCard() {}
+    };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return paneCreated ? { paneId: "w1:pi", terminalId: "term-pi", workspaceId: "w1", cwd: "/work/alpha", label: "pi-primary", agentKind: "pi", agentSession: { source: "herdr:pi", agent: "pi", kind: "id", value: "pi-session" }, agentState: "idle", foregroundExecutables: ["pi"] } : null; },
+      async createPane(workspaceId, cwd, options) { paneCreated = true; return { paneId: "w1:pi", workspaceId, cwd, label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] }; },
+      async observeRuntime() { return { pane: { paneId: "w1:pi", terminalId: "term-pi", workspaceId: "w1", cwd: "/work/alpha", label: "pi-primary", agentKind: "pi", agentSession: { source: "herdr:pi", agent: "pi", kind: "id", value: "pi-session" }, agentState: "idle", foregroundExecutables: ["pi"] }, traexProcess: false, composerReady: false, evidenceSource: "structured" }; },
+      startAgent, async startTraex() { throw new Error("TraeX must not start"); }, runPrompt, async renamePane() {}
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+    await coordinator.start();
+    await coordinator.handleMessage({ eventId: "event-pi-create", messageId: "message-pi-create", chatId: "chat", topicId: null, rootMessageId: "message-pi-create", actorOpenId: "user-1", text: "/swarm new investigate --agent pi", mentionsBot: true, isRootMessage: true });
+    const value = findProjectButton(selectorCard!, "alpha").value as { selectionId: string; projectId: string; action: string };
+    await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
+    await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
+
+    expect(startAgent).toHaveBeenCalledWith("w1:pi", { name: "alpha-primary", kind: "pi", executable: "pi", args: [] });
+    const piBinding = store.findBindingByPane("w1:pi")!;
+    expect(piBinding).toMatchObject({ agentKind: "pi", state: "active" });
+    expect(store.hasBindingPrimaryToolCapability(piBinding.id, piBinding.generation)).toBe(false);
+    await vi.waitFor(() => expect(store.loadTopicView(piBinding.id)).toMatchObject({ agentKind: "pi", primaryToolsAvailable: false, primaryToolsNotice: expect.stringContaining("pi Primary") }));
+    await coordinator.handleMessage({ eventId: "pi-prompt-event", messageId: "pi-prompt", chatId: "chat", topicId: "pi-topic", rootMessageId: "pi-root", actorOpenId: "user-1", text: "run with pi", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledWith("w1:pi", "run with pi", expect.any(Number), expect.any(Function), expect.any(AbortSignal), expect.any(Function)));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = ?").get("pi-prompt")).toEqual({ state: "delivered" }));
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
   it("returns the card callback before project provisioning completes", async () => {
     let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
     let releasePane!: () => void;

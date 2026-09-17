@@ -1,6 +1,7 @@
 import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import { summarizeProgress, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
+import type { AgentKind } from "../domain/agent-instance.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
@@ -37,6 +38,7 @@ const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 6;
 const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 3_000;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";
+const AGENT_LABEL: Record<AgentKind, string> = { traex: "TraeX", pi: "Pi", codex: "Codex", "claude-code": "Claude Code" };
 
 export function renderProjectSelectorCard(input: { selectionId: string; projects: ProjectConfig[] }, payloadLimit = 12_000): object {
   const elements: object[] = [];
@@ -112,7 +114,7 @@ export function renderRunCard(input: TopicViewState): object {
   } else if (input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned") {
     elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请检查 bridge 日志与 Herdr pane。"));
   } else if (input.phase === "running") {
-    elements.push({ tag: "markdown", content: "正在等待 TraeX 完成。本卡片会在状态变化时更新。" });
+    elements.push({ tag: "markdown", content: `正在等待 ${agentLabel(input.agentKind)} 完成。本卡片会在状态变化时更新。` });
   } else if (input.phase === "queued") {
     elements.push({ tag: "markdown", content: "消息已进入该话题的 FIFO 队列。" });
   }
@@ -123,7 +125,7 @@ export function renderRunCard(input: TopicViewState): object {
     schema: "2.0",
     config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: view.label } },
     header: {
-      title: { tag: "plain_text", content: agentPaneTitle(input.spaceName, input.paneId) },
+      title: { tag: "plain_text", content: agentPaneTitle(input.agentKind, input.spaceName, input.paneId) },
       subtitle: { tag: "plain_text", content: "HERDR REMOTE PANEL" },
       template: view.color
     },
@@ -225,7 +227,7 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
       summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` }
     },
     header: {
-      title: { tag: "plain_text", content: input.phase === "completed" && !streaming ? (pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成") : (pageNumber > 1 ? `✨ TraeX 继续回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复") },
+      title: { tag: "plain_text", content: input.phase === "completed" && !streaming ? (pageNumber > 1 ? `✅ ${agentLabel(input.agentKind)} 回复已完成 · 第 ${pageNumber} 页` : `✅ ${agentLabel(input.agentKind)} 回复已完成`) : (pageNumber > 1 ? `✨ ${agentLabel(input.agentKind)} 继续回复 · 第 ${pageNumber} 页` : `✨ ${agentLabel(input.agentKind)} 回复`) },
       subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
       template: input.phase === "completed" && !streaming ? "green" : state.color
     },
@@ -244,7 +246,7 @@ function defaultAnswerContent(input: RunCardView, stepProgress: { done: number; 
   const baseContent = prose
     ? normalizeLarkPreview(prose)
     : input.phase === "running" && stepProgress.total > 0
-      ? `TraeX 正在执行 · ${stepProgress.done}/${stepProgress.total}`
+      ? `${agentLabel(input.agentKind)} 正在执行 · ${stepProgress.done}/${stepProgress.total}`
     : input.phase === "running" ? "⏳ 已接收请求"
       : input.phase === "queued" ? "⏳ 已接收请求"
         : input.phase === "completed" ? "本次未产生可展示的回答。"
@@ -266,7 +268,7 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
     schema: "2.0",
     config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
-      title: { tag: "plain_text", content: input.phase === "completed" ? (pageNumber > 1 ? `✅ TraeX 回复已完成 · 第 ${pageNumber} 页` : "✅ TraeX 回复已完成") : (pageNumber > 1 ? `✨ TraeX 回复 · 第 ${pageNumber} 页` : "✨ TraeX 回复") },
+      title: { tag: "plain_text", content: input.phase === "completed" ? (pageNumber > 1 ? `✅ ${agentLabel(input.agentKind)} 回复已完成 · 第 ${pageNumber} 页` : `✅ ${agentLabel(input.agentKind)} 回复已完成`) : (pageNumber > 1 ? `✨ ${agentLabel(input.agentKind)} 回复 · 第 ${pageNumber} 页` : `✨ ${agentLabel(input.agentKind)} 回复`) },
       subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
       template: input.phase === "completed" ? "green" : RUN_STATE_VIEW[input.phase].color
     },
@@ -345,8 +347,8 @@ export function renderHelpCard(): object {
       ].join("\n") },
       { tag: "collapsible_panel", expanded: false, header: { title: { tag: "plain_text", content: "高级命令与恢复" } }, elements: [
       { tag: "markdown", content: [
-        "`/swarm new [标题]`  选择项目并创建 TraeX pane",
-        "`/swarm reset [标题]`  在当前话题安全切换到新的 TraeX 会话（旧 pane 仅在确认空闲后自动关闭）",
+        "`/swarm new [标题] [--agent traex|pi|codex|claude-code]`  选择项目和 Primary Agent（默认 traex）",
+        "`/swarm reset [标题]`  使用当前 Agent 类型安全切换到新会话（旧 pane 仅在确认空闲后自动关闭）",
         "`/swarm stop`  中断 exact active turn，不停止 pane、不取消 FIFO",
         "`/swarm steer <文本>`  active 时注入 exact turn，idle 时优先于普通队列执行",
         "`/swarm projects`  打开项目选择卡片",
@@ -354,12 +356,12 @@ export function renderHelpCard(): object {
         "`/swarm panes`  列出当前 Space 的 active Pane，并将所选入口卡片发送到群聊",
         "`/swarm sessions`  查看当前群的会话",
         "`/swarm failures`  查看并处理发送失败",
-        "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有 TraeX pane",
+        "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有受支持 Agent pane",
         "`/swarm status`  查看当前绑定",
         "`/swarm model [name]`  查看或切换当前 Pane 的 TraeX 模型",
         "`/swarm worker create <name> [--agent <kind>] [--model <name>] [--start]`  在当前 Primary 下创建 Worker",
         "`/swarm rename <标题>`  重命名当前 pane",
-        "`/swarm close`  归档映射（不会强杀 TraeX）",
+        "`/swarm close`  归档映射（不会强杀 Agent）",
         "`/swarm pane close`  请求关闭空闲 Pane（需要 60 秒内二次确认）",
         "`/swarm pane close confirm <code>`  确认关闭当前话题绑定的 Pane",
         "`/swarm reattach <pane>`  重新连接已验证的原 Pane",
@@ -415,7 +417,7 @@ export function renderMessageRejectedCard(message: string): object {
   };
 }
 
-function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "paneId" | "worktreeName" | "model" | "context" | "queueDepth">): string {
+function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" | "tabId" | "paneId" | "worktreeName" | "model" | "context" | "queueDepth">): string {
   const entries: Array<[label: string, value: string]> = [
     ["SPACE", input.spaceName],
     ["TAB", input.tabId ?? "—"],
@@ -423,6 +425,7 @@ function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "pa
   ];
   const identity = entries.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
   const metrics: Array<[label: string, value: string]> = [
+    ["AGENT", agentLabel(input.agentKind)],
     ["MODEL", input.model ?? "—"],
     ["CONTEXT", input.context ?? "—"],
     ["QUEUE", String(input.queueDepth)]
@@ -434,7 +437,7 @@ function verticalMetrics(input: Pick<TopicViewState, "spaceName" | "tabId" | "pa
 function runtimeFooter(input: TopicViewState): string {
   const identity = [input.spaceName, input.tabId, input.paneId].filter(Boolean).map((value) => `\`${escapeCode(value!)}\``).join(" · " );
   const preference = modelPreferenceHint(input);
-  const runtime = [input.model ? `\`${escapeCode(input.model)}\`` : null, preference, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
+  const runtime = [`agent \`${escapeCode(agentLabel(input.agentKind))}\``, input.model ? `\`${escapeCode(input.model)}\`` : null, preference, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
   const updated = relativeTime(input.activityAt);
   const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
   return [cardSection("🖥️", "Runtime"), identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
@@ -455,9 +458,10 @@ function callout(color: string, content: string): object {
 function escapeCode(value: string): string { return value.replaceAll("`", "'"); }
 function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
-function agentPaneTitle(spaceName: string, paneId: string | null): string {
-  return truncate(`TraeX · ${spaceName} / ${paneId ?? "provisioning"}`, 96);
+function agentPaneTitle(agentKind: AgentKind, spaceName: string, paneId: string | null): string {
+  return truncate(`${agentLabel(agentKind)} · ${spaceName} / ${paneId ?? "provisioning"}`, 96);
 }
+function agentLabel(kind: AgentKind | undefined): string { return AGENT_LABEL[kind ?? "traex"]; }
 function agentTitle(title: string): string {
   return boundedTitle(title);
 }
@@ -535,7 +539,7 @@ function latestLines(source: string, limit: number): string | null {
   return tail || null;
 }
 function projectWorkSummary(input: TopicViewState): string {
-  if (input.phase === "running") return `${cardSection("🎯", "当前任务")}\nTraeX 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
+  if (input.phase === "running") return `${cardSection("🎯", "当前任务")}\n${agentLabel(input.agentKind)} 正在处理当前请求${input.queueDepth > 0 ? `；后续还有 ${input.queueDepth} 条请求等待。` : "。"}`;
   if (input.phase === "queued") return `${cardSection("🎯", "当前任务")}\n当前请求正在 FIFO 队列中等待${input.queueDepth > 0 ? `（队列共 ${input.queueDepth} 条）。` : "。"}`;
   if (input.phase === "done") return `${cardSection("🎯", "当前任务")}\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
   return `${cardSection("🎯", "当前任务")}\n${STATE_VIEW[input.phase].label}`;

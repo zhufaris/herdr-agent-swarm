@@ -68,7 +68,7 @@ export class ExternalTurnObserver {
   }
 
   observe(binding: Binding): Promise<void> {
-    if (this.stopping) return Promise.resolve();
+    if (this.stopping || binding.agentKind !== "traex") return Promise.resolve();
     return this.track(() => this.enqueueObservation(binding, false));
   }
 
@@ -76,7 +76,7 @@ export class ExternalTurnObserver {
     if (this.stopping) return Promise.resolve();
     return this.track(async () => {
       const binding = this.options.store.getBinding(bindingId);
-      if (binding) await this.enqueueObservation(binding, true);
+      if (binding?.agentKind === "traex") await this.enqueueObservation(binding, true);
     });
   }
 
@@ -85,13 +85,13 @@ export class ExternalTurnObserver {
     return this.track(async () => {
       await Promise.all([...new Set(paneIds)].map(async (paneId) => {
         const binding = this.options.store.findBindingByPane(paneId);
-        if (binding?.state === "active") await this.observe(binding);
+        if (binding?.state === "active" && binding.agentKind === "traex") await this.observe(binding);
       }));
     });
   }
 
   observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
-    if (this.stopping) return Promise.resolve("ignored");
+    if (this.stopping || binding.agentKind !== "traex") return Promise.resolve("ignored");
     return this.track(async () => {
       this.handedOffInFlight.add(binding.id);
       try { return await this.observeSupersedingTurnInLifecycle(binding, prompt, observation); }
@@ -115,6 +115,7 @@ export class ExternalTurnObserver {
 
   recoverAfterDetachedTurn(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
     if (this.stopping) return Promise.resolve({ outcome: "unavailable", reason: "observer_stopping" });
+    if (binding.agentKind !== "traex") return Promise.resolve({ outcome: "unavailable", reason: "unsupported_agent_kind" });
     return this.track(() => this.recoverAfterDetachedTurnInLifecycle(binding, prompt));
   }
 
@@ -150,7 +151,7 @@ export class ExternalTurnObserver {
     if (this.stopping) return;
     if (this.scan) return this.scan;
     const scan = this.track(async () => {
-      const active = this.options.store.listBindingsByState("active");
+      const active = this.options.store.listBindingsByState("active").filter((binding) => binding.agentKind === "traex");
       await Promise.all(active.map((binding) => this.observe(binding)));
       this.releaseInactiveBindings(new Set(active.map(({ id }) => id)));
     });
@@ -237,7 +238,7 @@ export class ExternalTurnObserver {
       const externalPromptId = this.idFactory();
       const externalView = createQueuedRunCard({
         promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(observation.requestText),
-        sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: observation.requestText, queuePosition: 0, occurredAt: startedAt
+        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: observation.requestText, queuePosition: 0, occurredAt: startedAt
       });
       const result = this.options.store.adoptExternalTurn({
         bindingId: binding.id, expectedGeneration: binding.generation, expectedPaneId: binding.paneId!, expectedSession: session,

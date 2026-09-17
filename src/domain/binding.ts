@@ -1,5 +1,6 @@
 import type { AttachmentState, ProvisioningCheckpoint, SessionLifecycle } from "./pane-thread-lifecycle.js";
 import type { AgentState } from "./runtime-observation.js";
+import type { AgentKind } from "./agent-instance.js";
 
 export type BindingState = "pending" | "active" | "archived" | "orphaned" | "failed";
 export interface Binding {
@@ -7,7 +8,7 @@ export interface Binding {
   rootMessageId: string | null; retiredTopicId: string | null; retiredRootMessageId: string | null; replacesBindingId: string | null;
   reservedTopicId: string | null; reservedRootMessageId: string | null; resetMessageId: string | null; paneId: string | null; traexSessionId: string | null;
   agentSessionSource?: string | null; agentSessionAgent?: string | null; agentSessionKind?: "id" | "path" | null; agentSessionValue?: string | null;
-  title: string; runtime: "traex"; state: BindingState; statusMessageId: string | null; statusCardSequence: number; lastAgentState: AgentState;
+  title: string; agentKind: AgentKind; state: BindingState; statusMessageId: string | null; statusCardSequence: number; lastAgentState: AgentState;
   lastOutputFingerprint: string | null; lifecycle: SessionLifecycle; attachment: AttachmentState; generation: number; provisioningCheckpoint: ProvisioningCheckpoint;
   degradationCount: number; hasCompletedTurn: boolean; lastObservedAt: string | null; archivedAt: string | null; lastActivityAt: string; createdAt: string; updatedAt: string;
 }

@@ -142,7 +142,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
         }
       }
       effectMayHaveStarted = true;
-      if (command.kind === "new") await this.options.provisioning.selectProject(message, command.title);
+      if (command.kind === "new") await this.options.provisioning.selectProject(message, command.title, null, command.agentKind);
       else if (command.kind === "reset") ok = await this.options.provisioning.reset(message, binding, command.title);
       else if (command.kind === "attach") ok = await this.options.provisioning.attach(message, command.spaceName, command.paneId);
       else if (command.kind === "rename") ok = await this.options.sessionAdministration.rename(message, binding, command.title);

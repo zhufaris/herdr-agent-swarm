@@ -9,6 +9,7 @@ import type { OutboundWorkNotifier } from "../../events/outbound-work-notifier.j
 import { safeLogError } from "../../runtime/safe-error.js";
 import { provisioningRecoveryMessage } from "../binding-provisioning-policy.js";
 import { ProjectCatalog } from "../project-catalog.js";
+import type { AgentKind } from "../../domain/agent-instance.js";
 
 type StatusInput = Parameters<ApplicationPresentation["projectSelectionStatus"]>[0];
 
@@ -16,9 +17,9 @@ export class ProjectSelectionUseCase {
   private readonly projects: ProjectCatalog;
   constructor(private readonly options: { projects: readonly ProjectConfig[]; store: BindingProvisioningStore; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; immediateOutbound: ImmediateOutboundDispatcher; logger: Logger; presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus">; provision(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> }) { this.projects = new ProjectCatalog(options.projects); }
 
-  async begin(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null): Promise<void> {
+  async begin(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null, agentKind: AgentKind): Promise<void> {
     const selectionId = randomUUID();
-    this.options.store.createProjectSelection({ id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: this.options.presentation.projectSelector({ selectionId, projects: [...this.options.projects] }) });
+    this.options.store.createProjectSelection({ id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText, agentKind, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: this.options.presentation.projectSelector({ selectionId, projects: [...this.options.projects] }) });
     this.options.outboundWork.wake();
     try { await this.options.immediateOutbound.requestScan(); }
     catch (error) { this.options.logger.warn({ event: "project-selector-immediate-delivery-failed", err: safeLogError(error), selectionId, eventId: message.eventId, outcome: "deferred" }, "immediate project selector delivery failed; durable outbox retry remains scheduled"); }

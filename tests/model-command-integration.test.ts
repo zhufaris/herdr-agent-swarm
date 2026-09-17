@@ -52,6 +52,18 @@ describe("model command without terminal interaction", () => {
     await fixture.close();
   });
 
+  it("rejects model commands for a non-TraeX Primary without reading the TraeX catalog", async () => {
+    const fixture = await setup();
+    fixture.store.updateBinding(fixture.bindingId, { agentKind: "pi" });
+
+    await fixture.coordinator.handleMessage(message("/swarm model"));
+
+    await vi.waitFor(() => expect(fixture.cards.some((card) => JSON.stringify(card).includes(UNSUPPORTED))).toBe(true));
+    expect(fixture.herdrCalls).not.toContain("listModels");
+    expect(fixture.store.getModelPreference(fixture.bindingId)).toBeNull();
+    await fixture.close();
+  });
+
   it("rejects a recovered model operation and releases queued prompt work", async () => {
     const fixture = await setup();
     await fixture.coordinator.stop();

@@ -143,4 +143,11 @@ export class BindingSessionMigrations {
     const outboundColumns = this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
     if (!outboundColumns.some((column) => column.name === "selection_id")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN selection_id TEXT");
   }
+
+  ensurePrimaryAgentKindColumns(): void {
+    const bindingColumns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!bindingColumns.has("agent_kind")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'traex' CHECK(agent_kind IN ('pi','claude-code','codex','traex'))");
+    const selectionColumns = new Set((this.context.database.prepare("PRAGMA table_info(project_selections)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!selectionColumns.has("agent_kind")) this.context.database.exec("ALTER TABLE project_selections ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'traex' CHECK(agent_kind IN ('pi','claude-code','codex','traex'))");
+  }
 }

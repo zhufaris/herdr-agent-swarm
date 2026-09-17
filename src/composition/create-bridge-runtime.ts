@@ -30,7 +30,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   events.registerInstanceWakeup((instanceId) => instanceWork.wake(instanceId));
   const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
   channelPublisher.connectPromptScheduler(scheduler);
-  const primary = createPrimaryRuntime({ config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
+  const primary = createPrimaryRuntime({ config, stores, logger, herdr, traexControl, agentDrivers, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
   const { externalTurns, promptRun } = primary;
   const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter, swarmCommands } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation });
   primaryToolGateway.setWorkerCreation(swarmCommands);

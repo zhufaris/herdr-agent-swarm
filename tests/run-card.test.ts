@@ -27,10 +27,20 @@ describe("run card", () => {
 
   it("documents how to attach an existing pane", () => {
     const help = JSON.stringify(renderHelpCard());
+    expect(help).toContain("/swarm new [标题] [--agent traex|pi|codex|claude-code]");
+    expect(help).toContain("默认 traex");
     expect(help).toContain("/swarm attach <space> <pane>");
     expect(help).toContain("ID 或唯一名称");
     expect(help).toContain("/swarm spaces");
     expect(help).toContain("/swarm panes");
+  });
+
+  it("shows the selected Primary Agent on the project card", () => {
+    const card = JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), agentKind: "pi", spaceName: "datasage", paneId: "w1:p1", phase: "ready" }));
+
+    expect(card).toContain("agent");
+    expect(card).toContain("Pi");
+    expect(card).not.toContain("TraeX · datasage");
   });
 
   it("documents Primary-scoped Worker creation", () => {
@@ -144,11 +154,11 @@ describe("run card", () => {
 
     expect(runCard.body.elements[0]).toMatchObject({
       tag: "markdown",
-      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
+      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**AGENT**  `TraeX`   **MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
     });
     expect(projectCard.body.elements.at(-1)).toMatchObject({
       tag: "markdown",
-      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `w5:p3G`\n`GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `w5:p3G`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
     });
     expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
   });

@@ -1,4 +1,5 @@
 import type { AgentState, EventOrigin, IncomingLarkMessage } from "./types.js";
+import type { AgentKind } from "./agent-instance.js";
 import type { MainCardLiveStatus, RunProgressEvent } from "./run-card-view.js";
 
 interface EventBase<T extends string, P> {
@@ -48,7 +49,7 @@ export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObse
 }
 
 export type BridgeEvent =
-  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; tabId?: string | null; paneId: string | null }>
+  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; tabId?: string | null; paneId: string | null; agentKind?: AgentKind }>
   | EventBase<"BindingActivated", { paneId: string; tabId?: string | null; topicId: string }>
   | EventBase<"PrimaryToolAvailabilityChanged", { available: boolean; reason: string | null }>
   | EventBase<"BindingRenamed", { title: string }>

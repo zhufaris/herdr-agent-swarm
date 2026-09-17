@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { applyMonotonicAgentState, isConfirmedUnregisteredTraexAgent, isTraexCompatiblePane, type ObservedAgentState } from "../domain/binding-runtime-convergence-policy.js";
+import { matchesAgentKind } from "../domain/agent-instance.js";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
@@ -41,13 +42,14 @@ export class BindingRuntimeConverger {
 
   async converge(initial: Binding, initialPane: HerdrPane): Promise<void> {
     let existing = initial; let pane = initialPane;
-    if (hasLegacySessionIdentity(existing)) { await this.orphan(existing, `Herdr pane ${pane.paneId} has a retired Agent session identity`); return; }
-    if (!isTraexCompatiblePane(pane)) return;
+    if (existing.agentKind === "traex" && hasLegacySessionIdentity(existing)) { await this.orphan(existing, `Herdr pane ${pane.paneId} has a retired Agent session identity`); return; }
+    const compatible = existing.agentKind === "traex" ? isTraexCompatiblePane(pane) : matchesAgentKind(existing.agentKind, pane.agentKind);
+    if (!compatible) { await this.orphan(existing, `Herdr pane ${pane.paneId} Agent kind does not match ${existing.agentKind}`); return; }
     if (!existing.projectId) { const project = this.projects.projectForWorkspaceAndCwd(pane.workspaceId, pane.cwd); if (project) existing = this.options.store.updateBindingMetadata(existing.id, { projectId: project.id }); }
     if (existing.lifecycle === "provisioning") return;
     const previous = existing.lastAgentState;
     if (existing.attachment === "orphaned") { const recovered = await this.recover(existing, pane); if (!recovered) return; existing = recovered; }
-    if (isConfirmedUnregisteredTraexAgent(pane)) { await this.degrade(existing, pane); return; }
+    if (existing.agentKind === "traex" && isConfirmedUnregisteredTraexAgent(pane)) { await this.degrade(existing, pane); return; }
     pane = this.withMonotonicAgentState(pane);
     const observation = this.options.store.applyRuntimeObservation({ bindingId: existing.id, expectedPaneId: pane.paneId, expectedGeneration: existing.generation, pane });
     if (observation.outcome === "stale_binding") return;
@@ -62,7 +64,7 @@ export class BindingRuntimeConverger {
     const worktreeChanged = (worktreeName !== null && priorWorktreeName !== worktreeName) || (worktreeName === null && priorWorktreeName !== undefined && priorWorktreeName !== null);
     this.observedTabIds.set(pane.paneId, tabId); this.observedWorktreeNames.set(pane.paneId, worktreeName);
     if (tabChanged || worktreeChanged) await this.publish(existing.id, "PaneOutputObserved", { ...(tabChanged ? { tabId } : {}), ...(worktreeChanged ? { worktreeName } : {}) });
-    await this.options.externalTurnObserver?.observe(existing);
+    if (existing.agentKind === "traex") await this.options.externalTurnObserver?.observe(existing);
     if (this.options.isBindingBusy(existing.id)) return;
     if (previous !== pane.agentState) { const queueDepth = this.options.store.countPendingPrompts(existing.id); await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth }); this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id }); if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id }); }
   }

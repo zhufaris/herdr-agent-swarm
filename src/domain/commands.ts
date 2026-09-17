@@ -28,7 +28,7 @@ export function parseCommand(text: string): BridgeCommand | null {
     case "steer":
       return argument ? { kind: "steer", text: argument } : { kind: "help" };
     case "new":
-      return { kind: "new", title: argument || null };
+      return parseNewCommand(argument) ?? { kind: "help" };
     case "reset":
       return { kind: "reset", title: argument || null };
     case "projects":
@@ -72,6 +72,21 @@ export function parseCommand(text: string): BridgeCommand | null {
     default:
       return { kind: "help" };
   }
+}
+
+function parseNewCommand(argument: string): Extract<BridgeCommand, { kind: "new" }> | null {
+  const tokens = argument.split(/\s+/).filter(Boolean);
+  const agentOptionIndex = tokens.indexOf("--agent");
+  if (agentOptionIndex === -1) {
+    if (tokens.some((token) => token.startsWith("--"))) return null;
+    return { kind: "new", title: tokens.join(" ") || null, agentKind: "traex" };
+  }
+  const agentKind = tokens[agentOptionIndex + 1];
+  if (agentOptionIndex + 2 !== tokens.length) return null;
+  if (agentKind !== "traex" && agentKind !== "pi" && agentKind !== "codex" && agentKind !== "claude-code") return null;
+  const titleTokens = tokens.slice(0, agentOptionIndex);
+  if (titleTokens.some((token) => token.startsWith("--"))) return null;
+  return { kind: "new", title: titleTokens.join(" ") || null, agentKind };
 }
 
 function parseWorkerCommand(argument: string): Extract<BridgeCommand, { kind: "worker_create" }> | null {

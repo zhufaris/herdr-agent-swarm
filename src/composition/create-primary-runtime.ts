@@ -11,6 +11,7 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import { RuntimeLink } from "./runtime-link.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
+import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 
 export type PrimaryRuntimeStores = Pick<SqliteStoreBundle, "externalTurns" | "promptDispatch" | "promptRecovery" | "promptSession" | "runtimeReconciliation">;
 
@@ -18,9 +19,10 @@ export function createPrimaryRuntime(options: {
   config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: TraexTranscriptReaderPort;
   mainCards: Pick<MainCardWorkflowPort, "converge">;
+  agentDrivers: AgentDriverRegistry;
   presentation?: PrimaryPresentation;
 }) {
-  const { config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards } = options;
+  const { config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards, agentDrivers } = options;
   const presentation = options.presentation ?? feishuGatewayPrimaryPresentation;
   const promptRunLink = new RuntimeLink<PromptRunWorkflow>("Primary prompt runtime");
   const externalTurns = new ExternalTurnObserver({
@@ -30,7 +32,7 @@ export function createPrimaryRuntime(options: {
     pollIntervalMs: config.runtimeTuning.polling.externalTurnMs
   });
   const promptRun = new PromptRunWorkflow({
-    stores: { dispatch: stores.promptDispatch, recovery: stores.promptRecovery, session: stores.promptSession }, herdr, traexControl, bus, scheduler, outboundWork, logger, presentation, turnTimeoutMs: config.turnTimeoutMs,
+    stores: { dispatch: stores.promptDispatch, recovery: stores.promptRecovery, session: stores.promptSession }, herdr, traexControl, agentDrivers, bus, scheduler, outboundWork, logger, presentation, turnTimeoutMs: config.turnTimeoutMs,
     adoptRuntimeIdentity: (input) => stores.runtimeReconciliation.applyRuntimeObservation(input),
     transcriptReader, mainCards, transcriptPolling: { identityMs: config.runtimeTuning.polling.transcriptIdentityMs, attachedMs: config.runtimeTuning.polling.attachedTranscriptMs }, handoffExternalTurns: (bindingId) => externalTurns.handoff(bindingId),
     observeSupersedingExternalTurn: (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation),

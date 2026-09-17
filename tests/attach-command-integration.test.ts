@@ -349,7 +349,7 @@ describe("attach existing pane command", () => {
   it.each([
     { name: "an ambiguous space", projects: [config().projects[0]!, { ...config().projects[0]!, id: "analytics-copy", workspaceId: "w6", cwd: "/copy" }], panes: [], expected: "对应多个项目" },
     { name: "a missing pane", projects: config().projects, panes: [], expected: "未找到 Pane" },
-    { name: "a pane without TraeX", projects: config().projects, panes: [{ paneId: "w5:p3G", workspaceId: "w5", cwd: "/repo", label: "Shell", agentState: "idle" as const, foregroundExecutables: ["bash"] }], expected: "没有运行 TraeX" }
+    { name: "a pane without a supported Agent", projects: config().projects, panes: [{ paneId: "w5:p3G", workspaceId: "w5", cwd: "/repo", label: "Shell", agentState: "idle" as const, foregroundExecutables: ["bash"] }], expected: "没有可识别的受支持 Agent" }
   ])("rejects $name before creating a binding", async ({ projects, panes, expected }) => {
     let exposePanes = false;
     const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));

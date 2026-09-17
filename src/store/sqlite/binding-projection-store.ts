@@ -6,6 +6,7 @@ import { initialTopicView } from "../../domain/topic-view.js";
 import type { Binding, BindingTitleProjectionInput, BindingTitleProjectionResult, OrphanBindingProjectionInput, OrphanBindingProjectionResult, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RuntimeDegradationInput, RuntimeDegradationResult } from "../../domain/types.js";
 import type { SessionTransition } from "../../domain/pane-thread-lifecycle.js";
 import { isNativeTraexSession, sameNativeTraexSession } from "../../domain/traex-session-identity.js";
+import { matchesAgentKind } from "../../domain/agent-instance.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
@@ -85,8 +86,11 @@ export class SqliteBindingProjectionStore {
       if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || binding.lifecycle !== "active" || binding.attachment !== "orphaned" || binding.workspaceId !== input.pane.workspaceId) return { outcome: "stale", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: false };
       const persisted = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
       const observed = input.pane.agentSession ?? null;
-      const nativeSessionMatches = Boolean(persisted && observed && isNativeTraexSession(persisted) && sameNativeTraexSession(persisted, observed));
-      if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId || !nativeSessionMatches || !isTraexCompatibleNativeAgent(input.pane)) return { outcome: "identity_mismatch", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: false };
+      const sessionMatches = Boolean(persisted && observed && (binding.agentKind === "traex"
+        ? isNativeTraexSession(persisted) && sameNativeTraexSession(persisted, observed)
+        : persisted.source === observed.source && persisted.agent === observed.agent && persisted.kind === observed.kind && persisted.value === observed.value));
+      const agentMatches = binding.agentKind === "traex" ? isTraexCompatibleNativeAgent(input.pane) : matchesAgentKind(binding.agentKind, input.pane.agentKind);
+      if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId || !sessionMatches || !agentMatches) return { outcome: "identity_mismatch", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: false };
       binding = this.bindings.transitionBinding(input.bindingId, { type: "pane_reattached", replacement: false });
       binding = this.bindings.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.pane.agentState });
       this.projections.saveTopicView(input.view);

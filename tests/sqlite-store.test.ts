@@ -577,6 +577,20 @@ describe("SQLite store", () => {
     ]);
   });
 
+  it("backfills TraeX as the Primary Agent kind for legacy bindings and project selections", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-primary-agent-kind-migration-"));
+    const path = join(temporaryDirectory, "state.sqlite");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "legacy-binding", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Legacy" });
+    store.createProjectSelection({ id: "legacy-selection", commandMessageId: "cmd", chatId: "c1", topicId: null, rootMessageId: "root-selection", actorOpenId: "u1", requestedTitle: null, expiresAt: "2099-01-01T00:00:00.000Z", card: {} });
+    store.database.exec("ALTER TABLE bindings DROP COLUMN agent_kind; ALTER TABLE project_selections DROP COLUMN agent_kind");
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    expect(store.getBinding("legacy-binding")?.agentKind).toBe("traex");
+    expect(store.getProjectSelection("legacy-selection")?.agentKind).toBe("traex");
+  });
+
   it("uses the partial ordering index for pending card-context scans", () => {
     store = new SqliteBindingStore(":memory:");
     const insert = store.database.prepare(`INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at) VALUES ('worker-session', ?, 1, ?, ?, 'test', ?, ?)`);
@@ -2732,14 +2746,14 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     const selection = store.createProjectSelection({
       id: "s1", commandMessageId: "cmd-1", chatId: "c1", topicId: "t1", rootMessageId: "root-1",
-      actorOpenId: "u1", requestedTitle: "Fix login", expiresAt: "2099-01-01T00:00:00.000Z", card: { schema: "2.0" }
+      actorOpenId: "u1", requestedTitle: "Fix login", agentKind: "codex", expiresAt: "2099-01-01T00:00:00.000Z", card: { schema: "2.0" }
     });
     const duplicate = store.createProjectSelection({
       id: "other", commandMessageId: "cmd-1", chatId: "c1", topicId: "t1", rootMessageId: "root-1",
       actorOpenId: "u1", requestedTitle: null, expiresAt: "2099-01-01T00:00:00.000Z", card: {}
     });
 
-    expect(selection).toMatchObject({ id: "s1", state: "pending", selectorMessageId: null });
+    expect(selection).toMatchObject({ id: "s1", state: "pending", selectorMessageId: null, agentKind: "codex" });
     expect(duplicate.id).toBe("s1");
     expect(store.listPendingOutboundReplies()).toMatchObject([{ selectionId: "s1", kind: "card_reply", rootMessageId: "root-1" }]);
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "selector-1");
@@ -2769,7 +2783,8 @@ describe("SQLite store", () => {
 
   it("persists bindings, FIFO jobs, deduplication, and view snapshots", () => {
     store = new SqliteBindingStore(":memory:");
-    const binding = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    const binding = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task", agentKind: "pi" });
+    expect(binding.agentKind).toBe("pi");
     store.updateBinding(binding.id, { paneId: "w1:p2", state: "active" });
     expect(store.findBindingByLarkScope("unknown-thread", "m1")?.id).toBe("b1");
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "first" });

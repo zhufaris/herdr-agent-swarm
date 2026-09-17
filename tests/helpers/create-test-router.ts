@@ -39,6 +39,11 @@ import { createFeishuGatewayPlugin } from "../../src/gateways/feishu/plugin.js";
 import { GatewayEffectClient } from "../../src/gateways/effect-client.js";
 import { createFeishuCompatibilityDelivery } from "../../src/gateways/feishu/plugin.js";
 import { createCompatibilityGatewayIngressSink } from "../../src/gateways/compatibility-ingress.js";
+import { AgentDriverRegistry } from "../../src/runtime/agents/agent-driver.js";
+import { TraexDriver } from "../../src/runtime/agents/traex-driver.js";
+import { CodexDriver } from "../../src/runtime/agents/codex-driver.js";
+import { ClaudeCodeDriver } from "../../src/runtime/agents/claude-code-driver.js";
+import { PiDriver } from "../../src/runtime/agents/pi-driver.js";
 
 export function createTestRouter(
   config: BridgeConfig,
@@ -61,6 +66,12 @@ export function createTestRouter(
       ?? (await herdr.listPanes(paneId.split(":")[0] ?? "w1")).find((pane) => pane.paneId === paneId)
       ?? fallbackPromptPane(store.findBindingByPane(paneId), paneId)
   };
+  const agentDrivers = new AgentDriverRegistry([
+    new TraexDriver(promptHerdr, config.traex.executable, config.turnTimeoutMs),
+    new CodexDriver(promptHerdr, config.agents?.codex ?? "codex", config.turnTimeoutMs, true),
+    new ClaudeCodeDriver(promptHerdr, config.agents?.claudeCode ?? "claude", config.turnTimeoutMs, true),
+    new PiDriver(promptHerdr, config.agents?.pi ?? "pi", config.turnTimeoutMs, true)
+  ]);
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   const gatewayEffects = new GatewayEffectClient(createFeishuCompatibilityDelivery(lark, config.gateway?.id ?? "feishu:primary"));
   outboundWork.subscribe(() => outbound.requestScan());
@@ -74,7 +85,7 @@ export function createTestRouter(
     wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId })
   }) : undefined;
   promptRun = new PromptRunWorkflow({
-    stores: { dispatch: store, recovery: store, session: store }, herdr: promptHerdr, traexControl, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
+    stores: { dispatch: store, recovery: store, session: store }, herdr: promptHerdr, traexControl, agentDrivers, bus, scheduler, outboundWork, logger, presentation: cardKitPrimaryPresentation, turnTimeoutMs: config.turnTimeoutMs, shutdownGraceMs, transcriptReader, mainCards,
     adoptRuntimeIdentity: (input) => store.applyRuntimeObservation(input),
     handoffExternalTurns: externalTurns ? (bindingId) => externalTurns.handoff(bindingId) : undefined,
     observeSupersedingExternalTurn: externalTurns ? (binding, prompt, observation) => externalTurns.observeSupersedingTurn(binding, prompt, observation) : undefined,
@@ -89,7 +100,7 @@ export function createTestRouter(
     },
     configurationForBinding: (bindingId: string, generation: number) => ({ environment: {}, command: "node", args: ["primary-tools", "--binding", bindingId, "--generation", String(generation)] })
   };
-  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, gatewayEffects, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
+  const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, agentDrivers, gatewayEffects, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, traexControl, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: cardKitApplicationPresentation, logger });
   const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation });
   const paneControl = new PaneControlWorkflow({ store, outbound: writer, presentation: cardKitPanePresentation, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });

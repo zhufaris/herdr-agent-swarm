@@ -11,7 +11,8 @@ former compatibility plugin is not an installation or operation surface.
 ## What it provides
 
 - Project-scoped Primary sessions and explicitly created Worker sessions.
-- TraeX Primary support, plus TraeX, Codex, Claude Code, and Pi Worker drivers.
+- Selectable TraeX, Pi, Codex, or Claude Code Primary sessions, with TraeX as
+  the default, plus the same four Agent kinds for Workers.
 - One durable FIFO per binding or Worker, with exact-turn steering and stopping.
 - Restart recovery that observes uncertain work without automatically replaying
   prompts that may already have reached an Agent.
@@ -80,7 +81,7 @@ tracked configuration.
 - Linux with Node.js 22.12 or newer; Node.js 24 LTS is recommended.
 - npm and user systemd.
 - Herdr 0.7.5 or newer, with a running workspace.
-- `herdr`, `traex`, and any optional Worker CLIs you intend to use
+- `herdr`, `traex`, and any optional Primary or Worker CLIs you intend to use
   (`codex`, `claude`, or `pi`) available to the service account.
 - A published Lark custom app with bot capability and long-connection event delivery.
 - A topic-enabled Lark group containing the bot.
@@ -242,7 +243,7 @@ project, or use the project and instance cards:
 Within a Primary topic, the `/swarm` commands manage the current session:
 
 ~~~text
-/swarm new [title]
+/swarm new [title] [--agent traex|pi|codex|claude-code]
 /swarm projects
 /swarm spaces
 /swarm panes
@@ -267,6 +268,15 @@ delivered as exact-turn steering; an identity mismatch fails closed. Closing a
 binding does not kill its Agent or erase Lark history. Closing a real pane uses
 a separate, short-lived confirmation command and rechecks runtime identity and
 idle state first.
+
+Omitting `--agent` selects TraeX. The selected kind is durable: reset and pane
+replacement preserve it, while attach discovers the actual supported kind from
+Herdr. The Main Card shows the selected Agent. TraeX supports structured Answer
+streaming, model selection, and the Primary Worker tools. Pi, Codex, and Claude
+Code currently use fenced prompt delivery without structured Answer capture;
+their result card tells the operator to inspect the corresponding Herdr pane.
+Unsupported model, steering, stop, transcript-recovery, and Primary-tool
+operations fail closed instead of falling back to TraeX or terminal input.
 
 See [Lark group usage](docs/feishu-group-usage.md) for the complete command
 reference, cards, permissions, recovery commands, and examples.

@@ -48,6 +48,7 @@ export class SqliteMigrations {
     this.cards.ensureAnswerPageDeliveryMode();
     this.cards.ensureAnswerPages();
     this.binding.ensureProjectSelectionColumns();
+    this.binding.ensurePrimaryAgentKindColumns();
     this.binding.ensureBindingLifecycleColumns();
     this.binding.ensureBindingPrimaryToolCapabilities();
     this.binding.ensureBindingCreatorColumn();

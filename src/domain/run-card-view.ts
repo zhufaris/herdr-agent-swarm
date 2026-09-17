@@ -1,6 +1,7 @@
 import { stableElementId } from "./stable-element-id.js";
 import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
 import type { PrimaryWorkerActivitySummary } from "./card-context-summary.js";
+import type { AgentKind } from "./agent-instance.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
 export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
@@ -38,6 +39,7 @@ export interface RunCardView {
   answerPageStart: number;
   phase: RunCardPhase;
   title: string;
+  agentKind: AgentKind;
   sessionTitle?: string;
   requestText: string;
   workspaceId: string;
@@ -75,12 +77,12 @@ export type RunCardChange =
   | { type: "failed"; occurredAt: string; notice: string };
 
 export function createQueuedRunCard(input: {
-  promptId: string; bindingId: string; title: string; sessionTitle?: string; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
+  promptId: string; bindingId: string; title: string; sessionTitle?: string; agentKind?: AgentKind; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
   queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null;
 }): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
-    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
+    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
     progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };

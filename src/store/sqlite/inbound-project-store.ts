@@ -4,6 +4,7 @@ import { mapProjectSelection, type ProjectSelectionRow } from "../sqlite-records
 import type { SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import { inboundMessageScopeKey } from "../../domain/inbound-message-scope.js";
+import type { AgentKind } from "../../domain/agent-instance.js";
 
 export class SqliteInboundProjectStore {
   constructor(private readonly context: SqliteContext) {}
@@ -38,12 +39,12 @@ export class SqliteInboundProjectStore {
   isBridgeMessage(messageId: string): boolean { return Boolean(this.database.prepare("SELECT 1 FROM bridge_messages WHERE message_id = ?").get(messageId)); }
   recordBridgeMessage(messageId: string): void { this.database.prepare("INSERT OR IGNORE INTO bridge_messages(message_id, created_at) VALUES (?, ?)").run(messageId, now()); }
 
-  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; expiresAt: string; card: object }): ProjectSelection {
+  createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; expiresAt: string; card: object }): ProjectSelection {
     return this.context.transaction(() => {
       const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
       if (existing) return mapProjectSelection(existing);
       const timestamp = now();
-      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.expiresAt, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, agent_kind, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.agentKind ?? "traex", input.expiresAt, timestamp, timestamp);
       this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), `gateway:feishu:primary:message:${input.rootMessageId}`, timestamp, timestamp, timestamp);
       return this.getProjectSelection(input.id)!;
     });

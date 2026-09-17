@@ -9,6 +9,7 @@ import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { abortedPromptNotice, decidePromptExecutionFailure } from "./prompt-execution-lifecycle.js";
 import type { TranscriptObserver, TurnOutputSource } from "./transcript-observer.js";
+import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -19,6 +20,7 @@ interface PromptTurnExecutorOptions {
   transcript: TranscriptObserver;
   logger: Logger;
   turnTimeoutMs: number;
+  agentDrivers?: AgentDriverRegistry;
   isBindingActive(bindingId: string): boolean;
   isStopping(): boolean;
   updateTurnState(bindingId: string, promptId: string, state: import("../domain/types.js").AgentState): void;
@@ -32,6 +34,7 @@ export class PromptTurnExecutor {
   constructor(private readonly options: PromptTurnExecutorOptions) {}
 
   async execute(claimed: ClaimedPrompt, abortController: AbortController): Promise<{ observerDetached: boolean; dispatchDeferred?: boolean }> {
+    if (claimed.binding.agentKind !== "traex") return this.executeWithoutTranscript(claimed, abortController);
     let { binding, prompt, model } = claimed;
     const bindingId = binding.id;
     const paneId = binding.paneId!;
@@ -160,6 +163,43 @@ export class PromptTurnExecutor {
       if (attachedTranscriptObserver) await attachedTranscriptObserver;
     }
     return { observerDetached };
+  }
+
+  private async executeWithoutTranscript(claimed: ClaimedPrompt, abortController: AbortController): Promise<{ observerDetached: boolean; dispatchDeferred?: boolean }> {
+    const { binding, prompt } = claimed;
+    const driver = this.options.agentDrivers?.get(binding.agentKind);
+    if (!driver || !driver.describe().available) {
+      this.options.store.failPrompt({ promptId: prompt.id, error: `Agent adapter is unavailable: ${binding.agentKind}`, occurredAt: new Date().toISOString() });
+      return { observerDetached: false };
+    }
+    const runtime = { herdrWorkspaceId: binding.workspaceId, paneId: binding.paneId!, nativeSessionId: binding.agentSessionValue ?? null, generation: binding.generation };
+    const startedAt = Date.now();
+    let dispatched = false;
+    await this.options.publish(binding.id, "TurnStarted", "bridge", { promptId: prompt.id, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+    const receipt = await driver.submit(runtime, prompt.body, {
+      onDispatched: () => { if (!dispatched) { this.options.store.markPromptDispatched(prompt.id, new Date().toISOString()); dispatched = true; } },
+      onObservation: async ({ state, stateSource }) => {
+        if (stateSource === "unknown" || state === "unknown" || !this.options.isBindingActive(binding.id)) return;
+        this.options.updateTurnState(binding.id, prompt.id, state);
+        this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: state });
+      }
+    }, abortController.signal);
+    if (receipt.status === "not-delivered") {
+      const released = this.options.releaseUndispatched(claimed);
+      this.options.logger.warn({ event: "prompt-pre-dispatch-rejected", bindingId: binding.id, promptId: prompt.id, agentKind: binding.agentKind, outcome: released ? "requeued_before_dispatch" : "stale_claim" }, "Agent rejected prompt before acceptance");
+      return { observerDetached: false, dispatchDeferred: true };
+    }
+    if (receipt.status === "delivery-uncertain") {
+      this.options.store.markPromptObservationDetached(prompt.id, `${binding.agentKind} 请求可能已投递，但 Bridge 无法确认最终结果：${receipt.reason}；不会自动重发。`);
+      await this.options.convergeMainCard(binding.id);
+      return { observerDetached: true };
+    }
+    const notice = `⚠️ ${binding.agentKind} 当前不支持结构化输出捕获。任务已结束，请前往对应 Herdr Pane 查看本地会话。`;
+    this.options.store.completeTurn({ promptId: prompt.id, bindingId: binding.id, answer: notice, outputFingerprint: outputFingerprint(""), occurredAt: new Date().toISOString(), replaceAnswer: true });
+    this.options.store.transitionBinding(binding.id, { type: "pane_observed", runtime: "done" });
+    await this.options.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer: notice, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+    this.options.logger.info({ event: "turn-completed", bindingId: binding.id, promptId: prompt.id, agentKind: binding.agentKind, durationMs: Date.now() - startedAt, outcome: "completed_without_structured_output" }, "Agent turn completed without structured output");
+    return { observerDetached: false };
   }
 }
 

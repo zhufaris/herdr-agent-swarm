@@ -87,7 +87,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     const binding = this.freshBinding(action, command, true);
     if (!binding) return this.options.presentation.interactionToast("warning", "会话状态已变化，未创建续做任务。");
     const id = randomUUID();
-    const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: command.parentPromptId, title: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: text, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1, occurredAt: new Date().toISOString() });
+    const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: command.parentPromptId, title: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: text, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1, occurredAt: new Date().toISOString() });
     try {
       const result = this.options.store.acceptInterruptedContinuation({ interactionId: command.interactionId, parentPromptId: command.parentPromptId, sourceAnswerMessageId: command.sourceAnswerMessageId, expectedBindingGeneration: binding.generation, actorOpenId: action.operatorOpenId, accepted: { prompt: { id, bindingId: binding.id, larkMessageId: `card:${command.interactionId}`, actorOpenId: action.operatorOpenId, body: text, parentPromptId: command.parentPromptId }, view, rootMessageId: binding.rootMessageId ?? action.messageId, answerCard: this.options.presentation.answerCard(view), expectedBindingGeneration: binding.generation } });
       if (result.inserted) this.options.wakePrompt(binding.id);

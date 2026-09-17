@@ -322,7 +322,7 @@ export type BridgeCommand =
   | { kind: "steer"; text: string }
   | { kind: "model"; name: string | null }
   | { kind: "reset"; title: string | null }
-  | { kind: "new"; title: string | null }
+  | { kind: "new"; title: string | null; agentKind: import("./agent-instance.js").AgentKind }
   | { kind: "projects" }
   | { kind: "spaces" }
   | { kind: "panes" }

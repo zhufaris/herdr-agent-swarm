@@ -27,12 +27,12 @@ export function createBindingSessionRuntime(options: {
   presentation: { application: ApplicationPresentation; pane: PanePresentation };
 }) {
   const { config, stores, logger, bus, scheduler, infrastructure, delivery, primary, worker, presentation } = options;
-  const { herdr, gatewayEffects, worktreeNameResolver } = infrastructure;
+  const { herdr, gatewayEffects, worktreeNameResolver, agentDrivers } = infrastructure;
   const { outbound, outboundWork, channelPublisher, answerPages } = delivery;
   const { promptRun, externalTurns } = primary;
   const { instanceRuntime, instanceTurns } = worker;
   const retiredPaneCleanup = new RetiredPaneCleanupWorkflow({ store: stores.retiredPaneCleanup, herdr, logger });
-  const provisioning = new BindingProvisioningWorkflow({ config, store: stores.bindingProvisioning, herdr, gatewayEffects, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: worker.primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: presentation.application, logger });
+  const provisioning = new BindingProvisioningWorkflow({ config, store: stores.bindingProvisioning, herdr, agentDrivers, gatewayEffects, lifecycleEvents: bus, outbound, outboundWork, immediateOutbound: channelPublisher, scheduler, primaryTools: worker.primaryToolGateway, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: presentation.application, logger });
   const operationsQuery = new OperationsQueryWorkflow({ config, store: stores.operationsQuery, herdr, outbound, presentation: presentation.application, logger });
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store: stores.sessionAdministration, herdr, lifecycleEvents: bus, outbound, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), presentation: presentation.application });
   const deliveryRecovery = new DeliveryRecoveryWorkflow({ store: stores.deliveryRecovery, gatewayEffects, outbound, outboundWork, presentation: presentation.application, logger });

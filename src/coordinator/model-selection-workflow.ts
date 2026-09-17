@@ -86,6 +86,13 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   }
 
   private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, replyTarget: ModelReplyTarget): Promise<boolean> {
+    if (binding.agentKind !== "traex") {
+      await this.publish(binding, replyTarget, "unsupported-agent", this.options.presentation.modelResult({
+        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
+      }));
+      this.options.store.audit({ actorOpenId, action: "model.run", target: requested ?? "list", outcome: "unsupported_agent_kind" });
+      return false;
+    }
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
     if (!isNativeTraexSession(session)) {

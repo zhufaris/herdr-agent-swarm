@@ -21,6 +21,7 @@ import { PromptSafetyScanner } from "./prompt-safety-scanner.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { TranscriptObserver, type TurnOutputSource } from "./transcript-observer.js";
 import { PromptTurnExecutor } from "./prompt-turn-executor.js";
+import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 
 export interface ActiveTurnSnapshot {
   promptId: string;
@@ -50,6 +51,7 @@ interface PromptRunWorkflowOptions {
   logger: Logger;
   presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard">;
   turnTimeoutMs: number;
+  agentDrivers?: AgentDriverRegistry;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
   staleClaimGraceMs?: number;
@@ -91,7 +93,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       }
     });
     this.turnExecutor = new PromptTurnExecutor({
-      store: options.stores.dispatch, herdr: options.herdr, ...(options.traexControl ? { traexControl: options.traexControl } : {}), transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
+      store: options.stores.dispatch, herdr: options.herdr, ...(options.traexControl ? { traexControl: options.traexControl } : {}), ...(options.agentDrivers ? { agentDrivers: options.agentDrivers } : {}), transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       updateTurnState: (bindingId, promptId, state) => this.registry.updateTurnState(bindingId, promptId, state),
       convergeMainCard: (bindingId) => this.convergeMainCard(bindingId),

@@ -7,6 +7,7 @@ import type { PromptWorkScheduler } from "../../events/prompt-work-scheduler.js"
 import { canonicalPrimaryPaneToken } from "../../domain/pane-title.js";
 import { requireMatchingPane } from "../pane-runtime-identity.js";
 import type { ProjectCatalog } from "../project-catalog.js";
+import { agentKindFromHerdr } from "../../domain/agent-instance.js";
 
 export class BindingAttachmentUseCase {
   constructor(private readonly options: {
@@ -36,7 +37,7 @@ export class BindingAttachmentUseCase {
       if (existing.chatId === config.lark.chatId && existing.projectId === project.id && existing.state === "active") { const toolsUnavailable = !store.hasBindingPrimaryToolCapability(existing.id, existing.generation); if (!toolsUnavailable) await this.options.publish(existing.id, "PrimaryToolAvailabilityChanged", "bridge", { available: true, reason: null }); await this.options.publishAttachSuccess(message, existing, spaceName, true, false, toolsUnavailable); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "already_attached" }); return true; }
       await this.options.reject(message, `Pane ${pane.paneId} 已绑定到其他会话，不能在这里重新连接。`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: existing.id, outcome: "bound_elsewhere" }); return false;
     }
-    if (!pane.foregroundExecutables.includes("traex")) { await this.options.reject(message, `Pane ${pane.paneId} 当前没有运行 TraeX，未执行连接。`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: pane.paneId, outcome: "traex_not_running" }); return false; }
+    if (!agentKindFromHerdr(pane.agentKind) && !pane.foregroundExecutables.includes("traex")) { await this.options.reject(message, `Pane ${pane.paneId} 当前没有可识别的受支持 Agent，未执行连接。`); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: pane.paneId, outcome: "agent_not_running" }); return false; }
     const topicBinding = store.findBindingByLarkScope(message.topicId, message.rootMessageId);
     if (topicBinding && this.isRecoverableFailedReset(topicBinding, message, project)) { const recovered = await this.recoverFailedResetBinding(topicBinding, pane, message.actorOpenId); await this.options.publishAttachSuccess(message, recovered, spaceName, false, false, true); store.audit({ actorOpenId: message.actorOpenId, action: "binding.attach", target: recovered.id, outcome: "recovered_reset" }); return true; }
     const interrupted = store.listProcessingProjectSelections().filter((selection) => selection.bindingId && selection.selectedProjectId === project.id && store.getBinding(selection.bindingId)?.provisioningCheckpoint === "selected");

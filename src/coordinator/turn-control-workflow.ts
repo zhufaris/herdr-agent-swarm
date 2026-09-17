@@ -122,7 +122,7 @@ export class TurnControlWorkflow {
     if (target.kind === "idle") {
       const binding = target.binding;
       if (!binding.rootMessageId) throw new Error("Primary binding has no result thread");
-      const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, title: "Priority steer", sessionTitle: binding.title, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: input.text, queuePosition: 0, occurredAt });
+      const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, title: "Priority steer", sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: input.text, queuePosition: 0, occurredAt });
       const accepted = this.options.store.acceptPrompt({ prompt: { id, bindingId: binding.id, larkMessageId: `priority-steer:${input.idempotencyKey}`, actorOpenId: actorId(input.actor), body: input.text, priority: "priority" }, view, rootMessageId: binding.rootMessageId, answerCard: this.options.presentation.answerCard(view), maxQueueDepth: this.options.maxQueueDepth ?? 20, expectedBindingGeneration: binding.generation });
       if (accepted.inserted) { this.options.wakeOutbound?.(); this.options.wakePrimary?.(binding.id); }
       return { mode: "priority", logicalTurnId: accepted.prompt.id, duplicate: !accepted.inserted };

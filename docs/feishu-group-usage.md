@@ -1,7 +1,8 @@
 # 飞书群使用指南
 
 Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目；Herdr UI 不是必需组件。
-每个已绑定的飞书 Thread 都以其 Herdr pane 中运行的 TraeX 作为该 Thread 唯一的 Primary。
+每个已绑定的飞书 Thread 都以其 Herdr pane 中运行的一个 Agent 作为该 Thread 唯一的 Primary。
+创建时可选择 TraeX、Pi、Codex 或 Claude Code；不指定时默认 TraeX。
 项目中的持久化 Agent 实例仅包含由用户显式创建的 Worker，Worker 可以使用 TraeX、
 Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以 Herdr Lark Bridge 模式提供；
 该名称不代表当前多 Agent 产品或项目。用户可以在
@@ -13,10 +14,10 @@ Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以 Herdr L
 管理员完成 `npm run swarm:setup`、配置 `LARK_ALLOWED_OPEN_IDS` 与
 `LARK_ADMIN_OPEN_IDS`、启动服务，并确认 `npm run swarm:status` 正常后，
 允许名单内的群成员即可开始操作。实例创建、删除、停止、steer 及会话拓扑操作仅
-允许管理员名单成员。传统单话题 TraeX 流程的第一个飞书动作是在目标话题群发送：
+允许管理员名单成员。Primary 流程的第一个飞书动作是在目标话题群发送：
 
 ```text
-@Bot /swarm new 任务说明
+@Bot /swarm new 任务说明 --agent pi
 ```
 
 它只会展示项目选择卡；选择项目后才创建 Pane 并提交首个请求。安装、密钥和服务恢复
@@ -124,15 +125,15 @@ Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation
 实例停止不删除 worktree。删除前系统会重新检查 dirty、conflict、ahead、generation 和
 fingerprint；任何不安全或不确定状态都会保留实例/worktree，不提供危险确认按钮。
 
-以下传统 `/swarm` 流程用于单话题 TraeX binding，并在迁移期间继续支持。
+以下 `/swarm` 流程用于单话题 Primary binding。
 
 在已经配置 Bridge Bot 的飞书群中发送顶层消息，并 `@Bot`：
 
 ```text
-@Bot /swarm new 修复登录问题
+@Bot /swarm new 修复登录问题 --agent codex
 ```
 
-Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane、启动 TraeX，
+Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane、启动所选 Agent，
 并将当前飞书话题永久绑定到该项目和 pane。后续
 操作应在这个话题内发送。
 
@@ -167,8 +168,8 @@ generation，不支持接管。成功操作以 Toast 和原卡刷新反馈；确
 
 ### `/swarm reset [说明]`
 
-在当前已绑定话题中先创建并确认新的 TraeX 会话可用，再原子切换同一个飞书话题。
-如果新 pane 创建或 TraeX 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
+在当前已绑定话题中使用原 Binding 的 Agent 类型创建并确认新会话可用，再原子切换
+同一个飞书话题。如果新 pane 创建或 Agent 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
 只会自动关闭经过 fresh observation 确认身份匹配且处于 idle/done 的旧 pane；working、
 blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 Herdr 本地检查。
 如果主卡提示 TraeX 仍在运行但未注册为 Herdr Agent，会话创建者也可以使用
@@ -219,15 +220,27 @@ Primary 为 `idle` 时，Bridge 持久化一个 priority turn 并立即唤醒调
 working 时明确拒绝，idle 时创建 priority turn。普通排队任务仍使用 `/to <worker> <任务>`。
 `blocked` 通常表示本地审批或提问界面，Bridge 会拒绝远程 steering，必须回到 Herdr 处理。
 
-### `/swarm new [说明]`
+### `/swarm new [说明] [--agent traex|pi|codex|claude-code]`
 
-发送后直接展示项目选择卡片；选择后创建新的 Herdr pane、启动 TraeX，并建立飞书话题绑定。
+发送后直接展示项目选择卡片；选择后创建新的 Herdr pane、启动所选 Agent，并建立飞书话题绑定。
 选择卡先写入 durable outbox，再立即尝试投递；短暂的飞书投递失败不会丢失选择请求，
 Bridge 会继续重试。
 
 ```text
 /swarm new 修复登录超时
+/swarm new 分析 CI 失败 --agent pi
+/swarm new 审查事务边界 --agent codex
+/swarm new 更新文档 --agent claude-code
 ```
+
+省略 `--agent` 时使用 `traex`。参数必须放在可选说明之后；未知 Agent、重复参数、缺失值
+或额外参数都会显示帮助且不会创建选择记录。Agent 类型会持久化到项目选择与 Binding；
+`/swarm reset` 和 `/swarm replace` 继承它，不会在启动失败时回退到 TraeX。
+
+TraeX Primary 支持结构化 Answer 流、`/swarm model` 和 Primary Worker 工具。Pi、Codex 与
+Claude Code 当前支持有围栏的普通任务投递，但不捕获结构化 Answer；完成卡会提示前往对应
+Herdr pane 查看本地结果。各 Agent 不支持的 model、steer、stop、transcript recovery 或
+Primary-tool 操作会明确拒绝，不会模拟终端输入。主卡 Runtime 区会显示实际 Agent 类型。
 
 如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
 `/swarm new` 始终在选择项目后使用短随机 Pane 名，例如 `lark_7kq2`；
@@ -242,10 +255,10 @@ Bridge 会继续重试。
 
 ### `/swarm spaces`
 
-只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、非 TraeX Pane
+只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、不同 Agent 类型的 Pane
 以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
 仍会正常显示。已绑定到当前群的 Pane 提供“打开话题”；符合条件且未绑定的
-TraeX Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
+受支持 Agent Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
 校验。卡片不会提供关闭或删除动作。
 
 ### `/swarm panes`
@@ -265,7 +278,7 @@ attach、replace、Worker 目标切换等会话/拓扑操作；这些操作必�
 
 ### `/swarm sessions`
 
-列出当前群的会话，包括 Space、Pane ID、lifecycle、attachment、TraeX 状态、
+列出当前群的会话，包括 Space、Pane ID、Agent 类型、lifecycle、attachment、Agent 状态、
 generation、队列长度和最近活动时间。不会显示其他群的话题链接、prompt 正文或终端输出。
 
 ### `/swarm failures`
@@ -276,7 +289,7 @@ prompt。失败任务只用于诊断。
 
 ### `/swarm attach <space> <pane>`
 
-把已经运行 TraeX 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。
+把已经运行受支持 Agent 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。
 这个命令不会创建、重命名或重启 pane，也不会向 pane 发送文字。
 
 ```text
@@ -287,13 +300,13 @@ prompt。失败任务只用于诊断。
 `space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID、
 该 Space 中唯一的精确 Pane 名称，或 Pane 名称中可见的 4 字 token（例如 `task-cum7`
 可输入 `cum7`）；名称或 token 重名时会返回候选 ID。Bridge 只会在该项目的
-Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重复执行同一命令
+Herdr workspace 中查找指定 pane，并从 Herdr 结构化身份发现 TraeX、Pi、Codex 或 Claude Code。重复执行同一命令
 不会创建第二个绑定，而会返回已有连接信息。首次连接成功和重复连接的结果卡都会提供
 “打开话题”按钮；点击后 Bridge 会在当前群发送飞书原生的话题转发卡片，再点击该卡片
 即可进入项目话题。飞书公开 AppLink 不支持通过 Open API 的消息 ID 直达消息，因此 Bridge
 不会再生成无效的 `openMessageId` 链接。如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题。
 未知或重复的 space、其他 workspace
-中的 pane、不存在的 pane、非 TraeX pane，以及已经绑定到其他会话的 pane 都会被拒绝。
+中的 pane、不存在的 pane、无受支持 Agent 身份的 pane，以及已经绑定到其他会话的 pane 都会被拒绝。
 如果 pane 属于当前群、当前项目中因观测失败变为 `orphaned` 的原会话，`attach` 会在
 重新验证 workspace、项目目录、TraeX 和 terminal identity 后恢复原绑定。恢复过程不会
 创建新绑定或重放任务；请通过返回的话题入口进入原话题，再发送 `/swarm resume`。
@@ -310,6 +323,7 @@ Herdr workspace 中查找指定 pane，并确认 pane 正在运行 TraeX。重�
 ### `/swarm model [name]`
 
 查看当前 Primary TraeX session 的结构化模型目录，或为下一条普通消息选择模型。
+非 TraeX Primary 会明确返回“不支持远程切换模型”，且不会读取 TraeX catalog。
 
 ```text
 /swarm model

@@ -1,4 +1,12 @@
 export type AgentKind = "pi" | "claude-code" | "codex" | "traex";
+export type HerdrAgentKind = "pi" | "claude" | "codex" | "traex";
+
+export function herdrAgentKind(kind: AgentKind): HerdrAgentKind { return kind === "claude-code" ? "claude" : kind; }
+export function agentKindFromHerdr(kind: string | null | undefined): AgentKind | null {
+  if (kind === "claude") return "claude-code";
+  return kind === "pi" || kind === "codex" || kind === "traex" ? kind : null;
+}
+export function matchesAgentKind(kind: AgentKind, observed: string | null | undefined): boolean { return herdrAgentKind(kind) === observed; }
 export type InstanceRole = "primary" | "worker";
 export type DesiredInstanceState = "running" | "stopped";
 export type ObservedInstanceState =
@@ -130,7 +138,8 @@ export function resolveInstanceTarget(target: InstanceTarget, instances: readonl
 }
 
 export function matchesHerdrAgentKind(kind: AgentKind, observed: string): boolean {
-  if (kind === "claude-code") return observed === "claude";
-  if (kind === "traex") return observed === "traex" || observed === "codex";
-  return observed === kind;
+  // Older Herdr snapshots identify TraeX-backed Worker instances as `codex`.
+  // Keep that compatibility at the Worker-instance boundary; Primary bindings
+  // use the strict `matchesAgentKind` matcher instead.
+  return matchesAgentKind(kind, observed) || (kind === "traex" && observed === "codex");
 }

@@ -79,11 +79,12 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       const currentTopicView = topicView ?? {
         ...initialTopicView(binding.id),
         title: binding.title,
+        agentKind: binding.agentKind,
         workspaceId: binding.workspaceId,
         spaceName,
         paneId: binding.paneId
       };
-      const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId });
+      const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId });
       const runCards = this.store.listActionableStartupRunCards(binding.id);
       for (const view of runCards) {
         const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title;

@@ -250,7 +250,7 @@ describe("PromptRunWorkflow durable safety scan", () => {
       stores: promptStores({
         scanDurablePromptWork: () => ({ cancelled: 0, failedDetached: 0, hints: [] }),
         claimNextDispatchablePrompt: vi.fn(() => claimCount++ === 0 ? {
-          binding: { id: "b1", generation: 2, workspaceId: "w1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "idle" },
+          binding: { id: "b1", generation: 2, workspaceId: "w1", paneId: "w1:p1", state: "active", lifecycle: "active", agentKind: "traex", lastAgentState: "idle" },
           prompt: { id: "p1", bindingId: "b1", body: "queued work", state: "running", observationState: "not_started", updatedAt: "claim-version" },
           model: null
         } : null),

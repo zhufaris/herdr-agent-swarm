@@ -16,7 +16,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE TABLE IF NOT EXISTS bindings(
     id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
     root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
-    runtime TEXT NOT NULL CHECK(runtime = 'traex'),
+    runtime TEXT NOT NULL CHECK(runtime = 'traex'), agent_kind TEXT NOT NULL DEFAULT 'traex' CHECK(agent_kind IN ('pi','claude-code','codex','traex')),
     state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
     status_message_id TEXT, status_card_sequence INTEGER NOT NULL DEFAULT 0,
     last_agent_state TEXT NOT NULL CHECK(last_agent_state IN ('idle','working','blocked','done','unknown')),
@@ -186,7 +186,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE INDEX IF NOT EXISTS outbound_replies_pending ON outbound_replies(state, created_at);
   CREATE TABLE IF NOT EXISTS project_selections(
     id TEXT PRIMARY KEY, command_message_id TEXT UNIQUE NOT NULL, selector_message_id TEXT, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL, actor_open_id TEXT NOT NULL,
-    requested_title TEXT, initial_prompt_text TEXT, selected_project_id TEXT, binding_id TEXT REFERENCES bindings(id), state TEXT NOT NULL CHECK(state IN ('pending','processing','completed','failed','expired')),
+    requested_title TEXT, initial_prompt_text TEXT, agent_kind TEXT NOT NULL DEFAULT 'traex' CHECK(agent_kind IN ('pi','claude-code','codex','traex')), selected_project_id TEXT, binding_id TEXT REFERENCES bindings(id), state TEXT NOT NULL CHECK(state IN ('pending','processing','completed','failed','expired')),
     error TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS pane_close_requests(

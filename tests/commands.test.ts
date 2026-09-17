@@ -4,8 +4,15 @@ import { SWARM_COMMAND_POLICIES, swarmCommandPolicy } from "../src/domain/swarm-
 
 describe("commands", () => {
   it("parses supported commands", () => {
-    expect(parseCommand("/swarm new fix build")).toEqual({ kind: "new", title: "fix build" });
-    expect(parseCommand("/swarm new")).toEqual({ kind: "new", title: null });
+    expect(parseCommand("/swarm new fix build")).toEqual({ kind: "new", title: "fix build", agentKind: "traex" });
+    expect(parseCommand("/swarm new")).toEqual({ kind: "new", title: null, agentKind: "traex" });
+    expect(parseCommand("/swarm new investigate login failures --agent codex")).toEqual({ kind: "new", title: "investigate login failures", agentKind: "codex" });
+    expect(parseCommand("/swarm new --agent pi")).toEqual({ kind: "new", title: null, agentKind: "pi" });
+    expect(parseCommand("/swarm new --agent unknown")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm new --agent")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm new --agent pi --agent codex")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm new title --unknown value")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm new title --agent pi trailing")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm reset")).toEqual({ kind: "reset", title: null });
     expect(parseCommand("/swarm reset fresh start")).toEqual({ kind: "reset", title: "fresh start" });
     expect(parseCommand("/swarm projects")).toEqual({ kind: "projects" });
