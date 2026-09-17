@@ -14,7 +14,10 @@ export async function detectAgentRuntimeAvailability(input: { runner: CommandRun
   if (!discoverExecutable(input.agentExecutable, input.pathValue)) return false;
   try {
     const result = await input.runner.run(input.herdrExecutable, ["agent", "start", "--help"]);
-    const kinds = `${result.stdout}\n${result.stderr}`.match(/possible values:\s*([^\n]+)/i)?.[1]?.split("|").map((kind) => kind.trim()) ?? [];
+    const kinds = `${result.stdout}\n${result.stderr}`
+      .match(/possible values:\s*([^\]\n]+)/i)?.[1]
+      ?.split(/\s*[|,]\s*/u)
+      .map((kind) => kind.trim()) ?? [];
     return kinds.includes(input.herdrKind);
   } catch { return false; }
 }

@@ -156,7 +156,7 @@ describe("agent driver contract", () => {
 
   it("requires both an executable and Herdr agent-kind support for availability", async () => {
     expect(discoverExecutable("codex", "/missing")).toBeNull();
-    const runner = { run: vi.fn(async () => ({ stdout: "possible values: pi|claude|codex", stderr: "" })) };
+    const runner = { run: vi.fn(async () => ({ stdout: "[possible values: pi, claude, codex, traex]", stderr: "" })) };
     await expect(detectAgentRuntimeAvailability({ runner, herdrExecutable: "herdr", agentExecutable: process.execPath, herdrKind: "codex", pathValue: "" })).resolves.toBe(true);
     await expect(detectAgentRuntimeAvailability({ runner, herdrExecutable: "herdr", agentExecutable: "missing", herdrKind: "codex", pathValue: "/missing" })).resolves.toBe(false);
     expect(runner.run).toHaveBeenCalledTimes(1);
