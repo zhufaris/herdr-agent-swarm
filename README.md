@@ -255,6 +255,7 @@ Within a Primary topic, the `/swarm` commands manage the current session:
 /swarm stop
 /swarm rename <title>
 /swarm close
+/swarm close confirm <code>
 /swarm reattach <pane-id>
 /swarm replace
 /swarm resume
@@ -264,10 +265,13 @@ Within a Primary topic, the `/swarm` commands manage the current session:
 ~~~
 
 Ordinary messages remain FIFO. Eligible requests during an active turn can be
-delivered as exact-turn steering; an identity mismatch fails closed. Closing a
-binding does not kill its Agent or erase Lark history. Closing a real pane uses
-a separate, short-lived confirmation command and rechecks runtime identity and
-idle state first.
+delivered as exact-turn steering; an identity mismatch fails closed. `/swarm
+close` issues a short-lived confirmation code and rechecks the Primary runtime
+identity, queue, and idle/done state before closing anything. Confirmation
+best-effort closes safe Worker panes owned by that exact Primary generation,
+retains working, busy, missing, or identity-uncertain Workers, and then closes
+the Primary pane. Lark history and Worker worktrees are preserved. `/swarm pane
+close` remains accepted as a compatibility alias.
 
 Omitting `--agent` selects TraeX. The selected kind is durable: reset and pane
 replacement preserve it, while attach discovers the actual supported kind from

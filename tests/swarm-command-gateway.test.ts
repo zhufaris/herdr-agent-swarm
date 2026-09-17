@@ -87,7 +87,7 @@ describe("SwarmCommandGateway", () => {
     [{ kind: "reset", title: null }, "provisioning", "reset"],
     [{ kind: "attach", spaceName: "space", paneId: "w1:p2" }, "provisioning", "attach"],
     [{ kind: "rename", title: "New title" }, "sessionAdministration", "rename"],
-    [{ kind: "close" }, "sessionAdministration", "archive"],
+    [{ kind: "close" }, "paneClosure", "requestPaneClose"],
     [{ kind: "pane_close_request" }, "paneClosure", "requestPaneClose"],
     [{ kind: "pane_close_confirm", code: "ABC123" }, "paneClosure", "confirmPaneClose"],
     [{ kind: "resume" }, "sessionAdministration", "resume"],

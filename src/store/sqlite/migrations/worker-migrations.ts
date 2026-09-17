@@ -482,6 +482,23 @@ export class WorkerMigrations {
       this.context.database.exec("COMMIT");
     } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
   }
+
+  ensureWorkerPaneCloseRetainedState(): void {
+    if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 45").get()) return;
+    runForeignKeySafeRebuild(this.context, "Worker-pane close retained-state migration", () => this.context.database.exec(`
+      CREATE TABLE worker_pane_close_steps_next(
+        operation_id TEXT NOT NULL REFERENCES pane_close_requests(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, parent_pane_id TEXT NOT NULL, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, pane_id TEXT NOT NULL, instance_generation INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('executing','succeeded','retained','uncertain')), detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(operation_id, worker_id, pane_id)
+      );
+      INSERT INTO worker_pane_close_steps_next(operation_id, binding_id, parent_pane_id, worker_id, pane_id, instance_generation, state, detail, created_at, updated_at)
+      SELECT step.operation_id, step.binding_id, step.parent_pane_id, step.worker_id, step.pane_id, instance.generation, step.state, step.detail, step.created_at, step.updated_at
+      FROM worker_pane_close_steps step JOIN agent_instances instance ON instance.id = step.worker_id;
+      DROP TABLE worker_pane_close_steps;
+      ALTER TABLE worker_pane_close_steps_next RENAME TO worker_pane_close_steps;
+      CREATE INDEX worker_pane_close_steps_unresolved ON worker_pane_close_steps(state, created_at);
+      INSERT INTO schema_migrations(version) VALUES (45);
+    `));
+  }
 }
 
 function now(): string { return new Date().toISOString(); }

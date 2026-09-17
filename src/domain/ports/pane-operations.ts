@@ -1,4 +1,5 @@
 import type { Binding, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, OutboundReply, SessionSummary } from "../types.js";
+import type { AgentInstance } from "../agent-instance.js";
 import type { PaneControlOutcome as DomainPaneControlOutcome } from "../pane-control-lifecycle.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
@@ -22,9 +23,14 @@ export interface PaneOperationsStore {
   rejectAppliedPaneControlOperation(id: string, detail: string): PaneControlOperation | null;
   findBindingByPane(paneId: string): Binding | null;
   finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail?: string): void;
-  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; paneId: string; reason: string }): Array<{ workerId: string; paneId: string }>;
-  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; state: "executing" | "uncertain" }>;
-  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "uncertain"; detail?: string }): void;
+  countWorkerPanesForClose(input: { bindingId: string; bindingGeneration: number; paneId: string }): number;
+  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; bindingGeneration: number; paneId: string }): Array<{ workerId: string; paneId: string; instanceGeneration: number }>;
+  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; instanceGeneration: number; state: "executing" | "uncertain" }>;
+  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "retained" | "uncertain"; detail?: string }): void;
+  getAgentInstance(id: string): AgentInstance | null;
+  countPendingInstanceTurns(instanceId: string, expectedGeneration: number): number;
+  reserveWorkerPaneClose(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
+  terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null;
   getBinding(id: string): Binding | null;
   listBindings(): Binding[];
   listSessions(chatId: string): SessionSummary[];
@@ -36,4 +42,4 @@ export interface PaneOperationsStore {
 }
 
 export interface PaneControlStore extends Pick<PaneOperationsStore, "acceptPaneControlOperation" | "claimNextPaneControlOperation" | "claimPaneControlOperation" | "finishPaneControlOperation" | "getPaneControlOperation" | "listRecoverablePaneControlOperations" | "audit" | "getBinding" | "listBindings"> {}
-export interface PaneCloseStore extends Pick<PaneOperationsStore, "audit" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest" | "createAutomaticPaneCloseOperation" | "finishPaneCloseRequest" | "beginWorkerPaneCloseCascade" | "listUnresolvedWorkerPaneCloseSteps" | "finishWorkerPaneCloseStep" | "getBinding" | "listBindings" | "listUnresolvedPaneCloseOperations" | "transitionBinding"> {}
+export interface PaneCloseStore extends Pick<PaneOperationsStore, "audit" | "consumePaneCloseRequest" | "countPendingPrompts" | "createPaneCloseRequest" | "createAutomaticPaneCloseOperation" | "finishPaneCloseRequest" | "countWorkerPanesForClose" | "beginWorkerPaneCloseCascade" | "listUnresolvedWorkerPaneCloseSteps" | "finishWorkerPaneCloseStep" | "getAgentInstance" | "countPendingInstanceTurns" | "reserveWorkerPaneClose" | "terminateWorkerSession" | "getBinding" | "listBindings" | "listUnresolvedPaneCloseOperations" | "transitionBinding"> {}

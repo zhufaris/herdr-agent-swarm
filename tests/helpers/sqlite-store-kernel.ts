@@ -297,15 +297,23 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.paneOperations.finishPaneCloseRequest(operationId, state, detail);
   }
 
-  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; paneId: string; reason: string }): Array<{ workerId: string; paneId: string }> {
+  countWorkerPanesForClose(input: { bindingId: string; bindingGeneration: number; paneId: string }): number {
+    return this.paneOperations.countWorkerPanesForClose(input);
+  }
+
+  reserveWorkerPaneClose(instanceId: string, expectedGeneration: number) {
+    return this.instances.reserveWorkerPaneClose(instanceId, expectedGeneration);
+  }
+
+  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; bindingGeneration: number; paneId: string }): Array<{ workerId: string; paneId: string; instanceGeneration: number }> {
     return this.paneOperations.beginWorkerPaneCloseCascade(input);
   }
 
-  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; state: "executing" | "uncertain" }> {
+  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; instanceGeneration: number; state: "executing" | "uncertain" }> {
     return this.paneOperations.listUnresolvedWorkerPaneCloseSteps();
   }
 
-  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "uncertain"; detail?: string }): void {
+  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "retained" | "uncertain"; detail?: string }): void {
     this.paneOperations.finishWorkerPaneCloseStep(input);
   }
 

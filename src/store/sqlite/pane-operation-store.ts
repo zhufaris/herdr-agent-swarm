@@ -38,25 +38,26 @@ export class SqlitePaneOperationStore {
   }
 
   finishPaneCloseRequest(operationId: string, state: "succeeded" | "rejected" | "uncertain", detail?: string): void { this.database.prepare("UPDATE pane_close_requests SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('executing','uncertain')").run(state, detail ?? null, now(), operationId); }
+  countWorkerPanesForClose(input: { bindingId: string; bindingGeneration: number; paneId: string }): number {
+    const row = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_binding_generation = ? AND parent_pane_id = ? AND worker_session_lifecycle = 'active' AND pane_id IS NOT NULL").get(input.bindingId, input.bindingGeneration, input.paneId) as { count: number };
+    return Number(row.count);
+  }
 
-  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; paneId: string; reason: string }): Array<{ workerId: string; paneId: string }> {
+  beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; bindingGeneration: number; paneId: string }): Array<{ workerId: string; paneId: string; instanceGeneration: number }> {
     return this.context.transaction(() => {
-      const workers = this.database.prepare("SELECT id, generation, pane_id FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_pane_id = ? AND worker_session_lifecycle = 'active' ORDER BY created_at, id").all(input.bindingId, input.paneId) as Array<{ id: string; generation: number; pane_id: string | null }>;
+      const workers = this.database.prepare("SELECT id, generation, pane_id FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_binding_generation = ? AND parent_pane_id = ? AND worker_session_lifecycle = 'active' AND pane_id IS NOT NULL ORDER BY created_at, id").all(input.bindingId, input.bindingGeneration, input.paneId) as Array<{ id: string; generation: number; pane_id: string }>;
       const timestamp = now();
       for (const worker of workers) {
-        this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, worker.id, worker.generation);
-        this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, worker.id, worker.generation);
-        this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = generation + 1, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.reason, timestamp, worker.id, worker.generation);
-        if (worker.pane_id) this.database.prepare("INSERT OR IGNORE INTO worker_pane_close_steps(operation_id, binding_id, parent_pane_id, worker_id, pane_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'executing', ?, ?)").run(input.operationId, input.bindingId, input.paneId, worker.id, worker.pane_id, timestamp, timestamp);
+        this.database.prepare("INSERT OR IGNORE INTO worker_pane_close_steps(operation_id, binding_id, parent_pane_id, worker_id, pane_id, instance_generation, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'executing', ?, ?)").run(input.operationId, input.bindingId, input.paneId, worker.id, worker.pane_id, worker.generation, timestamp, timestamp);
       }
-      return workers.filter((worker): worker is { id: string; generation: number; pane_id: string } => worker.pane_id !== null).map((worker) => ({ workerId: worker.id, paneId: worker.pane_id }));
+      return workers.map((worker) => ({ workerId: worker.id, paneId: worker.pane_id, instanceGeneration: worker.generation }));
     });
   }
 
-  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; state: "executing" | "uncertain" }> {
-    return (this.database.prepare("SELECT operation_id, binding_id, parent_pane_id, worker_id, pane_id, state FROM worker_pane_close_steps WHERE state IN ('executing','uncertain') ORDER BY created_at, worker_id").all() as Array<{ operation_id: string; binding_id: string; parent_pane_id: string; worker_id: string; pane_id: string; state: "executing" | "uncertain" }>).map((row) => ({ operationId: row.operation_id, bindingId: row.binding_id, parentPaneId: row.parent_pane_id, workerId: row.worker_id, paneId: row.pane_id, state: row.state }));
+  listUnresolvedWorkerPaneCloseSteps(): Array<{ operationId: string; bindingId: string; parentPaneId: string; workerId: string; paneId: string; instanceGeneration: number; state: "executing" | "uncertain" }> {
+    return (this.database.prepare("SELECT operation_id, binding_id, parent_pane_id, worker_id, pane_id, instance_generation, state FROM worker_pane_close_steps WHERE state IN ('executing','uncertain') ORDER BY created_at, worker_id").all() as Array<{ operation_id: string; binding_id: string; parent_pane_id: string; worker_id: string; pane_id: string; instance_generation: number; state: "executing" | "uncertain" }>).map((row) => ({ operationId: row.operation_id, bindingId: row.binding_id, parentPaneId: row.parent_pane_id, workerId: row.worker_id, paneId: row.pane_id, instanceGeneration: row.instance_generation, state: row.state }));
   }
-  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "uncertain"; detail?: string }): void { this.database.prepare("UPDATE worker_pane_close_steps SET state = ?, detail = ?, updated_at = ? WHERE operation_id = ? AND worker_id = ? AND pane_id = ? AND state IN ('executing','uncertain')").run(input.state, input.detail ?? null, now(), input.operationId, input.workerId, input.paneId); }
+  finishWorkerPaneCloseStep(input: { operationId: string; workerId: string; paneId: string; state: "succeeded" | "retained" | "uncertain"; detail?: string }): void { this.database.prepare("UPDATE worker_pane_close_steps SET state = ?, detail = ?, updated_at = ? WHERE operation_id = ? AND worker_id = ? AND pane_id = ? AND state IN ('executing','uncertain')").run(input.state, input.detail ?? null, now(), input.operationId, input.workerId, input.paneId); }
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[] { return (this.database.prepare("SELECT id, binding_id, pane_id, state FROM pane_close_requests WHERE state IN ('executing','uncertain') ORDER BY created_at, id").all() as Array<{ id: string; binding_id: string; pane_id: string; state: PaneCloseOperation["state"] }>).map((row) => ({ id: row.id, bindingId: row.binding_id, paneId: row.pane_id, state: row.state })); }
 
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {

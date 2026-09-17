@@ -33,6 +33,7 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   updateAgentInstanceLifecycle: InstanceStore["updateAgentInstanceLifecycle"] = (input) => this.instances.updateAgentInstanceLifecycle(input);
   updateAgentInstanceObservation: InstanceStore["updateAgentInstanceObservation"] = (input) => this.instances.updateAgentInstanceObservation(input);
   reserveAgentInstanceStop: InstanceStore["reserveAgentInstanceStop"] = (instanceId, generation) => this.instances.reserveAgentInstanceStop(instanceId, generation);
+  reserveWorkerPaneClose: InstanceStore["reserveWorkerPaneClose"] = (instanceId, generation) => this.instances.reserveWorkerPaneClose(instanceId, generation);
   finishAgentInstanceStop: InstanceStore["finishAgentInstanceStop"] = (instanceId, generation) => this.instances.finishAgentInstanceStop(instanceId, generation);
   rollbackAgentInstanceStop: InstanceStore["rollbackAgentInstanceStop"] = (instanceId, generation, error) => this.instances.rollbackAgentInstanceStop(instanceId, generation, error);
   detachAgentInstanceRuntime: InstanceStore["detachAgentInstanceRuntime"] = (input) => this.instances.detachAgentInstanceRuntime(input);

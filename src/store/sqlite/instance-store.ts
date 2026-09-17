@@ -149,6 +149,18 @@ export class SqliteInstanceStore {
     });
   }
 
+  reserveWorkerPaneClose(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
+    return this.context.transaction(() => {
+      const instance = this.getAgentInstance(instanceId);
+      if (!instance || instance.role !== "worker" || instance.generation !== expectedGeneration || instance.workerSessionLifecycle !== "active" || instance.desiredState !== "running") return { outcome: "stale" };
+      const pending = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(instanceId, expectedGeneration);
+      if (pending) return { outcome: "busy" };
+      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND role = 'worker' AND worker_session_lifecycle = 'active' AND desired_state = 'running'").run(now(), instanceId, expectedGeneration);
+      const reserved = changed.changes === 1 ? this.getAgentInstance(instanceId) : null;
+      return reserved ? { outcome: "reserved", instance: reserved } : { outcome: "stale" };
+    });
+  }
+
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null {
     return this.context.transaction(() => {
       const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);

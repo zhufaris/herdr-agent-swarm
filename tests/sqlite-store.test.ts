@@ -1084,6 +1084,44 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'agent_instances_worker_parent_name'").get()).toEqual({ name: "agent_instances_worker_parent_name" });
   });
 
+  it("upgrades Worker pane close steps with instance generation and retained state", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-pane-close-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "binding-close", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-close", rootMessageId: "root-close", title: "Primary" });
+    store.updateBinding("binding-close", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:primary", lastAgentState: "idle" });
+    const worker = store.createWorkerAgentInstance({
+      id: "worker-close", projectId: "p1", name: "worker-close", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-close", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+      workspace: { id: "workspace-close", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    store.createPaneCloseRequest({ id: "close-operation", bindingId: "binding-close", paneId: "w1:primary", actorOpenId: "operator", codeHash: "hash", expiresAt: "2999-01-01T00:00:00.000Z" });
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA foreign_keys = OFF;
+      CREATE TABLE worker_pane_close_steps_legacy(
+        operation_id TEXT NOT NULL REFERENCES pane_close_requests(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, parent_pane_id TEXT NOT NULL, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, pane_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('executing','succeeded','uncertain')), detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(operation_id, worker_id, pane_id)
+      );
+      INSERT INTO worker_pane_close_steps_legacy VALUES ('close-operation', 'binding-close', 'w1:primary', 'worker-close', 'w1:worker', 'executing', NULL, '2026-09-17T00:00:00.000Z', '2026-09-17T00:00:00.000Z');
+      DROP TABLE worker_pane_close_steps;
+      ALTER TABLE worker_pane_close_steps_legacy RENAME TO worker_pane_close_steps;
+      DELETE FROM schema_migrations WHERE version = 45;
+      PRAGMA foreign_keys = ON;
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect((store.database.prepare("PRAGMA table_info(worker_pane_close_steps)").all() as Array<{ name: string }>).map(({ name }) => name)).toContain("instance_generation");
+    expect(store.database.prepare("SELECT instance_generation, state FROM worker_pane_close_steps WHERE worker_id = 'worker-close'").get()).toEqual({ instance_generation: worker.generation, state: "executing" });
+    store.finishWorkerPaneCloseStep({ operationId: "close-operation", workerId: "worker-close", paneId: "w1:worker", state: "retained", detail: "busy" });
+    expect(store.database.prepare("SELECT state, detail FROM worker_pane_close_steps WHERE worker_id = 'worker-close'").get()).toEqual({ state: "retained", detail: "busy" });
+  });
+
   it("atomically accepts a Worker turn with its initial card projection", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root-1", title: "Primary" });
@@ -2417,6 +2455,17 @@ describe("SQLite store", () => {
     expect(store.updateAgentInstanceObservation({ instanceId: "i1", expectedGeneration: instance.generation, observedState: "idle" })).toMatchObject({ desiredState: "stopped", observedState: "idle" });
     expect(store.claimNextInstanceTurn("i1", instance.generation)).toBeNull();
     expect(store.finishAgentInstanceStop("i1", instance.generation)).toMatchObject({ desiredState: "stopped", observedState: "stopped", runtimeRef: null });
+  });
+
+  it("atomically retains a Worker pane when any durable turn is pending", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "close-worker", projectId: "project-a", name: "worker-close", role: "worker", agentKind: "traex", model: null, parent: { bindingId: "binding-a", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "close-worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "close-worker", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: null })!;
+    store.acceptInstanceTurn({ id: "queued-close", idempotencyKey: "queued-close", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+
+    expect(store.reserveWorkerPaneClose(instance.id, instance.generation)).toEqual({ outcome: "busy" });
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ desiredState: "running", workerSessionLifecycle: "active", runtimeRef: { paneId: "w1:worker" } });
+    expect(store.getInstanceTurn("queued-close")).toMatchObject({ state: "queued" });
   });
 
   it("projects a legacy binding as a TraeX instance without creating durable work", () => {

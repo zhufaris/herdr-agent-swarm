@@ -50,7 +50,11 @@ export function parseCommand(text: string): BridgeCommand | null {
     case "rename":
       return argument ? { kind: "rename", title: argument } : { kind: "help" };
     case "close":
-      return { kind: "close" };
+      if (!argument) return { kind: "pane_close_request" };
+      {
+        const confirm = /^confirm\s+(\S+)$/i.exec(argument);
+        return confirm ? { kind: "pane_close_confirm", code: confirm[1]! } : { kind: "help" };
+      }
     case "pane": {
       if (argument === "close") return { kind: "pane_close_request" };
       const confirm = /^close\s+confirm\s+(\S+)$/i.exec(argument);

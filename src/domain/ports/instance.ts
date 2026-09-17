@@ -32,6 +32,7 @@ export interface InstanceStore {
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null;
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
+  reserveWorkerPaneClose(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null;
   rollbackAgentInstanceStop(instanceId: string, expectedGeneration: number, error: string): AgentInstance | null;
   detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null;
@@ -95,7 +96,7 @@ export type InstanceLifecycleStore = Pick<InstanceStore,
   "createAgentInstance" | "createWorkerAgentInstance" | "getAgentInstance" | "findAgentInstanceByPane" |
   "listWorkerInstancesByParent" | "listAgentInstances" | "setPrimaryAgentInstance" |
   "attachAgentInstanceRuntime" | "refreshAgentInstanceRuntimeSession" | "checkpointAgentInstance" | "updateAgentInstanceLifecycle" |
-  "updateAgentInstanceObservation" | "reserveAgentInstanceStop" | "finishAgentInstanceStop" |
+  "updateAgentInstanceObservation" | "reserveAgentInstanceStop" | "reserveWorkerPaneClose" | "finishAgentInstanceStop" |
   "rollbackAgentInstanceStop" | "detachAgentInstanceRuntime" | "terminateWorkerSession" |
   "getWorkspaceLease" | "updateWorkspaceLease" | "createInstanceRemovalPlan" |
   "getInstanceRemovalPlan" | "consumeInstanceRemovalPlan" | "removeAgentInstance" |

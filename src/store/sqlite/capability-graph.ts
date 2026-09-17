@@ -175,7 +175,7 @@ export class SqliteCapabilityGraph {
     const promptSession = new SqlitePromptSessionCapabilityStore(this.bindings, this.bindingProjections, this.projections);
     const bindingSession = new SqliteBindingSessionCapabilityStore(this.bindings, this.bindingProjections, this.prompts, this.projections, this.inboundProjects, this.paneOperations, this.operations);
     const routing = new SqliteInboundRoutingCapabilityStore(this.bindings, this.threadAliases, this.inboundProjects);
-    const paneControl = new SqlitePaneControlCapabilityStore(this.paneOperations, this.bindings, this.prompts, this.promptAcceptance, this.promptDispatch, this.projections, this.sessionOperations, this.operations);
+    const paneControl = new SqlitePaneControlCapabilityStore(this.paneOperations, this.bindings, this.prompts, this.promptAcceptance, this.promptDispatch, this.projections, this.sessionOperations, this.operations, this.instances, this.workerTurns);
     return {
       lifecycle: new SqliteStoreLifecycleAdapter(this.context, this.leases),
       approvals: this.approvals,

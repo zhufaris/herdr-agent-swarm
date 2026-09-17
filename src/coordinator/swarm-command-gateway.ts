@@ -146,7 +146,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
       else if (command.kind === "reset") ok = await this.options.provisioning.reset(message, binding, command.title);
       else if (command.kind === "attach") ok = await this.options.provisioning.attach(message, command.spaceName, command.paneId);
       else if (command.kind === "rename") ok = await this.options.sessionAdministration.rename(message, binding, command.title);
-      else if (command.kind === "close") ok = await this.options.sessionAdministration.archive(message, binding);
+      else if (command.kind === "close") ok = await this.options.paneClosure.requestPaneClose(message, binding);
       else if (command.kind === "pane_close_request") ok = await this.options.paneClosure.requestPaneClose(message, binding);
       else if (command.kind === "pane_close_confirm") ok = await this.options.paneClosure.confirmPaneClose(message, binding, command.code);
       else if (command.kind === "reattach") {

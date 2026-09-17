@@ -54,7 +54,9 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
     private readonly promptDispatch: SqlitePromptDispatchStore,
     private readonly projections: SqliteProjectionStore,
     private readonly sessionOperations: SqliteSessionOperationStore,
-    private readonly operations: SqliteOperationsStore
+    private readonly operations: SqliteOperationsStore,
+    private readonly instances: SqliteInstanceStore,
+    private readonly workerTurns: SqliteWorkerTurnStore
   ) {}
 
   audit: PaneControlStore["audit"] = (input) => this.operations.audit(input);
@@ -71,9 +73,14 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
   createPaneCloseRequest: PaneCloseStore["createPaneCloseRequest"] = (input) => this.paneOperations.createPaneCloseRequest(input);
   createAutomaticPaneCloseOperation: PaneCloseStore["createAutomaticPaneCloseOperation"] = (input) => this.paneOperations.createAutomaticPaneCloseOperation(input);
   finishPaneCloseRequest: PaneCloseStore["finishPaneCloseRequest"] = (id, state, detail) => this.paneOperations.finishPaneCloseRequest(id, state, detail);
+  countWorkerPanesForClose: PaneCloseStore["countWorkerPanesForClose"] = (input) => this.paneOperations.countWorkerPanesForClose(input);
   beginWorkerPaneCloseCascade: PaneCloseStore["beginWorkerPaneCloseCascade"] = (input) => this.paneOperations.beginWorkerPaneCloseCascade(input);
   listUnresolvedWorkerPaneCloseSteps: PaneCloseStore["listUnresolvedWorkerPaneCloseSteps"] = () => this.paneOperations.listUnresolvedWorkerPaneCloseSteps();
   finishWorkerPaneCloseStep: PaneCloseStore["finishWorkerPaneCloseStep"] = (input) => this.paneOperations.finishWorkerPaneCloseStep(input);
+  getAgentInstance: PaneCloseStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);
+  countPendingInstanceTurns: PaneCloseStore["countPendingInstanceTurns"] = (id, generation) => this.workerTurns.countPendingInstanceTurns(id, generation);
+  reserveWorkerPaneClose: PaneCloseStore["reserveWorkerPaneClose"] = (id, generation) => this.instances.reserveWorkerPaneClose(id, generation);
+  terminateWorkerSession: PaneCloseStore["terminateWorkerSession"] = (input) => this.instances.terminateWorkerSession(input);
   listUnresolvedPaneCloseOperations: PaneCloseStore["listUnresolvedPaneCloseOperations"] = () => this.paneOperations.listUnresolvedPaneCloseOperations();
   transitionBinding: PaneCloseStore["transitionBinding"] = (id, transition) => this.bindings.transitionBinding(id, transition);
   acceptModelPreference: ModelSelectionStore["acceptModelPreference"] = (input) => this.prompts.acceptModelPreference(input);

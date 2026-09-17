@@ -21,7 +21,7 @@ export const SWARM_COMMAND_POLICIES = {
   reset: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "reconcilable", handler: "provisioning" },
   attach: { mode: "mutation", scope: "project", authorization: "administrator", replay: "reconcilable", handler: "provisioning" },
   rename: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "safe-before-effect", handler: "session" },
-  close: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "safe-before-effect", handler: "session" },
+  close: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "safe-before-effect", handler: "pane-closure" },
   pane_close_request: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "safe-before-effect", handler: "pane-closure" },
   pane_close_confirm: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "non-replayable", handler: "pane-closure" },
   reattach: { mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "reconcilable", handler: "provisioning" },

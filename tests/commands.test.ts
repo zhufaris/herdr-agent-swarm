@@ -39,6 +39,9 @@ describe("commands", () => {
     expect(parseCommand("/swarm worker create reviewer --start --start")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm worker create reviewer --agent unknown")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm worker delete reviewer")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm close")).toEqual({ kind: "pane_close_request" });
+    expect(parseCommand("/swarm close confirm A7K9Q2")).toEqual({ kind: "pane_close_confirm", code: "A7K9Q2" });
+    expect(parseCommand("/swarm close confirm")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm pane close")).toEqual({ kind: "pane_close_request" });
     expect(parseCommand("/swarm pane close confirm A7K9Q2")).toEqual({ kind: "pane_close_confirm", code: "A7K9Q2" });
     expect(parseCommand("/swarm pane close confirm")).toEqual({ kind: "help" });

@@ -376,16 +376,19 @@ Primary FIFO。`/interrupt <worker>` 是 `/stop <worker>` 的临时兼容别名�
 
 ### `/swarm close`
 
-归档当前飞书话题与 pane 的绑定。这个命令是非破坏性的：
-
-- 不关闭 Herdr pane；
-- 不终止 TraeX；
-- 不删除飞书消息历史；
-- 归档后不再接受该话题中的新任务。
+请求关闭当前 Primary 拓扑。第一条命令只生成 60 秒内有效、绑定当前用户的确认码，
+不会立即关闭任何 Pane：
 
 ```text
 /swarm close
+/swarm close confirm <code>
 ```
+
+确认时 Bridge 会重新检查 Primary identity、队列与状态。Primary 必须为 `idle` 或
+`done`；随后 best-effort 关闭属于该 Primary exact binding generation 的安全 Worker，
+最后关闭 Primary 并归档话题。working、blocked、unknown、busy、缺失或 identity 不匹配的
+Worker 会被保留，不阻止其他安全 Worker 和 Primary 关闭。飞书历史、Worker 记录和 worktree
+不会删除。`/swarm pane close` 与 `/swarm pane close confirm <code>` 仍作为兼容别名接受。
 
 ### Pane 恢复命令
 
@@ -488,19 +491,21 @@ TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待�
 
 ## 从飞书关闭 Pane
 
-真正关闭当前话题绑定的 Pane 使用两步确认：
+关闭当前 Primary 拓扑使用两步确认：
 
 ```text
-/swarm pane close
-/swarm pane close confirm <code>
+/swarm close
+/swarm close confirm <code>
 ```
 
 第一条命令生成 60 秒一次性确认码，第二条必须由同一飞书用户在同一话题中
 发送。Bridge 会在确认时重新检查父 Primary 的 Pane identity、队列和运行状态，仅允许关闭
 Herdr 明确报告为 `idle` 或 `done` 的 Primary；`working`、`blocked` 和 `unknown`
-都会被拒绝。确认后的关闭会先终态化这个 Primary 派生的所有 Worker：未开始任务会取消，
-可能已投递的任务会标为 `dispatch-uncertain` 而不会重放；随后先关闭这些 Worker pane，
-再关闭父 Primary pane。其他 Thread 或其他父 pane 的 Worker 不会受影响。
+都会被拒绝。确认后只对 exact binding generation 的 Worker 做 fresh observation。身份匹配、
+没有任何 pending turn 且状态为 `idle` 或 `done` 的 Worker 会先关闭并终态化；working、
+blocked、unknown、busy、缺失或 identity 不匹配的 Worker 会保留。单个 Worker 被保留或关闭
+结果不确定都不会阻止其他安全 Worker和父 Primary 继续关闭。其他 Thread、其他 generation
+或其他父 pane 的 Worker 不会受影响。
 
 Worker pane 若被单独关闭或在 Herdr 中消失，也会终态化；原 worktree 可以保留并按
 安全删除流程处理，但不能在新 pane 中恢复为同一个 Worker session。关闭成功后，Bridge
@@ -516,10 +521,12 @@ Worker/pane 关闭步骤，绝不会自动重放关闭命令或 Agent 任务。
 若任务已经结束，则发送普通消息创建新的 FIFO 任务。如果 TraeX 是 `blocked`，请到
 Herdr 处理审批。
 
-### `/swarm close` 后 pane 还在
+### `/swarm close` 后 Worker pane 还在
 
-这是预期行为。`/swarm close` 只归档绑定，不会关闭 pane。需要真正关闭时，
-请在仍处于 active 的绑定话题中发送 `/swarm pane close` 并按卡片提示确认。
+先确认是否已发送卡片给出的 `/swarm close confirm <code>`。确认完成后若仍有 Worker pane，
+通常表示它在 fresh observation 时处于 working、blocked、unknown、busy、缺失或 identity
+不匹配状态，因此按 best-effort 安全策略被保留；结果卡会分别显示已关闭、已保留和不确定
+数量。请在 Herdr 中检查这些 Worker，不会自动重放关闭命令。
 
 ### 可以从飞书批准权限吗
 

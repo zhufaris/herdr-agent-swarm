@@ -88,6 +88,7 @@ export class SqliteMigrations {
     this.worker.ensurePrimaryCardContextColumns();
     this.worker.ensureCardContextStartupInvalidations();
     this.worker.ensureWorkerPaneCloseSteps();
+    this.worker.ensureWorkerPaneCloseRetainedState();
     this.cards.ensureOutboundLaneKey();
     this.cards.ensureOutboxLaneQuarantines();
     this.cards.ensureOutboxLaneHeads();

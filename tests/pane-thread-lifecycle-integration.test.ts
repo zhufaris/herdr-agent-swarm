@@ -283,7 +283,7 @@ describe("pane/thread lifecycle integration", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("drains the active turn, cancels queued work, then archives without closing the pane", async () => {
+  it("rejects topology close while a Primary turn is active without cancelling queued work", async () => {
     let finish!: () => void;
     const activeTurn = new Promise<void>((resolve) => { finish = resolve; });
     const submitted: string[] = [];
@@ -311,11 +311,11 @@ describe("pane/thread lifecycle integration", () => {
     await coordinator.handleMessage(message(2, "second"));
     await coordinator.handleMessage({ ...message(3, "/swarm close"), mentionsBot: true });
 
-    expect(store.listBindings()[0]).toMatchObject({ lifecycle: "draining", state: "active" });
-    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, cancelled: 1 });
+    expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", state: "active" });
+    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1, cancelled: 0 });
     finish();
-    await vi.waitFor(() => expect(store.listBindings()[0]).toMatchObject({ lifecycle: "archived", state: "archived" }));
-    expect(submitted).toHaveLength(1);
+    await vi.waitFor(() => expect(submitted).toHaveLength(2));
+    expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", state: "active" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

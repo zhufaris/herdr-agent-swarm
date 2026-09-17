@@ -665,7 +665,9 @@ describe("application composition boundaries", () => {
     expect(commands).toContain("PaneClosureWorkflowPort");
     expect(recovery).toContain("InboundMessageRoutingWorkflowPort");
     expect(commands).toContain("operationsQuery.listSpaces");
-    expect(commands).toContain("sessionAdministration.archive");
+    expect(commands).toContain("sessionAdministration.rename");
+    expect(commands).toContain("paneClosure.requestPaneClose");
+    expect(commands).not.toContain("sessionAdministration.archive");
     expect(commands).toContain("async stop(): Promise<void>");
     expect(router).toContain("swarmCommands.stop()");
     expect(router).not.toContain("modelSelection");
