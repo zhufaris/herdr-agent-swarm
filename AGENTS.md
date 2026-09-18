@@ -168,6 +168,16 @@ service; shutdown detaches in-flight observers by design.
 
 ## Security and data handling
 
+- Before every push to any remote, inspect the complete commit range that will
+  be pushed and run `npm run public:audit`. Treat this as a blocking security
+  gate: do not push if the audit fails or if the outgoing commits contain a
+  credential, private key, access token, API key, session token, secret-bearing
+  configuration, or other sensitive runtime data. Do not limit the review to
+  the current worktree because already committed outgoing changes are part of
+  the push. If a suspected secret is found, stop, keep it out of the remote,
+  report the affected path without printing the value, and require the secret
+  to be removed from every outgoing commit and rotated when exposure is
+  possible.
 - Keep `LARK_APP_SECRET` and the standalone `.env` file private. Do not commit
   credentials, live project registries, SQLite databases, WAL/SHM files, logs,
   or generated runtime state. `var/` is service-owned runtime data.
