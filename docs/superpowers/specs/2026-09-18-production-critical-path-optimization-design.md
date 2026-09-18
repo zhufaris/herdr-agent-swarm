@@ -22,6 +22,13 @@ The work covers five production-critical paths in this order:
 4. SQLite transactions, queries, and migrations; and
 5. card delivery, retry, dead-letter recovery, and convergence.
 
+The startup and shutdown slice also owns the local operational logging boundary.
+The existing Pino structured logger remains the application logger. The service
+lifecycle remains the only owner of local log files, permissions, rotation, and
+operator retrieval; migrating application call sites to `tslog` is out of scope
+because it would add broad type and transport risk without improving the required
+local diagnostics.
+
 Tests, operational tooling, and documentation change only where they directly
 support those paths. Broad repository cleanup, cosmetic rewrites, and speculative
 framework construction are out of scope.
@@ -79,6 +86,34 @@ Evidence includes startup-stage duration, Herdr call counts, repeated scans, sto
 latency, in-flight ownership, and restart recovery outcomes. A failure in one
 owner's background scan must not prevent other owners from converging, but it must
 remain visible in structured diagnostics.
+
+### Local Structured Logging
+
+Pino emits newline-delimited JSON to standard output and standard error. The user
+systemd unit appends both streams to the private `service.log`; application code
+does not open or rotate that file. This single-writer boundary avoids competing
+rotation policies, background transport workers, and shutdown-flush ambiguity.
+Existing redaction and `safeLogError` behavior remain mandatory. Production-critical
+records should keep stable correlation fields such as `eventId`, `bindingId`,
+`promptId`, `paneId`, and `replyId`.
+
+The lifecycle rotates logs only after the service is confirmed inactive. The active
+file remains capped at 16 MiB per stopped-state rotation check, and a bounded number
+of rotated generations is retained. Every directory and file in the rotation chain
+must pass the existing ownership, regular-file, no-symlink, and single-hard-link
+checks before mutation. The directory remains mode `0700` and log files mode `0600`.
+Rotation must preserve the old chain if a rename fails; a failed safety validation
+must leave all files untouched.
+
+`npm run swarm:logs` keeps its compatible bounded default: the final 100 complete
+lines from at most the final 1 MiB of the active log. Optional arguments add bounded
+Agent-oriented diagnosis by line count, byte limit, minimum level, timestamp,
+component, and correlation IDs. A flag may include the finite rotated chain in
+oldest-to-newest order, and a machine-readable mode emits matching JSONL without a
+human header. Parsing is streaming or otherwise explicitly bounded. A malformed or
+non-JSON line is skipped when structured filters are active and never causes the
+whole diagnostic command to fail. Invalid options, unsafe paths, and unavailable
+required files fail closed without revealing configuration secrets.
 
 ## Slice 2: Inbound Messages and Prompt FIFO
 
@@ -203,6 +238,13 @@ Each slice runs its regression and benchmark seams, focused Vitest files,
 `npm run typecheck`, `npm run architecture:check`, and `npm run build`. Any change
 spanning persistence, recovery, or shared runtime behavior also runs `npm test`.
 
+The logging portion additionally verifies default-output compatibility, bounded
+reads, rotation ordering and retention, permissions, link defenses, atomic failure
+behavior, structured filters, malformed records, and machine-readable output. A
+representative large fixture demonstrates that configured byte and line bounds are
+honored; no throughput claim is required because the design keeps Pino's existing
+hot path unchanged.
+
 The intended commit sequence is:
 
 1. audit and measurement infrastructure;
@@ -244,6 +286,8 @@ The program is complete when:
   compatible;
 - focused tests, the full Vitest suite, typecheck, architecture checks, and build
   pass;
+- Pino logs are locally retained and queryable through the supported lifecycle CLI
+  with bounded reads, safe rotation, private permissions, and preserved redaction;
 - the staged release is installed and the running build is ready and converged; and
 - the final report lists commits, evidence, unresolved risks, and why any audit-only
   candidate was not changed.

@@ -27,9 +27,30 @@ while preserving external behavior and all durability and no-replay invariants.
 - Measure startup-stage duration, repeated scans, Herdr calls, stop latency, and
   observer recovery with deterministic fakes or existing structured diagnostics.
 - Correct confirmed failures without weakening detach-without-replay behavior.
+- Correct restart safety so quarantined, non-actionable rows do not permanently
+  block restart, while ready, retry-wait, cooldown-wait, in-flight, active-delivery,
+  or incomplete metrics continue to fail closed.
 - Remove only duplicated lifecycle or scan decisions exposed by the correction.
 - Run focused tests, typecheck, architecture checks, build, and the full suite when
   shared recovery behavior changes; commit the slice independently.
+
+## Task 2A: Strengthen local structured logging
+
+- Keep Pino as the structured application logger and systemd as the sole writer of
+  `service.log`; do not add `tslog` or an application file transport.
+- Extend stopped-state rotation from one backup to a bounded generation chain while
+  preserving the 16 MiB threshold, `0700`/`0600` permissions, link defenses, and
+  failure atomicity.
+- Extend `swarm:logs` with bounded line/byte controls, optional rotated history,
+  structured level/time/component/correlation filters, and headerless JSONL output.
+- Keep the current final-100-lines/final-1-MiB behavior when no option is supplied.
+- Reject invalid arguments and unsafe paths. Skip malformed records only when a
+  structured filter requires JSON parsing; never expose secret configuration.
+- Add focused lifecycle tests for compatibility, bounds, history ordering, rotation
+  retention, permissions, unsafe links, rename failures, filters, malformed lines,
+  and JSONL output. Update operator and architecture documentation.
+- Run focused lifecycle tests, typecheck, architecture checks, build, and the full
+  suite because lifecycle and operator behavior are shared; commit independently.
 
 ## Task 3: Audit inbound messages and the Prompt FIFO
 
