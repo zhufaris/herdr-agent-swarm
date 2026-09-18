@@ -161,6 +161,18 @@ check, the Superpowers documentation audit, and the production build. The final
 build identity before installation was
 `sha256:b2834601b90744448c3f453c931b1f49062f39d12d20d54a79448bbcd7e86db6`.
 
-The remaining acceptance steps are installation, restart through the normal safety
-gate, and live verification of identity, readiness, SQLite integrity, configured
-Herdr workspaces, Gateway/Lark connectivity, and local log diagnostics.
+`./install.sh` staged and activated immutable release
+`b2834601b90744448c3f453c931b1f49062f39d12d20d54a79448bbcd7e86db6-b3074402268e`
+without starting it. The installed CLI successfully returned headerless JSONL via
+`npm run swarm:logs -- --lines 5 --json`; the log directory and current log
+remained `0700` and `0600`. Production dependency audit reports two moderate
+findings in `qs` through `@larksuiteoapi/node-sdk`, with no available npm fix; no
+dependency changed in this program.
+
+The first normal restart attempt failed closed before stop because this shell could
+not determine user-systemd activity. A fresh `/status` observation remained ready
+and healthy but reported one running Prompt. Herdr identified it as the current
+TraeX turn in pane `wN:p3S`, so forcing restart would detach this live observer and
+was not authorized. The remaining acceptance step is a later normal restart after
+this turn settles, followed by live identity, readiness, SQLite, workspace, Gateway,
+Lark, and log verification.
