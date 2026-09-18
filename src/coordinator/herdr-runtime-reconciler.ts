@@ -6,10 +6,13 @@ import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { PriorityReconciliationRunner, type PriorityReconciliationScope } from "../runtime/priority-reconciliation-runner.js";
 import { HerdrSnapshotCollector } from "./herdr-snapshot-collector.js";
-import { ReconciliationScheduler } from "./reconciliation-scheduler.js";
 import { BindingRuntimeConverger } from "./binding-runtime-converger.js";
 import { ProjectCatalog } from "./project-catalog.js";
+import { reconciliationCooldownCovers } from "./reconciliation-scope-policy.js";
+
+const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -45,13 +48,14 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly projects: ProjectCatalog;
   private skippedPaneReasons = new Map<string, string>();
   private readonly snapshots: HerdrSnapshotCollector;
-  private readonly reconciliationScheduler: ReconciliationScheduler;
+  private readonly reconciliationRunner: PriorityReconciliationRunner;
+  private readonly lastReconciledAt = new Map<string, number>();
   private readonly converger: BindingRuntimeConverger;
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
     this.snapshots = new HerdrSnapshotCollector(options.herdr, options.logger);
-    this.reconciliationScheduler = new ReconciliationScheduler({ configuredWorkspaceIds: this.configuredWorkspaceIds, execute: (scope) => this.reconcileOnce(scope), logger: options.logger });
+    this.reconciliationRunner = new PriorityReconciliationRunner({ execute: (scope) => this.execute(scope) });
     this.converger = new BindingRuntimeConverger(options);
     this.projects = new ProjectCatalog(options.projects);
   }
@@ -62,16 +66,22 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   async reconcile(workspaceIds?: readonly string[]): Promise<void> {
-    return this.reconciliationScheduler.reconcile(workspaceIds);
+    return this.reconciliationRunner.request(scopeForWorkspaces(workspaceIds), { allowActiveCoverage: true });
   }
 
   async requestReconciliation(workspaceIds?: readonly string[]): Promise<void> {
-    return this.reconciliationScheduler.request(workspaceIds);
+    if (reconciliationCooldownCovers({ ...(workspaceIds ? { requestedWorkspaceIds: workspaceIds } : {}), configuredWorkspaceIds: this.configuredWorkspaceIds, lastReconciledAt: this.lastReconciledAt, now: performance.now(), cooldownMs: EVENT_RECONCILIATION_COOLDOWN_MS })) {
+      this.reconciliationRunner.markCoalesced();
+      return;
+    }
+    return this.reconciliationRunner.request(scopeForWorkspaces(workspaceIds), { allowActiveCoverage: workspaceIds !== undefined });
   }
 
   async requestPaneReconciliation(paneIds: readonly string[]): Promise<void> {
-    if (this.reconciliationScheduler.isStopping()) return;
-    await this.reconciliationScheduler.waitForIdle();
+    return this.reconciliationRunner.request({ kind: "panes", ids: paneIds });
+  }
+
+  private async reconcilePanes(paneIds: readonly string[]): Promise<void> {
     for (const paneId of [...new Set(paneIds)]) {
       const existing = this.options.store.findBindingByPane(paneId);
       if (!existing || (existing.state !== "active" && existing.state !== "orphaned")) continue;
@@ -86,15 +96,23 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   snapshot(): ReconciliationDiagnostics {
-    return this.reconciliationScheduler.snapshot();
+    return this.reconciliationRunner.snapshot();
   }
 
   start(intervalMs: number): void {
-    this.reconciliationScheduler.start(intervalMs);
+    this.reconciliationRunner.start(intervalMs);
   }
 
   async stop(): Promise<void> {
-    await this.reconciliationScheduler.stop();
+    await this.reconciliationRunner.stop();
+  }
+
+  private async execute(scope: PriorityReconciliationScope): Promise<ReconciliationPassResult | void> {
+    if (scope.kind === "panes") return this.reconcilePanes(scope.ids);
+    const result = await this.reconcileOnce(scope.kind === "workspaces" ? new Set(scope.ids) : undefined);
+    const completedAt = performance.now();
+    for (const workspaceId of result.reconciledWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
+    return result;
   }
 
   private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<ReconciliationPassResult> {
@@ -197,4 +215,8 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     return { reconciledWorkspaceIds: new Set(panesByWorkspace.keys()), failures };
   }
 
+}
+
+function scopeForWorkspaces(workspaceIds?: readonly string[]): PriorityReconciliationScope {
+  return workspaceIds === undefined ? { kind: "all" } : { kind: "workspaces", ids: workspaceIds };
 }

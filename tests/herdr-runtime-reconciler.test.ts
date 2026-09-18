@@ -444,6 +444,39 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("prioritizes a pane event ahead of workspace work queued behind a full pass", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const calls: string[] = [];
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/one", label: "task", agentState: "working" as const, foregroundExecutables: ["traex"] };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "one", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: pane.paneId, traexSessionId: pane.terminalId, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [
+        { id: "one", displayName: "One", description: "One", workspaceId: "w1", cwd: "/one" },
+        { id: "two", displayName: "Two", description: "Two", workspaceId: "w2", cwd: "/two" }
+      ],
+      store, herdr: {
+        async listPanes(workspaceId: string) { calls.push(`workspace:${workspaceId}`); if (calls.length === 1) await blocked; return workspaceId === "w1" ? [pane] : []; },
+        async observeRuntime() { calls.push("pane:w1:p1"); return { pane, traexProcess: true, composerReady: false, evidenceSource: "structured" as const }; }
+      } as unknown as HerdrPort, lifecycleEvents: new BridgeEventBus(),
+      channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
+    });
+
+    const full = reconciler.reconcile();
+    await vi.waitFor(() => expect(calls).toEqual(expect.arrayContaining(["workspace:w1", "workspace:w2"])));
+    const workspace = reconciler.requestReconciliation(["w2"]);
+    const targeted = reconciler.requestPaneReconciliation(["w1:p1"]);
+    release();
+    await Promise.all([full, workspace, targeted]);
+
+    expect(calls).toEqual(["workspace:w1", "workspace:w2", "pane:w1:p1", "workspace:w2"]);
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 3, priorityPromotionCount: 1 });
+    store.close();
+  });
+
   it("absorbs an event already covered by the active workspace scan", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });

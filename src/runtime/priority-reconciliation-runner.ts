@@ -27,6 +27,7 @@ export class PriorityReconciliationRunner {
   private readonly workspaces: PendingIds = { ids: new Set(), waiters: [], acceptedAt: null };
   private readonly all: PendingAll = { requested: false, waiters: [], acceptedAt: null };
   private active: Promise<void> | null = null;
+  private activeScope: PriorityReconciliationScope | null = null;
   private activeScopeKind: PriorityReconciliationScope["kind"] | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
@@ -37,8 +38,12 @@ export class PriorityReconciliationRunner {
 
   constructor(private readonly options: { execute(scope: PriorityReconciliationScope): Promise<unknown>; clock?: () => number }) {}
 
-  request(scope: PriorityReconciliationScope): Promise<void> {
+  request(scope: PriorityReconciliationScope, options: { allowActiveCoverage?: boolean } = {}): Promise<void> {
     if (this.stopping) return Promise.resolve();
+    if (options.allowActiveCoverage && this.active && this.activeScope && activeScopeCovers(this.activeScope, scope)) {
+      this.metrics.markCoalesced();
+      return this.active;
+    }
     const acceptedAt = this.clock();
     if (this.active) this.metrics.markCoalesced();
     const promise = new Promise<void>((resolve, reject) => {
@@ -51,9 +56,11 @@ export class PriorityReconciliationRunner {
     return promise;
   }
 
+  markCoalesced(): void { this.metrics.markCoalesced(); }
+
   start(intervalMs: number): void {
     if (this.stopping || this.timer) return;
-    this.timer = setInterval(() => { void this.request({ kind: "all" }).catch(() => {}); }, intervalMs);
+    this.timer = setInterval(() => { void this.request({ kind: "all" }, { allowActiveCoverage: true }).catch(() => {}); }, intervalMs);
     this.timer.unref?.();
   }
 
@@ -86,15 +93,18 @@ export class PriorityReconciliationRunner {
   }
 
   private async drain(): Promise<void> {
+    let firstError: unknown;
     while (!this.stopping) {
       const next = this.takeNext();
-      if (!next) return;
+      if (!next) break;
       this.activeScopeKind = next.scope.kind;
+      this.activeScope = next.scope;
       this.recordStartDelay(next.scope.kind, next.acceptedAt);
       try { await this.metrics.measure(() => this.options.execute(next.scope)); for (const waiter of next.waiters) waiter.resolve(); }
-      catch (error) { for (const waiter of next.waiters) waiter.reject(error); }
-      finally { this.activeScopeKind = null; }
+      catch (error) { firstError ??= error; for (const waiter of next.waiters) waiter.reject(error); }
+      finally { this.activeScopeKind = null; this.activeScope = null; }
     }
+    if (firstError !== undefined) throw firstError;
   }
 
   private takeNext(): { scope: PriorityReconciliationScope; waiters: Waiter[]; acceptedAt: number } | null {
@@ -132,4 +142,11 @@ export class PriorityReconciliationRunner {
     pending.acceptedAt = null;
     for (const waiter of pending.waiters.splice(0)) waiter.resolve();
   }
+}
+
+function activeScopeCovers(active: PriorityReconciliationScope, requested: PriorityReconciliationScope): boolean {
+  if (active.kind === "all") return requested.kind === "all";
+  if (active.kind !== requested.kind || active.kind === "panes") return false;
+  const activeIds = new Set(active.ids);
+  return requested.ids.every((id) => activeIds.has(id));
 }

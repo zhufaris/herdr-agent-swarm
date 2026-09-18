@@ -5,66 +5,50 @@ import type { InstanceRuntimeReconciliationStore } from "../domain/ports/instanc
 import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../domain/types.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { ReconciliationRunMetrics } from "../runtime/reconciliation-run-metrics.js";
+import { PriorityReconciliationRunner, type PriorityReconciliationScope } from "../runtime/priority-reconciliation-runner.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options { projects: readonly ProjectConfig[]; store: InstanceRuntimeReconciliationStore; paneHost: PaneHost; wake(instanceId: string): void; wakeCardContext?: () => void; logger?: Pick<Logger, "warn"> }
 interface ReconciliationScope { paneIds?: readonly string[]; workspaceIds?: readonly string[] }
-type PendingReconciliationScope = null | { paneIds: Set<string>; workspaceIds: Set<string> };
 
 export class InstanceRuntimeReconciler {
   private readonly projects: ProjectCatalog;
-  private running: Promise<void> | null = null;
-  private pending: PendingReconciliationScope | undefined;
-  private timer: NodeJS.Timeout | null = null;
-  private stopping = false;
+  private readonly runner: PriorityReconciliationRunner;
   private completed = false;
   private lastError: string | null = null;
-  private readonly metrics = new ReconciliationRunMetrics();
 
   constructor(private readonly options: Options) {
     this.projects = new ProjectCatalog(options.projects);
+    this.runner = new PriorityReconciliationRunner({ execute: (scope) => this.execute(scope) });
   }
 
   reconcile(): Promise<void> {
-    if (this.stopping) return Promise.resolve();
-    if (this.running) { this.metrics.markCoalesced(); return this.running; }
-    return this.startDrain(null);
+    return this.runner.request({ kind: "all" }, { allowActiveCoverage: true });
   }
 
   requestReconciliation(scope?: ReconciliationScope): Promise<void> {
-    if (this.stopping) return Promise.resolve();
-    const requested = normalizeScope(scope);
-    if (this.running) { this.metrics.markCoalesced(); this.pending = mergeScopes(this.pending, requested); return this.running; }
-    return this.startDrain(requested);
+    if (!scope) return this.runner.request({ kind: "all" });
+    const requests: Promise<void>[] = [];
+    if (scope.paneIds?.length) requests.push(this.runner.request({ kind: "panes", ids: scope.paneIds }));
+    if (scope.workspaceIds?.length) requests.push(this.runner.request({ kind: "workspaces", ids: scope.workspaceIds }));
+    return requests.length > 0 ? Promise.all(requests).then(() => undefined) : Promise.resolve();
   }
   start(intervalMs: number): void {
-    if (this.stopping || this.timer) return;
-    this.timer = setInterval(() => {
-      void this.requestReconciliation().catch((error) => {
-        this.options.logger?.warn({ event: "instance-runtime-reconciliation-failed", err: safeLogError(error), outcome: "retry_later" }, "periodic instance runtime reconciliation failed");
-      });
-    }, intervalMs);
-    this.timer.unref();
+    this.runner.start(intervalMs);
   }
-  async stop(): Promise<void> { this.stopping = true; this.pending = undefined; if (this.timer) clearInterval(this.timer); this.timer = null; await this.running; }
+  async stop(): Promise<void> { await this.runner.stop(); }
   snapshot(): ReconciliationDiagnostics & { ready: boolean; lastError: string | null } {
-    return { ...this.metrics.snapshot(this.stopping ? "stopping" : this.running ? "running" : "idle"), ready: this.completed && !this.lastError, lastError: this.lastError };
+    return { ...this.runner.snapshot(), ready: this.completed && !this.lastError, lastError: this.lastError };
   }
 
-  private startDrain(requested: PendingReconciliationScope): Promise<void> {
-    this.pending = mergeScopes(this.pending, requested);
-    const run = this.drain();
-    const tracked = run.finally(() => { if (this.running === tracked) this.running = null; });
-    this.running = tracked;
-    return tracked;
-  }
-
-  private async drain(): Promise<void> {
-    while (!this.stopping && this.pending !== undefined) {
-      const requested = this.pending;
-      this.pending = undefined;
-      await this.metrics.measure(() => this.reconcileOnce(denormalizeScope(requested)));
+  private async execute(scope: PriorityReconciliationScope): Promise<void> {
+    try {
+      if (scope.kind === "panes") await this.reconcileOnce({ paneIds: scope.ids });
+      else if (scope.kind === "workspaces") await this.reconcileOnce({ workspaceIds: scope.ids });
+      else await this.reconcileOnce();
+    } catch (error) {
+      this.options.logger?.warn({ event: "instance-runtime-reconciliation-failed", err: safeLogError(error), outcome: "retry_later" }, "instance runtime reconciliation failed");
+      throw error;
     }
   }
 
@@ -140,17 +124,6 @@ export class InstanceRuntimeReconciler {
   }
 }
 
-function normalizeScope(scope?: ReconciliationScope): PendingReconciliationScope {
-  return scope === undefined ? null : { paneIds: new Set(scope.paneIds ?? []), workspaceIds: new Set(scope.workspaceIds ?? []) };
-}
-function denormalizeScope(scope: PendingReconciliationScope): ReconciliationScope | undefined {
-  return scope === null ? undefined : { ...(scope.paneIds.size ? { paneIds: [...scope.paneIds] } : {}), ...(scope.workspaceIds.size ? { workspaceIds: [...scope.workspaceIds] } : {}) };
-}
-function mergeScopes(current: PendingReconciliationScope | undefined, next: PendingReconciliationScope): PendingReconciliationScope {
-  if (current === null || next === null) return null;
-  if (current === undefined) return { paneIds: new Set(next.paneIds), workspaceIds: new Set(next.workspaceIds) };
-  return { paneIds: new Set([...current.paneIds, ...next.paneIds]), workspaceIds: new Set([...current.workspaceIds, ...next.workspaceIds]) };
-}
 function normalizeState(pane: HerdrPane): ObservedInstanceState {
   if (pane.agentState === "idle" || pane.agentState === "done") return "idle";
   if (pane.agentState === "working") return "working";

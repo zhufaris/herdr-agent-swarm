@@ -597,12 +597,12 @@ describe("application composition boundaries", () => {
   it("keeps reconciliation metrics behind one runtime module", () => {
     const herdrReconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
     const instanceReconciler = readFileSync(new URL("../src/coordinator/instance-runtime-reconciler.ts", import.meta.url), "utf8");
-    const scheduler = readFileSync(new URL("../src/coordinator/reconciliation-scheduler.ts", import.meta.url), "utf8");
+    const runner = readFileSync(new URL("../src/runtime/priority-reconciliation-runner.ts", import.meta.url), "utf8");
     const metrics = readFileSync(new URL("../src/runtime/reconciliation-run-metrics.ts", import.meta.url), "utf8");
-    expect(herdrReconciler).toContain("ReconciliationScheduler");
+    expect(herdrReconciler).toContain("PriorityReconciliationRunner");
     expect(herdrReconciler).not.toContain("ReconciliationRunMetrics");
-    expect(scheduler).toContain("ReconciliationRunMetrics");
-    expect(instanceReconciler).toContain("ReconciliationRunMetrics");
+    expect(runner).toContain("ReconciliationRunMetrics");
+    expect(instanceReconciler).toContain("PriorityReconciliationRunner");
     expect(herdrReconciler).not.toContain("private runCount");
     expect(instanceReconciler).not.toContain("private runCount");
     expect(metrics).toContain("async measure<T>");

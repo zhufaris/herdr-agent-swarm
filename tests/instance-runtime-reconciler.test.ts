@@ -83,6 +83,35 @@ describe("instance runtime reconciliation", () => {
     expect(reconciler.snapshot()).toMatchObject({ runCount: 2, successCount: 2, coalescedRequestCount: 2 });
   });
 
+  it("prioritizes pane work ahead of workspace work queued behind a full scan", async () => {
+    const target = pane({ agentState: "working" });
+    const { reconciler, paneHost } = setup([target]);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const calls: string[] = [];
+    let active = 0;
+    let peak = 0;
+    vi.spyOn(paneHost, "listPanes").mockImplementation(async () => {
+      calls.push("workspace"); active += 1; peak = Math.max(peak, active);
+      if (calls.length === 1) await blocked;
+      active -= 1; return [target];
+    });
+    vi.spyOn(paneHost, "inspectPane").mockImplementation(async () => {
+      calls.push("pane"); active += 1; peak = Math.max(peak, active); active -= 1; return target;
+    });
+
+    const full = reconciler.reconcile();
+    await vi.waitFor(() => expect(calls).toEqual(["workspace"]));
+    const workspace = reconciler.requestReconciliation({ workspaceIds: ["herdr-w"] });
+    const targeted = reconciler.requestReconciliation({ paneIds: [target.paneId] });
+    release();
+    await Promise.all([full, workspace, targeted]);
+
+    expect(calls).toEqual(["workspace", "pane", "workspace"]);
+    expect(peak).toBe(1);
+    expect(reconciler.snapshot()).toMatchObject({ runCount: 3, priorityPromotionCount: 1 });
+  });
+
   it("does not start queued reconciliation work after stop begins", async () => {
     const target = pane({ agentState: "working" });
     const { reconciler, paneHost } = setup([target], { bulkSnapshot: true });
