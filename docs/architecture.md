@@ -216,6 +216,16 @@ These channels share composition but not semantics. There is no generic durable
 event log, no event sourcing, and no assumption that receiving an event proves a
 state transition.
 
+Primary binding and Worker instance reconciliation each own an independent
+`PriorityReconciliationRunner`. The shared runner is a domain-free single-writer
+scheduler: it coalesces only bounded Pane/workspace identifiers and one full-scan
+bit, then selects pending work in `pane -> workspace -> full` order. A Pane hint
+accepted during a broader pass is never treated as covered by that older pass; it
+runs immediately afterward, ahead of lower-priority pending work. The two runner
+instances do not share an execution queue or failure boundary. Their process-local
+scope state carries no Prompt, turn, card, or delivery payload, and a lost hint is
+recovered by startup or periodic full reconciliation against SQLite and Herdr.
+
 ### Recovery converges from canonical state
 
 Startup acquires the fenced SQLite lease, runs migrations and integrity checks,

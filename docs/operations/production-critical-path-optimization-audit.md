@@ -35,6 +35,7 @@ implementation commits were not installed during intermediate slices.
 | O-8 | External-turn convergence | P1 | Production Prompt `791f5224-26c4-4772-8b19-baa3b5e174b8` remained `running/attached` after Pane `w5:p56` became idle. Its exact transcript contained `task_started` and `:q`, but no matching `task_complete` or `turn_aborted`; this permanently blocked the FIFO and the normal restart gate. | After two distinct post-start durable idle/done observations with no intervening exact-turn transcript activity, atomically fail the exact Prompt closed with an unknown outcome, publish `TurnFailed`, and wake the FIFO. Never infer success or replay. | Red-capable observer regression; transcript-resumption reset regression; SQLite full-fence and exactly-once regression; 293 focused tests. |
 | O-9 | Immutable release retention | P1 | Installing a second candidate before a safety-gated restart changed `current` twice. Pruning retained only the candidate and previous `current`, deleted the still-running unit's older `WorkingDirectory`, and caused live SQLite integrity checks to report `uv_cwd` / `ENOENT`. | Parse the prior installed unit before replacement and retain its valid direct release `WorkingDirectory` during post-activation pruning. Ignore absent, external, symlinked, or malformed paths. | Red-capable repeated-install lifecycle regression; all 104 lifecycle tests; typecheck. |
 | O-10 | Runtime reconciliation | P2 | A live Pane still owned by an `archived/attached` binding reached compatibility handling and attempted the active-only `pane_probe_failed` transition on every reconciliation pass. Production repeatedly logged `Cannot pane_probe_failed session in archived/attached`. | Make `BindingRuntimeConverger` accept runtime observations only for `active` and `draining` lifecycles. Preserve historical Pane ownership in `findBindingByPane()` so terminal bindings cannot be rediscovered as new sessions. | Red-capable archived-Pane regression; terminal lifecycle no-effect matrix; draining, active mismatch, and exact-identity orphan recovery regressions; all 45 reconciler tests. |
+| O-11 | Event-driven runtime convergence | P2 | Primary pane reconciliation waited for a separate workspace scheduler to become idle, while Worker instance reconciliation duplicated its own scope merge, single-flight, timer, stop, and metrics state machine. Precise Pane hints had no shared priority contract. | Use one domain-free `PriorityReconciliationRunner` implementation with separate Primary and Worker instances. Keep one writer per domain and select pending `pane -> workspace -> full`; retain periodic full scans. | Runner concurrency/failure/stop/periodic tests; Primary and Worker public-seam priority tests; real Router + SQLite integration converged both domains and reserved Main Card outbox intent in 78 ms, below the one-second local target. |
 
 ## Startup, Recovery, and Shutdown
 
@@ -112,6 +113,13 @@ bindings no longer consume live runtime observations. The eligibility decision i
 owned by `BindingRuntimeConverger`, so full and targeted reconciliation share one
 rule while the lifecycle state machine remains strict.
 
+O-11 moves scheduling mechanics behind one reusable runtime module without merging
+the two domain queues. The Primary and Worker reconcilers each retain their own
+executor and failure boundary, but no longer duplicate pending scope, timer,
+single-flight, stop, or base metrics state. A newer Pane event cannot be absorbed
+by an older broad pass. The runner stores only bounded, coalesced identifiers and
+a full-scan bit; SQLite and fresh Herdr state remain the recovery authorities.
+
 ## SQLite Transactions, Queries, and Migrations
 
 The store continues to use one primary `SqliteContext`; tests inject transaction
@@ -178,6 +186,7 @@ goal.
 | External-turn convergence O-8 | `5a17aba` | Two independent durable idle/done observations plus an empty exact-turn delta trigger a full-fence, exactly-once fail-closed transition and FIFO wake without replay. |
 | Release retention O-9 | `71040b2` | Repeated candidate installation preserves the release referenced by the prior unit while pruning unrelated inactive releases. |
 | Runtime convergence eligibility O-10 | `59ced38` | Terminal bindings keep historical Pane ownership without runtime mutation; active and draining convergence remains covered. |
+| Priority runtime reconciliation O-11 | `24beef0` plus final evidence commit | Separate Primary/Worker runner instances prioritize Pane hints, retain periodic fallback, expose bounded queue-delay diagnostics, and remove the obsolete Primary scheduler plus duplicated Worker state machine. |
 
 Source verification before the O-8 release on 2026-09-18 passed `git diff --check`,
 174 Vitest files with 2321 tests, TypeScript checking, the 320-file architecture import
