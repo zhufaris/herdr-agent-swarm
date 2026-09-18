@@ -1,6 +1,6 @@
 import type { OutboxTestDriver } from "./outbox-test-driver.js";
 import { DatabaseSync } from "node:sqlite";
-import type { AcceptInstanceTurnWithCardInput } from "../../src/domain/ports.js";
+import type { AcceptInstanceTurnWithCardInput, TransitionInstanceTurnWithProjectionInput, TransitionInstanceTurnWithProjectionResult } from "../../src/domain/ports.js";
 import type { AcceptPromptInput } from "../../src/domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../../src/domain/ports/workflow.js";
 import type { TurnControlStore } from "../../src/domain/ports/turn-control.js";
@@ -141,7 +141,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnCardHydration(input); }
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnContinuation(input); }
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null { return this.workerTurns.applyInstanceTurnProjection(input); }
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null { return this.workerTurns.transitionInstanceTurnWithProjection(input); }
+  transitionInstanceTurnWithProjection(input: TransitionInstanceTurnWithProjectionInput): TransitionInstanceTurnWithProjectionResult | null { return this.workerTurns.transitionInstanceTurnWithProjection(input); }
   listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } { return this.workerTurns.listInstanceTurns(instanceId, options); }
   listRecentInstanceTurnSummaries(instanceId: string, requestedLimit = 5): InstanceTurnSummary[] { return this.workerTurns.listRecentInstanceTurnSummaries(instanceId, requestedLimit); }
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null { return this.workerTurns.getActiveInstanceTurn(instanceId, expectedGeneration); }

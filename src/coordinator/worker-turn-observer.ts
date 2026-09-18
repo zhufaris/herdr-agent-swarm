@@ -10,7 +10,7 @@ interface Options {
   transcriptReader: TraexTranscriptReaderPort;
   wakeInstance(instanceId: string): void;
   wakeOutbound(): void;
-  presentation: Pick<WorkerPresentation, "workerTurn" | "safeWorkerOutput">;
+  presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification" | "safeWorkerOutput">;
   pollIntervalMs?: number;
 }
 export interface WorkerTurnWatch { flush(): Promise<void>; stop(): Promise<void>; detach(): Promise<void> }
@@ -53,7 +53,7 @@ export class WorkerTurnObserver {
         ? "TraeX turn was interrupted by a human operator"
         : `TraeX turn was aborted${lifecycle.reason ? `: ${lifecycle.reason}` : ""}`;
       const projected = view
-        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled", change: { type: "cancelled", occurredAt, notice }, render: this.options.presentation.workerTurn })
+        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled", change: { type: "cancelled", occurredAt, notice }, render: this.options.presentation.workerTurn, renderHumanReviewNotification: this.options.presentation.workerHumanReviewNotification })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "cancelled", error: notice, eventKind: "turn.cancelled" });
       this.headlessOutput.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }
@@ -62,7 +62,7 @@ export class WorkerTurnObserver {
     if (lifecycle?.state === "completed") {
       const answer = lifecycle.finalAnswer === undefined ? accumulated : this.safeOutput(lifecycle.finalAnswer);
       const projected = view
-        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer, ...(tokenCount === undefined ? {} : { tokenCount }) }, render: this.options.presentation.workerTurn })
+        ? this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt, answer, ...(tokenCount === undefined ? {} : { tokenCount }) }, render: this.options.presentation.workerTurn, renderHumanReviewNotification: this.options.presentation.workerHumanReviewNotification })
         : this.options.store.updateInstanceTurn({ turnId, expectedGeneration: turn.instanceGeneration, ...expected, state: "completed", result: answer, eventKind: "turn.completed" });
       this.headlessOutput.delete(turnId);
       if (projected) { this.options.wakeOutbound(); this.options.wakeInstance(turn.instanceId); }

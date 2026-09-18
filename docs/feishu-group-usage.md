@@ -109,6 +109,15 @@ Worker Main Card 仅显示当前状态允许的操作。运行中的任务提供
 follow-up，也不会把 follow-up 改成 steer。Worker Main 的“发起新任务”会明确显示任务是
 立即执行还是进入 FIFO。
 
+Worker 从非 blocked 状态进入 blocked 时，Bridge 还会在所属 Primary 群 Thread 中发送一张
+独立的橙色“需要处理”通知卡。每个连续 blocked episode 只发送一次；Worker 离开 blocked
+后再次进入 blocked 才会产生新通知。通知会在身份安全时 `@` Primary Thread 创建者；创建者
+身份缺失或不符合安全格式时仍发送普通群通知。按钮只用于打开 canonical Worker Main Card，
+不提供远程批准、拒绝或终端输入。通知 intent 与 Worker 状态、事件及 Main Card invalidation
+在同一个 SQLite transaction 中提交，并通过 durable outbox 重试；飞书投递失败不会回滚
+Worker 状态，也不会重放 Worker 任务。若 Primary generation、pane、binding 生命周期或 root
+identity 已过期，系统只跳过通知，避免发到错误会话，Worker 的 blocked 状态仍会正常提交。
+
 Worker Main Card 上的任务结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
 TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。
 

@@ -122,6 +122,7 @@ export class SqliteCapabilityGraph {
     this.externalTurnAdoption = new SqliteExternalTurnAdoptionStore(this.context, this.projections, (id) => this.promptDispatch.getPrompt(id));
     this.workerTurns = new SqliteWorkerTurnStore(this.context, {
       getAgentInstance: (id) => this.instances.getAgentInstance(id),
+      getBinding: (id) => this.bindings.getBinding(id),
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
       invalidateWorkerCardContexts: (view, reason) => this.cardContexts.invalidateWorkerCardContexts(view, reason),
       hasPendingOutboundReplyForWorkerTurn: (turnId) => this.outbox.hasPendingOutboundReplyForWorkerTurn(turnId)

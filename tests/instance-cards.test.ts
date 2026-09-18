@@ -4,6 +4,7 @@ import { renderInstanceDetailCard } from "../src/cards/instance-detail-card.js";
 import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstanceSteerCard } from "../src/cards/instance-control-card.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
+import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
 import { createQueuedWorkerTurnCard, reduceWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 
 const instance = { id: "i1", projectId: "p1", name: "reviewer", role: "worker" as const, agentKind: "claude-code" as const, model: "sonnet", desiredState: "running" as const, observedState: "idle" as const, workspaceLeaseId: "ws1", generation: 2, runtimeRef: { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1", generation: 2 }, pendingRuntimeRef: null, provisioningCheckpoint: "verified" as const, lastError: null };
@@ -12,6 +13,53 @@ const capabilities = { available: true, structuredEvents: true, nativeResume: tr
 const primary = { bindingId: "binding-1", generation: 3, paneId: "w1:p0", state: "active" as const };
 
 describe("instance cards", () => {
+  it("mentions the Primary creator in a bounded local-only Worker review notification", () => {
+    const card = renderWorkerHumanReviewNotification({
+      workerId: "i1",
+      workerSessionGeneration: 3,
+      workerName: "reviewer",
+      turnId: "turn-review",
+      taskTitle: `review ${"x".repeat(4_000)}`,
+      primaryName: "primary-review",
+      parentPaneId: "w1:p0",
+      workerPaneId: "w1:p1",
+      notice: "Bearer live-secret",
+      creatorOpenId: "ou_primary_123",
+      workerMainMessageId: "worker-main-message"
+    });
+    const text = JSON.stringify(card);
+
+    expect(card).toMatchObject({ schema: "2.0", header: { template: "orange" } });
+    expect(text).toContain("<at id=ou_primary_123></at>");
+    expect(text).toContain("reviewer");
+    expect(text).toContain("turn-review");
+    expect(text).toContain("w1:p0");
+    expect(text).toContain("w1:p1");
+    expect(text).toContain("审批和本地操作仍须在对应 Herdr Pane 完成");
+    expect(text).toContain('"action":"card_target_open"');
+    expect(text).toContain('"aggregateKind":"worker-session"');
+    expect(text).toContain('"aggregateId":"i1"');
+    expect(text).toContain('"generation":3');
+    expect(text).toContain('"messageId":"worker-main-message"');
+    expect(text).not.toContain("live-secret");
+    expect(text).not.toContain("approve");
+    expect(text).not.toContain("deny");
+    expect(text).not.toContain("terminal");
+    expect(text.length).toBeLessThan(12_000);
+  });
+
+  it.each([null, 'unsafe" open-id'])("falls back to an ordinary group review notification for creator identity %s", (creatorOpenId) => {
+    const text = JSON.stringify(renderWorkerHumanReviewNotification({
+      workerId: "i1", workerSessionGeneration: 3, workerName: "reviewer", turnId: "turn-review", taskTitle: "review",
+      primaryName: "primary-review", parentPaneId: "w1:p0", workerPaneId: "w1:p1", notice: "needs local input",
+      creatorOpenId, workerMainMessageId: null
+    }));
+
+    expect(text).toContain("正在等待用户处理");
+    expect(text).not.toContain("<at id=");
+    expect(text).not.toContain("card_target_open");
+  });
+
   it.each(["queued", "preparing", "running", "blocked", "completed", "failed", "cancelled", "dispatch-uncertain"] as const)("renders a bounded and actionable %s Worker task card", (phase) => {
     const queued = createQueuedWorkerTurnCard({ turnId: "turn:unsafe/id", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: "parent-turn", rootMessageId: "root-1", requestText: `review ${"x".repeat(4_000)}`, queuePosition: 3, occurredAt: "2026-09-01T00:00:00.000Z" });
     const view = { ...queued, phase, answer: phase === "completed" ? "final finding" : "partial private draft", notice: ["blocked", "failed", "cancelled", "dispatch-uncertain"].includes(phase) ? "Bearer live-secret" : null, resultCapture: phase === "completed" ? "captured" as const : "pending" as const };

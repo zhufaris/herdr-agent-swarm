@@ -8,7 +8,7 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnObserver } from "./worker-turn-observer.js";
 
-interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn">; logger?: Pick<Logger, "info" | "warn"> }
+interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "info" | "warn"> }
 
 export class InstanceTurnSupervisor {
   private timer: NodeJS.Timeout | null = null;
@@ -135,8 +135,12 @@ export class InstanceTurnSupervisor {
 
   private transition(turnId: string, generation: number, state: Parameters<InstanceTurnSupervisionStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<InstanceTurnSupervisionStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
-      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn });
-      if (projected) this.options.wakeOutbound?.();
+      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn, renderHumanReviewNotification: this.options.presentation.workerHumanReviewNotification });
+      if (projected) {
+        if (projected.projectionChanged || projected.notification.outcome === "reserved") this.options.wakeOutbound?.();
+        if (projected.notification.outcome === "reserved") this.options.logger?.info({ event: "worker-human-review-notification-reserved", instanceId: projected.turn.instanceId, turnId, eventId: projected.notification.eventId, mention: projected.notification.mention, outcome: "reserved" }, "reserved Worker human review notification");
+        else if (state === "blocked" && projected.notification.reason === "stale-routing") this.options.logger?.warn({ event: "worker-human-review-notification-skipped", instanceId: projected.turn.instanceId, turnId, reason: projected.notification.reason, outcome: "state_committed" }, "skipped stale Worker human review notification route");
+      }
     } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }
 }

@@ -13,6 +13,7 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 import { outboundLaneHeadSelectionSql } from "../src/store/sqlite/outbox-queue-store.js";
+import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
@@ -1142,6 +1143,82 @@ describe("SQLite store", () => {
     expect(store.hasPendingOutboundReplyForWorkerTurn("missing")).toBe(false);
     const pendingPlan = store.database.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND state = 'pending' LIMIT 1").all("turn-1") as Array<{ detail: string }>;
     expect(pendingPlan.some(({ detail }) => detail.includes("outbound_replies_worker_pending"))).toBe(true);
+  });
+
+  it("reserves one durable Human Review notification for a Worker blocked episode", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary 51g1", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-review", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-review", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-thread-root", requestText: "review durable flow", queuePosition: 1, occurredAt: "2026-09-18T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-18T00:00:01.000Z" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
+
+    const blocked = store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-18T00:00:02.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
+    const reviewReplies = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"));
+
+    expect(blocked).toMatchObject({ notification: { outcome: "reserved", mention: "included" } });
+    expect(reviewReplies).toHaveLength(1);
+    expect(reviewReplies[0]).toMatchObject({ bindingId: "binding-review", rootMessageId: "primary-root", kind: "card_reply", targetRole: "operation_result", workerTurnId: null, workerId: null });
+    expect(reviewReplies[0]!.idempotencyKey).toMatch(/^worker-review:reviewer:1:turn-review:\d+$/);
+    expect(reviewReplies[0]!.laneKey).toContain("reply:");
+    expect(reviewReplies[0]!.payload).toContain("<at id=ou_primary></at>");
+  });
+
+  it("deduplicates repeated blocked observations and notifies a later blocked episode", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("binding-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-review", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-review", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-18T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const transition = (state: "running" | "blocked", second: number) => store!.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state, eventKind: state === "blocked" ? "turn.blocked" : "turn.started", change: state === "blocked" ? { type: "blocked" as const, occurredAt: `2026-09-18T00:00:0${second}.000Z`, notice: "Needs local review" } : { type: "running" as const, occurredAt: `2026-09-18T00:00:0${second}.000Z` }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
+
+    transition("running", 1);
+    expect(transition("blocked", 2)).toMatchObject({ notification: { outcome: "reserved", mention: "omitted" } });
+    expect(transition("blocked", 3)).toMatchObject({ notification: { outcome: "skipped", reason: "not-blocked-transition" } });
+    transition("running", 4);
+    expect(transition("blocked", 5)).toMatchObject({ notification: { outcome: "reserved", mention: "omitted" } });
+
+    const notifications = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"));
+    expect(notifications).toHaveLength(2);
+    expect(new Set(notifications.map(({ idempotencyKey }) => idempotencyKey)).size).toBe(2);
+    expect(store.listInstanceEvents(worker.id).filter(({ kind }) => kind === "turn.blocked")).toHaveLength(2);
+  });
+
+  it("commits blocked state but skips notification when the parent route is stale", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("binding-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-review", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: null }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-review", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-18T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    store.updateBinding("binding-review", { generation: 2 });
+
+    const blocked = store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-18T00:00:02.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
+
+    expect(blocked).toMatchObject({ turn: { state: "blocked" }, view: { phase: "blocked" }, notification: { outcome: "skipped", reason: "stale-routing" } });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"))).toHaveLength(0);
+  });
+
+  it("rolls back blocked state, event, projection and outbox when notification rendering fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("binding-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-review", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: null }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-review", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-18T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const eventsBefore = store.listInstanceEvents(worker.id).length;
+
+    expect(() => store!.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-18T00:00:02.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard, renderHumanReviewNotification: () => { throw new Error("render failed"); } })).toThrow("render failed");
+    expect(store.getInstanceTurn(view.turnId)).toMatchObject({ state: "queued" });
+    expect(store.loadWorkerTurnCard(view.turnId)).toMatchObject({ phase: "queued" });
+    expect(store.listInstanceEvents(worker.id)).toHaveLength(eventsBefore);
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"))).toHaveLength(0);
   });
 
   it("backfills bounded Worker stream metadata and tolerates malformed legacy payloads", () => {

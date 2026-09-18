@@ -601,6 +601,21 @@ per-turn card or continuation message is created. Previously delivered Task Card
 remain immutable historical artifacts, and startup dismisses only legacy create
 intents that are proven never attempted.
 
+A real non-`blocked` to `blocked` Worker transition is also the reservation seam
+for a one-time Human Review notification. The transition inserts `turn.blocked`
+and uses that event row ID as the episode identity. In the same SQLite transaction
+it updates the Worker turn projection, invalidates dependent cards, fences the
+current Worker session and active parent Binding generation/pane/root, and reserves
+an immutable `card_reply` on its own reply lane. The idempotency key includes the
+Worker ID, Worker Session generation, turn ID, and event ID, so repeated blocked
+observations and restart recovery cannot duplicate a notification, while a later
+blocked episode can create a new one. The card mentions the persisted Binding
+creator when that opaque Open ID is safe; otherwise it remains an ordinary group
+notification. Stale parent routing skips only the notification. Gateway retry or
+dead-letter handling never rolls back Worker state and never repeats Agent work.
+The notification can navigate to the canonical Worker Main Card but deliberately
+contains no approval, denial, terminal-input, process, or pane-control action.
+
 The other card contexts are explicit durable projection boundaries. Primary Main
 contains only bounded summaries for Workers owned by its exact binding and pane.
 Primary Answer contains only activity whose persisted `parentPromptId` names that

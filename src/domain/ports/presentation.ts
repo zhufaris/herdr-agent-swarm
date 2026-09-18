@@ -15,6 +15,7 @@ import type { ModelPreference, TraexModelSummary } from "../model-selection.js";
 import type { WorkerMainView } from "../worker-main-view.js";
 import type { Binding, FailureSummary, ProjectConfig, SessionSummary } from "../types.js";
 import type { InstanceTurnSummary } from "../instance-turn.js";
+import type { WorkerHumanReviewNotificationInput } from "../worker-human-review.js";
 
 export interface PrimaryPresentation {
   mainCard(view: TopicViewState): object;
@@ -30,6 +31,7 @@ export interface PrimaryPresentation {
 
 export interface WorkerPresentation {
   workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage): object;
+  workerHumanReviewNotification(input: WorkerHumanReviewNotificationInput): object;
   workerTurnProgress(view: WorkerTurnCardView): string;
   turnControlResult(operation: TurnControlOperation): object;
   workerTurnPage(view: WorkerTurnCardView, pageStart: number, limit: number): { page: string; nextPageStart: number | null; sourceLength: number };

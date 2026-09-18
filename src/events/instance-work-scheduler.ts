@@ -16,7 +16,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverRegistry; observer?: WorkerTurnObserver; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn">; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverRegistry; observer?: WorkerTurnObserver; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;
@@ -91,8 +91,8 @@ export class InstanceWorkScheduler {
   }
   private transition(turnId: string, generation: number, state: Parameters<InstanceTurnStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<InstanceTurnStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
-      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn });
-      if (projected) this.options.wakeOutbound?.();
+      const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn, renderHumanReviewNotification: this.options.presentation.workerHumanReviewNotification });
+      if (projected && (projected.projectionChanged || projected.notification.outcome === "reserved")) this.options.wakeOutbound?.();
     } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }
   snapshot(): { state: "idle" | "running" | "stopping"; activeDispatchWorkers: number; lastFailureAt: string | null; lastFailure: string | null } {

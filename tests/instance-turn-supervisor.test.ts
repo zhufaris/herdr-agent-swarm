@@ -11,9 +11,11 @@ afterEach(() => { store?.close(); store = undefined; });
 
 function setup(state: "dispatching" | "running") {
   store = new SqliteBindingStore(":memory:");
-  store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-  const instance = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
-  const view = createQueuedWorkerTurnCard({ turnId: "turn", instanceId: instance.id, instanceGeneration: instance.generation, workerName: instance.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+  store.createPendingBinding({ id: "binding", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root-1", title: "Primary", creatorOpenId: "ou_primary" });
+  store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p0" });
+  const created = store.createWorkerAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding", bindingGeneration: 1, paneId: "w1:p0", nativeSessionId: null }, workspace: { id: "ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+  const instance = store.attachAgentInstanceRuntime({ instanceId: "worker", expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null })!;
+  const view = createQueuedWorkerTurnCard({ turnId: "turn", instanceId: instance.id, instanceGeneration: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name, parentTurnId: null, rootMessageId: "root-1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
   store.acceptInstanceTurnWithCard({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
   store.claimNextInstanceTurn(instance.id, instance.generation);
   store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state, eventKind: `turn.${state}` });
@@ -56,6 +58,24 @@ describe("InstanceTurnSupervisor", () => {
     expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "blocked" });
     expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "blocked" });
     expect(wakeOutbound).toHaveBeenCalled();
+  });
+
+  it("wakes and logs once for one durable blocked episode without sensitive notification fields", async () => {
+    const { supervisor, inspectPane, wakeOutbound } = setup("running");
+    const info = vi.fn(); const warn = vi.fn();
+    (supervisor as unknown as { options: { logger: object } }).options.logger = { info, warn };
+    inspectPane.mockResolvedValue({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "blocked", foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" });
+
+    await supervisor.reconcile();
+    await supervisor.reconcile();
+
+    const notifications = store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"));
+    expect(notifications).toHaveLength(1);
+    expect(wakeOutbound).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "worker-human-review-notification-reserved", instanceId: "worker", turnId: "turn", mention: "included", outcome: "reserved" }), "reserved Worker human review notification");
+    expect(JSON.stringify(info.mock.calls)).not.toContain("ou_primary");
+    expect(JSON.stringify(info.mock.calls)).not.toContain("Worker 正在等待");
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("keeps an ambiguous dispatch uncertain when the pane is idle", async () => {

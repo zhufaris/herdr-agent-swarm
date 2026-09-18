@@ -10,6 +10,13 @@ import type { PrimaryWorkerActivitySummary, PrimaryWorkerSummary } from "../card
 import type { WorkerMainProjectionSource } from "../worker-main-selector.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { RunCardView } from "../run-card-view.js";
+import type { WorkerHumanReviewNotificationInput, WorkerHumanReviewReservation } from "../worker-human-review.js";
+
+export interface TransitionInstanceTurnWithProjectionInput {
+  turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object;
+  renderHumanReviewNotification?(input: WorkerHumanReviewNotificationInput): object;
+}
+export interface TransitionInstanceTurnWithProjectionResult { turn: InstanceTurn; view: WorkerTurnCardView; projectionChanged: boolean; notification: WorkerHumanReviewReservation }
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
@@ -66,7 +73,7 @@ export interface InstanceStore {
   reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome;
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
+  transitionInstanceTurnWithProjection(input: TransitionInstanceTurnWithProjectionInput): TransitionInstanceTurnWithProjectionResult | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
   listRecentInstanceTurnSummaries(instanceId: string, limit?: number): InstanceTurnSummary[];
   getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null;

@@ -4,9 +4,11 @@ import { renderWorkerTurnCard, workerTurnProgressContent } from "./worker-turn-c
 import { renderLarkMarkdownPage } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { workerTurnStreamContent } from "../domain/worker-turn-card-view.js";
+import { renderWorkerHumanReviewNotification } from "./worker-human-review-notification.js";
 
 export const cardKitWorkerPresentation: WorkerPresentation = {
   workerTurn: renderWorkerTurnCard,
+  workerHumanReviewNotification: renderWorkerHumanReviewNotification,
   workerTurnProgress: workerTurnProgressContent,
   turnControlResult: renderTurnControlResultCard,
   workerTurnPage: (view, pageStart, limit) => {

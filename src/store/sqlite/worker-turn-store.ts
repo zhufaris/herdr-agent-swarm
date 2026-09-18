@@ -1,17 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type { AgentInstance } from "../../domain/agent-instance.js";
+import type { Binding } from "../../domain/binding.js";
 import type { ControlActor } from "../../domain/commands.js";
 import { InstanceTurnCapacityExceeded } from "../../domain/instance-turn-capacity-error.js";
 import type { InstanceEvent, InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../../domain/instance-turn.js";
-import type { AcceptInstanceTurnWithCardInput } from "../../domain/ports.js";
+import type { AcceptInstanceTurnWithCardInput, TransitionInstanceTurnWithProjectionInput, TransitionInstanceTurnWithProjectionResult } from "../../domain/ports.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome, OutboundReplyState } from "../../domain/types.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { SqliteContext } from "./context.js";
 import { turnActorProvenance } from "./turn-actor-provenance.js";
+import { canMentionFeishuOpenId } from "../../domain/worker-human-review.js";
 
 export interface WorkerTurnStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
+  getBinding(id: string): Binding | null;
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
   invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void;
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean;
@@ -223,7 +226,7 @@ export class SqliteWorkerTurnStore {
       return next;
     });
   }
-  transitionInstanceTurnWithProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
+  transitionInstanceTurnWithProjection(input: TransitionInstanceTurnWithProjectionInput): TransitionInstanceTurnWithProjectionResult | null {
     const timestamp = now();
     return this.context.transaction(() => {
       const current = this.getInstanceTurn(input.turnId);
@@ -232,9 +235,13 @@ export class SqliteWorkerTurnStore {
       const changed = this.context.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)")
         .run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
       if (changed.changes !== 1) return null;
-      this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state });
+      const blockedEpisode = input.state === "blocked" && current.state !== "blocked";
+      const eventId = blockedEpisode || input.state !== "blocked"
+        ? this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state })
+        : null;
       const next = reduceWorkerTurnCard(currentView, input.change);
-      if (next !== currentView) {
+      const projectionChanged = next !== currentView;
+      if (projectionChanged) {
         this.saveWorkerTurnCard(next);
         this.dependencies.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
       }
@@ -248,8 +255,37 @@ export class SqliteWorkerTurnStore {
           this.dependencies.invalidateWorkerCardContexts(reordered, "turn.queue-position");
         }
       }
+      let notification: TransitionInstanceTurnWithProjectionResult["notification"] = { outcome: "skipped", reason: "not-blocked-transition" };
+      if (blockedEpisode && eventId !== null && input.renderHumanReviewNotification) {
+        const instance = this.dependencies.getAgentInstance(current.instanceId);
+        const parent = instance?.parent;
+        const binding = parent ? this.dependencies.getBinding(parent.bindingId) : null;
+        const routeCurrent = instance?.role === "worker"
+          && instance.generation === current.instanceGeneration
+          && instance.workerSessionLifecycle === "active"
+          && instance.workerSessionGeneration === currentView.workerSessionGeneration
+          && parent?.bindingGeneration === binding?.generation
+          && parent?.paneId === binding?.paneId
+          && binding?.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached"
+          && typeof binding.rootMessageId === "string" && binding.rootMessageId.length > 0
+          && typeof instance.runtimeRef?.paneId === "string";
+        if (routeCurrent && instance && parent && binding?.rootMessageId && instance.runtimeRef) {
+          const mention = canMentionFeishuOpenId(binding.creatorOpenId) ? "included" as const : "omitted" as const;
+          const card = input.renderHumanReviewNotification({
+            workerId: instance.id, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name,
+            turnId: current.id, taskTitle: current.text, primaryName: binding.title, parentPaneId: parent.paneId,
+            workerPaneId: instance.runtimeRef.paneId, notice: next.notice ?? "Worker 正在等待本地处理。",
+            creatorOpenId: binding.creatorOpenId, workerMainMessageId: next.workerMain.messageId
+          });
+          this.dependencies.enqueueOutboundReply({
+            id: randomUUID(), idempotencyKey: `worker-review:${instance.id}:${instance.workerSessionGeneration}:${current.id}:${eventId}`,
+            bindingId: binding.id, targetRole: "operation_result", rootMessageId: binding.rootMessageId, kind: "card_reply", payload: JSON.stringify(card)
+          });
+          notification = { outcome: "reserved", mention, eventId };
+        } else notification = { outcome: "skipped", reason: "stale-routing" };
+      }
       const turn = this.getInstanceTurn(input.turnId);
-      return turn ? { turn, view: next } : null;
+      return turn ? { turn, view: next, projectionChanged, notification } : null;
     });
   }
   saveWorkerTurnCard(view: WorkerTurnCardView): void {
@@ -257,9 +293,10 @@ export class SqliteWorkerTurnStore {
       .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerSessionGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.progressSequence, view.phase, view.requestText, view.answer, view.statusTitle, view.tokenCount, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, JSON.stringify(view.workerMain), view.primaryAnswer ? JSON.stringify(view.primaryAnswer) : null, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
   }
   private getInstanceTurnByKey(key: string): InstanceTurn | null { return mapInstanceTurn(this.context.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
-  private insertInstanceEvent(projectId: string, instanceId: string, turnId: string | null, kind: InstanceEventKind, payload: Record<string, unknown>): void {
-    this.context.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+  private insertInstanceEvent(projectId: string, instanceId: string, turnId: string | null, kind: InstanceEventKind, payload: Record<string, unknown>): number {
+    const result = this.context.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(projectId, instanceId, turnId, kind, JSON.stringify(payload), now());
+    return Number(result.lastInsertRowid);
   }
   listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } {
     const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
