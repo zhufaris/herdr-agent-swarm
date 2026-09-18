@@ -618,6 +618,22 @@ describe("service lifecycle", () => {
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user stop herdr-agent-swarm.service\n--user daemon-reload\n--user start --no-block herdr-agent-swarm.service");
   });
 
+  it("refuses restart when an inactive unit still has a service on the configured listener", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus({ operational: { prompts: { running: 1, queued: 0 } } })));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ active: false, port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      writeFileSync(fixture.calls, "");
+
+      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/unit is inactive.*listener.*still responds/i);
+      expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it("rotates an oversized log before starting an inactive unit", async () => {
     const fixture = createFixture({ active: false });
     await runServiceLifecycle("install", fixture.environment);

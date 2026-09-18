@@ -144,11 +144,18 @@ export function createSetupLifecycleAdapter(environment: NodeJS.ProcessEnv = pro
 
 async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, force: boolean): Promise<void> {
   const activity = unitActivity(paths.serviceName, base);
-  if (activity === "inactive") return;
   if (activity === "indeterminate") throw new Error(`restart blocked: cannot determine ${paths.serviceName} unit activity; refusing to stop`);
+  const config = loadConfig(loadRuntimeEnvironment(paths, base));
+  if (activity === "inactive") {
+    try {
+      await getJson(config.http.host, config.http.port, "/status", true);
+    } catch {
+      return;
+    }
+    throw new Error(`restart blocked: ${paths.serviceName} unit is inactive but the configured listener still responds; stop the detached process before retrying`);
+  }
   let status: unknown;
   try {
-    const config = loadConfig(loadRuntimeEnvironment(paths, base));
     status = await getJson(config.http.host, config.http.port, "/status", true);
   } catch (error) {
     throw new Error(`restart blocked: active service status is unreachable (${safeMessage(error)}); verify the running unit or retry with --force`);

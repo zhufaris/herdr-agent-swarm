@@ -36,6 +36,7 @@ implementation commits were not installed during intermediate slices.
 | O-9 | Immutable release retention | P1 | Installing a second candidate before a safety-gated restart changed `current` twice. Pruning retained only the candidate and previous `current`, deleted the still-running unit's older `WorkingDirectory`, and caused live SQLite integrity checks to report `uv_cwd` / `ENOENT`. | Parse the prior installed unit before replacement and retain its valid direct release `WorkingDirectory` during post-activation pruning. Ignore absent, external, symlinked, or malformed paths. | Red-capable repeated-install lifecycle regression; all 104 lifecycle tests; typecheck. |
 | O-10 | Runtime reconciliation | P2 | A live Pane still owned by an `archived/attached` binding reached compatibility handling and attempted the active-only `pane_probe_failed` transition on every reconciliation pass. Production repeatedly logged `Cannot pane_probe_failed session in archived/attached`. | Make `BindingRuntimeConverger` accept runtime observations only for `active` and `draining` lifecycles. Preserve historical Pane ownership in `findBindingByPane()` so terminal bindings cannot be rediscovered as new sessions. | Red-capable archived-Pane regression; terminal lifecycle no-effect matrix; draining, active mismatch, and exact-identity orphan recovery regressions; all 45 reconciler tests. |
 | O-11 | Event-driven runtime convergence | P2 | Primary pane reconciliation waited for a separate workspace scheduler to become idle, while Worker instance reconciliation duplicated its own scope merge, single-flight, timer, stop, and metrics state machine. Precise Pane hints had no shared priority contract. | Use one domain-free `PriorityReconciliationRunner` implementation with separate Primary and Worker instances. Keep one writer per domain and select pending `pane -> workspace -> full`; retain periodic full scans. | Runner concurrency/failure/stop/periodic tests; Primary and Worker public-seam priority tests; real Router + SQLite integration converged both domains and reserved Main Card outbox intent in 78 ms, below the one-second local target. |
+| O-12 | Detached-listener restart safety | P1 | Source inspection found that the restart gate returned immediately on confirmed inactive unit state without checking the configured listener. A stale same-service process could therefore keep the port and SQLite lease while lifecycle attempted to start a second writer. The observed production unit was subsequently confirmed active with matching PID ownership; this is a prevented edge case, not a claim that production was detached. | Treat an inactive unit as safely stopped only when the configured status endpoint is unreachable. If any HTTP service still responds, fail closed before stop/start, including for `--force`, because systemd cannot own or stop that detached listener. | Red-capable public lifecycle regression reproduces inactive unit plus a responsive listener; it timed out through the old stop/start path and passes after the gate rejects in 37 ms. All 105 lifecycle tests pass. |
 
 ## Startup, Recovery, and Shutdown
 
@@ -58,6 +59,14 @@ status discrepancy is O-4, not an application fallback opportunity.
 O-6 was subsequently confirmed from the live quarantine state and corrected.
 The gate now distinguishes actionable delivery work from rows deliberately parked
 behind a quarantined lane.
+
+O-12 closes a separate ownership gap at the same boundary. Unit inactivity alone
+does not prove the configured endpoint and SQLite writer are absent. The restart
+gate now probes the endpoint before accepting the inactive fast path and refuses
+to proceed when a listener responds. It does not terminate or adopt a detached
+process, and force remains unable to bypass ownership uncertainty. The production
+unit was later queried through the real user-systemd environment and had matching
+MainPID/listener ownership; no detached production process was inferred.
 
 ## Local Logging and Agent Diagnostics
 
