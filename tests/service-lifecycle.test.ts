@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createSetupLifecycleAdapter, inspectServiceLifecycle, isServiceLifecycleEntrypoint, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
+import { createSetupLifecycleAdapter, inspectServiceLifecycle, isServiceLifecycleEntrypoint, parseLogQueryArgs, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
 
 describe("service lifecycle", () => {
   it("recognizes a CLI entrypoint reached through a symlinked home path", () => {
@@ -239,7 +239,7 @@ describe("service lifecycle", () => {
     expect(script).not.toContain("swarm-service-cutover");
     expect(script).toContain('setup) exec node "$ROOT/dist/cli/setup.js"');
     expect(script).toContain('doctor) exec node "$ROOT/dist/cli/doctor.js"');
-    expect(script).toContain('args=("$ROOT/dist/cli/service-lifecycle.js" "$ACTION")');
+    expect(script).toContain('exec node "$ROOT/dist/cli/service-lifecycle.js" "$ACTION" "${@:2}"');
     expect(packageJson.scripts.service).toBe("node dist/cli/service-lifecycle.js");
     expect(packageJson.scripts.plugin).toBeUndefined();
   });
@@ -361,6 +361,12 @@ describe("service lifecycle", () => {
     await expect(runServiceLifecycle("logs", fixture.environment)).rejects.toThrow(/log directory.*symlink/i);
   });
 
+  it("fails closed when the current service log is unavailable", async () => {
+    const fixture = createFixture();
+    mkdirSync(join(fixture.state, "logs"));
+    await expect(runServiceLifecycle("logs", fixture.environment)).rejects.toThrow(/service log is unavailable/i);
+  });
+
   it("rejects hard-linked current logs before install chmod or log reading", async () => {
     for (const action of ["install", "logs"] as const) {
       const fixture = createFixture();
@@ -422,6 +428,27 @@ describe("service lifecycle", () => {
       .rejects.toThrow(/injected rename failure/);
     expect(readFileSync(join(logs, "service.log.1"), "utf8")).toBe("prior");
     expect(statSync(join(logs, "service.log")).size).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it("rolls back every generation when rotation fails after moving history", async () => {
+    const fixture = createFixture({ active: false });
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log"), "current");
+    truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
+    writeFileSync(join(logs, "service.log.1"), "one");
+    writeFileSync(join(logs, "service.log.2"), "two");
+    writeFileSync(join(logs, "service.log.3"), "three");
+    let calls = 0;
+    await expect(runServiceLifecycle("install", fixture.environment, { renameLogFile: (source, destination) => {
+      calls += 1;
+      if (calls === 3) throw new Error("injected mid-rotation failure");
+      renameSync(source, destination);
+    } })).rejects.toThrow(/mid-rotation/);
+    expect(readFileSync(join(logs, "service.log"), "utf8").startsWith("current")).toBe(true);
+    expect(readFileSync(join(logs, "service.log.1"), "utf8")).toBe("one");
+    expect(readFileSync(join(logs, "service.log.2"), "utf8")).toBe("two");
+    expect(readFileSync(join(logs, "service.log.3"), "utf8")).toBe("three");
   });
 
   it("escapes systemd path metacharacters in log directives", async () => {
@@ -502,6 +529,58 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("logs", fixture.environment, { readLogChunk: (fd, buffer, offset, length, position) => readSync(fd, buffer, offset, Math.min(length, 2), position) });
     } finally { write.mockRestore(); }
     expect(output).toContain("one\ntwo\nthree\n");
+  });
+
+  it("filters structured logs across the bounded rotated chain", async () => {
+    const fixture = createFixture();
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log.2"), JSON.stringify({ time: "2026-09-18T09:00:00Z", level: 50, component: "publisher", eventId: "old" }) + "\n");
+    writeFileSync(join(logs, "service.log.1"), "not-json\n" + JSON.stringify({ time: "2026-09-18T10:00:00Z", level: 40, component: "publisher", eventId: "target" }) + "\n");
+    writeFileSync(join(logs, "service.log"), JSON.stringify({ time: "2026-09-18T11:00:00Z", level: 30, component: "coordinator", eventId: "target" }) + "\n");
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try { await runServiceLifecycle("logs", fixture.environment, { logQuery: { includeRotated: true, json: true, level: "warn", component: "publisher", since: "2026-09-18T09:30:00Z" } }); } finally { write.mockRestore(); }
+    expect(output).toContain('"eventId":"target"');
+    expect(output).not.toContain("not-json");
+    expect(output).not.toContain('"eventId":"old"');
+    expect(output).not.toContain("private service log:");
+  });
+
+  it("parses bounded Agent log query options and rejects invalid values", () => {
+    expect(parseLogQueryArgs(["--lines", "25", "--max-bytes", "4096", "--level", "warn", "--event-id", "evt-1", "--include-rotated", "--json"])).toEqual({ lines: 25, maxBytes: 4096, level: "warn", eventId: "evt-1", includeRotated: true, json: true });
+    expect(() => parseLogQueryArgs(["--lines", "0"])).toThrow(/--lines/);
+    expect(() => parseLogQueryArgs(["--level", "verbose"])).toThrow(/--level/);
+    expect(() => parseLogQueryArgs(["--since", "not-a-date"])).toThrow(/--since/);
+    expect(() => parseLogQueryArgs(["--unknown"])).toThrow(/invalid logs option/);
+  });
+
+  it("retains three rotated generations", async () => {
+    const fixture = createFixture({ active: false });
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log.1"), "one");
+    writeFileSync(join(logs, "service.log.2"), "two");
+    writeFileSync(join(logs, "service.log.3"), "three");
+    writeFileSync(join(logs, "service.log"), "current");
+    truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
+    await runServiceLifecycle("install", fixture.environment);
+    expect(readFileSync(join(logs, "service.log.1"), "utf8").startsWith("current")).toBe(true);
+    expect(readFileSync(join(logs, "service.log.2"), "utf8")).toBe("one");
+    expect(readFileSync(join(logs, "service.log.3"), "utf8")).toBe("two");
+    expect(statSync(join(logs, "service.log")).size).toBe(0);
+  });
+
+  it("applies custom line and byte limits", async () => {
+    const fixture = createFixture();
+    const logs = join(fixture.state, "logs");
+    mkdirSync(logs);
+    writeFileSync(join(logs, "service.log"), "excluded\none\ntwo\nthree\n");
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try { await runServiceLifecycle("logs", fixture.environment, { logQuery: { lines: 2, maxBytes: 14 } }); } finally { write.mockRestore(); }
+    expect(output).not.toContain("excluded");
+    expect(output.endsWith("two\nthree\n")).toBe(true);
   });
 
   it("preserves config and state while uninstalling only the service", async () => {

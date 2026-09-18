@@ -106,8 +106,10 @@ unit and `current` target before retrying install, start, or restart.
 The canonical unit appends stdout and stderr to
 `${SWARM_STATE_DIR}/logs/service.log`; the lifecycle keeps `logs/` private at
 `0700` and the log at `0600`. Logs rotate at 16 MiB while the unit is stopped,
-retaining only `service.log.1` and the current file. Host journal access is not
-required for supported log inspection.
+retaining `service.log.1` through `.3` and the current file. Host journal access
+is not required for supported log inspection. `npm run swarm:logs -- <options>`
+supports bounded rotated-history, level, time, component, and correlation-ID
+filters; use `--json` for headerless JSONL output.
 
 For foreground development, load the same environment used by the service before
 starting the process. The service exposes `/health`, `/ready`, and `/status` on

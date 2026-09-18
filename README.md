@@ -223,7 +223,20 @@ npm run swarm:logs
 
 Run `npm run swarm:doctor` for read-only environment diagnosis. The service
 log is private, bounded, and available through `swarm:logs`; host journal
-access is not required.
+access is not required. Pino writes structured JSON to stdout/stderr and the
+user systemd unit is the sole local file writer. Logs rotate only while the
+unit is confirmed stopped, at 16 MiB, retaining `service.log.1` through `.3`.
+The default command prints the final 100 complete lines from at most 1 MiB.
+Agent-oriented filtering is available without journal access, for example:
+
+~~~bash
+npm run swarm:logs -- --include-rotated --level warn --since 2026-09-18T00:00:00Z
+npm run swarm:logs -- --prompt-id <prompt-id> --json
+~~~
+
+Supported selectors are `--component`, `--event-id`, `--binding-id`,
+`--prompt-id`, `--pane-id`, and `--reply-id`; `--lines` and `--max-bytes` keep
+reads explicitly bounded. Structured filtering skips malformed legacy lines.
 
 ## Use the Lark gateway
 

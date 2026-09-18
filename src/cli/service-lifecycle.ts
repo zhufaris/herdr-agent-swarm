@@ -16,7 +16,14 @@ export interface LifecycleOptions {
   requireReady?: boolean;
   renameLogFile?: (source: string, destination: string) => void;
   readLogChunk?: typeof readSync;
+  logQuery?: LogQueryOptions;
   renameActivationLink?: typeof renameSync;
+}
+
+export interface LogQueryOptions {
+  lines?: number; maxBytes?: number; includeRotated?: boolean; json?: boolean;
+  level?: string; since?: string; component?: string; eventId?: string;
+  bindingId?: string; promptId?: string; paneId?: string; replyId?: string;
 }
 
 export interface LifecycleInspection {
@@ -31,7 +38,7 @@ interface RuntimePaths {
   stateDirectory: string;
   logDirectory: string;
   logFile: string;
-  rotatedLogFile: string;
+  rotatedLogFiles: string[];
   environmentFile: string;
   entrypoint: string;
   buildInfo: string;
@@ -80,7 +87,7 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
   }
   if (action === "install") return install(paths, environment, options.renameLogFile ?? renameSync, options.renameActivationLink ?? renameSync);
   if (action === "uninstall") return uninstall(paths, environment);
-  if (action === "logs") return printLogs(paths, options.readLogChunk ?? readSync);
+  if (action === "logs") return printLogs(paths, options.readLogChunk ?? readSync, options.logQuery ?? {});
   if (action === "status") return printStatus(paths, environment);
 
   requireInstalled(paths);
@@ -202,7 +209,7 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const logDirectory = resolve(stateDirectory, "logs");
   const logFile = resolve(logDirectory, "service.log");
   return {
-    root, configDirectory, stateDirectory, logDirectory, logFile, rotatedLogFile: `${logFile}.1`, serviceName: SERVICE_NAME,
+    root, configDirectory, stateDirectory, logDirectory, logFile, rotatedLogFiles: [1, 2, 3].map((generation) => `${logFile}.${generation}`), serviceName: SERVICE_NAME,
     environmentFile: resolve(configDirectory, ".env"),
     entrypoint: resolve(root, "dist/main.js"), buildInfo: resolve(root, "dist/build-info.json"),
     unitFile: resolve(unitDirectory, SERVICE_NAME),
@@ -441,7 +448,7 @@ function convergeLogPaths(paths: RuntimePaths): void {
   } finally { closeSync(directoryDescriptor); }
   const descriptor = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
   try { fchmodSync(descriptor, 0o600); } finally { closeSync(descriptor); }
-  validateOptionalRegularLogFile(paths.rotatedLogFile);
+  for (const rotated of paths.rotatedLogFiles) validateOptionalRegularLogFile(rotated);
 }
 
 function rotateLogs(paths: RuntimePaths, renameFile: (source: string, destination: string) => void): void {
@@ -449,10 +456,28 @@ function rotateLogs(paths: RuntimePaths, renameFile: (source: string, destinatio
   let size: number;
   try { size = fstatSync(descriptor).size; } finally { closeSync(descriptor); }
   if (size <= 16 * 1024 * 1024) return;
-  validateOptionalRegularLogFile(paths.rotatedLogFile);
-  renameFile(paths.logFile, paths.rotatedLogFile);
-  const replacement = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_EXCL, 0o600);
-  closeSync(replacement);
+  for (const rotated of paths.rotatedLogFiles) validateOptionalRegularLogFile(rotated);
+  const first = paths.rotatedLogFiles[0]!;
+  const second = paths.rotatedLogFiles[1]!;
+  const third = paths.rotatedLogFiles[2]!;
+  const displaced = `${third}.pending-${process.pid}`;
+  if (lstatOptional(displaced)) throw new Error(`stale log rotation file exists: ${displaced}`);
+  const completed: Array<[string, string]> = [];
+  try {
+    const move = (source: string, destination: string) => { renameFile(source, destination); completed.push([source, destination]); };
+    if (existsSync(third)) move(third, displaced);
+    if (existsSync(second)) move(second, third);
+    if (existsSync(first)) move(first, second);
+    move(paths.logFile, first);
+    const replacement = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_EXCL, 0o600);
+    closeSync(replacement);
+    if (existsSync(displaced)) unlinkSync(displaced);
+  } catch (error) {
+    for (const [source, destination] of completed.reverse()) {
+      if (existsSync(destination)) renameFile(destination, source);
+    }
+    throw error;
+  }
 }
 
 function openRegularLogFile(path: string, flags: number, mode?: number): number {
@@ -497,12 +522,35 @@ function rewriteUnit(paths: RuntimePaths, environment: NodeJS.ProcessEnv): void 
   atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), runtimeEnvironment), 0o600);
 }
 
-function printLogs(paths: RuntimePaths, readChunk: typeof readSync): number {
+function printLogs(paths: RuntimePaths, readChunk: typeof readSync, query: LogQueryOptions): number {
   validateLogDirectory(paths.logDirectory);
-  const descriptor = openRegularLogFile(paths.logFile, constants.O_RDONLY);
+  if (!existsSync(paths.logFile)) throw new Error(`private service log is unavailable: ${paths.logFile}`);
+  const linesLimit = boundedInteger(query.lines, 100, 1, 100_000, "--lines");
+  const byteLimit = boundedInteger(query.maxBytes, 1024 * 1024, 1, 64 * 1024 * 1024, "--max-bytes");
+  let remainingBytes = byteLimit;
+  const files = query.includeRotated ? [...paths.rotatedLogFiles].reverse().concat(paths.logFile) : [paths.logFile];
+  for (const path of files) validateOptionalRegularLogFile(path);
+  const chunks: string[][] = [];
+  for (const path of [...files].reverse()) {
+    if (remainingBytes === 0 || !existsSync(path)) continue;
+    const result = readLogTail(path, remainingBytes, readChunk);
+    remainingBytes -= result.bytesRead;
+    chunks.unshift(result.lines);
+  }
+  const filtered = chunks.flat().filter((line) => logLineMatches(line, query)).slice(-linesLimit);
+  if (!query.json) {
+    const bound = query.maxBytes === undefined ? "final 1 MiB maximum" : `final ${byteLimit} bytes maximum`;
+    process.stdout.write(`private service log: ${paths.logFile} (final ${linesLimit} lines, ${bound}${query.includeRotated ? ", including rotated logs" : ""})\n`);
+  }
+  if (filtered.length > 0) process.stdout.write(`${filtered.join("\n")}\n`);
+  return 0;
+}
+
+function readLogTail(path: string, maxBytes: number, readChunk: typeof readSync): { lines: string[]; bytesRead: number } {
+  const descriptor = openRegularLogFile(path, constants.O_RDONLY);
   try {
     const size = fstatSync(descriptor).size;
-    const length = Math.min(size, 1024 * 1024);
+    const length = Math.min(size, maxBytes);
     const position = size - length;
     const buffer = Buffer.alloc(length);
     let bytesRead = 0;
@@ -519,11 +567,58 @@ function printLogs(paths: RuntimePaths, readChunk: typeof readSync): number {
     const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
     if (!startsAtBoundary) lines.shift();
     if (lines.at(-1) === "") lines.pop();
-    process.stdout.write(`private service log: ${paths.logFile} (final 100 lines, final 1 MiB maximum)\n`);
-    const tail = lines.slice(-100);
-    if (tail.length > 0) process.stdout.write(`${tail.join("\n")}\n`);
-    return 0;
+    return { lines, bytesRead };
   } finally { closeSync(descriptor); }
+}
+
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number, option: string): number {
+  const result = value ?? fallback;
+  if (!Number.isInteger(result) || result < minimum || result > maximum) throw new Error(`${option} must be an integer from ${minimum} to ${maximum}`);
+  return result;
+}
+
+const LOG_LEVELS: Record<string, number> = { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 };
+function logLineMatches(line: string, query: LogQueryOptions): boolean {
+  const structured = Boolean(query.json || query.level || query.since || query.component || query.eventId || query.bindingId || query.promptId || query.paneId || query.replyId);
+  if (!structured) return true;
+  let record: Record<string, unknown>;
+  try { const parsed: unknown = JSON.parse(line); const normalized = asRecord(parsed); if (!normalized) return false; record = normalized; } catch { return false; }
+  if (query.level) {
+    const minimum = LOG_LEVELS[query.level];
+    const actual = typeof record.level === "number" ? record.level : typeof record.level === "string" ? LOG_LEVELS[record.level] : undefined;
+    if (minimum === undefined || actual === undefined || actual < minimum) return false;
+  }
+  if (query.since) {
+    const since = Date.parse(query.since);
+    const observed = typeof record.time === "number" ? record.time : typeof record.time === "string" ? Date.parse(record.time) : Number.NaN;
+    if (!Number.isFinite(since) || !Number.isFinite(observed) || observed < since) return false;
+  }
+  const exact: Array<[keyof LogQueryOptions, string]> = [["component", "component"], ["eventId", "eventId"], ["bindingId", "bindingId"], ["promptId", "promptId"], ["paneId", "paneId"], ["replyId", "replyId"]];
+  return exact.every(([option, field]) => query[option] === undefined || record[field] === query[option]);
+}
+
+export function parseLogQueryArgs(args: string[]): LogQueryOptions {
+  const result: LogQueryOptions = {};
+  const valueOptions: Record<string, keyof LogQueryOptions> = {
+    "--lines": "lines", "--max-bytes": "maxBytes", "--level": "level", "--since": "since", "--component": "component",
+    "--event-id": "eventId", "--binding-id": "bindingId", "--prompt-id": "promptId", "--pane-id": "paneId", "--reply-id": "replyId"
+  };
+  for (let index = 0; index < args.length; index += 1) {
+    const option = args[index]!;
+    if (option === "--include-rotated") { result.includeRotated = true; continue; }
+    if (option === "--json") { result.json = true; continue; }
+    const key = valueOptions[option];
+    const value = args[index + 1];
+    if (!key || value === undefined || value.startsWith("--")) throw new Error(`invalid logs option: ${option}`);
+    index += 1;
+    if (key === "lines" || key === "maxBytes") (result as Record<string, unknown>)[key] = Number(value);
+    else (result as Record<string, unknown>)[key] = value;
+  }
+  boundedInteger(result.lines, 100, 1, 100_000, "--lines");
+  boundedInteger(result.maxBytes, 1024 * 1024, 1, 64 * 1024 * 1024, "--max-bytes");
+  if (result.level && LOG_LEVELS[result.level] === undefined) throw new Error(`--level must be one of ${Object.keys(LOG_LEVELS).join(", ")}`);
+  if (result.since && !Number.isFinite(Date.parse(result.since))) throw new Error("--since must be an ISO-8601 timestamp");
+  return result;
 }
 
 function systemdEscape(value: string): string {
@@ -733,9 +828,15 @@ export function isServiceLifecycleEntrypoint(moduleUrl: string, argvPath: string
 }
 
 if (isServiceLifecycleEntrypoint(import.meta.url, process.argv[1])) {
-  if (!action || !["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action) || flags.some((flag) => flag !== "--force") || flags.length > 1 || flags.includes("--force") && action !== "restart") {
-    process.stderr.write("usage: service-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart]\n"); process.exitCode = 2;
+  const validAction = action && ["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action);
+  const validRestart = action === "restart" && (flags.length === 0 || flags.length === 1 && flags[0] === "--force");
+  const validLogs = action === "logs";
+  const validPlain = action !== "restart" && action !== "logs" && flags.length === 0;
+  if (!validAction || !(validRestart || validLogs || validPlain)) {
+    process.stderr.write("usage: service-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart] [logs options]\n"); process.exitCode = 2;
   } else {
-    runServiceLifecycle(action, process.env, { force: flags.includes("--force") }).then((code) => { process.exitCode = code; }).catch((error) => { process.stderr.write(`service lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 1; });
+    let logQuery: LogQueryOptions | undefined;
+    try { if (action === "logs") logQuery = parseLogQueryArgs(flags); } catch (error) { process.stderr.write(`service lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 2; }
+    if (process.exitCode !== 2) runServiceLifecycle(action, process.env, { force: flags.includes("--force"), ...(logQuery ? { logQuery } : {}) }).then((code) => { process.exitCode = code; }).catch((error) => { process.stderr.write(`service lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 1; });
   }
 }
