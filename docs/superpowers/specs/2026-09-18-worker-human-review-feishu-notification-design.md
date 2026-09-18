@@ -28,9 +28,11 @@ conversation. The card uses the Primary card hierarchy and contains:
   its delivered message identity is available.
 
 The notification mentions the parent binding's persisted `creatorOpenId` in a
-CardKit Markdown element. If that identity is absent or cannot be represented
-safely, the same card is sent without a mention. Missing mention data never
-blocks the Worker transition or the notification itself.
+CardKit Markdown element using Feishu's documented `<at id=OPEN_ID></at>` form.
+The renderer accepts only the existing opaque identity after strict attribute
+escaping. If that identity is absent or cannot be represented safely, the same
+card is sent without a mention. Missing mention data never blocks the Worker
+transition or the notification itself.
 
 The card has no approve, deny, arbitrary-input, stop-process, or pane-control
 action. Reply routing and high-risk approval remain unchanged.
