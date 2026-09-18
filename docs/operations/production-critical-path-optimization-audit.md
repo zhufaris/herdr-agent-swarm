@@ -177,7 +177,7 @@ goal.
 | Local diagnostics O-7 | `b82496d` | Pino/systemd remains the single writer; three generations, bounded filtering, JSONL output, malformed-line handling, and rollback are covered by lifecycle tests. |
 | External-turn convergence O-8 | `5a17aba` | Two independent durable idle/done observations plus an empty exact-turn delta trigger a full-fence, exactly-once fail-closed transition and FIFO wake without replay. |
 | Release retention O-9 | `71040b2` | Repeated candidate installation preserves the release referenced by the prior unit while pruning unrelated inactive releases. |
-| Runtime convergence eligibility O-10 | Pending implementation commit | Terminal bindings keep historical Pane ownership without runtime mutation; active and draining convergence remains covered. |
+| Runtime convergence eligibility O-10 | `59ced38` | Terminal bindings keep historical Pane ownership without runtime mutation; active and draining convergence remains covered. |
 
 Source verification before the O-8 release on 2026-09-18 passed `git diff --check`,
 174 Vitest files with 2321 tests, TypeScript checking, the 320-file architecture import
@@ -233,6 +233,20 @@ they did not leave actionable delivery work. The overall `/status` remains
 `degraded` only because retained historical dead letters and an existing
 archived/attached Pane reconciliation warning remain visible. Readiness and all
 acceptance-critical live components are healthy.
+
+## O-10 Candidate Verification
+
+Source commit `59ced38` passed the 45-test runtime reconciler suite, TypeScript
+checking, the 322-file architecture import check, the Superpowers documentation
+audit, the production build, `git diff --check`, and the full 174-file Vitest
+suite with 2,336 tests. The generated build identity was
+`sha256:91959eaf400d3662262c0e1f19799e52723211bf82c897c82c2bb652871f2a38`.
+
+`./install.sh` staged and activated immutable release
+`91959eaf400d3662262c0e1f19799e52723211bf82c897c82c2bb652871f2a38-59ced380a194`
+without stopping the running service. The ordinary restart gate then correctly
+refused activation because two Prompts and one turn worker were active. No forced
+restart was performed without a new operator decision.
 
 ## Prompt-to-Artifact Completion Checklist
 
