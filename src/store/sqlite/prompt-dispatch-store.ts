@@ -1,4 +1,4 @@
-import type { Binding, PromptJob, PromptObservationState, PromptState, TranscriptTurnClaimOutcome } from "../../domain/types.js";
+import type { Binding, HerdrAgentSession, PromptJob, PromptObservationState, PromptState, TranscriptTurnClaimOutcome } from "../../domain/types.js";
 import { freezeRunCardWorkerContext, reduceRunCard, updateRunCardWorkerContext, type RunCardChange } from "../../domain/run-card-view.js";
 import { mirrorRunCardToTopic } from "../../domain/topic-view.js";
 import { selectPrimaryWorkerActivity, type PrimaryWorkerActivitySummary } from "../../domain/card-context-summary.js";
@@ -97,6 +97,28 @@ export class SqlitePromptDispatchStore {
       this.context.database.prepare("UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ? WHERE id = ?")
         .run(input.error, input.occurredAt, input.promptId);
       this.persistTerminalRunCard(input.promptId, { type: "failed", occurredAt: input.occurredAt, notice: input.error });
+    });
+  }
+
+  failExternalTurnWithoutTerminalEvent(input: { promptId: string; bindingId: string; expectedGeneration: number; expectedPaneId: string; expectedSession: HerdrAgentSession; expectedObservedAt: string; turnId: string; startedAt: string; error: string; occurredAt: string }): boolean {
+    return this.context.transaction(() => {
+      const changed = this.context.database.prepare(`
+        UPDATE prompt_jobs SET state = 'failed', observation_state = 'completed', error = ?, updated_at = ?
+        WHERE id = ? AND binding_id = ? AND execution_origin = 'herdr'
+          AND state = 'running' AND observation_state = 'attached'
+          AND transcript_turn_id = ? AND transcript_turn_started_at = ?
+          AND EXISTS (
+            SELECT 1 FROM bindings b JOIN run_cards r ON r.prompt_id = prompt_jobs.id
+            WHERE b.id = prompt_jobs.binding_id AND b.generation = ? AND r.binding_generation = b.generation
+              AND b.state = 'active' AND b.lifecycle = 'active' AND b.attachment = 'attached'
+              AND b.pane_id = ? AND b.agent_session_source = ? AND b.agent_session_agent = ?
+              AND b.agent_session_kind = ? AND b.agent_session_value = ?
+              AND b.last_agent_state IN ('idle', 'done') AND b.last_observed_at = ?
+          )
+      `).run(input.error, input.occurredAt, input.promptId, input.bindingId, input.turnId, input.startedAt, input.expectedGeneration, input.expectedPaneId, input.expectedSession.source, input.expectedSession.agent, input.expectedSession.kind, input.expectedSession.value, input.expectedObservedAt);
+      if (Number(changed.changes) !== 1) return false;
+      this.persistTerminalRunCard(input.promptId, { type: "failed", occurredAt: input.occurredAt, notice: input.error });
+      return true;
     });
   }
 

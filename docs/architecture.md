@@ -977,6 +977,18 @@ never imported. Background polling pauses while the binding worker owns the turn
 boundary. Before that worker claims each queued Lark prompt, it performs one
 serialized handoff scan so external transcript work is adopted before the next
 bridge dispatch; external completion wakes the binding worker to resume its FIFO.
+
+TraeX can return to `idle` without writing a matching `task_complete` or
+`turn_aborted` record. That absence is not success evidence. For an exact external
+turn that remains `running` and `attached`, the observer requires two distinct
+durable Herdr observations later than the turn start, both `idle` or `done`, with
+no intervening transcript observation. Any transcript activity or non-idle state
+resets the confirmation. It then attempts one transactional fail-closed transition
+fenced by Binding generation and attachment, Pane, Agent session, Prompt origin and
+state, exact turn ID/start time, Run Card generation, and durable runtime state.
+The Prompt and Run Card become failed with an explicitly unknown outcome, a
+`TurnFailed` event updates durable projections, and the Prompt FIFO is woken. The
+request is never replayed and the bridge never fabricates a successful answer.
 The scan reads only durable active bindings and their transcript files; it does
 not perform a Herdr snapshot or treat socket payloads as authoritative state. A
 new `task_started` plus its scoped user message may adopt exactly one queued

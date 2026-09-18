@@ -137,6 +137,18 @@ Evidence includes per-instance scan and dispatch counts, wake-up coalescing, Her
 calls, scheduling fairness, stale-generation rejection, and recovery of interrupted
 observers without replay.
 
+An exact external TraeX turn may become durably idle without emitting a matching
+`task_complete` or `turn_aborted` transcript event. The observer must not infer
+success, wait forever, or replay the request. It may fail the Prompt closed only
+after two distinct post-start Herdr observations report `idle` or `done` and the
+exact transcript cursor produces no new observation between them. Transcript
+activity, a non-idle runtime state, or an identity change resets the confirmation.
+The final transition is atomic and fenced by binding generation, Pane, Agent
+session, Prompt, exact turn ID and start time, active attachment, Run Card
+generation, and the durable idle/done state. A successful transition publishes a
+failed outcome with unknown execution result and wakes the durable FIFO; it never
+claims success and never resubmits the Prompt.
+
 ## Slice 4: SQLite Transactions, Queries, and Migrations
 
 Audit atomic aggregate transitions, transaction duration, repeated reads, record

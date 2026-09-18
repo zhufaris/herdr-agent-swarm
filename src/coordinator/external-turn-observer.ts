@@ -38,10 +38,14 @@ interface TurnProjectionState {
 interface ObservedBinding extends TurnProjectionState {
   identity: string;
   cursor: ExactTurnCursor;
+  idleWithoutTerminalConfirmations: number;
+  lastIdleObservedAt: string | null;
 }
 
 const MAX_DRAIN_OBSERVATIONS = 8;
 const MAX_AWAKE_OBSERVATIONS = 256;
+const IDLE_WITHOUT_TERMINAL_CONFIRMATIONS = 2;
+const MISSING_TERMINAL_EVENT_ERROR = "TraeX returned idle without a terminal transcript event; the outcome is unknown and the prompt was not replayed";
 
 export class ExternalTurnObserver {
   private readonly bindings = new Map<string, ObservedBinding>();
@@ -186,7 +190,7 @@ export class ExternalTurnObserver {
           : { kind: "active" }
       });
       if (opened.mode !== "typed") { this.bindings.delete(binding.id); return; }
-      observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map() };
+      observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map(), idleWithoutTerminalConfirmations: 0, lastIdleObservedAt: null };
       if (durable?.transcriptTurnId && durable.transcriptTurnStartedAt) {
         observed.pendingStarts.set(durable.transcriptTurnId, durable.transcriptTurnStartedAt);
         observed.promptsByTurn.set(durable.transcriptTurnId, { promptId: durable.id, output: createBoundedTurnOutput() });
@@ -196,10 +200,39 @@ export class ExternalTurnObserver {
     }
     if (!force && this.options.isBindingBusy(binding.id) && observed.promptsByTurn.size === 0) return;
     try {
-      await observed.cursor.drain({ limit: MAX_DRAIN_OBSERVATIONS, onObservation: async (observation) => {
+      const drained = await observed.cursor.drain({ limit: MAX_DRAIN_OBSERVATIONS, onObservation: async (observation) => {
         await this.apply(binding, session, observed, observation);
         return "continue" as const;
       } });
+      if (drained.accepted > 0 || (binding.lastAgentState !== "idle" && binding.lastAgentState !== "done")) {
+        observed.idleWithoutTerminalConfirmations = 0;
+        observed.lastIdleObservedAt = null;
+        return;
+      }
+      const durable = this.options.store.getActiveExternalPrompt(binding.id, binding.generation);
+      if (!durable?.transcriptTurnId || !durable.transcriptTurnStartedAt || !observed.promptsByTurn.has(durable.transcriptTurnId)) {
+        observed.idleWithoutTerminalConfirmations = 0;
+        observed.lastIdleObservedAt = null;
+        return;
+      }
+      const observedAtMs = binding.lastObservedAt ? Date.parse(binding.lastObservedAt) : Number.NaN;
+      const startedAtMs = Date.parse(durable.transcriptTurnStartedAt);
+      const previousObservedAtMs = observed.lastIdleObservedAt ? Date.parse(observed.lastIdleObservedAt) : Number.NEGATIVE_INFINITY;
+      if (!Number.isFinite(observedAtMs) || !Number.isFinite(startedAtMs) || observedAtMs <= startedAtMs || observedAtMs <= previousObservedAtMs) return;
+      observed.lastIdleObservedAt = binding.lastObservedAt;
+      observed.idleWithoutTerminalConfirmations += 1;
+      if (observed.idleWithoutTerminalConfirmations < IDLE_WITHOUT_TERMINAL_CONFIRMATIONS) return;
+      const failed = this.options.store.failExternalTurnWithoutTerminalEvent({
+        promptId: durable.id, bindingId: binding.id, expectedGeneration: binding.generation, expectedPaneId: binding.paneId, expectedSession: session, expectedObservedAt: binding.lastObservedAt!,
+        turnId: durable.transcriptTurnId, startedAt: durable.transcriptTurnStartedAt, error: MISSING_TERMINAL_EVENT_ERROR, occurredAt: new Date().toISOString()
+      });
+      observed.idleWithoutTerminalConfirmations = 0;
+      if (!failed) return;
+      observed.promptsByTurn.delete(durable.transcriptTurnId);
+      observed.pendingStarts.delete(durable.transcriptTurnId);
+      await this.publish(binding.id, "TurnFailed", "herdr", { promptId: durable.id, error: MISSING_TERMINAL_EVENT_ERROR, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+      this.options.logger.warn({ event: "external-turn-terminal-event-missing", bindingId: binding.id, promptId: durable.id, paneId: binding.paneId, turnId: durable.transcriptTurnId, outcome: "failed_closed" }, "failed external Herdr turn after repeated idle observations without a terminal event");
+      this.options.wakePrompt(binding.id);
     } catch (error) {
       this.bindings.delete(binding.id);
       this.options.logger.warn({ event: "external-turn-observation-failed", err: safeLogError(error), bindingId: binding.id, paneId: binding.paneId, outcome: "deferred" }, "failed to observe external Herdr turn");

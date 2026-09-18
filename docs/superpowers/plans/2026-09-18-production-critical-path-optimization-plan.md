@@ -75,6 +75,10 @@ while preserving external behavior and all durability and no-replay invariants.
   inputs.
 - Correct confirmed failures and narrow scheduler/reconciler dependencies where the
   same decision is currently duplicated.
+- Reproduce external turns that become durably idle without a terminal transcript
+  event. Fail them closed only after two distinct post-start idle/done observations
+  with no intervening exact-turn transcript activity, using a transactional full
+  identity fence; publish failure and wake the FIFO without replay.
 - Run Worker integration, scheduler, reconciler, architecture, typecheck, build, and
   full-suite gates; commit independently.
 

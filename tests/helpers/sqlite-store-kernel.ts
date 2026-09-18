@@ -561,6 +561,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     this.promptDispatch.failPrompt(input);
   }
 
+  failExternalTurnWithoutTerminalEvent(input: Parameters<ExternalTurnObservationStore["failExternalTurnWithoutTerminalEvent"]>[0]): boolean {
+    return this.promptDispatch.failExternalTurnWithoutTerminalEvent(input);
+  }
+
   cancelQueuedPromptsWithProjection(input: { bindingId: string; reason: string; occurredAt: string; rootMessageId: string | null; renderRunCard(view: RunCardView): object }): { cancelledPromptIds: string[]; outboxReserved: boolean } {
     return this.prompts.cancelQueuedPromptsWithProjection(input);
   }

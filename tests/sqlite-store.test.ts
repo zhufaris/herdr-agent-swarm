@@ -1439,6 +1439,38 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: "external", kind: "stream_card_create", cardRole: "answer" })]));
   });
 
+  it("fails an idle external turn only while every durable identity fence still matches", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.database.prepare("UPDATE bindings SET last_agent_state = 'idle', last_observed_at = '2026-08-31T10:00:02.000Z' WHERE id = 'b1'").run();
+    const startedAt = "2026-08-31T10:00:01.000Z";
+    const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 2, title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: ":q", queuePosition: 0, occurredAt: startedAt });
+    store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "turn-1", startedAt, requestText: ":q", externalPromptId: "external", externalMessageId: "external", externalView, answerCardFor: renderRequestAnswerCard });
+    const input = { promptId: "external", bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, expectedObservedAt: "2026-08-31T10:00:02.000Z", turnId: "turn-1", startedAt, error: "missing terminal event", occurredAt: "2026-08-31T10:01:00.000Z" };
+
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedGeneration: 1 })).toBe(false);
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedPaneId: "w1:p2" })).toBe(false);
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedSession: { ...input.expectedSession, value: "session-2" } })).toBe(false);
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedObservedAt: "2026-08-31T10:00:03.000Z" })).toBe(false);
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, turnId: "turn-2" })).toBe(false);
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, startedAt: "2026-08-31T10:00:00.000Z" })).toBe(false);
+    store.database.prepare("UPDATE bindings SET attachment = 'degraded' WHERE id = 'b1'").run();
+    expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
+    store.database.prepare("UPDATE bindings SET attachment = 'attached', last_agent_state = 'working' WHERE id = 'b1'").run();
+    expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
+    store.database.prepare("UPDATE bindings SET last_agent_state = 'idle' WHERE id = 'b1'").run();
+    store.database.prepare("UPDATE run_cards SET binding_generation = 1 WHERE prompt_id = 'external'").run();
+    expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
+    store.database.prepare("UPDATE run_cards SET binding_generation = 2 WHERE prompt_id = 'external'").run();
+    expect(store.getPrompt("external")).toMatchObject({ state: "running", observationState: "attached" });
+
+    expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(true);
+    expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
+    expect(store.getPrompt("external")).toMatchObject({ state: "failed", observationState: "completed", error: "missing terminal event" });
+    expect(store.loadRunCard("external")).toMatchObject({ phase: "failed", notice: "missing terminal event" });
+  });
+
   it("atomically supersedes an exact-owned detached prompt with a later external turn", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

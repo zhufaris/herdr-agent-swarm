@@ -84,6 +84,7 @@ export interface ExternalTurnObservationStore {
   adoptExternalTurn(input: AdoptExternalTurnInput): ExternalTurnAdoption;
   completeTurn(input: { promptId: string; bindingId: string; answer: string; occurredAt: string; outputFingerprint: string; replaceAnswer?: boolean }): Binding;
   countPendingPrompts(bindingId: string): number;
+  failExternalTurnWithoutTerminalEvent(input: { promptId: string; bindingId: string; expectedGeneration: number; expectedPaneId: string; expectedSession: HerdrAgentSession; expectedObservedAt: string; turnId: string; startedAt: string; error: string; occurredAt: string }): boolean;
   failPrompt(input: { promptId: string; error: string; occurredAt: string }): void;
   findBindingByPane(paneId: string): Binding | null;
   getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null;

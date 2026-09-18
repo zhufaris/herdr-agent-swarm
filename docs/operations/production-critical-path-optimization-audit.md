@@ -32,6 +32,7 @@ implementation commits were not installed during intermediate slices.
 | O-5 | Large modules | P3 audit only | The largest files are migration history, transaction-owning stores, lifecycle control, and card renderers. Line count alone did not prove duplicate semantics. | Do not mechanically split them. Refactor only beside a confirmed behavior or performance change. | Architecture guide and import-boundary tests preserve the deep-module and single-context boundaries. |
 | O-6 | Restart safety | P1 | Live status had 22 pending replies, all intentionally waiting behind two quarantined lanes, while lifecycle blocked on aggregate `pendingOutbox`. Those rows cannot drain automatically. | Gate restart on actionable `outboxWork` and active deliveries; permit quarantine-only history; fail closed on missing metrics. | Lifecycle regressions cover ready, in-flight, retry-wait, cooldown-wait, incomplete, and quarantine-only states. |
 | O-7 | Local diagnostics | P3 | Pino already emitted structured JSON and systemd owned a private local file, but only one rotated generation and an unfilterable tail were available. `tslog` or a memory queue would duplicate ownership and add flush/loss modes. | Keep Pino and the single writer. Retain three stopped-state generations and add bounded structured `swarm:logs` filters. | Lifecycle tests cover defaults, bounds, history, malformed records, validation, link defenses, and rotation rollback. |
+| O-8 | External-turn convergence | P1 | Production Prompt `791f5224-26c4-4772-8b19-baa3b5e174b8` remained `running/attached` after Pane `w5:p56` became idle. Its exact transcript contained `task_started` and `:q`, but no matching `task_complete` or `turn_aborted`; this permanently blocked the FIFO and the normal restart gate. | After two distinct post-start durable idle/done observations with no intervening exact-turn transcript activity, atomically fail the exact Prompt closed with an unknown outcome, publish `TurnFailed`, and wake the FIFO. Never infer success or replay. | Red-capable observer regression; transcript-resumption reset regression; SQLite full-fence and exactly-once regression; 293 focused tests. |
 
 ## Startup, Recovery, and Shutdown
 
@@ -86,10 +87,22 @@ uncertain dispatch. Existing tests cover duplicate wake-ups, serialized scoped
 reconciliation, stale generations, missing or mismatched panes, interrupted
 observers, and no-replay recovery.
 
-Live diagnostics showed no queued, active, or uncertain Worker turn and no
+The initial live snapshot showed no queued, active, or uncertain Worker turn and no
 reconciliation failure. Snapshot cache failures were bounded and the Herdr circuit
-breaker was closed. No new P0/P1 issue or repeatable P2 bottleneck was established,
-so this slice remains audit-only.
+breaker was closed. A later restart-safety inspection exposed O-8 on the Primary
+external-turn observation path: the authoritative Pane was idle, while the exact
+durable Prompt remained `running/attached` because TraeX had emitted no terminal
+transcript record.
+
+The regression reproduces that exact stall and is red-capable: increasing the idle
+confirmation threshold kept the Prompt running. The correction accepts only two
+strictly increasing durable `lastObservedAt` values after the exact turn start and
+no intervening transcript observation. Transcript activity, non-idle runtime,
+missing durable ownership, or changed observer identity resets confirmation. The
+transaction rejects stale generation, Pane, Agent session, observation timestamp,
+turn identity/start, attachment, runtime, or Run Card generation and succeeds only
+once. Its visible outcome is failure with unknown execution result, never a
+fabricated success or a replay.
 
 ## SQLite Transactions, Queries, and Migrations
 
@@ -154,9 +167,10 @@ goal.
 | Restart safety O-6 | `59a4077` | Actionable outbox categories block restart; quarantine-only backlog is permitted; missing categories fail closed. |
 | Lane-head scan O-1 | `c7a71ef` | Production SQL uses the lane-head delivery index; query-plan test rejects a temporary order B-tree; live median improved from 1816.152 ms to 0.038 ms per 20-query sample. |
 | Local diagnostics O-7 | `b82496d` | Pino/systemd remains the single writer; three generations, bounded filtering, JSONL output, malformed-line handling, and rollback are covered by lifecycle tests. |
+| External-turn convergence O-8 | this change | Two independent durable idle/done observations plus an empty exact-turn delta trigger a full-fence, exactly-once fail-closed transition and FIFO wake without replay. |
 
-Final source verification on 2026-09-18 passed `git diff --check`, 174 Vitest
-files with 2318 tests, TypeScript checking, the 320-file architecture import
+Source verification before the O-8 release on 2026-09-18 passed `git diff --check`,
+174 Vitest files with 2321 tests, TypeScript checking, the 320-file architecture import
 check, the Superpowers documentation audit, and the production build. The final
 build identity before installation was
 `sha256:b2834601b90744448c3f453c931b1f49062f39d12d20d54a79448bbcd7e86db6`.
@@ -170,9 +184,9 @@ findings in `qs` through `@larksuiteoapi/node-sdk`, with no available npm fix; n
 dependency changed in this program.
 
 The first normal restart attempt failed closed before stop because this shell could
-not determine user-systemd activity. A fresh `/status` observation remained ready
-and healthy but reported one running Prompt. Herdr identified it as the current
-TraeX turn in pane `wN:p3S`, so forcing restart would detach this live observer and
-was not authorized. The remaining acceptance step is a later normal restart after
-this turn settles, followed by live identity, readiness, SQLite, workspace, Gateway,
-Lark, and log verification.
+not determine user-systemd activity. Later inspection distinguished the current
+TraeX turn in Pane `wN:p3S` from O-8's stale exact external turn in Pane `w5:p56`.
+The remaining acceptance step is to build and install the O-8 correction, allow its
+normal convergence path to clear the stale Prompt, and then pass the ordinary
+restart gate followed by live identity, readiness, SQLite, workspace, Gateway,
+Lark, and log verification. No forced restart is authorized.

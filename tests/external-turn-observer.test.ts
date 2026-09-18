@@ -155,6 +155,70 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
+  it("fails closed after repeated idle observations when an external turn has no terminal transcript event", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.database.prepare("UPDATE bindings SET last_agent_state = 'idle', last_observed_at = '2026-08-31T10:00:01.000Z' WHERE id = 'b1'").run();
+    const startedAt = "2026-08-31T10:00:00.000Z";
+    const view = createQueuedRunCard({ promptId: "external-1", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: ":q", queuePosition: 0, occurredAt: startedAt });
+    store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1",
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt, requestText: ":q", externalPromptId: "external-1",
+      externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
+    });
+    const events: string[] = [];
+    const bus = new BridgeEventBus();
+    bus.onBridgeEvent("capture", (event) => events.push(event.type));
+    const wakePrompt = vi.fn();
+    const observer = new ExternalTurnObserver({
+      store, transcriptReader: {
+        open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }),
+        openAtTurn: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } } })
+      },
+      bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt
+    });
+
+    await observer.observe(store.getBinding("b1")!);
+    await observer.observe(store.getBinding("b1")!);
+    expect(store.getPrompt("external-1")).toMatchObject({ state: "running", observationState: "attached" });
+    await observer.observe(store.getBinding("b1")!);
+    expect(store.getPrompt("external-1")).toMatchObject({ state: "running", observationState: "attached" });
+    store.database.prepare("UPDATE bindings SET last_observed_at = '2026-08-31T10:00:02.000Z' WHERE id = 'b1'").run();
+    await observer.observe(store.getBinding("b1")!);
+
+    expect(store.getPrompt("external-1")).toMatchObject({ state: "failed", observationState: "completed", error: expect.stringMatching(/without a terminal transcript event/) });
+    expect(store.loadRunCard("external-1")).toMatchObject({ phase: "failed", notice: expect.stringMatching(/without a terminal transcript event/) });
+    expect(events).toEqual(["TurnFailed"]);
+    expect(wakePrompt).toHaveBeenCalledWith("b1");
+    await observer.stop();
+    store.close();
+  });
+
+  it("resets missing-terminal confirmation when transcript evidence resumes", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.database.prepare("UPDATE bindings SET last_agent_state = 'idle', last_observed_at = '2026-08-31T10:00:01.000Z' WHERE id = 'b1'").run();
+    const startedAt = "2026-08-31T10:00:00.000Z";
+    const view = createQueuedRunCard({ promptId: "external-1", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: startedAt });
+    store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "turn-1", startedAt, requestText: "direct", externalPromptId: "external-1", externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({}) });
+    const observations: TraexTranscriptObservation[] = [{ answerDelta: "" }, { turnId: "turn-1", answerDelta: "late output", turnLifecycle: { turnId: "turn-1", state: "active", startedAt } }, { answerDelta: "" }];
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }), openAtTurn: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }) }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
+
+    await observer.observe(store.getBinding("b1")!);
+    await observer.observe(store.getBinding("b1")!);
+    store.database.prepare("UPDATE bindings SET last_observed_at = '2026-08-31T10:00:02.000Z' WHERE id = 'b1'").run();
+    await observer.observe(store.getBinding("b1")!);
+    store.database.prepare("UPDATE bindings SET last_observed_at = '2026-08-31T10:00:03.000Z' WHERE id = 'b1'").run();
+    await observer.observe(store.getBinding("b1")!);
+
+    expect(store.getPrompt("external-1")).toMatchObject({ state: "running", observationState: "attached" });
+    await observer.stop();
+    store.close();
+  });
+
   it("waits for an in-flight detached-turn recovery before stopping", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

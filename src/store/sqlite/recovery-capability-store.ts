@@ -84,6 +84,7 @@ export class SqliteExternalTurnCapabilityStore implements ExternalTurnObservatio
   adoptExternalTurn: ExternalTurnObservationStore["adoptExternalTurn"] = (input) => this.adoption.adoptExternalTurn(input);
   completeTurn: ExternalTurnObservationStore["completeTurn"] = (input) => this.dispatch.completeTurn(input);
   countPendingPrompts: ExternalTurnObservationStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
+  failExternalTurnWithoutTerminalEvent: ExternalTurnObservationStore["failExternalTurnWithoutTerminalEvent"] = (input) => this.dispatch.failExternalTurnWithoutTerminalEvent(input);
   failPrompt: ExternalTurnObservationStore["failPrompt"] = (input) => this.dispatch.failPrompt(input);
   findBindingByPane: ExternalTurnObservationStore["findBindingByPane"] = (id) => this.bindings.findBindingByPane(id);
   getActiveExternalPrompt: ExternalTurnObservationStore["getActiveExternalPrompt"] = (id, generation) => this.adoption.getActiveExternalPrompt(id, generation);
