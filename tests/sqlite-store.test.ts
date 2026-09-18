@@ -12,6 +12,7 @@ import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
+import { outboundLaneHeadSelectionSql } from "../src/store/sqlite/outbox-queue-store.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
@@ -4207,6 +4208,18 @@ describe("SQLite store", () => {
     expect(store.listOutboundLaneHeads(4, null, [], "history").map((reply) => reply.id)).toEqual(["history"]);
     expect(store.listOutboundLaneHeads(4, null, [], "live").map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
     vi.useRealTimers();
+  });
+
+  it("drives work-class lane selection from the bounded lane-head index", () => {
+    store = new SqliteBindingStore(":memory:");
+    const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${outboundLaneHeadSelectionSql({
+      excludedLaneCount: 0, dueAt: true, workClass: true
+    })}`).all("2026-08-24T00:00:00.000Z", "live", 1) as Array<{ detail: string }>;
+
+    expect(plan.map(({ detail }) => detail)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/SCAN h USING INDEX outbox_lane_heads_delivery_order/)
+    ]));
+    expect(plan.some(({ detail }) => detail.includes("USE TEMP B-TREE FOR ORDER BY"))).toBe(false);
   });
 
   it("maintains lane heads across coalescing, delivery, retry, dismissal, and dead-letter recovery", () => {

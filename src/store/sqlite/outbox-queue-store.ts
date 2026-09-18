@@ -196,14 +196,12 @@ export class SqliteOutboxQueueStore {
   listLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys: readonly string[] = [], workClass?: OutboundWorkClass): OutboundReply[] {
     if (!Number.isInteger(limit) || limit <= 0) return [];
     if (this.cooldown.activeUntil()) return [];
-    const exclusions = excludedLaneKeys.length > 0 ? `AND h.lane_key NOT IN (${excludedLaneKeys.map(() => "?").join(", " )})` : "";
-    const due = dueAt === null ? "" : "AND h.next_attempt_at <= ?";
-    const classFilter = workClass ? "AND o.work_class = ?" : "";
     const parameters: SqlValue[] = [...excludedLaneKeys];
     if (dueAt !== null) parameters.push(dueAt);
     if (workClass) parameters.push(workClass);
     parameters.push(limit);
-    return (this.context.database.prepare(`SELECT o.* FROM outbox_lane_heads h JOIN outbound_replies o ON o.id = h.reply_id WHERE o.claim_attempt_id IS NULL AND NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = o.lane_key AND active.claim_attempt_id IS NOT NULL) ${exclusions} ${due} ${classFilter} ORDER BY h.delivery_order LIMIT ?`).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
+    const sql = outboundLaneHeadSelectionSql({ excludedLaneCount: excludedLaneKeys.length, dueAt: dueAt !== null, workClass: Boolean(workClass) });
+    return (this.context.database.prepare(sql).all(...parameters) as OutboundReplyRow[]).map(mapOutboundReply);
   }
 
   getNextLaneHeadAttemptAt(): string | null {
@@ -222,6 +220,13 @@ export class SqliteOutboxQueueStore {
     const row = this.context.database.prepare("SELECT * FROM outbound_replies WHERE id = ?").get(id) as OutboundReplyRow | undefined;
     return row ? mapOutboundReply(row) : null;
   }
+}
+
+export function outboundLaneHeadSelectionSql(input: { excludedLaneCount: number; dueAt: boolean; workClass: boolean }): string {
+  const exclusions = input.excludedLaneCount > 0 ? `AND h.lane_key NOT IN (${Array.from({ length: input.excludedLaneCount }, () => "?").join(", " )})` : "";
+  const due = input.dueAt ? "AND h.next_attempt_at <= ?" : "";
+  const classFilter = input.workClass ? "AND o.work_class = ?" : "";
+  return `SELECT o.* FROM outbox_lane_heads h INDEXED BY outbox_lane_heads_delivery_order JOIN outbound_replies o ON o.id = h.reply_id WHERE o.claim_attempt_id IS NULL AND NOT EXISTS (SELECT 1 FROM outbound_replies active WHERE active.lane_key = o.lane_key AND active.claim_attempt_id IS NOT NULL) ${exclusions} ${due} ${classFilter} ORDER BY h.delivery_order LIMIT ?`;
 }
 
 function now(): string { return new Date().toISOString(); }
