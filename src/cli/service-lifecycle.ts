@@ -263,6 +263,7 @@ function activateRelease(paths: RuntimePaths, environment: NodeJS.ProcessEnv, id
   const keepInactive = releaseRetention(environment);
   const priorCurrent = readPriorCurrent(paths);
   const priorUnit = readPriorUnit(paths);
+  const priorUnitRelease = priorUnit ? releaseWorkingDirectory(paths, priorUnit.content) : null;
   const priorEnabled = priorUnit ? readEnabledState(paths.serviceName, environment) : "absent";
   if (lstatOptional(paths.activationUnitBackup)) throw new Error(`release activation backup already exists: ${paths.activationUnitBackup}`);
   atomicWrite(paths.activationMarker, JSON.stringify({ version: 1, candidate, priorCurrent, priorUnit: priorUnit ? { backup: paths.activationUnitBackup, mode: priorUnit.mode } : null, priorEnabled, phase: "prepared" }) + "\n", 0o600);
@@ -288,7 +289,7 @@ function activateRelease(paths: RuntimePaths, environment: NodeJS.ProcessEnv, id
   try { removeActivationEvidence(paths); } catch (error) {
     throw new Error(`release activation committed but recovery marker cleanup failed (${safeMessage(error)}); inspect ${paths.activationMarker}`);
   }
-  try { pruneReleases(paths, candidate, priorCurrent, keepInactive); } catch (error) {
+  try { pruneReleases(paths, new Set([candidate, priorCurrent, priorUnitRelease].filter((path): path is string => path !== null)), keepInactive); } catch (error) {
     process.stderr.write(`release activation committed but release pruning failed: ${safeMessage(error)}\n`);
   }
   process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}; activated ${candidate}\n`);
@@ -329,6 +330,16 @@ function readPriorUnit(paths: RuntimePaths): { content: string; mode: number } |
   const status = lstatSync(paths.unitFile);
   if (!status.isFile() || status.isSymbolicLink()) throw new Error(`service unit must be a regular file: ${paths.unitFile}`);
   return { content: readFileSync(paths.unitFile, "utf8"), mode: status.mode & 0o777 };
+}
+
+function releaseWorkingDirectory(paths: RuntimePaths, unit: string): string | null {
+  const value = unit.split("\n").map((line) => line.trim()).find((line) => line.startsWith("WorkingDirectory="))?.slice("WorkingDirectory=".length);
+  if (!value || !existsSync(value)) return null;
+  const candidate = realpathSync(value);
+  const releases = realpathSync(paths.releasesDirectory);
+  const status = lstatSync(candidate);
+  if (!status.isDirectory() || status.isSymbolicLink() || dirname(candidate) !== releases) return null;
+  return /^[a-f0-9]{64}-[a-f0-9]{12}$/.test(candidate.slice(releases.length + 1)) ? candidate : null;
 }
 
 function readEnabledState(serviceName: string, environment: NodeJS.ProcessEnv): Exclude<PriorEnabledState, "absent"> {
@@ -377,14 +388,14 @@ function releaseRetention(environment: NodeJS.ProcessEnv): number {
   return Number(value);
 }
 
-function pruneReleases(paths: RuntimePaths, current: string, previous: string | null, keepInactive: number): void {
+function pruneReleases(paths: RuntimePaths, retained: ReadonlySet<string>, keepInactive: number): void {
   let kept = 0;
   const candidates = readdirSync(paths.releasesDirectory, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && /^[a-f0-9]{64}-[a-f0-9]{12}$/.test(entry.name))
     .map((entry) => resolve(paths.releasesDirectory, entry.name))
     .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
   for (const candidate of candidates) {
-    if (candidate === current || candidate === previous) continue;
+    if (retained.has(candidate)) continue;
     if (kept++ < keepInactive) continue;
     rmSync(candidate, { recursive: true });
   }

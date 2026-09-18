@@ -47,6 +47,23 @@ describe("service lifecycle", () => {
     expect(inactive.filter(existsSync)).toHaveLength(1);
   });
 
+  it("retains the release referenced by the installed unit while another candidate is current", async () => {
+    const fixture = createActivationFixture({ previous: true });
+    const releases = join(fixture.state, "releases");
+    const running = join(releases, `${"e".repeat(64)}-${"f".repeat(12)}`);
+    const inactive = join(releases, `${"1".repeat(64)}-${"2".repeat(12)}`);
+    mkdirSync(running);
+    mkdirSync(inactive);
+    writeFileSync(fixture.unit, `[Service]\nWorkingDirectory=${running}\n`, { mode: 0o640 });
+
+    await expect(runServiceLifecycle("install", { ...fixture.environment, SWARM_RELEASE_RETENTION: "0" })).resolves.toBe(0);
+
+    expect(existsSync(fixture.candidate)).toBe(true);
+    expect(existsSync(fixture.previous)).toBe(true);
+    expect(existsSync(running)).toBe(true);
+    expect(existsSync(inactive)).toBe(false);
+  });
+
   it("restores the previous unit and current release when daemon reload fails", async () => {
     const fixture = createActivationFixture({ previous: true, failFirstReload: true, priorEnabled: "enabled" });
     const priorUnit = readFileSync(fixture.unit, "utf8");

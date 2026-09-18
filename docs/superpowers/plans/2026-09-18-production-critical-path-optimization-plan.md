@@ -127,6 +127,8 @@ while preserving external behavior and all durability and no-replay invariants.
 ## Task 8: Install and validate the release
 
 - Run `./install.sh` only after every repository gate passes.
+- Verify repeated candidate installation retains the immutable release referenced by
+  the prior installed unit until the running process can pass the normal restart gate.
 - Inspect active Prompt workers, Worker turns, observers, outbox work, lease, and
   readiness before restarting.
 - Use `npm run swarm:restart` and respect its active-work safety gate. Do not force a

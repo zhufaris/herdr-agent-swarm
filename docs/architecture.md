@@ -1414,7 +1414,10 @@ only as the final activation commit. A caught pre-commit failure restores the ol
 unit and enabled state. An interrupted activation or failed compensation leaves a
 private `.release-activation.json` marker; later install, start, and restart
 commands fail closed until the operator reconciles that evidence. Release pruning
-runs only after activation and retains the current and previous releases.
+runs only after activation and retains the current release, the previous `current`
+target, and any valid release directory referenced by the previously installed
+unit's `WorkingDirectory`. This protects a still-running old process when multiple
+candidates are installed before the normal safety-gated restart.
 
 Inside the process, `ManagedBridgeRuntime` starts components in explicit phases:
 ownership and fencing; recovery preparation and integrity checks; the health

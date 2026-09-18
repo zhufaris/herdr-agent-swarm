@@ -284,6 +284,11 @@ card convergence. The work does not push by default. Before any requested push,
 inspect the complete outgoing commit range and pass `npm run public:audit`; suspected
 sensitive data blocks the push.
 
+Installing another candidate while the previous process still runs must not prune
+that process's immutable release directory. Activation therefore retains not only
+the new and previous `current` targets but also a valid direct release directory
+referenced by the prior installed unit's `WorkingDirectory`.
+
 ## Acceptance Criteria
 
 The program is complete when:
