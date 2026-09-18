@@ -168,8 +168,8 @@ goal.
 | Restart safety O-6 | `59a4077` | Actionable outbox categories block restart; quarantine-only backlog is permitted; missing categories fail closed. |
 | Lane-head scan O-1 | `c7a71ef` | Production SQL uses the lane-head delivery index; query-plan test rejects a temporary order B-tree; live median improved from 1816.152 ms to 0.038 ms per 20-query sample. |
 | Local diagnostics O-7 | `b82496d` | Pino/systemd remains the single writer; three generations, bounded filtering, JSONL output, malformed-line handling, and rollback are covered by lifecycle tests. |
-| External-turn convergence O-8 | this change | Two independent durable idle/done observations plus an empty exact-turn delta trigger a full-fence, exactly-once fail-closed transition and FIFO wake without replay. |
-| Release retention O-9 | this change | Repeated candidate installation preserves the release referenced by the prior unit while pruning unrelated inactive releases. |
+| External-turn convergence O-8 | `5a17aba` | Two independent durable idle/done observations plus an empty exact-turn delta trigger a full-fence, exactly-once fail-closed transition and FIFO wake without replay. |
+| Release retention O-9 | `71040b2` | Repeated candidate installation preserves the release referenced by the prior unit while pruning unrelated inactive releases. |
 
 Source verification before the O-8 release on 2026-09-18 passed `git diff --check`,
 174 Vitest files with 2321 tests, TypeScript checking, the 320-file architecture import
@@ -188,7 +188,57 @@ dependency changed in this program.
 The first normal restart attempt failed closed before stop because this shell could
 not determine user-systemd activity. Later inspection distinguished the current
 TraeX turn in Pane `wN:p3S` from O-8's stale exact external turn in Pane `w5:p56`.
-The remaining acceptance step is to build and install the O-8 correction, allow its
-normal convergence path to clear the stale Prompt, and then pass the ordinary
-restart gate followed by live identity, readiness, SQLite, workspace, Gateway,
-Lark, and log verification. No forced restart is authorized.
+## Final Production Convergence
+
+The final source verification on 2026-09-18 passed `git diff --check`, 174
+Vitest files with 2322 tests, TypeScript checking, the 320-file architecture
+import check, the Superpowers documentation audit, and the production build.
+The installed immutable release is
+`9458dd675b520f92b07acf14e65feda51af3b77c1d841165765d8c4d553b5f7a-71040b2235a6`;
+its generated build identity is
+`sha256:9458dd675b520f92b07acf14e65feda51af3b77c1d841165765d8c4d553b5f7a`.
+
+The ordinary restart gate remained blocked by an active Primary turn. After the
+operator explicitly authorized a forced restart, the lifecycle correctly refused
+to bypass a degraded SQLite health snapshot. That snapshot was not database
+corruption: the old process could no longer resolve its deleted working directory
+and reported `uv_cwd`. The supported `swarm:stop` followed by `swarm:start`
+performed graceful detachment and started the installed release without weakening
+the integrity gate.
+
+The converged production snapshot reported:
+
+- expected and observed build identity both `9458dd...` at commit `71040b2`;
+- canonical unit ownership matched PID `2846099` and its listener;
+- readiness `ready`, with database, projects, all four Herdr workspaces, Gateway,
+  Lark, lease, and instance runtime healthy;
+- startup recovery completed and SQLite `quickCheck=ok` with no issues;
+- actionable outbox work and card convergence both drained to zero; and
+- the two potentially dispatched Prompts remained `running/detached`, with zero
+  newly discovered turns and durable error text stating that the existing TraeX
+  turn is observed without replay.
+
+The bounded local log command confirmed the new PID emitted `bridge-started`,
+`herdr-socket-connected`, and `lark-websocket-ready`. Historical closed CardKit
+streams were rejected and routed through the existing permanent recovery path;
+they did not leave actionable delivery work. The overall `/status` remains
+`degraded` only because retained historical dead letters and an existing
+archived/attached Pane reconciliation warning remain visible. Readiness and all
+acceptance-critical live components are healthy.
+
+## Prompt-to-Artifact Completion Checklist
+
+| Requirement | Design / implementation | Test or runtime evidence | Result |
+| --- | --- | --- | --- |
+| Worker progress is distinct from tool activity | Worker Main design; `src/cards/worker-main-card.ts`; `37446e2` | `worker-main-card.test.ts` covers plan progress, tool-only activity, and legacy activity | Complete |
+| Human review is visible in Feishu using the Primary-style hierarchy | Worker Main review-notice design; canonical durable Worker Main update; `f5b2db7`, `af7f3b4`, `21b354e` | Blocked card tests cover orange actionable notice and `等待用户处理`; no remote high-risk approval was added | Complete |
+| Stability and global critical paths were audited | This audit plus design and phased plan; O-1 through O-9 | Startup, shutdown, reconciliation, queue, outbox, transaction, and CardKit suites | Complete |
+| Local Pino diagnostics and rotation are bounded | `b82496d`; systemd remains the sole file writer | Lifecycle tests cover three generations, bounds, filters, JSON output, permissions, and rollback; installed command returned structured records | Complete |
+| SQLite remains the only durable queue | Architecture durable-before-wake contract; no application message queue | Wake-ups carry no payload or acknowledgement state; startup and periodic SQLite scans provide convergence | Complete |
+| Restart safety is preserved | `59a4077`, `71040b2`; fail-closed identity, ownership, recovery, and integrity gates | Quarantine-only backlog no longer blocks; actionable work does; live integrity degradation was not bypassed | Complete |
+| Lane-head scans are bounded | `c7a71ef` | Live median for 20 queries improved from 1816.152 ms to 0.038 ms with query-plan regression coverage | Complete |
+| Missing terminal events converge without replay | `5a17aba` | Observer and full-fence SQLite regressions; production Prompt `791f...` recovered as detached and was not redispatched | Complete |
+| Running immutable releases survive repeated installation | `71040b2` | Repeated-install regression; 104 lifecycle tests; final release installed and started | Complete |
+| Repository gates pass | Source HEAD `71040b2` | 2322 tests, typecheck, architecture check, docs audit, build, and diff check passed | Complete |
+| Production runtime matches the installed artifact | Immutable release and generated build info | Expected/observed identity match; PID ownership, readiness, lease, SQLite, workspaces, Gateway, Lark, recovery, outbox, and card convergence verified | Complete |
+| Remote publication remains controlled | No push was performed | Branch remains ahead of `origin/main`; outgoing commit trailers and `public:audit` remain mandatory pre-push gates | Complete |
