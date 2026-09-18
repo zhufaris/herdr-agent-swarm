@@ -160,7 +160,12 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, f
   const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers);
   const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns);
   const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns);
-  const pendingOutbox = nonNegativeInteger(operational?.pendingOutbox);
+  const outboxWork = asRecord(operational?.outboxWork);
+  const readyOutbox = nonNegativeInteger(outboxWork?.ready);
+  const inFlightOutbox = nonNegativeInteger(outboxWork?.inFlight);
+  const retryWaitOutbox = nonNegativeInteger(outboxWork?.retryWait);
+  const cooldownWaitOutbox = nonNegativeInteger(outboxWork?.cooldownWait);
+  const waitingBehindLaneOutbox = nonNegativeInteger(outboxWork?.waitingBehindLane);
   const outboxDispatcher = asRecord(record?.outboxDispatcher);
   const activeDeliveries = nonNegativeInteger(outboxDispatcher?.activeDeliveries);
   const startupRecovery = asRecord(record?.startupRecovery);
@@ -170,12 +175,12 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, f
   const sqliteQuickCheck = typeof sqliteIntegrity?.quickCheck === "string" ? sqliteIntegrity.quickCheck : null;
   if (!force) {
     if (running! > 0 || queued! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
-    if (pendingOutbox! > 0) throw new Error(`restart blocked: ${pendingOutbox} pending outbox items; wait for delivery to drain or retry with --force`);
+    if (readyOutbox! > 0 || inFlightOutbox! > 0 || retryWaitOutbox! > 0 || cooldownWaitOutbox! > 0) throw new Error(`restart blocked: outbox work has ${metric(readyOutbox)} ready, ${metric(inFlightOutbox)} in-flight, ${metric(retryWaitOutbox)} retry-wait, ${metric(cooldownWaitOutbox)} cooldown-wait, ${metric(waitingBehindLaneOutbox)} waiting behind lanes; wait for actionable delivery work to drain or retry with --force`);
     if (activeDeliveries! > 0) throw new Error(`restart blocked: ${activeDeliveries} active deliveries; wait for delivery to drain or retry with --force`);
   }
   if (startupRecoveryState !== null && startupRecoveryState !== "completed") throw new Error(`restart blocked: startup recovery is ${startupRecoveryState}, expected completed; wait for recovery or retry with --force`);
   if (sqliteIntegrityState !== null && sqliteIntegrityState !== "healthy" || sqliteQuickCheck !== null && sqliteQuickCheck !== "ok") throw new Error(`restart blocked: SQLite integrity is ${sqliteIntegrityState ?? "missing"} with quickCheck ${sqliteQuickCheck ?? "missing"}; repair integrity or retry with --force`);
-  const workloadIncomplete = !force && [running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, pendingOutbox, activeDeliveries].some((value) => value === null);
+  const workloadIncomplete = !force && [running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, readyOutbox, inFlightOutbox, retryWaitOutbox, cooldownWaitOutbox, waitingBehindLaneOutbox, activeDeliveries].some((value) => value === null);
   if (workloadIncomplete || startupRecoveryState === null || sqliteIntegrityState === null || sqliteQuickCheck === null) throw new Error("restart blocked: active service status has incomplete restart safety metrics; verify the running unit or retry with --force");
 }
 

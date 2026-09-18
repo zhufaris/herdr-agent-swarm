@@ -655,7 +655,10 @@ describe("service lifecycle", () => {
 
   it.each([
     ["queued prompts", { operational: { prompts: { running: 0, queued: 1 }, pendingOutbox: 0 } }, /queued prompts/i],
-    ["pending outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1 } }, /pending outbox/i],
+    ["ready outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 1, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0 } } }, /1 ready/i],
+    ["in-flight outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 0, inFlight: 1, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0 } } }, /1 in-flight/i],
+    ["retry-wait outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 0, inFlight: 0, retryWait: 1, cooldownWait: 0, waitingBehindLane: 0 } } }, /1 retry-wait/i],
+    ["cooldown-wait outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 1, waitingBehindLane: 0 } } }, /1 cooldown-wait/i],
     ["active deliveries", { outboxDispatcher: { activeDeliveries: 1 } }, /active deliveries/i],
     ["incomplete startup recovery", { startupRecovery: { state: "running" } }, /startup recovery/i],
     ["unhealthy SQLite integrity state", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /sqlite integrity/i],
@@ -675,7 +678,7 @@ describe("service lifecycle", () => {
   });
 
   it.each([
-    ["pendingOutbox", { operational: { prompts: { running: 0, queued: 0 } } }],
+    ["outboxWork", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 0 } }],
     ["activeDeliveries", { outboxDispatcher: {} }],
     ["startupRecovery", { startupRecovery: {} }],
     ["sqliteIntegrity", { sqliteIntegrity: {} }]
@@ -689,6 +692,25 @@ describe("service lifecycle", () => {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
       await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/incomplete.*--force/i);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("allows an unforced restart when pending outbox rows are safely quarantined", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
+      response.end(JSON.stringify(completedStartupStatus({
+        operational: {
+          prompts: { running: 0, queued: 0 }, pendingOutbox: 22,
+          outboxWork: { ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 22 }
+        }
+      })));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" })).resolves.toBe(0);
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
@@ -1146,7 +1168,7 @@ describe("service lifecycle", () => {
 function completedStartupStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     status: "ok", identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" },
-    startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 0 },
+    startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 0, outboxWork: { ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0 } },
     promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 },
     outboxDispatcher: { activeDeliveries: 0 }, sqliteIntegrity: { state: "healthy", quickCheck: "ok" },
     ...overrides
