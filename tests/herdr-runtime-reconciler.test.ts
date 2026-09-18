@@ -129,6 +129,85 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("keeps a live Pane owned by an archived binding without reconciling terminal history", async () => {
+    const pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "retired",
+      agentState: "idle" as const, agentKind: "codex", foregroundExecutables: ["codex"]
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "archived", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / retired" });
+    store.updateBinding("archived", {
+      paneId: pane.paneId, traexSessionId: pane.terminalId, state: "archived", lifecycle: "archived",
+      attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+    const before = store.getBinding("archived");
+    const discoverPane = vi.fn();
+    const lifecycleEvents = new BridgeEventBus();
+    const publish = vi.spyOn(lifecycleEvents, "publish");
+    const logger = pino({ enabled: false });
+    const warning = vi.spyOn(logger, "warn");
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, discoverPane, logger, lifecycleEvents);
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("archived")).toEqual(before);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(discoverPane).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "pane-reconciliation-failed" }),
+      expect.any(String)
+    );
+    store.close();
+  });
+
+  it.each([
+    { lifecycle: "provisioning" as const, state: "pending" as const },
+    { lifecycle: "closed" as const, state: "archived" as const },
+    { lifecycle: "failed" as const, state: "failed" as const }
+  ])("does not reconcile a $lifecycle binding from a live Pane", async ({ lifecycle, state }) => {
+    const pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "retired",
+      agentState: "working" as const, agentKind: "codex", foregroundExecutables: ["codex"]
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: lifecycle, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: `repo / ${lifecycle}` });
+    store.updateBinding(lifecycle, { paneId: pane.paneId, traexSessionId: pane.terminalId, state, lifecycle, attachment: "attached", lastAgentState: "idle" });
+    const before = store.getBinding(lifecycle);
+    const discoverPane = vi.fn();
+    const lifecycleEvents = new BridgeEventBus();
+    const publish = vi.spyOn(lifecycleEvents, "publish");
+    const logger = pino({ enabled: false });
+    const warning = vi.spyOn(logger, "warn");
+
+    await fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, discoverPane, logger, lifecycleEvents).reconcile();
+
+    expect(store.getBinding(lifecycle)).toEqual(before);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(discoverPane).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalledWith(expect.objectContaining({ event: "pane-reconciliation-failed" }), expect.any(String));
+    store.close();
+  });
+
+  it("continues runtime convergence while an active turn is draining", async () => {
+    const pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task",
+      agentState: "working" as const, agentKind: "traex", foregroundExecutables: ["traex"]
+    };
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "draining", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("draining", {
+      paneId: pane.paneId, traexSessionId: pane.terminalId, state: "active", lifecycle: "draining",
+      attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+
+    await fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort).reconcile();
+
+    expect(store.getBinding("draining")).toMatchObject({ lifecycle: "draining", attachment: "attached", lastAgentState: "working" });
+    store.close();
+  });
+
   it("starts one timer and stop waits for the in-flight pass", async () => {
     vi.useFakeTimers();
     let release!: () => void;
@@ -308,6 +387,34 @@ describe("HerdrRuntimeReconciler", () => {
 
     expect(store.getBinding("legacy")).toMatchObject({ state: "orphaned", attachment: "orphaned", traexSessionId: "term-1", agentSessionValue: "session-1" });
     expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.close();
+  });
+
+  it("still recovers an active orphaned binding with the exact native runtime identity", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "orphaned", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "repo / task" });
+    store.updateBinding("orphaned", {
+      paneId: "w1:p1", traexSessionId: "term-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "conversation-1", state: "orphaned", lifecycle: "active",
+      attachment: "orphaned", provisioningCheckpoint: "activated", lastAgentState: "unknown", degradationCount: 2
+    });
+    store.saveTopicView({ ...initialTopicView("orphaned"), title: "repo / task", workspaceId: "w1", spaceName: "repo", paneId: "w1:p1", phase: "orphaned", notice: "workspace unavailable" });
+    const pane = {
+      paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+      agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "conversation-1" },
+      stateChangeSeq: 1, foregroundExecutables: ["traex"]
+    };
+    const lifecycleEvents = new BridgeEventBus();
+    const publish = vi.spyOn(lifecycleEvents, "publish");
+    const wakeOutbound = vi.fn();
+
+    await fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, undefined, undefined, lifecycleEvents, wakeOutbound).reconcile();
+
+    expect(store.getBinding("orphaned")).toMatchObject({ state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", degradationCount: 0 });
+    expect(store.loadTopicView("orphaned")).toMatchObject({ phase: "ready", notice: null });
+    expect(store.listPendingOutboundReplies()).not.toEqual([]);
+    expect(wakeOutbound).toHaveBeenCalledOnce();
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ type: "BindingActivated", bindingId: "orphaned" }));
     store.close();
   });
 

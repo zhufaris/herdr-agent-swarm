@@ -486,6 +486,12 @@ authoritative pane still has the same workspace, pane, generation, terminal,
 and (when persisted) native Agent session identity. Recovery does not recreate
 or replay prompt work that orphaning already made terminal.
 
+Pane lookup retains historical bindings so an archived pane remains owned and
+cannot be rediscovered as a new session. Runtime convergence itself accepts only
+`active` and `draining` lifecycles. `provisioning`, `archived`, `closed`, and
+`failed` bindings ignore live runtime observations until an explicit lifecycle
+workflow makes them eligible; reconciliation does not mutate terminal history.
+
 ### Events and scheduling
 
 `RuntimeEventIntegration` owns composition-time wiring for four reliability

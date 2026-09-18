@@ -42,6 +42,7 @@ export class BindingRuntimeConverger {
 
   async converge(initial: Binding, initialPane: HerdrPane): Promise<void> {
     let existing = initial; let pane = initialPane;
+    if (existing.lifecycle !== "active" && existing.lifecycle !== "draining") return;
     if (existing.agentKind === "traex" && hasLegacySessionIdentity(existing)) { await this.orphan(existing, `Herdr pane ${pane.paneId} has a retired Agent session identity`); return; }
     const compatible = existing.agentKind === "traex" ? isTraexCompatiblePane(pane) : matchesAgentKind(existing.agentKind, pane.agentKind);
     if (!compatible) { await this.orphan(existing, `Herdr pane ${pane.paneId} Agent kind does not match ${existing.agentKind}`); return; }
