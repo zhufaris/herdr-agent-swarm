@@ -1,7 +1,7 @@
 import { transitionSession, type SessionTransition } from "../../domain/pane-thread-lifecycle.js";
 import { isNativeTraexSession, sameNativeTraexSession } from "../../domain/traex-session-identity.js";
 import { matchesAgentKind } from "../../domain/agent-instance.js";
-import type { Binding, BindingMetadataPatch, BindingState, FailureSummary, HerdrPane, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionSummary } from "../../domain/types.js";
+import type { Binding, BindingMetadataPatch, BindingState, FailureSummary, HerdrPane, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionPage, SessionSummary } from "../../domain/types.js";
 import { mapBinding, mapRetiredPaneCleanup, type BindingRow, type RetiredPaneCleanupRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import type { AgentKind } from "../../domain/agent-instance.js";
@@ -9,6 +9,28 @@ import type { AgentKind } from "../../domain/agent-instance.js";
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
   id: "id", gatewayId: "gateway_id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id", rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id", agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value", title: "title", agentKind: "agent_kind", state: "state", statusMessageId: "status_message_id", statusCardSequence: "status_card_sequence", lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint", lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint", degradationCount: "degradation_count", hasCompletedTurn: "has_completed_turn", lastObservedAt: "last_observed_at", archivedAt: "archived_at", lastActivityAt: "last_activity_at", createdAt: "created_at", updatedAt: "updated_at"
 };
+const SESSION_PAGE_SIZE = 20;
+interface SessionCursor { attachment: number; lifecycle: number; activity: string; id: string; }
+
+function sessionPageSql(hasCursor: boolean): string {
+  const attachment = "CASE b.attachment WHEN 'degraded' THEN 0 WHEN 'orphaned' THEN 2 ELSE 1 END";
+  const lifecycle = "CASE b.lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END";
+  const cursor = hasCursor ? `AND ((${attachment}) > ? OR ((${attachment}) = ? AND ((${lifecycle}) > ? OR ((${lifecycle}) = ? AND (b.last_activity_at < ? OR (b.last_activity_at = ? AND b.id > ?))))))` : "";
+  return `SELECT b.*, ${attachment} AS attachment_rank, ${lifecycle} AS lifecycle_rank,
+    (SELECT COUNT(*) FROM prompt_jobs p WHERE p.binding_id = b.id AND p.state IN ('queued','running')) AS queue_depth,
+    COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name
+    FROM bindings b INDEXED BY bindings_chat_session_rank_order WHERE b.chat_id = ? ${cursor}
+    ORDER BY attachment_rank, lifecycle_rank, b.last_activity_at DESC, b.id`;
+}
+
+function encodeSessionCursor(cursor: SessionCursor): string { return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url"); }
+function decodeSessionCursor(value: string): SessionCursor {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<SessionCursor>;
+    if (!Number.isInteger(parsed.attachment) || !Number.isInteger(parsed.lifecycle) || typeof parsed.activity !== "string" || typeof parsed.id !== "string" || !parsed.id) throw new Error();
+    return parsed as SessionCursor;
+  } catch { throw new Error("invalid_sessions_cursor"); }
+}
 
 export class SqliteBindingLifecycleStore {
   constructor(private readonly context: SqliteContext, private readonly invalidateWorkerContexts?: (bindingId: string, reason: string) => void) {}
@@ -103,9 +125,14 @@ export class SqliteBindingLifecycleStore {
   listBindings(): Binding[] { return (this.database.prepare("SELECT * FROM bindings ORDER BY created_at").all() as BindingRow[]).map(mapBinding); }
   listBindingsByState(state: Binding["state"]): Binding[] { return (this.database.prepare("SELECT * FROM bindings WHERE state = ? ORDER BY created_at, id").all(state) as BindingRow[]).map(mapBinding); }
 
-  listSessions(chatId: string): SessionSummary[] {
-    const rows = this.database.prepare(`SELECT b.*, (SELECT COUNT(*) FROM prompt_jobs p WHERE p.binding_id = b.id AND p.state IN ('queued','running')) AS queue_depth, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM bindings b WHERE b.chat_id = ? ORDER BY CASE b.attachment WHEN 'degraded' THEN 0 WHEN 'orphaned' THEN 2 ELSE 1 END, CASE b.lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END, b.last_activity_at DESC, b.id`).all(chatId) as Array<BindingRow & { queue_depth: number; space_name: string }>;
-    return rows.map((row) => ({ binding: mapBinding(row), queueDepth: Number(row.queue_depth), spaceName: row.space_name }));
+  listSessions(chatId: string, cursor: string | null = null): SessionPage {
+    const decoded = cursor ? decodeSessionCursor(cursor) : null;
+    const parameters = decoded ? [decoded.attachment, decoded.attachment, decoded.lifecycle, decoded.lifecycle, decoded.activity, decoded.activity, decoded.id] : [];
+    const rows = this.database.prepare(`${sessionPageSql(Boolean(decoded))} LIMIT ?`).all(chatId, ...parameters, SESSION_PAGE_SIZE + 1) as Array<BindingRow & { queue_depth: number; space_name: string; attachment_rank: number; lifecycle_rank: number }>;
+    const pageRows = rows.slice(0, SESSION_PAGE_SIZE);
+    const sessions = pageRows.map((row): SessionSummary => ({ binding: mapBinding(row), queueDepth: Number(row.queue_depth), spaceName: row.space_name }));
+    const last = pageRows.at(-1);
+    return { sessions, nextCursor: rows.length > SESSION_PAGE_SIZE && last ? encodeSessionCursor({ attachment: Number(last.attachment_rank), lifecycle: Number(last.lifecycle_rank), activity: last.last_activity_at, id: last.id }) : null };
   }
 
   listFailures(chatId: string): FailureSummary[] {

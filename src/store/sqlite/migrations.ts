@@ -57,6 +57,7 @@ export class SqliteMigrations {
     this.retired.removeReportedTraexSessionColumns();
     this.binding.ensureBindingResetColumns();
     this.binding.ensureTwoPhaseResetState();
+    this.binding.ensureSessionQueryIndex();
     this.prompt.ensurePromptCancelledState();
     this.prompt.ensurePromptObservationColumn();
     this.prompt.ensurePromptProvenanceColumns();

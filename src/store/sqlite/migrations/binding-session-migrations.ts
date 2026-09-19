@@ -135,6 +135,15 @@ export class BindingSessionMigrations {
     if (!names.has("agent_session_value")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN agent_session_value TEXT");
   }
 
+  ensureSessionQueryIndex(): void {
+    this.context.database.exec(`CREATE INDEX IF NOT EXISTS bindings_chat_session_rank_order ON bindings(
+      chat_id,
+      CASE attachment WHEN 'degraded' THEN 0 WHEN 'orphaned' THEN 2 ELSE 1 END,
+      CASE lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END,
+      last_activity_at DESC, id
+    )`);
+  }
+
   ensureProjectSelectionColumns(): void {
     const bindingColumns = this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>;
     if (!bindingColumns.some((column) => column.name === "project_id")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN project_id TEXT");

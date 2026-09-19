@@ -15,6 +15,6 @@ describe("configured CardKit presentation", () => {
       queueDepth: 0, spaceName: "space"
     }));
     const presentation = createCardKitApplicationPresentation({ payloadLimitChars: 1_000, answerStreamLimitChars: 28_000 });
-    expect(presentation.sessions(sessions).length).toBeGreaterThan(1);
+    expect(presentation.sessions({ sessions, nextCursor: null }).length).toBeGreaterThan(1);
   });
 });

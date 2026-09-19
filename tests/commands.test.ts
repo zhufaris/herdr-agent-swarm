@@ -20,7 +20,9 @@ describe("commands", () => {
     expect(parseCommand("/swarm spaces extra")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm panes")).toEqual({ kind: "panes" });
     expect(parseCommand("/swarm panes extra")).toEqual({ kind: "help" });
-    expect(parseCommand("/swarm sessions")).toEqual({ kind: "sessions" });
+    expect(parseCommand("/swarm sessions")).toEqual({ kind: "sessions", cursor: null });
+    expect(parseCommand("/swarm sessions eyJpZCI6ImIxIn0")).toEqual({ kind: "sessions", cursor: "eyJpZCI6ImIxIn0" });
+    expect(parseCommand("/swarm sessions bad!cursor")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm failures")).toEqual({ kind: "failures" });
     expect(parseCommand("/swarm rename better title")).toEqual({ kind: "rename", title: "better title" });
     expect(parseCommand("/swarm status")).toEqual({ kind: "status" });

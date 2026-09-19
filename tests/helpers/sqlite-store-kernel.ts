@@ -386,8 +386,8 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.bindings.listBindingsByState(state);
   }
 
-  listSessions(chatId: string): SessionSummary[] {
-    return this.bindings.listSessions(chatId);
+  listSessions(chatId: string, cursor: string | null = null): ReturnType<SqliteBindingLifecycleStore["listSessions"]> {
+    return this.bindings.listSessions(chatId, cursor);
   }
 
   listFailures(chatId: string): FailureSummary[] {

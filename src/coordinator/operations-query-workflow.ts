@@ -12,7 +12,7 @@ interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQue
 export interface OperationsQueryWorkflowPort {
   listSpaces(message: IncomingLarkMessage): Promise<void>;
   listTopicPanes(message: IncomingLarkMessage, scopeBinding?: Binding | null): Promise<void>;
-  listSessions(message: IncomingLarkMessage): Promise<void>;
+  listSessions(message: IncomingLarkMessage, cursor?: string | null): Promise<void>;
   listFailures(message: IncomingLarkMessage): Promise<void>;
 }
 
@@ -56,7 +56,7 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
     await this.publishCards(message, "panes", [this.options.presentation.topicPanes(entries)]);
   }
 
-  async listSessions(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "sessions", this.options.presentation.sessions(this.options.store.listSessions(message.chatId))); }
+  async listSessions(message: IncomingLarkMessage, cursor: string | null = null): Promise<void> { await this.publishCards(message, "sessions", this.options.presentation.sessions(this.options.store.listSessions(message.chatId, cursor))); }
   async listFailures(message: IncomingLarkMessage): Promise<void> { await this.publishCards(message, "failures", this.options.presentation.failures(this.options.store.listFailures(message.chatId))); }
 
   private async publishCards(message: IncomingLarkMessage, kind: string, cards: object[]): Promise<void> {

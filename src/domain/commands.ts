@@ -38,7 +38,7 @@ export function parseCommand(text: string): BridgeCommand | null {
     case "panes":
       return argument ? { kind: "help" } : { kind: "panes" };
     case "sessions":
-      return argument ? { kind: "help" } : { kind: "sessions" };
+      return argument && !/^[A-Za-z0-9_-]+$/.test(argument) ? { kind: "help" } : { kind: "sessions", cursor: argument || null };
     case "failures":
       return argument ? { kind: "help" } : { kind: "failures" };
     case "status":

@@ -82,6 +82,7 @@ export interface SessionSummary {
   queueDepth: number;
   spaceName?: string;
 }
+export interface SessionPage { sessions: SessionSummary[]; nextCursor: string | null; }
 
 export type FailureSummary =
   | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
@@ -326,7 +327,7 @@ export type BridgeCommand =
   | { kind: "projects" }
   | { kind: "spaces" }
   | { kind: "panes" }
-  | { kind: "sessions" }
+  | { kind: "sessions"; cursor: string | null }
   | { kind: "failures" }
   | { kind: "status" }
   | { kind: "attach"; spaceName: string; paneId: string }

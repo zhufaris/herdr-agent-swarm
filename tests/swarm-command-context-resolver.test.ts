@@ -7,7 +7,7 @@ const project = { id: "project", displayName: "Project", spaceName: "space", des
 const message = { eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "", mentionsBot: true, isRootMessage: false };
 const binding = { id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native", generation: 3 } as never;
 const commandByKind = {
-  help: { kind: "help" }, projects: { kind: "projects" }, spaces: { kind: "spaces" }, panes: { kind: "panes" }, sessions: { kind: "sessions" }, failures: { kind: "failures" }, status: { kind: "status" },
+  help: { kind: "help" }, projects: { kind: "projects" }, spaces: { kind: "spaces" }, panes: { kind: "panes" }, sessions: { kind: "sessions", cursor: null }, failures: { kind: "failures" }, status: { kind: "status" },
   new: { kind: "new", title: null }, reset: { kind: "reset", title: null }, attach: { kind: "attach", spaceName: "space", paneId: "w1:p2" }, rename: { kind: "rename", title: "name" },
   close: { kind: "close" }, pane_close_request: { kind: "pane_close_request" }, pane_close_confirm: { kind: "pane_close_confirm", code: "ABC" }, reattach: { kind: "reattach", paneId: "w1:p2" },
   replace: { kind: "replace" }, resume: { kind: "resume" }, awake: { kind: "awake" }, skip: { kind: "skip" }, stop: { kind: "stop" }, steer: { kind: "steer", text: "focus" },
@@ -35,7 +35,7 @@ describe("SwarmCommandContextResolver", () => {
     [{ kind: "projects" }, "global", "chat:chat"],
     [{ kind: "spaces" }, "project", "project:project"],
     [{ kind: "panes" }, "global", "chat:chat"],
-    [{ kind: "sessions" }, "global", "chat:chat"],
+    [{ kind: "sessions", cursor: null }, "global", "chat:chat"],
     [{ kind: "failures" }, "global", "chat:chat"],
     [{ kind: "status" }, "primary-session", "binding:binding"],
     [{ kind: "new", title: null }, "global", "chat:chat"],

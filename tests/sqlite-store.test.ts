@@ -3386,7 +3386,7 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", promptId: "p1", rootMessageId: "m1", kind: "card_update", payload: "{}" });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed");
 
-    expect(store.listSessions("c1")).toHaveLength(1);
+    expect(store.listSessions("c1").sessions).toHaveLength(1);
     expect(store.listFailures("c1")).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "outbound", id: "o1" }), expect.objectContaining({ kind: "prompt", id: "p1" })]));
     expect(store.retryDeadLetter("o1", "c2", "u2")).toBe("unauthorized");
     expect(store.retryDeadLetter("o1", "c1", "u1")).toBe("retried");
@@ -3398,6 +3398,30 @@ describe("SQLite store", () => {
     expect(store.dismissDeadLetter("o1", "c1", "u1")).toBe("dismissed");
     expect(store.listFailures("c1").some((failure) => failure.kind === "outbound")).toBe(false);
     expect(store.getOperationalSummary().outbound.dismissed).toBe(1);
+  });
+
+  it("pages sessions with a stable non-overlapping keyset and chat-leading index", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (let index = 0; index < 45; index += 1) {
+      const id = `b-${String(index).padStart(2, "0")}`;
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: `t-${id}`, rootMessageId: `m-${id}`, title: id });
+      store.database.prepare("UPDATE bindings SET last_activity_at = ? WHERE id = ?").run(`2026-09-18T00:${String(index).padStart(2, "0")}:00.000Z`, id);
+    }
+    const first = store.listSessions("c1");
+    expect(first.sessions).toHaveLength(20);
+    expect(first.nextCursor).not.toBeNull();
+    store.createPendingBinding({ id: "newest", workspaceId: "w1", chatId: "c1", topicId: "t-new", rootMessageId: "m-new", title: "new" });
+    store.database.prepare("UPDATE bindings SET last_activity_at = '2099-01-01T00:00:00.000Z' WHERE id = 'newest'").run();
+    const second = store.listSessions("c1", first.nextCursor);
+    expect(second.sessions).toHaveLength(20);
+    expect(second.sessions.map(({ binding }) => binding.id).filter((id) => first.sessions.some(({ binding }) => binding.id === id))).toEqual([]);
+    expect(() => store!.listSessions("c1", "invalid")).toThrow("invalid_sessions_cursor");
+    const plan = store.database.prepare(`EXPLAIN QUERY PLAN SELECT * FROM bindings INDEXED BY bindings_chat_session_rank_order WHERE chat_id = ? ORDER BY
+      CASE attachment WHEN 'degraded' THEN 0 WHEN 'orphaned' THEN 2 ELSE 1 END,
+      CASE lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END,
+      last_activity_at DESC, id LIMIT 21`).all("c1") as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("bindings_chat_session_rank_order"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("TEMP B-TREE"))).toBe(false);
   });
 
   it("atomically accepts one streaming answer card and claims before its card identity is delivered", () => {

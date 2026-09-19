@@ -13,7 +13,7 @@ import type { AgentInstance, InstanceRemovalPlan, InstanceTarget, WorkspaceLease
 import type { AgentCapabilities } from "../agent-runtime.js";
 import type { ModelPreference, TraexModelSummary } from "../model-selection.js";
 import type { WorkerMainView } from "../worker-main-view.js";
-import type { Binding, FailureSummary, ProjectConfig, SessionSummary } from "../types.js";
+import type { Binding, FailureSummary, ProjectConfig, SessionPage } from "../types.js";
 import type { InstanceTurnSummary } from "../instance-turn.js";
 import type { WorkerHumanReviewNotificationInput } from "../worker-human-review.js";
 
@@ -59,7 +59,7 @@ export interface ApplicationPresentation extends PrimaryPresentation, WorkerPres
   skipStatus(message: string, outcome: "skipped" | "none" | "stale"): object;
   modelSelection(input: { bindingId: string; spaceName: string; paneId: string; models: readonly TraexModelSummary[]; preference: ModelPreference | null; notice?: string }): object;
   modelResult(input: { bindingId: string; spaceName: string; paneId: string; output: string; switched: boolean }): object;
-  sessions(sessions: SessionSummary[]): object[];
+  sessions(page: SessionPage): object[];
   failures(failures: FailureSummary[], notice?: string): object[];
   spaces(groups: SpaceDirectoryGroup[]): object[];
   topicPanes(entries: TopicPaneDirectoryEntry[]): object;

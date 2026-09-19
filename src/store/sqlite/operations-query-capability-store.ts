@@ -15,5 +15,5 @@ export class SqliteOperationsQueryCapabilityStore implements OperationsQueryStor
   listWorkerInstancesByParent: OperationsQueryStore["listWorkerInstancesByParent"] = (input) => this.instances.listWorkerInstancesByParent(input);
   loadTopicView: OperationsQueryStore["loadTopicView"] = (bindingId) => this.projections.loadTopicView(bindingId);
   listFailures: OperationsQueryStore["listFailures"] = (chatId) => this.bindings.listFailures(chatId);
-  listSessions: OperationsQueryStore["listSessions"] = (chatId) => this.bindings.listSessions(chatId);
+  listSessions: OperationsQueryStore["listSessions"] = (chatId, cursor) => this.bindings.listSessions(chatId, cursor);
 }

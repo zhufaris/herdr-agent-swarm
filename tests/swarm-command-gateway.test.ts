@@ -32,7 +32,7 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
 describe("SwarmCommandGateway", () => {
   it.each([
     [{ kind: "help" }, "outbound", "enqueueCard"], [{ kind: "projects" }, "provisioning", "selectProject"], [{ kind: "spaces" }, "operationsQuery", "listSpaces"], [{ kind: "panes" }, "operationsQuery", "listTopicPanes"],
-    [{ kind: "sessions" }, "operationsQuery", "listSessions"], [{ kind: "failures" }, "operationsQuery", "listFailures"], [{ kind: "status" }, "sessionAdministration", "emitStatus"],
+    [{ kind: "sessions", cursor: null }, "operationsQuery", "listSessions"], [{ kind: "failures" }, "operationsQuery", "listFailures"], [{ kind: "status" }, "sessionAdministration", "emitStatus"],
     [{ kind: "model", name: null }, "modelSelection", "runModel"]
   ] as const)("runs query %j without a durable intent", async (command, owner, method) => {
     const fixture = setup(); await fixture.gateway.handle(message, command); expect((fixture[owner] as never)[method]).toHaveBeenCalled();

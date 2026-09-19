@@ -204,7 +204,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     if (command.kind === "projects") return this.options.provisioning.selectProject(message, null);
     if (command.kind === "spaces") return this.options.operationsQuery.listSpaces(message);
     if (command.kind === "panes") return this.options.operationsQuery.listTopicPanes(message, binding);
-    if (command.kind === "sessions") return this.options.operationsQuery.listSessions(message);
+    if (command.kind === "sessions") return this.options.operationsQuery.listSessions(message, command.cursor);
     if (command.kind === "failures") return this.options.operationsQuery.listFailures(message);
     if (command.kind === "status" && binding) return this.options.sessionAdministration.emitStatus(binding);
     if (command.kind === "model") { await this.options.modelSelection.runModel(message, binding, null); return; }

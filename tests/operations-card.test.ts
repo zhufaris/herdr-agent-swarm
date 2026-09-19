@@ -13,6 +13,10 @@ describe("operations cards", () => {
     expect(serialized).not.toContain("active/attached");
   });
 
+  it("shows the opaque continuation command on a bounded session page", () => {
+    expect(JSON.stringify(renderSessionCards([bindingSummary()], 12_000, "next_cursor"))).toContain("/swarm sessions next_cursor");
+  });
+
   it("only gives outbound failures retry and dismiss controls", () => {
     const serialized = JSON.stringify(renderFailureCards([
       { kind: "outbound", id: "outbound-reply-123456789", bindingId: "b1", attemptCount: 5, updatedAt: "now", error: "send", spaceName: "datasage", paneId: "w1:p1" },
@@ -53,3 +57,4 @@ describe("operations cards", () => {
 function binding() {
   return { id: "b1", projectId: "project", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", paneId: "w1:p1", traexSessionId: null, title: "Session", runtime: "traex" as const, state: "active" as const, statusMessageId: "m1", lastAgentState: "idle" as const, lastOutputFingerprint: null, lifecycle: "active" as const, attachment: "attached" as const, generation: 1, provisioningCheckpoint: "activated" as const, degradationCount: 0, hasCompletedTurn: false, lastObservedAt: null, archivedAt: null, lastActivityAt: "now", createdAt: "now", updatedAt: "now" };
 }
+function bindingSummary() { return { queueDepth: 0, binding: binding() }; }

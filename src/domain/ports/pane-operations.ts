@@ -33,7 +33,7 @@ export interface PaneOperationsStore {
   terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null;
   getBinding(id: string): Binding | null;
   listBindings(): Binding[];
-  listSessions(chatId: string): SessionSummary[];
+  listSessions(chatId: string, cursor?: string | null): import("../types.js").SessionPage;
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[];
   loadTopicView(bindingId: string): TopicViewState | null;
   transitionBinding(id: string, transition: SessionTransition): Binding;

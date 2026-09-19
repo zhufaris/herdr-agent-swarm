@@ -10,7 +10,7 @@ const ATTACHMENT_LABEL: Record<Binding["attachment"], string> = {
 };
 const AGENT_LABEL: Record<AgentState, string> = { idle: "空闲", working: "执行中", blocked: "等待处理", done: "已完成", unknown: "未知" };
 
-export function renderSessionCards(sessions: SessionSummary[], payloadLimit = 12_000): object[] {
+export function renderSessionCards(sessions: SessionSummary[], payloadLimit = 12_000, nextCursor: string | null = null): object[] {
   const rows = sessions.map(({ binding, queueDepth, spaceName }) => {
     const scope = spaceName ?? binding.projectId ?? binding.workspaceId;
     const content = [
@@ -20,6 +20,7 @@ export function renderSessionCards(sessions: SessionSummary[], payloadLimit = 12
     ].join("\n");
     return [{ tag: "markdown", content }, ...(binding.rootMessageId ? [button("发送话题入口", { action: "open_project_thread", bindingId: binding.id })] : [])];
   });
+  if (nextCursor) rows.push([{ tag: "markdown", content: `继续查看：\`/swarm sessions ${nextCursor}\`` }]);
   return paginate("Herdr Sessions", "当前群没有会话。", rows, "blue", payloadLimit);
 }
 
