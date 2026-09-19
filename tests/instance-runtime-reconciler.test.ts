@@ -204,14 +204,27 @@ describe("instance runtime reconciliation", () => {
     expect(wakeCardContext).toHaveBeenCalledOnce();
   });
 
+  it("terminalizes a pending Worker whose allocated pane is absent", async () => {
+    const { instance, reconciler, wake, wakeCardContext } = setupPending([]);
+
+    await reconciler.reconcile();
+
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({
+      generation: instance.generation + 1, desiredState: "stopped", observedState: "stopped",
+      workerSessionLifecycle: "terminated", pendingRuntimeRef: null,
+      lastError: "Herdr pending pane herdr-w:p1 is missing"
+    });
+    expect(wake).not.toHaveBeenCalled();
+    expect(wakeCardContext).toHaveBeenCalledOnce();
+  });
+
   it.each([
-    ["missing pane", null],
     ["missing session identity", pane({ agentSession: null })],
     ["workspace mismatch", pane({ workspaceId: "other-w" })],
     ["cwd mismatch", pane({ cwd: "/other" })],
     ["agent mismatch", pane({ agentKind: "claude", foregroundExecutables: ["claude"] })]
   ])("leaves a pending runtime unchanged on %s", async (_reason, observedPane) => {
-    const { instance, reconciler, wake, wakeCardContext } = setupPending(observedPane ? [observedPane] : []);
+    const { instance, reconciler, wake, wakeCardContext } = setupPending([observedPane]);
 
     await reconciler.reconcile();
 

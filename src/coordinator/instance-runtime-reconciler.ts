@@ -89,8 +89,14 @@ export class InstanceRuntimeReconciler {
       if (instance.role !== "worker" || instance.workerSessionLifecycle !== "active" || instance.desiredState !== "running" || !pending
         || pending.generation !== instance.generation || instance.provisioningCheckpoint !== "pane-allocated" && instance.provisioningCheckpoint !== "runtime-started") return;
       const pendingPane = panes.get(pending.paneId);
+      if (!pendingPane) {
+        if (this.options.store.terminateWorkerSession({
+          instanceId: instance.id, expectedGeneration: instance.generation, reason: `Herdr pending pane ${pending.paneId} is missing`
+        })) this.options.wakeCardContext?.();
+        return;
+      }
       const workspace = this.options.store.getWorkspaceLease(instance.workspaceLeaseId);
-      if (!pendingPane || pending.herdrWorkspaceId !== project.workspaceId || pendingPane.workspaceId !== pending.herdrWorkspaceId
+      if (pending.herdrWorkspaceId !== project.workspaceId || pendingPane.workspaceId !== pending.herdrWorkspaceId
         || pendingPane.cwd !== workspace?.cwd || !pendingPane.agentKind || !matchesHerdrAgentKind(instance.agentKind, pendingPane.agentKind)
         || !pendingPane.agentSession?.value || !matchesHerdrAgentKind(instance.agentKind, pendingPane.agentSession.agent)) return;
       const attached = this.options.store.attachAgentInstanceRuntime({
