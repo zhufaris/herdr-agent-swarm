@@ -259,6 +259,32 @@ describe("workspace snapshot cache", () => {
     expect(observeRuntime).toHaveBeenCalledWith("w1:p1");
   });
 
+  it("bounds fallback runtime observations when the delegate has no bulk API", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const releases: Array<() => void> = [];
+    const observeRuntime = vi.fn(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" as const };
+    });
+    const cache = new WorkspaceSnapshotCache(adapter({ observeRuntime }));
+    const work = cache.observeRuntimes(["w1:p1", "w1:p2", "w1:p3", "w1:p4", "w1:p5", "w1:p6"]);
+
+    await Promise.resolve();
+    expect(active).toBe(4);
+    releases.splice(0).forEach((release) => release());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(active).toBe(2);
+    releases.splice(0).forEach((release) => release());
+
+    await expect(work).resolves.toHaveProperty("size", 6);
+    expect(maximumActive).toBe(4);
+    expect(observeRuntime).toHaveBeenCalledTimes(6);
+  });
+
   it("preserves validation semantics and forwards pane close while invalidating the snapshot", async () => {
     const assertWorkspace = vi.fn(async () => { throw new Error("workspace missing"); });
     const closePane = vi.fn(async () => undefined);

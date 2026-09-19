@@ -1,11 +1,13 @@
 import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, WorkspaceCacheStatus } from "../domain/types.js";
+import { mapWithConcurrency } from "./map-with-concurrency.js";
 import { safeLogError } from "./safe-error.js";
 
 interface Snapshot { panes: HerdrPane[]; capturedAt: number }
 interface Refresh<T> { generation: number; resetGeneration: number; promise: Promise<T> }
 const MAX_TARGETED_READS = 256;
+const RUNTIME_OBSERVATION_CONCURRENCY = 4;
 
 export class WorkspaceSnapshotCache implements HerdrPort {
   private readonly snapshots = new Map<string, Snapshot>();
@@ -152,7 +154,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   }
   async observeRuntimes(paneIds: readonly string[]): Promise<ReadonlyMap<string, RuntimeObservation>> {
     if (!this.delegate.observeRuntimes) {
-      const observations = await Promise.all(paneIds.map(async (paneId) => [paneId, await this.observeRuntime(paneId)] as const));
+      const observations = await mapWithConcurrency(paneIds, RUNTIME_OBSERVATION_CONCURRENCY, async (paneId) => [paneId, await this.observeRuntime(paneId)] as const);
       return new Map(observations);
     }
     const observations = await this.delegate.observeRuntimes(paneIds);
