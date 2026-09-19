@@ -136,7 +136,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
       const path = await this.resolveTranscriptPath(session.value);
       if (!path) return { mode: "unavailable", reason: "transcript_not_found" };
       const file = await stat(path);
-      const baseline = await latestTranscriptBaseline(path, file.size, MAX_RECOVERY_SCAN_BYTES, this.maxRenderedDeltaChars);
+      const baseline = await latestActiveTranscriptBaseline(path, file.size, MAX_RECOVERY_SCAN_BYTES, this.maxRenderedDeltaChars);
       return { mode: "typed", cursor: new FileTraexTranscriptCursor(path, baseline.replayOffset ?? file.size, this.maxReadBytes, this.maxRenderedDeltaChars, baseline.tokenCount, baseline.replayOffset === null ? baseline.turnLifecycle : undefined) };
     } catch {
       return { mode: "unavailable", reason: "transcript_validation_failed" };
@@ -459,6 +459,85 @@ async function latestTranscriptBaseline(path: string, end: number, maxBytes: num
   }
 }
 
+async function latestActiveTranscriptBaseline(path: string, end: number, maxBytes: number, maxRenderedDeltaChars: number): Promise<TranscriptBaseline> {
+  if (end <= 0) return { tokenCount: null, turnLifecycle: undefined, replayOffset: null };
+  const lowerBound = Math.max(0, end - maxBytes);
+  const handle = await open(path, "r");
+  let latestTokenCount: number | null | undefined;
+  let activeTurnTokenBaseline: number | null | undefined;
+  let latestStartOffset: number | null = null;
+  const laterLifecycle: Array<z.infer<typeof envelopeSchema>> = [];
+  let turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
+  try {
+    await scanRecordsBackward(handle, lowerBound, end, (record, offset) => {
+      if (!isBaselineEventRecord(record)) return false;
+      const envelope = parseEnvelope(record.toString("utf8"));
+      if (!envelope || envelope.type !== "event_msg") return false;
+      const tokens = tokenCountEventSchema.safeParse(envelope.payload);
+      if (tokens.success) {
+        latestTokenCount ??= tokens.data.info.total_token_usage.total_tokens;
+        if (latestStartOffset !== null && activeTurnTokenBaseline === undefined) activeTurnTokenBaseline = tokens.data.info.total_token_usage.total_tokens;
+      }
+      if (latestStartOffset === null) {
+        const started = taskStartedEventSchema.safeParse(envelope.payload);
+        if (started.success) {
+          latestStartOffset = offset;
+          turnLifecycle = reduceTurnLifecycle(undefined, envelope, maxRenderedDeltaChars);
+          for (let index = laterLifecycle.length - 1; index >= 0; index -= 1) {
+            turnLifecycle = reduceTurnLifecycle(turnLifecycle, laterLifecycle[index]!, maxRenderedDeltaChars);
+          }
+        } else if (taskCompleteEventSchema.safeParse(envelope.payload).success || turnAbortedEventSchema.safeParse(envelope.payload).success) {
+          laterLifecycle.push(envelope);
+        }
+      }
+      if (latestStartOffset === null) return false;
+      if (turnLifecycle?.state === "active") return activeTurnTokenBaseline !== undefined;
+      return latestTokenCount !== undefined;
+    });
+    if (latestStartOffset === null) return { tokenCount: latestTokenCount ?? null, turnLifecycle: undefined, replayOffset: null };
+    return {
+      tokenCount: turnLifecycle?.state === "active" ? activeTurnTokenBaseline ?? null : latestTokenCount ?? null,
+      turnLifecycle,
+      replayOffset: turnLifecycle?.state === "active" ? latestStartOffset : null
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function scanRecordsBackward(
+  handle: Awaited<ReturnType<typeof open>>, lowerBound: number, end: number,
+  inspect: (record: Buffer, offset: number) => boolean
+): Promise<void> {
+  let position = end;
+  let carry = Buffer.alloc(0);
+  while (position > lowerBound) {
+    const start = Math.max(lowerBound, position - RECOVERY_SCAN_CHUNK_BYTES);
+    const chunk = Buffer.allocUnsafe(position - start);
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
+    if (bytesRead === 0) break;
+    const source = carry.length === 0 ? chunk.subarray(0, bytesRead) : Buffer.concat([chunk.subarray(0, bytesRead), carry]);
+    const firstNewline = source.indexOf(0x0a);
+    if (firstNewline < 0) {
+      carry = source;
+      if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX baseline record exceeds bounded size");
+      position = start;
+      continue;
+    }
+    let recordEnd = source.length;
+    while (recordEnd > firstNewline) {
+      const newline = source.lastIndexOf(0x0a, recordEnd - 1);
+      const recordStart = newline + 1;
+      if (recordEnd > recordStart && inspect(source.subarray(recordStart, recordEnd), start + recordStart)) return;
+      recordEnd = newline;
+    }
+    carry = source.subarray(0, firstNewline);
+    if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX baseline record exceeds bounded size");
+    position = start;
+  }
+  if (lowerBound === 0 && carry.length > 0) inspect(carry, 0);
+}
+
 function isBaselineEventRecord(record: Buffer): boolean {
   return BASELINE_EVENT_MARKERS.some((marker) => record.includes(marker));
 }
@@ -596,33 +675,6 @@ export async function scanTranscriptPaths(root: string, maxEntries: number): Pro
   };
   await visit(rootPath);
   return { pathsBySessionId, exhausted: state.exhausted };
-}
-
-async function findExactTranscriptPaths(root: string, sessionId: string, maxEntries: number): Promise<TranscriptDiscoveryResult> {
-  const rootPath = await realpath(root);
-  const matches: string[] = [];
-  const state = { visited: 0, stopped: false, exhausted: false };
-  const visit = async (directory: string): Promise<void> => {
-    if (state.stopped || state.exhausted) return;
-    const entries = await opendir(directory);
-    for await (const entry of entries) {
-      if (state.stopped || state.exhausted) break;
-      if (state.visited >= maxEntries) { state.exhausted = true; break; }
-      state.visited += 1;
-      const path = resolve(directory, entry.name);
-      if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile() && basename(path).endsWith(`-${sessionId}.jsonl`)) matches.push(path);
-      if (matches.length > 1) state.stopped = true;
-    }
-  };
-  await visit(rootPath);
-  if (state.exhausted) return { paths: matches, exhausted: true };
-  for (const path of matches) {
-    const resolvedPath = await realpath(path);
-    const child = relative(rootPath, resolvedPath);
-    if (child.startsWith(`..${sep}`) || child === "..") return { paths: [], exhausted: false };
-  }
-  return { paths: matches, exhausted: false };
 }
 
 async function isValidTranscriptPath(root: string, path: string, sessionId: string): Promise<boolean> {

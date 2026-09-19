@@ -413,6 +413,54 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("opens at EOF when the latest turn is already complete", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "answer-1", role: "assistant", content: [{ type: "output_text", text: "completed answer" }] }]),
+      eventMessage({ type: "task_complete", turn_id: turnId, started_at: 1_788_035_304, completed_at: 1_788_035_318, last_agent_message: "completed answer" })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openActiveTurn!(session()));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, answerDelta: "", turnLifecycle: { turnId, state: "completed", finalAnswer: "completed answer" }
+    });
+  });
+
+  it("does not let a foreign terminal event close the latest active turn", async () => {
+    const { root, path } = await createTranscript();
+    const activeTurn = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const foreignTurn = "01a04f35-9d2f-7913-8ac7-9642e7c6a615";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: activeTurn, started_at: 1_788_035_304 }),
+      mutation([{ type: "message", id: "answer-1", role: "assistant", content: [{ type: "output_text", text: "still active" }] }]),
+      eventMessage({ type: "task_complete", turn_id: foreignTurn, started_at: 1_788_035_320, completed_at: 1_788_035_321 })
+    ].join(""));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openActiveTurn!(session()));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId: activeTurn, freshTurnStart: true, answerDelta: "still active", turnLifecycle: { turnId: activeTurn, state: "active" }
+    });
+  });
+
+  it("recovers an active turn whose start record crosses a reverse-scan chunk boundary", async () => {
+    const { root, path } = await createTranscript();
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const start = eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 });
+    const answer = mutation([{ type: "message", id: "answer-1", role: "assistant", content: [{ type: "output_text", text: "cross-boundary answer" }] }]);
+    const tailLength = 1024 * 1024 - Math.floor(start.length / 2);
+    await appendFile(path, start + answer + eventMessage({ type: "agent_reasoning_raw_content", text: "x".repeat(tailLength) }));
+
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).openActiveTurn!(session()));
+
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      turnId, freshTurnStart: true, answerDelta: "cross-boundary answer", turnLifecycle: { turnId, state: "active" }
+    });
+  });
+
   it("emits adjacent transcript turns as separate lifecycle-scoped observations", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
