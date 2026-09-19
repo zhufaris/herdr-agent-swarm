@@ -3,7 +3,10 @@ import type { HerdrPort } from "../domain/ports/external.js";
 import type { HerdrPane } from "../domain/types.js";
 import type { ReconciliationFailure } from "../runtime/diagnostics.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
+import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 import { safeLogError } from "../runtime/safe-error.js";
+
+const WORKSPACE_DISCOVERY_CONCURRENCY = 4;
 
 export class HerdrSnapshotCollector {
   private readonly workspaceFailureLogs = new FailureLogGate();
@@ -11,7 +14,7 @@ export class HerdrSnapshotCollector {
   constructor(private readonly herdr: HerdrPort, private readonly logger: Logger) {}
 
   async allOrConfigured(workspaceIds: readonly string[]): Promise<HerdrPane[]> {
-    return this.herdr.listAllPanes ? this.herdr.listAllPanes() : (await Promise.all(workspaceIds.map((id) => this.herdr.listPanes(id)))).flat();
+    return this.herdr.listAllPanes ? this.herdr.listAllPanes() : (await mapWithConcurrency(workspaceIds, WORKSPACE_DISCOVERY_CONCURRENCY, (id) => this.herdr.listPanes(id))).flat();
   }
 
   async collect(workspaceIds: readonly string[]): Promise<{ panesByWorkspace: Map<string, HerdrPane[]>; failures: ReconciliationFailure[] }> {
@@ -32,7 +35,7 @@ export class HerdrSnapshotCollector {
       }
     }
     const failures: ReconciliationFailure[] = [];
-    await Promise.all(workspaceIds.map(async (workspaceId) => {
+    await mapWithConcurrency(workspaceIds, WORKSPACE_DISCOVERY_CONCURRENCY, async (workspaceId) => {
       try {
         result.set(workspaceId, await this.herdr.listPanes(workspaceId));
         const recovery = this.workspaceFailureLogs.recover(workspaceId);
@@ -43,7 +46,7 @@ export class HerdrSnapshotCollector {
         const decision = this.workspaceFailureLogs.fail(workspaceId, safe.message);
         if (decision.kind !== "suppressed") this.logger.warn({ event: decision.kind === "summary" ? "workspace-reconciliation-failure-summary" : "workspace-reconciliation-failed", err: safe, workspaceId, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "failed" }, "workspace reconciliation failed");
       }
-    }));
+    });
     return { panesByWorkspace: result, failures };
   }
 }
