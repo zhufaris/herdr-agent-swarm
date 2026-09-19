@@ -370,7 +370,7 @@ export class CardOutboxMigrations {
       const immutableClaim = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_immutable_claim'").get() as { sql: string } | undefined;
       const groupTargets = names.has("target_chat_id") && names.has("thread_alias_id");
       const workerTarget = names.has("worker_thread_id");
-      if (immutableClaim && (!immutableClaim.sql.includes("work_class") || !immutableClaim.sql.includes("gateway_plan_json") || !immutableClaim.sql.includes("OLD.claim_attempt_id IS NULL") || groupTargets && !immutableClaim.sql.includes("target_chat_id") || workerTarget && !immutableClaim.sql.includes("worker_thread_id"))) this.context.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
+      if (immutableClaim && (!immutableClaim.sql.includes("work_class") || !immutableClaim.sql.includes("gateway_plan_json") || !immutableClaim.sql.includes("OLD.claim_attempt_id IS NULL") || !immutableClaim.sql.includes("json_object('schemaVersion', 2") || groupTargets && !immutableClaim.sql.includes("target_chat_id") || workerTarget && !immutableClaim.sql.includes("worker_thread_id"))) this.context.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
       const groupTargetColumns = groupTargets ? `target_chat_id, thread_alias_id, ${workerTarget ? "worker_thread_id, " : ""}` : "";
       const groupTargetChanges = groupTargets ? `NEW.target_chat_id IS NOT OLD.target_chat_id OR NEW.thread_alias_id IS NOT OLD.thread_alias_id OR ${workerTarget ? "NEW.worker_thread_id IS NOT OLD.worker_thread_id OR " : ""}` : "";
       this.context.database.exec(`
@@ -379,7 +379,12 @@ export class CardOutboxMigrations {
         CREATE TRIGGER IF NOT EXISTS outbound_replies_immutable_claim
         BEFORE UPDATE OF payload, intent_json, intent_kind, renderer_revision, gateway_id, gateway_profile_id, gateway_plan_json, gateway_plan_hash, root_message_id, ${groupTargetColumns}kind, view_version, card_sequence, idempotency_key, lane_key, work_class, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, card_role, target_role, selection_id, stream_page_index, stream_element_id, snapshot_revision, first_claimed_at ON outbound_replies
         WHEN OLD.first_claimed_at IS NOT NULL AND (
-          NEW.payload IS NOT OLD.payload OR NEW.intent_json IS NOT OLD.intent_json OR NEW.intent_kind IS NOT OLD.intent_kind OR NEW.renderer_revision IS NOT OLD.renderer_revision
+          NEW.payload IS NOT OLD.payload OR (NEW.intent_json IS NOT OLD.intent_json AND NOT (
+            OLD.claim_attempt_id IS NULL AND OLD.state IN ('delivered','dismissed') AND OLD.renderer_revision = 1
+            AND json_valid(OLD.intent_json) AND json_extract(OLD.intent_json, '$.schemaVersion') = 1
+            AND json_extract(OLD.intent_json, '$.kind') = OLD.intent_kind AND json_extract(OLD.intent_json, '$.materializedPayload') = OLD.payload
+            AND NEW.intent_json = json_object('schemaVersion', 2, 'kind', OLD.intent_kind)
+          )) OR NEW.intent_kind IS NOT OLD.intent_kind OR NEW.renderer_revision IS NOT OLD.renderer_revision
           OR NEW.gateway_id IS NOT OLD.gateway_id OR NEW.gateway_profile_id IS NOT OLD.gateway_profile_id
           OR ((NEW.gateway_plan_json IS NOT OLD.gateway_plan_json OR NEW.gateway_plan_hash IS NOT OLD.gateway_plan_hash) AND NOT (
             OLD.claim_attempt_id IS NULL AND OLD.gateway_plan_json IS NULL AND OLD.gateway_plan_hash IS NULL
@@ -678,15 +683,21 @@ export class CardOutboxMigrations {
     if (!names.has("intent_kind")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN intent_kind TEXT");
     if (!names.has("intent_json")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN intent_json TEXT");
     if (!names.has("renderer_revision")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN renderer_revision INTEGER");
-    this.context.database.exec(`
-      CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert AFTER INSERT ON outbound_replies WHEN NEW.intent_json IS NULL BEGIN
-        UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload), renderer_revision = 1 WHERE id = NEW.id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_payload_update AFTER UPDATE OF payload ON outbound_replies BEGIN
-        UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 1, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, 'materializedPayload', NEW.payload), renderer_revision = 1 WHERE id = NEW.id;
-      END;
-    `);
-    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (29)").run();
+    const insertTrigger = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_typed_intent_insert'").get() as { sql: string } | undefined;
+    const needsV2Triggers = !insertTrigger?.sql.includes("json_object('schemaVersion', 2");
+    this.context.transaction(() => {
+      if (needsV2Triggers) this.context.database.exec("DROP TRIGGER IF EXISTS outbound_replies_typed_intent_insert; DROP TRIGGER IF EXISTS outbound_replies_typed_intent_payload_update");
+      this.context.database.exec(`
+        CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_insert AFTER INSERT ON outbound_replies WHEN NEW.intent_json IS NULL BEGIN
+          UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 2, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END), renderer_revision = 1 WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS outbound_replies_typed_intent_payload_update AFTER UPDATE OF payload ON outbound_replies BEGIN
+          UPDATE outbound_replies SET intent_kind = CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END, intent_json = json_object('schemaVersion', 2, 'kind', CASE NEW.kind WHEN 'text' THEN 'text' WHEN 'group_card_create' THEN 'group-card' WHEN 'stream_card_create' THEN 'stream-card' WHEN 'stream_content' THEN 'stream-content' WHEN 'stream_finish' THEN 'stream-finish' ELSE 'card' END), renderer_revision = 1 WHERE id = NEW.id;
+        END;
+      `);
+      this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (29)").run();
+      this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (46)").run();
+    });
   }
 }
 

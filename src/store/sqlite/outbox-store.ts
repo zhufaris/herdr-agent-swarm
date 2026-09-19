@@ -68,4 +68,5 @@ export class SqliteOutboxStore {
   dismissDeadLetter(id: string, chatId: string, actorOpenId: string): DeadLetterActionOutcome { return this.recovery.dismissDeadLetter(id, chatId, actorOpenId); }
 
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number { return this.retention.pruneDelivered(cutoff, limit); }
+  compactDeliveryIntents(limit: number): number { return this.retention.compactDeliveryIntents(limit); }
 }

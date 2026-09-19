@@ -1,9 +1,11 @@
 import type { OutboundReplyKind } from "./types.js";
 
-export const DELIVERY_INTENT_SCHEMA_VERSION = 1;
+export const DELIVERY_INTENT_SCHEMA_VERSION = 2;
 export const CARD_RENDERER_REVISION = 1;
 export type DeliveryIntentKind = "text" | "card" | "group-card" | "stream-card" | "stream-content" | "stream-finish";
-export interface MaterializedDeliveryIntent { schemaVersion: 1; kind: DeliveryIntentKind; materializedPayload: string }
+export interface MaterializedDeliveryIntentV1 { schemaVersion: 1; kind: DeliveryIntentKind; materializedPayload: string }
+export interface DeliveryIntentV2 { schemaVersion: 2; kind: DeliveryIntentKind }
+export type DeliveryIntent = MaterializedDeliveryIntentV1 | DeliveryIntentV2;
 
 export function deliveryIntentKind(kind: OutboundReplyKind): DeliveryIntentKind {
   if (kind === "text") return "text";
@@ -13,14 +15,19 @@ export function deliveryIntentKind(kind: OutboundReplyKind): DeliveryIntentKind 
   if (kind === "stream_finish") return "stream-finish";
   return "card";
 }
-export function materializedDeliveryIntent(kind: OutboundReplyKind, payload: string): MaterializedDeliveryIntent { return { schemaVersion: DELIVERY_INTENT_SCHEMA_VERSION, kind: deliveryIntentKind(kind), materializedPayload: payload }; }
+export function materializedDeliveryIntent(kind: OutboundReplyKind, payload: string): MaterializedDeliveryIntentV1 { return { schemaVersion: 1, kind: deliveryIntentKind(kind), materializedPayload: payload }; }
 export function encodeDeliveryIntent(kind: OutboundReplyKind, payload: string): { intentKind: DeliveryIntentKind; intentJson: string; rendererRevision: number } {
-  const intent = materializedDeliveryIntent(kind, payload);
+  const intent: DeliveryIntentV2 = { schemaVersion: DELIVERY_INTENT_SCHEMA_VERSION, kind: deliveryIntentKind(kind) };
   return { intentKind: intent.kind, intentJson: JSON.stringify(intent), rendererRevision: CARD_RENDERER_REVISION };
 }
-export function decodeDeliveryIntent(value: string | null): MaterializedDeliveryIntent | null {
+export function decodeDeliveryIntent(value: string | null): DeliveryIntent | null {
   if (!value) return null;
-  try { const parsed = JSON.parse(value) as Partial<MaterializedDeliveryIntent>; return parsed.schemaVersion === 1 && isDeliveryIntentKind(parsed.kind) && typeof parsed.materializedPayload === "string" ? parsed as MaterializedDeliveryIntent : null; }
+  try {
+    const parsed = JSON.parse(value) as { schemaVersion?: unknown; kind?: unknown; materializedPayload?: unknown };
+    if (!isDeliveryIntentKind(parsed.kind)) return null;
+    if (parsed.schemaVersion === 2) return { schemaVersion: 2, kind: parsed.kind };
+    return parsed.schemaVersion === 1 && typeof parsed.materializedPayload === "string" ? parsed as MaterializedDeliveryIntentV1 : null;
+  }
   catch { return null; }
 }
 

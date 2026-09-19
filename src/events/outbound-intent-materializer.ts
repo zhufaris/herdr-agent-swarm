@@ -7,5 +7,5 @@ export function materializeOutboundReply(reply: OutboundReply): string {
   if (legacy) return reply.payload;
   const intent = decodeDeliveryIntent(reply.intentJson);
   if (!intent || reply.rendererRevision !== 1 || intent.kind !== reply.intentKind) throw new PermanentDeliveryError(`Unsupported durable delivery intent for reply ${reply.id}`);
-  return intent.materializedPayload;
+  return intent.schemaVersion === 1 ? intent.materializedPayload : reply.payload;
 }

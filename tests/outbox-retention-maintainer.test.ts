@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { OutboxRetentionMaintainer } from "../src/runtime/outbox-retention-maintainer.js";
 
 describe("outbox retention maintainer", () => {
+  it("compacts delivery intents in bounded yielding batches before pruning", async () => {
+    const results = [500, 2];
+    const infos: object[] = [];
+    const maintainer = new OutboxRetentionMaintainer({
+      compactDeliveryIntents(limit) { expect(limit).toBe(500); return results.shift() ?? 0; },
+      pruneDeliveredOutboundReplies() { return 0; }, pruneAcceptedInboundMessages() { return 0; }, pruneTerminalSessionOperations() { return 0; }
+    }, { retentionDays: 14, batchSize: 500 }, { info(value) { infos.push(value); }, error() {} });
+
+    expect(await maintainer.run()).toBe(0);
+    expect(infos).toEqual([expect.objectContaining({ deliveryIntentsCompacted: 502, compactionBatches: 2 })]);
+  });
+
   it("uses the configured window and logs only non-empty pruning", async () => {
     const cutoffs: Array<{ cutoff: string; limit: number }> = [];
     const infos: object[] = [];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deliveryIntentKind, materializedDeliveryIntent } from "../src/domain/delivery-intent.js";
+import { deliveryIntentKind, encodeDeliveryIntent, materializedDeliveryIntent } from "../src/domain/delivery-intent.js";
 import { materializeOutboundReply } from "../src/events/outbound-intent-materializer.js";
 import type { OutboundReply } from "../src/domain/types.js";
 
@@ -23,6 +23,17 @@ describe("durable delivery intent", () => {
   it("uses the immutable payload pinned in a typed intent", () => {
     const intent = materializedDeliveryIntent("card_update", '{"typed":true}');
     expect(materializeOutboundReply(reply({ intentKind: intent.kind, intentJson: JSON.stringify(intent), rendererRevision: 1 }))).toBe('{"typed":true}');
+  });
+  it("encodes new intents without duplicating the canonical payload", () => {
+    const encoded = encodeDeliveryIntent("card_update", '{"large":"payload"}');
+    expect(JSON.parse(encoded.intentJson)).toEqual({ schemaVersion: 2, kind: "card" });
+    expect(encoded.intentJson).not.toContain("payload");
+  });
+  it("materializes a version 2 intent from the canonical row payload", () => {
+    expect(materializeOutboundReply(reply({
+      payload: '{"canonical":true}', intentKind: "card",
+      intentJson: JSON.stringify({ schemaVersion: 2, kind: "card" }), rendererRevision: 1
+    }))).toBe('{"canonical":true}');
   });
   it("rejects unsupported renderer revisions", () => {
     const intent = materializedDeliveryIntent("card_update", "{}");

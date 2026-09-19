@@ -28,6 +28,7 @@ export class SqliteRetentionStoreAdapter implements SqliteRetentionStore {
     private readonly sessions: SqliteSessionOperationStore
   ) {}
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number { return this.outbox.pruneDeliveredOutboundReplies(cutoff, limit); }
+  compactDeliveryIntents(limit: number): number { return this.outbox.compactDeliveryIntents(limit); }
   pruneAcceptedInboundMessages(cutoff: string, limit: number): number { return this.inbound.pruneAcceptedInboundMessages(cutoff, limit); }
   pruneTerminalSessionOperations(cutoff: string, limit: number): number { return this.sessions.pruneTerminal(cutoff, limit); }
 }

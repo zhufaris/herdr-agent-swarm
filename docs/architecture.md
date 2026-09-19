@@ -89,6 +89,14 @@ Every arrow across an external-effect boundary has a durable fact on the SQLite
 side. Process-local events and wake-ups reduce latency; durable scans and fresh
 Herdr observations provide convergence when a hint is lost.
 
+Delivery intent schema version 2 stores only the typed intent kind; the
+canonical materialized body remains in the row's immutable `payload` column.
+Version 1 envelopes with an embedded `materializedPayload` remain readable. The
+retention maintainer incrementally converts only byte-equivalent, inactive v1
+envelopes in bounded batches, leaving active claims and ambiguous legacy rows
+unchanged. This removes duplicate durable bodies without changing Gateway plans,
+claim fences, retry identity, or recovery evidence.
+
 ## Composition root
 
 The composition root is the only production location that knows the complete

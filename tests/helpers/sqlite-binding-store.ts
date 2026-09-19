@@ -49,6 +49,7 @@ export const SqliteBindingStore: StoreConstructor = class {
       isBridgeMessage: modules.inboundDispatch.isBridgeMessage.bind(modules.inboundDispatch),
       recordBridgeMessage: modules.inboundDispatch.recordBridgeMessage.bind(modules.inboundDispatch),
       pruneDeliveredOutboundReplies: modules.retention.pruneDeliveredOutboundReplies.bind(modules.retention),
+      compactDeliveryIntents: modules.retention.compactDeliveryIntents.bind(modules.retention),
       pruneAcceptedInboundMessages: modules.retention.pruneAcceptedInboundMessages.bind(modules.retention),
       pruneTerminalSessionOperations: modules.retention.pruneTerminalSessionOperations.bind(modules.retention),
       reserveWorkerCardDisplay: modules.workerCardDisplay.reserveWorkerCardDisplay.bind(modules.workerCardDisplay),

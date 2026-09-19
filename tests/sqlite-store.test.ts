@@ -14,6 +14,7 @@ import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capaci
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 import { outboundLaneHeadSelectionSql } from "../src/store/sqlite/outbox-queue-store.js";
 import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
+import { materializeOutboundReply } from "../src/events/outbound-intent-materializer.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
@@ -69,6 +70,52 @@ function prepareSupersededWorkerMainCandidate(candidateStore: SqliteBindingStore
 
 describe("SQLite store", () => {
   describe("outbound delivery claims", () => {
+    it("stores new delivery intents without duplicating the canonical payload", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.enqueueOutboundReply({ id: "v2", idempotencyKey: "v2", rootMessageId: "message", kind: "card_update", payload: '{"large":"body"}' });
+
+      const row = store.database.prepare("SELECT payload, intent_json FROM outbound_replies WHERE id = 'v2'").get() as { payload: string; intent_json: string };
+      expect(row.payload).toBe('{"large":"body"}');
+      expect(JSON.parse(row.intent_json)).toEqual({ schemaVersion: 2, kind: "card" });
+      expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 46").get()).toEqual({ version: 46 });
+    });
+
+    it("compacts only equivalent inactive version 1 delivery intents", () => {
+      store = new SqliteBindingStore(":memory:");
+      for (const id of ["safe", "mismatch", "malformed", "active"]) {
+        store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: id, kind: "card_update", payload: `{"id":"${id}"}` });
+        store.database.prepare("UPDATE outbound_replies SET intent_json = json_object('schemaVersion', 1, 'kind', 'card', 'materializedPayload', payload) WHERE id = ?").run(id);
+      }
+      store.database.prepare("UPDATE outbound_replies SET intent_json = json_object('schemaVersion', 1, 'kind', 'card', 'materializedPayload', 'different') WHERE id = 'mismatch'").run();
+      store.database.prepare("UPDATE outbound_replies SET intent_json = '{' WHERE id = 'malformed'").run();
+      const claim = store.claimOutboundReply("active", null)!;
+
+      expect(store.compactDeliveryIntents(10)).toBe(1);
+      expect(JSON.parse((store.database.prepare("SELECT intent_json FROM outbound_replies WHERE id = 'safe'").get() as { intent_json: string }).intent_json)).toEqual({ schemaVersion: 2, kind: "card" });
+      expect(JSON.parse((store.database.prepare("SELECT intent_json FROM outbound_replies WHERE id = 'mismatch'").get() as { intent_json: string }).intent_json)).toMatchObject({ schemaVersion: 1, materializedPayload: "different" });
+      expect((store.database.prepare("SELECT intent_json FROM outbound_replies WHERE id = 'malformed'").get() as { intent_json: string }).intent_json).toBe("{");
+      expect(JSON.parse((store.database.prepare("SELECT intent_json FROM outbound_replies WHERE id = 'active'").get() as { intent_json: string }).intent_json)).toMatchObject({ schemaVersion: 1 });
+      expect(store.markOutboundReplyFailedWithQuarantine(claim, "retry", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 503, larkErrorCode: null })).not.toBeNull();
+      expect(store.compactDeliveryIntents(10)).toBe(0);
+      const retry = store.claimOutboundReply("active", null)!;
+      expect(store.markOutboundReplyDelivered(retry, "active")).toBe(true);
+      expect(store.compactDeliveryIntents(10)).toBe(1);
+      expect(JSON.parse((store.database.prepare("SELECT intent_json FROM outbound_replies WHERE id = 'active'").get() as { intent_json: string }).intent_json)).toEqual({ schemaVersion: 2, kind: "card" });
+    });
+
+    it("keeps version 1 intents deliverable across reopen before incremental compaction", () => {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-delivery-intent-v2-"));
+      const databasePath = join(temporaryDirectory, "bridge.db");
+      store = new SqliteBindingStore(databasePath);
+      store.enqueueOutboundReply({ id: "legacy-v1", idempotencyKey: "legacy-v1", rootMessageId: "message", kind: "card_update", payload: '{"canonical":true}' });
+      store.database.prepare("UPDATE outbound_replies SET intent_json = json_object('schemaVersion', 1, 'kind', 'card', 'materializedPayload', '{\"legacy\":true}') WHERE id = 'legacy-v1'").run();
+      store.close();
+
+      store = new SqliteBindingStore(databasePath);
+      expect(materializeOutboundReply(store.getOutboundReply("legacy-v1")!)).toBe('{"legacy":true}');
+      expect(store.compactDeliveryIntents(10)).toBe(0);
+    });
+
     it("claims only a due lane head and rejects stale acknowledgements, failures and checkpoints", () => {
       store = new SqliteBindingStore(":memory:");
       for (const id of ["first", "next"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: "message", kind: "card_update", payload: "{}" });

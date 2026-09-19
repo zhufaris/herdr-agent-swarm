@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 
 interface OutboxRetentionStore {
+  compactDeliveryIntents?(limit: number): number;
   pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
   pruneAcceptedInboundMessages(cutoff: string, limit: number): number;
   pruneTerminalSessionOperations(cutoff: string, limit: number): number;
@@ -43,11 +44,14 @@ export class OutboxRetentionMaintainer {
     try {
       const cutoff = new Date(Date.now() - this.options.retentionDays * 86_400_000).toISOString();
       const maxBatches = this.options.maxBatches ?? 20;
+      const compacted = this.store.compactDeliveryIntents
+        ? await this.pruneKind((limit) => this.store.compactDeliveryIntents!(limit), maxBatches)
+        : { removed: 0, batches: 0 };
       const outbound = await this.pruneKind((limit) => this.store.pruneDeliveredOutboundReplies(cutoff, limit), maxBatches);
       const inbound = await this.pruneKind((limit) => this.store.pruneAcceptedInboundMessages(cutoff, limit), maxBatches);
       const sessionOperations = await this.pruneKind((limit) => this.store.pruneTerminalSessionOperations(cutoff, limit), maxBatches);
       const removed = outbound.removed + inbound.removed + sessionOperations.removed;
-      if (removed > 0) this.logger.info({ event: "durable-history-pruned", removed, outboundRemoved: outbound.removed, inboundRemoved: inbound.removed, sessionOperationRemoved: sessionOperations.removed, outboundBatches: outbound.batches, inboundBatches: inbound.batches, sessionOperationBatches: sessionOperations.batches, cutoff, limit: this.options.batchSize, maxBatches, outcome: "pruned" }, "pruned retained Lark delivery, inbound, and Session operation history");
+      if (removed > 0 || compacted.removed > 0) this.logger.info({ event: "durable-history-pruned", removed, deliveryIntentsCompacted: compacted.removed, outboundRemoved: outbound.removed, inboundRemoved: inbound.removed, sessionOperationRemoved: sessionOperations.removed, compactionBatches: compacted.batches, outboundBatches: outbound.batches, inboundBatches: inbound.batches, sessionOperationBatches: sessionOperations.batches, cutoff, limit: this.options.batchSize, maxBatches, outcome: "pruned" }, "compacted delivery intents and pruned retained Gateway, inbound, and Session operation history");
       return removed;
     } catch (error) {
       this.logger.error({ event: "outbox-retention-failed", err: error, outcome: "failed" }, "failed to prune retained Lark outbox history");
