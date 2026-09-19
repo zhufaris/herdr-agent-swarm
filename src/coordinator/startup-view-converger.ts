@@ -64,12 +64,11 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       if (deliveryWorkReleased) this.outboundWork.wake();
       this.logger?.warn({ event: "startup-outbox-quarantines-recovered", retiredWorkerTaskCardIntents, ...recovered, outcome: "converging" }, "recovered stale outbox quarantines and retired undelivered legacy Worker Task Card intents");
     }
-    return this.convergeSelectedBindings(this.store.listBindings());
+    return this.convergeSelectedBindings(this.store.listStartupViewBindings());
   }
 
   async convergeBindings(bindingIds: readonly string[]): Promise<readonly string[]> {
-    const requested = new Set(bindingIds);
-    return this.convergeSelectedBindings(this.store.listBindings().filter((binding) => requested.has(binding.id)));
+    return this.convergeSelectedBindings(this.store.listStartupViewBindings(bindingIds));
   }
 
   private async convergeSelectedBindings(bindings: readonly Binding[]): Promise<readonly string[]> {

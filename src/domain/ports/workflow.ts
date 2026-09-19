@@ -32,7 +32,7 @@ export interface StartupRecoveryStore {
 
 export interface StartupViewStore {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void;
-  listBindings(): Binding[];
+  listStartupViewBindings(bindingIds?: readonly string[]): Binding[];
   listActionableStartupRunCards(bindingId: string): RunCardView[];
   loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null;
   loadTopicView(bindingId: string): TopicViewState | null;

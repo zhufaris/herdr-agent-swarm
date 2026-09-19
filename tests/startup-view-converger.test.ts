@@ -181,6 +181,39 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
+  it("does not visit a terminal binding whose Main and Answer views are fully delivered", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "historical", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "history" });
+    store.updateBinding("historical", { paneId: "wH:p1", statusMessageId: "root", state: "archived", lifecycle: "archived", attachment: "unattached" });
+    store.saveTopicView({ ...initialTopicView("historical"), title: "history", workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: "wH:p1", phase: "done", viewVersion: 1, deliveredVersion: 1 });
+    const queued = createQueuedRunCard({ promptId: "done", bindingId: "historical", title: "done", workspaceId: "wH", paneId: "wH:p1", requestText: "done", queuePosition: 0, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "done", bindingId: "historical", larkMessageId: "message-done", actorOpenId: "u1", body: "done" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const create = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(create.id, "answer", "card");
+    store.saveRunCard({ ...store.loadRunCard("done")!, phase: "completed", answer: "done", answerSegments: ["done"], viewVersion: 1, answerDeliveredVersion: 1 });
+    store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'done'").run();
+    const mainCards = { project: vi.fn(async () => undefined) };
+
+    await createConverger(store, { mainCardWorkflow: mainCards }).converge();
+
+    expect(mainCards.project).not.toHaveBeenCalled();
+    store.close();
+  });
+
+  it("keeps a terminal binding in the startup read model while durable delivery is pending", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "pending-view", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "pending" });
+    store.updateBinding("pending-view", { statusMessageId: "root", state: "archived", lifecycle: "archived", attachment: "unattached" });
+    store.saveTopicView({ ...initialTopicView("pending-view"), title: "pending", workspaceId: "wH", spaceName: "herdr-lark-bridge", phase: "done", viewVersion: 2, deliveredVersion: 1 });
+    const mainCards = { project: vi.fn(async () => undefined) };
+
+    await createConverger(store, { mainCardWorkflow: mainCards }).convergeBindings(["absent", "pending-view"]);
+
+    expect(mainCards.project).toHaveBeenCalledOnce();
+    expect(mainCards.project).toHaveBeenCalledWith(expect.objectContaining({ bindingId: "pending-view" }), "history");
+    store.close();
+  });
+
   it("restores the running prompt instead of a newer completed card", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

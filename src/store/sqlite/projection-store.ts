@@ -4,7 +4,7 @@ import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome,
 import type { MainCardLiveStatus, RunCardView } from "../../domain/run-card-view.js";
 import { initialTopicView, type TopicViewState } from "../../domain/topic-view.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
-import { mapAnswerPage, type AnswerPageRow } from "../sqlite-records.js";
+import { mapAnswerPage, mapBinding, type AnswerPageRow, type BindingRow } from "../sqlite-records.js";
 import { outboundLaneKey } from "../outbox-lanes.js";
 import type { SqliteContext } from "./context.js";
 import { linkAnswerRecovery, recordAnswerCoverage } from "./delivery-recovery-evidence.js";
@@ -23,6 +23,32 @@ export class SqliteProjectionStore {
 
   getBinding(id: string): Binding | null { return this.dependencies.getBinding(id); }
   getModelPreference(bindingId: string): ModelPreference | null { return this.dependencies.getModelPreference(bindingId); }
+
+  listStartupViewBindings(bindingIds?: readonly string[]): Binding[] {
+    if (bindingIds?.length === 0) return [];
+    const idFilter = bindingIds ? `AND binding.id IN (${bindingIds.map(() => "?").join(", ")})` : "";
+    const rows = this.context.database.prepare(`
+      SELECT binding.* FROM bindings binding
+      LEFT JOIN topic_views topic ON topic.binding_id = binding.id
+      WHERE (
+        binding.lifecycle NOT IN ('archived','closed','failed')
+        OR topic.binding_id IS NULL
+        OR COALESCE(json_extract(topic.state_json, '$.viewVersion'), 1) > COALESCE(json_extract(topic.state_json, '$.deliveredVersion'), 0)
+        OR EXISTS (SELECT 1 FROM run_cards card WHERE card.binding_id = binding.id AND (
+          card.phase IN ('queued','running','blocked') OR card.answer_message_id IS NULL
+          OR card.view_version > card.answer_delivered_version
+          OR EXISTS (SELECT 1 FROM answer_pages page WHERE page.prompt_id = card.prompt_id AND (page.state = 'creating' OR (page.state = 'active' AND page.delivery_mode = 'streaming')))
+        ))
+        OR EXISTS (SELECT 1 FROM outbound_replies reply WHERE reply.binding_id = binding.id AND reply.state = 'pending')
+        OR EXISTS (SELECT 1 FROM delivery_recoveries recovery JOIN outbound_replies failed ON failed.id = recovery.failed_reply_id WHERE failed.binding_id = binding.id AND (
+          recovery.state = 'replacement_pending'
+          OR EXISTS (SELECT 1 FROM outbox_lane_quarantines quarantine WHERE quarantine.failed_reply_id = recovery.failed_reply_id AND quarantine.state = 'active')
+        ))
+      ) ${idFilter}
+      ORDER BY binding.created_at, binding.id
+    `).all(...(bindingIds ?? [])) as BindingRow[];
+    return rows.map(mapBinding);
+  }
 
   saveTopicView(view: TopicViewState): void {
     const current = this.loadTopicView(view.bindingId);
