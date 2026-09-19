@@ -45,6 +45,14 @@ export class InstanceInteractionWorkflow {
     return this.commands.handle(message, command);
   }
 
+  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: import("../domain/agent-instance.js").AgentInstance; binding: import("../domain/types.js").Binding | null } | { outcome: "rejected"; message: string } {
+    if (!this.isOperator(message.actorOpenId)) return { outcome: "rejected", message: "你没有 Agent 管理权限。" };
+    const context = this.context.resolve(message);
+    const binding = context.conversationKey.startsWith("binding:") ? this.options.store.getBinding(context.conversationKey.slice(8)) : null;
+    const instance = this.context.findByName(context.conversationKey, command.name);
+    return instance ? { outcome: "resolved", instance, binding } : { outcome: "rejected", message: `实例不存在或不属于当前 Primary：${command.name}` };
+  }
+
   async handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean> {
     if (message.parentMessageId) return false;
     const context = this.context.resolve(message);

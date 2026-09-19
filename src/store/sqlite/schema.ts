@@ -134,6 +134,14 @@ export function createLatestSchema(context: SqliteContext): void {
   );
   CREATE INDEX IF NOT EXISTS swarm_command_intents_claim ON swarm_command_intents(state, lane_key, created_at);
   CREATE INDEX IF NOT EXISTS swarm_command_intents_recovery ON swarm_command_intents(state, updated_at);
+  CREATE TABLE IF NOT EXISTS natural_language_command_confirmations(
+    id TEXT PRIMARY KEY, source_message_id TEXT NOT NULL UNIQUE, actor_open_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL,
+    command_json TEXT NOT NULL, expected_binding_id TEXT, expected_binding_generation INTEGER, expected_instance_id TEXT, expected_instance_generation INTEGER,
+    state TEXT NOT NULL CHECK(state IN ('pending','consumed','expired','cancelled')), expires_at TEXT NOT NULL, result_detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT,
+    CHECK((expected_binding_id IS NULL) = (expected_binding_generation IS NULL)),
+    CHECK((expected_instance_id IS NULL) = (expected_instance_generation IS NULL))
+  );
+  CREATE INDEX IF NOT EXISTS natural_language_command_confirmations_pending ON natural_language_command_confirmations(state, expires_at, created_at);
   CREATE TABLE IF NOT EXISTS prompt_jobs(
     id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
     actor_open_id TEXT NOT NULL, body TEXT NOT NULL, parent_prompt_id TEXT REFERENCES prompt_jobs(id), execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),

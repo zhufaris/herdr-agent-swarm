@@ -17,7 +17,7 @@ import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
-import { SwarmCommandContextResolver } from "./swarm-command-context-resolver.js";
+import { SwarmCommandContextResolver, type SwarmCommandContextResolution } from "./swarm-command-context-resolver.js";
 
 interface Options {
   store: CommandIntentWorkflowStore; primaryPrompts: Pick<InstanceStore, "getActiveOrdinaryPrompt">;
@@ -31,6 +31,8 @@ interface Options {
 
 export interface SwarmCommandGatewayPort {
   handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void>;
+  resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution;
+  drainAcceptedIntent(intent: CommandIntent): Promise<void>;
   createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult>;
   createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult>;
   recover(): Promise<void>;
@@ -42,6 +44,9 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   private readonly workerResults = new Map<string, CreateWorkerResult>();
   private readonly awaitedWorkerResults = new Set<string>();
   constructor(private readonly options: Options) {}
+
+  resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution { return this.options.resolver.resolve(message, command); }
+  async drainAcceptedIntent(intent: CommandIntent): Promise<void> { await this.drainLane(intent.laneKey); }
 
   async handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void> {
     const resolved = this.options.resolver.resolve(message, command);

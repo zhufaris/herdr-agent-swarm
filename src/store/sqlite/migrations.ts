@@ -101,6 +101,7 @@ export class SqliteMigrations {
     this.prompt.ensurePaneControlOperationState();
     this.prompt.ensureTurnControlOperations();
     this.prompt.ensureSwarmCommandIntents();
+    this.ensureNaturalLanguageCommandConfirmations();
     this.worker.ensureWorkerCardDisplayRequests();
     this.worker.ensureWorkerSessionThreads();
     this.worker.ensureWorkerThreadEntryRequests();
@@ -154,6 +155,20 @@ export class SqliteMigrations {
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {
     this.cards.canonicalizeLegacyAnswerTargets(timestamp);
+  }
+
+  private ensureNaturalLanguageCommandConfirmations(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS natural_language_command_confirmations(
+        id TEXT PRIMARY KEY, source_message_id TEXT NOT NULL UNIQUE, actor_open_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL,
+        command_json TEXT NOT NULL, expected_binding_id TEXT, expected_binding_generation INTEGER, expected_instance_id TEXT, expected_instance_generation INTEGER,
+        state TEXT NOT NULL CHECK(state IN ('pending','consumed','expired','cancelled')), expires_at TEXT NOT NULL, result_detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT,
+        CHECK((expected_binding_id IS NULL) = (expected_binding_generation IS NULL)),
+        CHECK((expected_instance_id IS NULL) = (expected_instance_generation IS NULL))
+      );
+      CREATE INDEX IF NOT EXISTS natural_language_command_confirmations_pending ON natural_language_command_confirmations(state, expires_at, created_at);
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (47);
+    `);
   }
 }
 

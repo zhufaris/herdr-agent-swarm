@@ -16,6 +16,7 @@ import type { WorkerMainView } from "../worker-main-view.js";
 import type { Binding, FailureSummary, ProjectConfig, SessionPage } from "../types.js";
 import type { InstanceTurnSummary } from "../instance-turn.js";
 import type { WorkerHumanReviewNotificationInput } from "../worker-human-review.js";
+import type { NaturalLanguageCommandConfirmation } from "../natural-language-command-confirmation.js";
 
 export interface PrimaryPresentation {
   mainCard(view: TopicViewState): object;
@@ -49,6 +50,8 @@ export interface ThreadPrimaryView { bindingId: string; generation: number; pane
 export type InteractionToast = { toast: { type: "success" | "warning" | "error"; content: string } };
 
 export interface ApplicationPresentation extends PrimaryPresentation, WorkerPresentation {
+  naturalLanguageCommandConfirmation(input: NaturalLanguageCommandConfirmation): object;
+  naturalLanguageCommandGuidance(input: { title: string; message: string; examples: readonly string[]; warning?: boolean }): object;
   commandResult(input: { title: string; text: string }): object;
   projectDirectory(input: { projects: readonly ProjectConfig[]; selectedProjectId?: string }): object;
   projectSelector(input: { selectionId: string; projects: ProjectConfig[] }): object;

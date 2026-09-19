@@ -23,6 +23,8 @@ import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { executePromptAcceptanceEffects } from "./prompt-acceptance-effects.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
+import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
+import type { NaturalLanguageCommandWorkflow } from "./natural-language-command-workflow.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -33,6 +35,7 @@ interface Options {
   config: BridgeConfig; stores: { routing: Pick<InboundRoutingStore, "findBindingByLarkScope" | "isBindingThreadAlias">; promptAcceptance: PromptAcceptanceStore }; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
   promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "handleMessage">;
+  naturalLanguage?: { interpreter: NaturalLanguageCommandInterpreter; workflow: Pick<NaturalLanguageCommandWorkflow, "handle"> };
 }
 
 export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkflowPort {
@@ -76,6 +79,15 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       else if (instanceCommand) { decision = `instance-command:${instanceCommand.kind}`; if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
       else if (command && alias && rejectsAliasCommand(command)) { decision = `alias-command-rejected:${command.kind}`; await this.reject(message, "这个入口话题只用于当前 Agent 交互；请回到原始 Main Card 话题执行会话或拓扑管理命令。"); disposition = "rejected"; }
       else if (command) { decision = `command:${command.kind}`; await this.options.swarmCommands.handle(message, command); }
+      else if (message.mentionsBot && this.options.naturalLanguage) {
+        const interpreted = this.options.naturalLanguage.interpreter.interpret(message.text);
+        if (interpreted.outcome !== "task") { decision = `natural-language:${interpreted.outcome === "command" ? `${interpreted.family}:${interpreted.command.kind}` : interpreted.outcome}`; await this.options.naturalLanguage.workflow.handle(message, interpreted); }
+        else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
+        else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
+        else if (message.isRootMessage && this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) { decision = "create_binding"; const provisioned = await this.options.provisioning.provisionDefaultProject(message, deriveTopicTitle(message.text), message.text); if (provisioned) { await this.enqueueInitialProjectPrompt(provisioned.binding, provisioned.selection); disposition = "prompt_queued"; } else disposition = "rejected"; }
+        else if (message.isRootMessage) { decision = "create_binding_rejected"; await this.reject(message, "你没有 Agent 管理权限。"); disposition = "rejected"; }
+        else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, this.options.presentation.disconnectedTopic(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
+      }
       else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
       else if (message.isRootMessage && message.mentionsBot && this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) {

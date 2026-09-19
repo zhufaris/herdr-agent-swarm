@@ -12,11 +12,13 @@ import { renderSpaceDirectoryCards } from "./space-directory-card.js";
 import { renderTopicPaneDirectoryCard } from "./topic-pane-directory-card.js";
 import { renderWorkerMainCard, renderWorkerStatusSnapshot, renderWorkerThreadEntryCard, renderWorkerThreadEntryReadyCard } from "./worker-main-card.js";
 import type { ProjectConfig } from "../domain/types.js";
+import { renderNaturalLanguageCommandConfirmationCard, renderNaturalLanguageCommandGuidanceCard } from "./natural-language-command-card.js";
 
 export function createCardKitApplicationPresentation(limits: CardKitPresentationLimits, projects: readonly ProjectConfig[] = []): ApplicationPresentation {
   const primary = createCardKitPrimaryPresentation(limits);
   return {
   ...primary, ...cardKitWorkerPresentation,
+  naturalLanguageCommandConfirmation: renderNaturalLanguageCommandConfirmationCard, naturalLanguageCommandGuidance: renderNaturalLanguageCommandGuidanceCard,
   commandResult: ({ title, text }) => ({ schema: "2.0", config: { update_multi: true, summary: { content: title } }, header: { title: { tag: "plain_text", content: title }, template: "blue" }, body: { elements: [{ tag: "markdown", content: text }] } }),
   projectDirectory: ({ projects, selectedProjectId }) => ({ schema: "2.0", config: { update_multi: true, summary: { content: "Projects" } }, header: { title: { tag: "plain_text", content: "Projects" }, template: "blue" }, body: { elements: projects.map((project) => ({ tag: "markdown", content: `${project.id === selectedProjectId ? "▶ " : ""}**${project.displayName}** · \`${project.id}\`\n${project.description}` })) } }),
   projectSelector: (input) => renderProjectSelectorCard(input, limits.payloadLimitChars), projectSelectionStatus: renderProjectSelectionStatusCard, attachStatus: renderAttachStatusCard,

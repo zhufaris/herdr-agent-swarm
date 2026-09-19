@@ -24,6 +24,8 @@ describe("card action command parsing", () => {
     [{ action: "claim_pane", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }, null, { kind: "pane-claim", projectId: "p1", workspaceId: "w1", paneId: "pane-1" }],
     [{ action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: "2", paneId: "pane-1", sourceMainMessageId: "om-main" }, null, { kind: "pane-directory", action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 2, paneId: "pane-1", sourceMainMessageId: "om-main" }],
     [{ action: "pane_worker_thread_forward", instanceId: "i1", generation: "4", workerSessionGeneration: "3", bindingId: "b1", bindingGeneration: "2", parentPaneId: "pane-1", sourceMainMessageId: "om-main" }, null, { kind: "pane-directory", action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 2, parentPaneId: "pane-1", sourceMainMessageId: "om-main" }],
+    [{ action: "natural_language_command_confirm", confirmationId: "confirmation_1" }, null, { kind: "natural-language-confirmation", decision: "confirm", confirmationId: "confirmation_1" }],
+    [{ action: "natural_language_command_cancel", confirmationId: "confirmation_1" }, null, { kind: "natural-language-confirmation", decision: "cancel", confirmationId: "confirmation_1" }],
   ] as const)("normalizes an owned action %#", (value, option, expected) => {
     expect(parseCardActionCommand(value, option)).toEqual(expected);
   });
@@ -61,6 +63,7 @@ describe("card action command parsing", () => {
     { action: "worker_task_instruction_submit", turnId: "t1", instanceId: "i1", generation: 1, workerSessionGeneration: 1, sourceCardMessageId: "card", interactionId: "i1", requestedBy: "user", intent: "queue" },
     { action: "card_target_open", aggregateKind: "unknown", aggregateId: "i1", generation: 1, messageId: "card" },
     { action: "instance_open", instanceId: "i1", generation: 1, conversationKey: "x".repeat(201) },
+    { action: "natural_language_command_confirm" },
   ])("maps malformed or unknown payload %# to the common fallback", (value) => {
     expect(parseCardActionCommand(value)).toEqual({ kind: "unknown" });
   });

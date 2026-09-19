@@ -11,6 +11,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import { parseCardActionCommand, type CardActionCommand } from "./card-action-command.js";
 import { ProjectCatalog } from "./project-catalog.js";
+import type { NaturalLanguageCommandWorkflow } from "./natural-language-command-workflow.js";
 
 export interface CardActionRouterPort {
   handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void>;
@@ -26,6 +27,7 @@ interface Options {
   modelSelection: ModelSelectionWorkflowPort;
   deliveryRecovery: DeliveryRecoveryWorkflowPort;
   instanceInteractions?: InstanceInteractionWorkflow;
+  naturalLanguageCommands?: Pick<NaturalLanguageCommandWorkflow, "decide">;
   logger: Pick<Logger, "info" | "error">;
   enqueueInitialPrompt(binding: Binding, selection: ProjectSelection): Promise<void>;
 }
@@ -50,6 +52,8 @@ export class CardActionRouter implements CardActionRouterPort {
     if (!(this.options.allowedOpenIds ?? []).includes(action.operatorOpenId)) return { toast: { type: "error", content: "你没有访问权限。" } };
     const command = parseCardActionCommand(action.value, action.option);
     switch (command.kind) {
+      case "natural-language-confirmation":
+        return this.options.naturalLanguageCommands?.decide(action, command.confirmationId, command.decision) ?? staleAction();
       case "instance":
         return this.options.instanceInteractions?.handleCardAction(action, command) ?? staleAction();
       case "session":

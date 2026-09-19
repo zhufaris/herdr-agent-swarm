@@ -779,6 +779,68 @@ describe("SQLite store", () => {
     expect(store.claimNextCommandIntent("lane-1")).toBeNull();
   });
 
+  it("stages natural-language mutation confirmations atomically and idempotently", () => {
+    store = new SqliteBindingStore(":memory:");
+    const confirmation = {
+      id: "confirmation-1", sourceMessageId: "message-1", actorOpenId: "admin", chatId: "chat", topicId: null, rootMessageId: "message-1",
+      envelope: { version: 1, family: "swarm", command: { kind: "new", title: "Fix login", agentKind: "traex" } } as const,
+      expectedBindingId: null, expectedBindingGeneration: null, expectedInstanceId: null, expectedInstanceGeneration: null,
+      expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z"
+    };
+    const input = { confirmation, outbox: { id: "confirmation-card-1", idempotencyKey: "natural-language-confirmation:confirmation-1", card: { type: "confirmation" } } };
+
+    expect(store.stageNaturalLanguageCommandConfirmation(input)).toMatchObject({ outcome: "staged", confirmation: { id: "confirmation-1", state: "pending" } });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "confirmation-card-1", idempotencyKey: "natural-language-confirmation:confirmation-1" })]);
+    expect(store.stageNaturalLanguageCommandConfirmation(input)).toMatchObject({ outcome: "duplicate", confirmation: { id: "confirmation-1" } });
+    expect(store.stageNaturalLanguageCommandConfirmation({ ...input, confirmation: { ...confirmation, id: "other", actorOpenId: "other" } })).toMatchObject({ outcome: "conflict", confirmation: { id: "confirmation-1" } });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 47").get()).toEqual({ version: 47 });
+  });
+
+  it("consumes or cancels a natural-language confirmation exactly once for its actor and chat", () => {
+    store = new SqliteBindingStore(":memory:");
+    const stage = (id: string) => store!.stageNaturalLanguageCommandConfirmation({
+      confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "stop" } }, expectedBindingId: null, expectedBindingGeneration: null, expectedInstanceId: null, expectedInstanceGeneration: null, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" },
+      outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} }
+    });
+    stage("confirm"); stage("cancel");
+
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "intruder", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "unauthorized", confirmation: { state: "pending" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "consumed", confirmation: { state: "consumed", resultDetail: "confirmed" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:02:00.000Z" })).toMatchObject({ outcome: "already-resolved", confirmation: { state: "consumed" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "cancel", decision: "cancel", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "cancelled", confirmation: { state: "cancelled" } });
+  });
+
+  it("expires and generation-fences natural-language confirmations before consumption", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    const stage = (id: string, expiresAt: string) => store!.stageNaturalLanguageCommandConfirmation({
+      confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "rename", title: "New title" } }, expectedBindingId: "binding-1", expectedBindingGeneration: 1, expectedInstanceId: null, expectedInstanceGeneration: null, expiresAt, createdAt: "2026-09-19T00:00:00.000Z" },
+      outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} }
+    });
+    stage("expired", "2026-09-19T00:00:30.000Z");
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "expired", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "expired", confirmation: { state: "expired" } });
+
+    stage("stale", "2026-09-19T01:00:00.000Z");
+    store.database.prepare("UPDATE bindings SET generation = 2 WHERE id = 'binding-1'").run();
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "stale", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled", resultDetail: "stale_context" } });
+  });
+
+  it("atomically consumes a natural-language confirmation with its Swarm command intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    const command = { kind: "new", title: "Fix login", agentKind: "traex" } as const;
+    store.stageNaturalLanguageCommandConfirmation({
+      confirmation: { id: "atomic", sourceMessageId: "message-atomic", actorOpenId: "admin", chatId: "chat", topicId: null, rootMessageId: "message-atomic", envelope: { version: 1, family: "swarm", command }, expectedBindingId: null, expectedBindingGeneration: null, expectedInstanceId: null, expectedInstanceGeneration: null, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" },
+      outbox: { id: "atomic-card", idempotencyKey: "confirmation:atomic", card: {} }
+    });
+    const context = { chatId: "chat", topicId: null, rootMessageId: "message-atomic", sourceMessageId: "natural-language-confirmation:atomic", actorOpenId: "admin", projectId: null, workspaceId: null, primary: null };
+    const input = { id: "atomic", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", commandIntent: { id: "intent-atomic", idempotencyKey: "natural-language-confirmation:atomic:new", laneKey: "chat:chat", command, context, replayPolicy: "reconcilable" as const, acceptedAt: "2026-09-19T00:01:00.000Z" } };
+
+    expect(store.confirmNaturalLanguageSwarmCommand(input)).toMatchObject({ outcome: "consumed", confirmation: { state: "consumed" }, commandIntent: { outcome: "accepted", intent: { id: "intent-atomic", state: "accepted" } } });
+    expect(store.confirmNaturalLanguageSwarmCommand({ ...input, commandIntent: { ...input.commandIntent, id: "ignored" } })).toMatchObject({ outcome: "already-resolved", confirmation: { state: "consumed" } });
+    expect(store.getCommandIntent("intent-atomic")).toMatchObject({ command, state: "accepted" });
+  });
+
   it("backfills safe Worker, Primary Main, and mutable Answer invalidations on upgrade", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-card-context-backfill-"));
     const path = join(temporaryDirectory, "bridge.db");

@@ -55,6 +55,7 @@ export type InstanceCardActionCommand =
   | ({ kind: "instance"; action: "worker_task_instruction_submit"; interactionId: string; requestedBy: string; intent: "steer" | "followup" } & WorkerTaskIdentity);
 
 export type CardActionCommand = InstanceCardActionCommand | SessionCardActionCommand
+  | { kind: "natural-language-confirmation"; decision: "confirm" | "cancel"; confirmationId: string }
   | { kind: "pane-directory"; action: "pane_primary_thread_forward"; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string }
   | { kind: "pane-directory"; action: "pane_worker_thread_forward"; instanceId: string; generation: number; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }
   | { kind: "model"; bindingId: string; model: string }
@@ -75,6 +76,7 @@ export function parseCardActionCommand(value: unknown, option?: string | null): 
   const item = value as Record<string, unknown>;
   const action = string(item.action);
   if (!action) return unknown();
+  if (action === "natural_language_command_confirm" || action === "natural_language_command_cancel") { const confirmationId = interaction(item.confirmationId); return confirmationId ? { kind: "natural-language-confirmation", decision: action.endsWith("confirm") ? "confirm" : "cancel", confirmationId } : unknown(); }
   if (retiredActions.has(action)) return { kind: "retired", action: action as RetiredCardActionName };
   const session = parseSession(action, item);
   if (session) return session;
