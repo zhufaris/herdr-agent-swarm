@@ -22,6 +22,8 @@ interface Readiness {
     instanceRuntime?: ComponentState;
   };
 }
+type HealthServerOptions = Parameters<typeof startHealthServer>[0];
+type StatusSnapshot = { body: Record<string, unknown>; cacheable: boolean };
 
 export function startHealthServer(options: {
   host: string; port: number; store: HealthStore; herdr: HerdrPort; gateway?: Pick<GatewaySession, "snapshot">; /** @deprecated test compatibility */ lark?: { isReady(): boolean }; projects: readonly ProjectConfig[];
@@ -42,10 +44,22 @@ export function startHealthServer(options: {
   herdrSocket?: { status(): HerdrSocketStatus };
   buildIdentity: BuildIdentity;
   readinessTtlMs?: number;
+  statusTtlMs?: number;
 }): Promise<Server> {
   const workspaceReadinessCache = new ReadinessCache(() => inspectHerdrReadiness(options.herdr, options.projects), options.readinessTtlMs ?? 2_000);
+  const statusCache = new ReadinessCache(
+    () => collectStatusSnapshot(options, workspaceReadinessCache),
+    options.statusTtlMs ?? 1_000,
+    Date.now,
+    (snapshot) => snapshot.cacheable
+  );
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
+    const knownReadEndpoint = request.url === "/health" || request.url === "/ready" || request.url === "/status";
+    if (knownReadEndpoint && request.method !== "GET" && request.method !== "HEAD") {
+      response.setHeader("allow", "GET, HEAD");
+      response.statusCode = 405; response.end(JSON.stringify({ error: "method_not_allowed" })); return;
+    }
     if (request.url === "/health") {
       const { serviceId, version, buildId } = options.buildIdentity;
       response.statusCode = 200; response.end(JSON.stringify({ status: "ok", serviceId, version, buildId })); return;
@@ -57,61 +71,9 @@ export function startHealthServer(options: {
       return;
     }
     if (request.url === "/status") {
-      const { readiness, instanceRuntime } = inspectReadiness(options, await workspaceReadinessCache.read());
-      let operational: ReturnType<HealthStore["getOperationalSummary"]> | { error: string };
-      try { operational = options.store.getOperationalSummary(); }
-      catch (error) { operational = { error: boundedError(error) }; }
-      const outboxDispatcher = collectDiagnostic<OutboxDispatcherDiagnostics>(() => options.outboxDispatcher?.snapshot());
-      const promptWorker = collectDiagnostic<PromptWorkerDiagnostics>(() => options.promptWorker?.snapshot());
-      const instanceWorker = collectDiagnostic<InstanceWorkerDiagnostics>(() => options.instanceWorker?.snapshot());
-      const herdrCircuitBreaker = collectDiagnostic<HerdrCircuitBreakerStatus>(() => options.herdrCircuitBreaker?.status());
-      const startupRecovery = collectDiagnostic<StartupRecoveryDiagnostics>(() => options.startupRecovery?.snapshot());
-      const inboundDispatcher = collectDiagnostic<InboundDispatcherDiagnostics>(() => options.inboundDispatcher?.snapshot());
-      const sessionOperationDispatcher = collectDiagnostic<SessionOperationDispatcherDiagnostics>(() => options.sessionOperationDispatcher?.snapshot());
-      const sqliteIntegrity = collectDiagnostic<SqliteIntegrityDiagnostics>(() => options.sqliteIntegrity?.snapshot());
-      const bindingRuntime = collectDiagnostic<ReconciliationDiagnostics>(() => options.bindingRuntime?.snapshot());
-      const cardConvergence = collectDiagnostic<CardUpdateSchedulerDiagnostics>(() => options.cardConvergence?.snapshot());
-      const lifecycleEvents = collectDiagnostic(() => options.lifecycleEvents?.snapshot());
-      const workspaceCache = collectDiagnostic<WorkspaceCacheStatus>(() => options.workspaceCache?.status());
-      const herdrSocket = collectDiagnostic<HerdrSocketStatus>(() => options.herdrSocket?.status());
-      const reconciliation = bindingRuntime || instanceRuntime ? { ...(bindingRuntime ? { bindingRuntime } : {}), ...(instanceRuntime ? { instanceRuntime } : {}) } : undefined;
-      const diagnosticCollectionFailed = [outboxDispatcher, promptWorker, instanceWorker, herdrCircuitBreaker, startupRecovery, inboundDispatcher, sessionOperationDispatcher, sqliteIntegrity, bindingRuntime, instanceRuntime, cardConvergence, lifecycleEvents, workspaceCache, herdrSocket].some(isDiagnosticError);
+      const snapshot = await statusCache.read();
       response.statusCode = 200;
-      const operationalDegraded = "error" in operational
-        || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
-        || operational.eligibleDeadLetterRecoveries > 0
-        || operational.larkDeliveryCooldown.active
-        || operational.outboxQuarantines.active > 0
-        || operational.outboxLanes.stalled > 0
-        || operational.inbound.oldestPendingAgeSeconds !== null && operational.inbound.oldestPendingAgeSeconds >= 300;
-      const sessionOperationsDegraded = !("error" in operational) && operational.sessionOperations.oldestAcceptedAgeSeconds !== null && operational.sessionOperations.oldestAcceptedAgeSeconds >= 300;
-      response.end(JSON.stringify({
-        status: readiness.status === "ready" && !operationalDegraded && !sessionOperationsDegraded
-          && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
-          && !(inboundDispatcher && "error" in inboundDispatcher)
-          && !(sessionOperationDispatcher && "error" in sessionOperationDispatcher)
-          && !(outboxDispatcher && "lastScanOutcome" in outboxDispatcher && outboxDispatcher.lastScanOutcome === "failed")
-          && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
-          && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
-          && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))
-          && !(bindingRuntime && ("error" in bindingRuntime || bindingRuntime.lastOutcome === "failed")) && !(instanceRuntime && "error" in instanceRuntime)
-          && !diagnosticCollectionFailed
-          && !(sqliteIntegrity && (!("quickCheck" in sqliteIntegrity) || sqliteIntegrity.state === "idle" || sqliteIntegrity.state === "degraded" || sqliteIntegrity.state === "running" && (sqliteIntegrity.quickCheck !== "ok" || sqliteIntegrity.issues.length > 0 || sqliteIntegrity.error !== null))) ? "ok" : "degraded", identity: options.buildIdentity,
-        timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: leaseStatus(readiness.components.lease),
-        ...(outboxDispatcher ? { outboxDispatcher } : {}),
-        ...(promptWorker ? { promptWorker } : {}),
-        ...(instanceWorker ? { instanceWorker } : {}),
-        ...(workspaceCache ? { workspaceCache } : {}),
-        ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}),
-        ...(startupRecovery ? { startupRecovery } : {}),
-        ...(inboundDispatcher ? { inboundDispatcher } : {}),
-        ...(sessionOperationDispatcher ? { sessionOperationDispatcher } : {}),
-        ...(sqliteIntegrity ? { sqliteIntegrity } : {}),
-        ...(reconciliation ? { reconciliation } : {}),
-        ...(cardConvergence ? { cardConvergence } : {}),
-        ...(herdrSocket ? { herdrSocket } : {}),
-        ...(lifecycleEvents ? { lifecycleEvents } : {})
-      }));
+      response.end(JSON.stringify(snapshot.body));
       return;
     }
     response.statusCode = 404; response.end(JSON.stringify({ error: "not_found" }));
@@ -127,15 +89,68 @@ class ReadinessCache<T> {
   private refreshedAt = 0;
   private refresh: Promise<T> | null = null;
 
-  constructor(private readonly inspect: () => Promise<T>, private readonly ttlMs: number, private readonly clock: () => number = Date.now) {}
+  constructor(private readonly inspect: () => Promise<T>, private readonly ttlMs: number, private readonly clock: () => number = Date.now, private readonly shouldCache: (value: T) => boolean = () => true) {}
 
   async read(): Promise<T> {
     if (this.value && this.clock() - this.refreshedAt < this.ttlMs) return this.value;
     if (this.refresh) return this.refresh;
-    const refresh = this.inspect().then((value) => { this.value = value; this.refreshedAt = this.clock(); return value; });
+    const refresh = this.inspect().then((value) => {
+      if (this.shouldCache(value)) { this.value = value; this.refreshedAt = this.clock(); }
+      return value;
+    });
     this.refresh = refresh;
     try { return await refresh; } finally { if (this.refresh === refresh) this.refresh = null; }
   }
+}
+
+async function collectStatusSnapshot(options: HealthServerOptions, workspaceReadinessCache: ReadinessCache<HerdrReadiness>): Promise<StatusSnapshot> {
+  const { readiness, instanceRuntime } = inspectReadiness(options, await workspaceReadinessCache.read());
+  let operational: ReturnType<HealthStore["getOperationalSummary"]> | { error: string };
+  try { operational = options.store.getOperationalSummary(); }
+  catch (error) { operational = { error: boundedError(error) }; }
+  const outboxDispatcher = collectDiagnostic<OutboxDispatcherDiagnostics>(() => options.outboxDispatcher?.snapshot());
+  const promptWorker = collectDiagnostic<PromptWorkerDiagnostics>(() => options.promptWorker?.snapshot());
+  const instanceWorker = collectDiagnostic<InstanceWorkerDiagnostics>(() => options.instanceWorker?.snapshot());
+  const herdrCircuitBreaker = collectDiagnostic<HerdrCircuitBreakerStatus>(() => options.herdrCircuitBreaker?.status());
+  const startupRecovery = collectDiagnostic<StartupRecoveryDiagnostics>(() => options.startupRecovery?.snapshot());
+  const inboundDispatcher = collectDiagnostic<InboundDispatcherDiagnostics>(() => options.inboundDispatcher?.snapshot());
+  const sessionOperationDispatcher = collectDiagnostic<SessionOperationDispatcherDiagnostics>(() => options.sessionOperationDispatcher?.snapshot());
+  const sqliteIntegrity = collectDiagnostic<SqliteIntegrityDiagnostics>(() => options.sqliteIntegrity?.snapshot());
+  const bindingRuntime = collectDiagnostic<ReconciliationDiagnostics>(() => options.bindingRuntime?.snapshot());
+  const cardConvergence = collectDiagnostic<CardUpdateSchedulerDiagnostics>(() => options.cardConvergence?.snapshot());
+  const lifecycleEvents = collectDiagnostic(() => options.lifecycleEvents?.snapshot());
+  const workspaceCache = collectDiagnostic<WorkspaceCacheStatus>(() => options.workspaceCache?.status());
+  const herdrSocket = collectDiagnostic<HerdrSocketStatus>(() => options.herdrSocket?.status());
+  const reconciliation = bindingRuntime || instanceRuntime ? { ...(bindingRuntime ? { bindingRuntime } : {}), ...(instanceRuntime ? { instanceRuntime } : {}) } : undefined;
+  const diagnostics = [outboxDispatcher, promptWorker, instanceWorker, herdrCircuitBreaker, startupRecovery, inboundDispatcher, sessionOperationDispatcher, sqliteIntegrity, bindingRuntime, instanceRuntime, cardConvergence, lifecycleEvents, workspaceCache, herdrSocket];
+  const diagnosticCollectionFailed = diagnostics.some(isDiagnosticError);
+  const operationalDegraded = "error" in operational
+    || operational.retiredPaneCleanup.oldestActiveAgeSeconds !== null && operational.retiredPaneCleanup.oldestActiveAgeSeconds >= 300
+    || operational.eligibleDeadLetterRecoveries > 0
+    || operational.larkDeliveryCooldown.active
+    || operational.outboxQuarantines.active > 0
+    || operational.outboxLanes.stalled > 0
+    || operational.inbound.oldestPendingAgeSeconds !== null && operational.inbound.oldestPendingAgeSeconds >= 300;
+  const sessionOperationsDegraded = !("error" in operational) && operational.sessionOperations.oldestAcceptedAgeSeconds !== null && operational.sessionOperations.oldestAcceptedAgeSeconds >= 300;
+  const body = {
+    status: readiness.status === "ready" && !operationalDegraded && !sessionOperationsDegraded
+      && !(outboxDispatcher && "error" in outboxDispatcher) && !(promptWorker && "error" in promptWorker)
+      && !(inboundDispatcher && "error" in inboundDispatcher)
+      && !(sessionOperationDispatcher && "error" in sessionOperationDispatcher)
+      && !(outboxDispatcher && "lastScanOutcome" in outboxDispatcher && outboxDispatcher.lastScanOutcome === "failed")
+      && !(instanceWorker && ("error" in instanceWorker || instanceWorker.activeDispatchWorkers > 0 || instanceWorker.activeObservers > 0 || instanceWorker.activeTurns > 0 || instanceWorker.uncertainTurns > 0))
+      && !(herdrCircuitBreaker && ("error" in herdrCircuitBreaker || herdrCircuitBreaker.state !== "closed"))
+      && !(startupRecovery && ("error" in startupRecovery || startupRecovery.state === "degraded"))
+      && !(bindingRuntime && ("error" in bindingRuntime || bindingRuntime.lastOutcome === "failed")) && !(instanceRuntime && "error" in instanceRuntime)
+      && !diagnosticCollectionFailed
+      && !(sqliteIntegrity && (!("quickCheck" in sqliteIntegrity) || sqliteIntegrity.state === "idle" || sqliteIntegrity.state === "degraded" || sqliteIntegrity.state === "running" && (sqliteIntegrity.quickCheck !== "ok" || sqliteIntegrity.issues.length > 0 || sqliteIntegrity.error !== null))) ? "ok" : "degraded", identity: options.buildIdentity,
+    timestamp: new Date().toISOString(), uptimeSeconds: Math.floor(process.uptime()), readiness, operational, lease: leaseStatus(readiness.components.lease),
+    ...(outboxDispatcher ? { outboxDispatcher } : {}), ...(promptWorker ? { promptWorker } : {}), ...(instanceWorker ? { instanceWorker } : {}),
+    ...(workspaceCache ? { workspaceCache } : {}), ...(herdrCircuitBreaker ? { herdrCircuitBreaker } : {}), ...(startupRecovery ? { startupRecovery } : {}),
+    ...(inboundDispatcher ? { inboundDispatcher } : {}), ...(sessionOperationDispatcher ? { sessionOperationDispatcher } : {}), ...(sqliteIntegrity ? { sqliteIntegrity } : {}),
+    ...(reconciliation ? { reconciliation } : {}), ...(cardConvergence ? { cardConvergence } : {}), ...(herdrSocket ? { herdrSocket } : {}), ...(lifecycleEvents ? { lifecycleEvents } : {})
+  };
+  return { body, cacheable: !("error" in operational) && !diagnosticCollectionFailed };
 }
 
 function inspectReadiness(options: { store: HealthStore; gateway?: Pick<GatewaySession, "snapshot">; lark?: { isReady(): boolean }; projects: readonly ProjectConfig[]; lease: { snapshot(): InstanceLeaseStatus }; instanceRuntime?: { snapshot(): { ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics> } }, herdr: HerdrReadiness): { readiness: Readiness; instanceRuntime: ({ ready: boolean; lastError: string | null } & Partial<ReconciliationDiagnostics>) | DiagnosticFailure | undefined } {

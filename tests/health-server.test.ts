@@ -186,6 +186,74 @@ describe("health server", () => {
     expect(assertWorkspace).toHaveBeenCalledOnce();
   });
 
+  it("coalesces concurrent status collection and caches successful snapshots briefly", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    const getOperationalSummary = vi.fn(() => originalSummary());
+    store.getOperationalSummary = getOperationalSummary;
+    let releaseProbe: (() => void) | undefined;
+    const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    const assertWorkspace = vi.fn(() => probeGate);
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { assertWorkspace } as never, statusTtlMs: 25,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/status`;
+
+    const first = fetch(url);
+    const second = fetch(url);
+    await vi.waitFor(() => expect(assertWorkspace).toHaveBeenCalledOnce());
+    releaseProbe?.();
+    await Promise.all([first, second]);
+    expect(getOperationalSummary).toHaveBeenCalledOnce();
+
+    await fetch(url);
+    expect(getOperationalSummary).toHaveBeenCalledOnce();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await fetch(url);
+    expect(getOperationalSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache a status collection containing a diagnostic failure", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    const getOperationalSummary = vi.fn()
+      .mockImplementationOnce(() => { throw new Error("summary unavailable"); })
+      .mockImplementation(() => originalSummary());
+    store.getOperationalSummary = getOperationalSummary;
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never, statusTtlMs: 60_000,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/status`;
+
+    expect(await (await fetch(url)).json()).toMatchObject({ status: "degraded", operational: { error: "summary unavailable" } });
+    expect(await (await fetch(url)).json()).toMatchObject({ status: "ok" });
+    expect(getOperationalSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("supports HEAD and rejects mutating methods on read endpoints", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    for (const path of ["/health", "/ready", "/status"]) {
+      const head = await fetch(`${baseUrl}${path}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+      const post = await fetch(`${baseUrl}${path}`, { method: "POST" });
+      expect(post.status).toBe(405);
+      expect(post.headers.get("allow")).toBe("GET, HEAD");
+      expect(await post.json()).toEqual({ error: "method_not_allowed" });
+    }
+  });
+
   it("refreshes volatile readiness state while reusing the workspace probe", async () => {
     store = new SqliteBindingStore(":memory:");
     const assertWorkspace = vi.fn(async () => undefined);
