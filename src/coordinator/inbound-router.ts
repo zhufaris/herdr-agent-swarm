@@ -11,6 +11,7 @@ import type { StartupRecoveryWorkflowPort } from "./startup-recovery-workflow.js
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 export interface InboundRouterPort {
+  prepareDelivery(): Promise<void>;
   start(): Promise<void>;
   stop(context?: ShutdownContext): Promise<void>;
   handleMessage(message: IncomingLarkMessage): Promise<void>;
@@ -25,6 +26,8 @@ export interface InboundRouterOptions {
 
 export class InboundRouter implements InboundRouterPort {
   constructor(private readonly options: InboundRouterOptions) {}
+
+  prepareDelivery(): Promise<void> { return this.options.startupRecovery.prepareDelivery(); }
 
   async start(): Promise<void> {
     await this.options.startupRecovery.start();

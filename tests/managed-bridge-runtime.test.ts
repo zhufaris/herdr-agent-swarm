@@ -21,7 +21,7 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     cardContextRebuilder: { start() { mark("card-context:start"); }, async stop() { mark("card-context:stop"); } },
     queueFeedbackProjector: { start() { mark("queue-feedback:start"); }, async converge() { mark("queue-feedback:converge"); }, async stop() { mark("queue-feedback:stop"); } },
     bus: {},
-    coordinator: { async start() { mark("coordinator:start"); }, async stop() { mark("coordinator:stop"); } },
+    coordinator: { async prepareDelivery() { mark("coordinator:prepare-delivery"); }, async start() { mark("coordinator:start"); }, async stop() { mark("coordinator:stop"); } },
     paneRetention: { async scan() { mark("pane-retention:scan"); }, start() { mark("pane-retention:start"); }, async stop() { mark("pane-retention:stop"); } },
     externalTurns: { start() { mark("external-turns:start"); }, async stop() { mark("external-turns:stop"); } },
     herdrSocketSubscriber: { startEvents() { mark("socket:start"); }, async stop() { mark("socket:stop"); } },
@@ -43,11 +43,31 @@ describe("ManagedBridgeRuntime", () => {
       "lease:acquire", "fence:start", "lease:start",
       "instance-turns:prepare", "primary-tools:start", "integrity:start", "integrity:run",
       "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
+      "coordinator:prepare-delivery",
       "publisher:start", "outbox-retention:start", "projector:start", "card-context:start",
       "queue-feedback:start", "queue-feedback:converge", "coordinator:start",
       "pane-retention:scan", "pane-retention:start", "external-turns:start",
       "instance-runtime:start", "instance-turns:start", "socket:start"
     ]);
+  });
+
+  it("completes durable startup repair before the publisher can claim work", async () => {
+    let releaseRepair!: () => void;
+    const repair = new Promise<void>((resolve) => { releaseRepair = resolve; });
+    const { runtime, calls } = fixture({
+      coordinator: {
+        async prepareDelivery() { calls.push("coordinator:prepare-delivery"); await repair; },
+        async start() { calls.push("coordinator:start"); },
+        async stop() { calls.push("coordinator:stop"); }
+      }
+    });
+
+    const starting = runtime.start();
+    await vi.waitFor(() => expect(calls).toContain("coordinator:prepare-delivery"));
+    expect(calls).not.toContain("publisher:start");
+    releaseRepair();
+    await starting;
+    expect(calls.indexOf("coordinator:prepare-delivery")).toBeLessThan(calls.indexOf("publisher:start"));
   });
 
   it("does not reacquire a lease handed off by production bootstrap", async () => {
@@ -182,7 +202,7 @@ describe("ManagedBridgeRuntime", () => {
 
   it("stops a coordinator whose asynchronous start partially fails", async () => {
     const stop = vi.fn(async () => {});
-    const { runtime } = fixture({ coordinator: { async start() { throw new Error("coordinator failed"); }, stop } });
+    const { runtime } = fixture({ coordinator: { async prepareDelivery() {}, async start() { throw new Error("coordinator failed"); }, stop } });
 
     await expect(runtime.start()).rejects.toThrow("coordinator failed");
 

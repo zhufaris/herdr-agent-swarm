@@ -20,6 +20,7 @@ import type { StartupViewConvergerPort } from "./startup-view-converger.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 export interface StartupRecoveryWorkflowPort {
+  prepareDelivery(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   snapshot(): StartupRecoveryDiagnostics;
@@ -34,17 +35,19 @@ export interface StartupRecoveryWorkflowOptions {
 export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
+  private prepareDeliveryPromise: Promise<void> | null = null;
   private diagnostics: StartupRecoveryDiagnostics = { state: "idle", startedAt: null, completedAt: null, stages: [] };
 
   constructor(private readonly options: StartupRecoveryWorkflowOptions) {}
 
+  prepareDelivery(): Promise<void> {
+    this.prepareDeliveryPromise ??= this.performPrepareDelivery();
+    return this.prepareDeliveryPromise;
+  }
+
   async start(): Promise<void> {
-    const { config, store, herdr, gatewayIngress, gatewaySink, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, startupViews, inboundDispatcher } = this.options;
-    this.diagnostics = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
-    promptRun.prepareRecovery();
-    const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
-    if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
-    await this.runStage("view-convergence", () => startupViews.converge());
+    const { config, herdr, gatewayIngress, gatewaySink, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, inboundDispatcher } = this.options;
+    await this.prepareDelivery();
     const recoveredInbound = inboundDispatcher.recoverProcessingMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     const workspaceAssertions = new Map<string, { workspaceId: string; spaceName: string }>();
@@ -77,6 +80,15 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   }
 
   snapshot(): StartupRecoveryDiagnostics { return { ...this.diagnostics, stages: this.diagnostics.stages.map((stage) => ({ ...stage })) }; }
+
+  private async performPrepareDelivery(): Promise<void> {
+    const { store, logger, promptRun, startupViews } = this.options;
+    this.diagnostics = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
+    promptRun.prepareRecovery();
+    const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
+    if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
+    await this.runStage("view-convergence", () => startupViews.converge());
+  }
 
   private async recoverInitialProjectPrompts(): Promise<void> {
     for (const selection of this.options.store.listCompletedProjectSelectionsWithInitialPrompt()) {

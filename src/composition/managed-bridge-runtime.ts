@@ -36,7 +36,7 @@ export interface ManagedBridgeRuntimeDependencies {
   cardContextRebuilder: { start(intervalMs: number): void; stop(context?: ShutdownContext): Promise<void> };
   queueFeedbackProjector: { start(bus: unknown): void; converge(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   bus: unknown;
-  coordinator: { start(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
+  coordinator: { prepareDelivery(): Promise<void>; start(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   paneRetention: { scan(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   externalTurns: { start(): void; stop(): Promise<void> };
   herdrSocketSubscriber?: { startEvents(): void; stop(): Promise<void> };
@@ -163,6 +163,10 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       const healthServer = await d.createHealthServer();
       this.registerCleanup("healthServer", "health", "non-writer", () => closeHealthServer(healthServer));
       this.assertStarting();
+      this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
+      this.registerCleanup("instanceWork", "workers", "writer", (context) => d.instanceWork.stop(context));
+      await d.coordinator.prepareDelivery();
+      this.assertStarting();
       this.registerCleanup("publisher", "projections", "writer", (context) => d.channelPublisher.stop(context));
       d.channelPublisher.start();
       this.registerCleanup("outboxRetention", "projections", "writer", () => d.outboxRetention.stop());
@@ -175,8 +179,6 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       d.queueFeedbackProjector.start(d.bus);
       await d.queueFeedbackProjector.converge();
       this.assertStarting();
-      this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
-      this.registerCleanup("instanceWork", "workers", "writer", (context) => d.instanceWork.stop(context));
       await d.coordinator.start();
       this.assertStarting();
       await d.paneRetention.scan();
