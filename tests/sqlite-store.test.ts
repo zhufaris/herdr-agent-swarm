@@ -2940,6 +2940,28 @@ describe("SQLite store", () => {
     expect(store.getProjectSelection("processing")).toMatchObject({ state: "failed" });
   });
 
+  it("lists only completed project selections whose deterministic initial prompt is absent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.createProjectSelection({ id: "s1", commandMessageId: "cmd-1", chatId: "c1", topicId: null, rootMessageId: "root-1", actorOpenId: "u1", requestedTitle: null, initialPromptText: "start", expiresAt: "2099-01-01T00:00:00.000Z", card: {} });
+    const reply = store.listPendingOutboundReplies().find((candidate) => candidate.selectionId === "s1")!;
+    store.markOutboundReplyDelivered(reply.id, "selector-1");
+    expect(store.claimProjectSelection({ selectionId: "s1", projectId: "bridge", messageId: "selector-1", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] }).outcome).toBe("claimed");
+    store.linkProjectSelectionBinding("s1", "b1");
+    store.completeProjectSelection("s1", "b1");
+
+    expect(store.listCompletedProjectSelectionsWithInitialPrompt().map(({ id }) => id)).toEqual(["s1"]);
+    store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "cmd-1", actorOpenId: "u1", body: "start" });
+    expect(store.listCompletedProjectSelectionsWithInitialPrompt()).toEqual([]);
+
+    const plan = store.database.prepare(`EXPLAIN QUERY PLAN
+      SELECT selection.* FROM project_selections selection
+      WHERE selection.state = 'completed' AND selection.initial_prompt_text IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM prompt_jobs prompt WHERE prompt.lark_message_id = selection.command_message_id)
+      ORDER BY selection.created_at`).all() as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("sqlite_autoindex_prompt_jobs_2"))).toBe(true);
+  });
+
   it("persists bindings, FIFO jobs, deduplication, and view snapshots", () => {
     store = new SqliteBindingStore(":memory:");
     const binding = store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task", agentKind: "pi" });
@@ -3759,6 +3781,20 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("p1")?.answerElementId).toBe(answerElementId("p1", 1));
     expect(payload.stream.elementId).toBe(store.loadRunCard("p1")?.answerElementId);
     expect(payload.card.body.elements[0].element_id).toBe(payload.stream.elementId);
+  });
+
+  it("finds pending Answer continuations from normalized metadata instead of reparsing payloads", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.enqueueOutboundReply({ id: "continuation", idempotencyKey: "continuation", bindingId: "b1", promptId: "p1", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ stream: { pageIndex: 2, pageStart: 9_000, elementId: answerElementId("p1", 2) }, card: {} }) });
+    store.database.prepare("UPDATE outbound_replies SET payload = json_set(payload, '$.stream.pageIndex', 99) WHERE id = 'continuation'").run();
+
+    expect(store.hasPendingAnswerContinuation("p1", 2)).toBe(true);
+    expect(store.hasPendingAnswerContinuation("p1", 99)).toBe(false);
+    const plan = store.database.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' AND stream_page_index = ? LIMIT 1").all("p1", 2) as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("outbound_replies_prompt_kind_state_updated"))).toBe(true);
   });
 
   it("canonicalizes persisted answer targets before startup outbox draining", () => {

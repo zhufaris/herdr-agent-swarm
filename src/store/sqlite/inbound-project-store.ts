@@ -69,7 +69,19 @@ export class SqliteInboundProjectStore {
 
   recoverProcessingProjectSelections(): number { return Number(this.database.prepare("UPDATE project_selections SET state = 'failed', error = 'Interrupted during project creation; inspect Herdr before retrying', updated_at = ? WHERE state = 'processing'").run(now()).changes); }
   listProcessingProjectSelections(): ProjectSelection[] { return (this.database.prepare("SELECT * FROM project_selections WHERE state = 'processing' ORDER BY created_at").all() as ProjectSelectionRow[]).map(mapProjectSelection); }
-  listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[] { return (this.database.prepare("SELECT * FROM project_selections WHERE state = 'completed' AND initial_prompt_text IS NOT NULL ORDER BY created_at").all() as ProjectSelectionRow[]).map(mapProjectSelection); }
+  listCompletedProjectSelectionsWithInitialPrompt(): ProjectSelection[] {
+    return (this.database.prepare(`
+      SELECT selection.*
+      FROM project_selections selection
+      WHERE selection.state = 'completed'
+        AND selection.initial_prompt_text IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM prompt_jobs prompt
+          WHERE prompt.lark_message_id = selection.command_message_id
+        )
+      ORDER BY selection.created_at
+    `).all() as ProjectSelectionRow[]).map(mapProjectSelection);
+  }
   linkProjectSelectionBinding(id: string, bindingId: string): ProjectSelection { return this.updateSelection(id, "binding_id = ?, updated_at = ?", [bindingId, now()], "AND state = 'processing'"); }
   pauseProjectSelection(id: string, error: string): ProjectSelection { return this.updateSelection(id, "error = ?, updated_at = ?", [error, now()], "AND state = 'processing'"); }
   completeProjectSelection(id: string, bindingId: string): ProjectSelection { return this.updateSelection(id, "state = 'completed', binding_id = ?, error = NULL, updated_at = ?", [bindingId, now()], "AND state = 'processing'"); }

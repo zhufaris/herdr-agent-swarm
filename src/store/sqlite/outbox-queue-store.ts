@@ -185,7 +185,7 @@ export class SqliteOutboxQueueStore {
   }
 
   hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean {
-    return this.context.database.prepare(`SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' AND json_extract(payload, '$.stream.pageIndex') = ? LIMIT 1`).get(promptId, pageIndex) !== undefined;
+    return this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' AND stream_page_index = ? LIMIT 1").get(promptId, pageIndex) !== undefined;
   }
 
   dismissSupersededAnswerStream(replyId: string): boolean {
