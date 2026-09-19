@@ -379,7 +379,7 @@ git diff --check
 Before any installation, inspect active Prompt/Worker-turn state and use the
 normal restart gate. A force restart requires a fresh explicit authorization.
 No push is part of this design. If a push is later requested, inspect the entire
-outgoing range, remove any injected `Co-authored-by: TRAE CLI` trailers, and run
+outgoing range, remove any injected CLI co-author trailers, and run
 `npm run public:audit` first.
 
 ## Rejected alternatives

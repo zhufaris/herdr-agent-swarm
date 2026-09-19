@@ -1431,11 +1431,11 @@ configuration is valid, `./install.sh` builds and stages the immutable release
 and enables the unit without starting it; `npm run swarm:start` performs the
 explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
 `npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
-Pino remains the application-side structured JSON logger and writes only to
-stdout/stderr. The unit appends both streams to the private local service log,
-so systemd and the lifecycle CLI—not an application transport or in-memory
-queue—own file durability, permissions, and rotation. Rotation occurs only
-after confirmed inactivity, at 16 MiB, retaining three generations.
+Pino remains the application-side structured JSON logger. In installed mode it
+owns one private file destination; foreground development still uses stdout. A
+user-systemd timer invokes the lifecycle CLI, which verifies the file and exact
+MainPID, rotates at 16 MiB, and sends `SIGUSR2` for an in-process reopen. The
+lifecycle owns permissions and rotation, retaining one rotated generation.
 `swarm:logs` retains its bounded default and can include rotated generations or
 filter JSON records by level, time, component, and correlation identifiers.
 Staging creates an inactive candidate and does not change `current`. The install

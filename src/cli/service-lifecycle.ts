@@ -9,7 +9,7 @@ import { readEnvironmentFile } from "../runtime/environment-file.js";
 import { AGENT_SWARM_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
 import type { SetupLifecyclePort } from "../setup/setup-types.js";
 
-type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs";
+type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs" | "rotate-logs";
 const SERVICE_NAME = "herdr-agent-swarm.service";
 export interface LifecycleOptions {
   force?: boolean;
@@ -18,6 +18,8 @@ export interface LifecycleOptions {
   readLogChunk?: typeof readSync;
   logQuery?: LogQueryOptions;
   renameActivationLink?: typeof renameSync;
+  signalProcess?: (pid: number, signal: NodeJS.Signals) => void;
+  processHasOpenFile?: (pid: number, path: string) => boolean;
 }
 
 export interface LogQueryOptions {
@@ -43,12 +45,16 @@ interface RuntimePaths {
   entrypoint: string;
   buildInfo: string;
   unitFile: string;
+  rotationUnitFile: string;
+  rotationTimerFile: string;
   serviceName: string;
   nodeExecutable: string;
   releasesDirectory: string;
   currentLink: string;
   activationMarker: string;
   activationUnitBackup: string;
+  activationRotationUnitBackup: string;
+  activationRotationTimerBackup: string;
 }
 
 export interface PrivateLogMetadata { kind: "directory" | "file"; uid: number | bigint; nlink: number | bigint }
@@ -88,6 +94,7 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
   if (action === "install") return install(paths, environment, options.renameLogFile ?? renameSync, options.renameActivationLink ?? renameSync);
   if (action === "uninstall") return uninstall(paths, environment);
   if (action === "logs") return printLogs(paths, options.readLogChunk ?? readSync, options.logQuery ?? {});
+  if (action === "rotate-logs") return rotateServiceLogs(paths, environment, options);
   if (action === "status") return printStatus(paths, environment);
 
   requireInstalled(paths);
@@ -216,15 +223,19 @@ function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const logDirectory = resolve(stateDirectory, "logs");
   const logFile = resolve(logDirectory, "service.log");
   return {
-    root, configDirectory, stateDirectory, logDirectory, logFile, rotatedLogFiles: [1, 2, 3].map((generation) => `${logFile}.${generation}`), serviceName: SERVICE_NAME,
+    root, configDirectory, stateDirectory, logDirectory, logFile, rotatedLogFiles: [`${logFile}.1`], serviceName: SERVICE_NAME,
     environmentFile: resolve(configDirectory, ".env"),
     entrypoint: resolve(root, "dist/main.js"), buildInfo: resolve(root, "dist/build-info.json"),
     unitFile: resolve(unitDirectory, SERVICE_NAME),
+    rotationUnitFile: resolve(unitDirectory, "herdr-agent-swarm-log-rotate.service"),
+    rotationTimerFile: resolve(unitDirectory, "herdr-agent-swarm-log-rotate.timer"),
     nodeExecutable: resolve(environment.NODE_BIN || process.execPath),
     releasesDirectory: resolve(stateDirectory, "releases"),
     currentLink: resolve(stateDirectory, "current"),
     activationMarker: resolve(stateDirectory, ".release-activation.json"),
-    activationUnitBackup: resolve(stateDirectory, ".release-activation.unit")
+    activationUnitBackup: resolve(stateDirectory, ".release-activation.unit"),
+    activationRotationUnitBackup: resolve(stateDirectory, ".release-activation.rotation-unit"),
+    activationRotationTimerBackup: resolve(stateDirectory, ".release-activation.rotation-timer")
   };
 }
 
@@ -256,7 +267,7 @@ function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv, renameFile
   const candidate = environment.SWARM_RELEASE_CANDIDATE;
   if (candidate) return activateRelease(paths, environment, identity, runtimeEnvironment, candidate, renameActivationLink);
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
-  atomicWrite(paths.unitFile, renderUnit(paths, identity, runtimeEnvironment), 0o600);
+  writeUnits(paths, identity, runtimeEnvironment);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) result = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
   if (result === 0) process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}\n`);
@@ -269,15 +280,22 @@ function activateRelease(paths: RuntimePaths, environment: NodeJS.ProcessEnv, id
   const candidate = validateReleaseCandidate(paths, candidateValue, identity);
   const keepInactive = releaseRetention(environment);
   const priorCurrent = readPriorCurrent(paths);
-  const priorUnit = readPriorUnit(paths);
+  const priorUnit = readPriorUnit(paths.unitFile);
+  const priorRotationUnit = readPriorUnit(paths.rotationUnitFile);
+  const priorRotationTimer = readPriorUnit(paths.rotationTimerFile);
   const priorUnitRelease = priorUnit ? releaseWorkingDirectory(paths, priorUnit.content) : null;
   const priorEnabled = priorUnit ? readEnabledState(paths.serviceName, environment) : "absent";
-  if (lstatOptional(paths.activationUnitBackup)) throw new Error(`release activation backup already exists: ${paths.activationUnitBackup}`);
-  atomicWrite(paths.activationMarker, JSON.stringify({ version: 1, candidate, priorCurrent, priorUnit: priorUnit ? { backup: paths.activationUnitBackup, mode: priorUnit.mode } : null, priorEnabled, phase: "prepared" }) + "\n", 0o600);
+  const priorUnits = [
+    { path: paths.unitFile, backup: paths.activationUnitBackup, prior: priorUnit },
+    { path: paths.rotationUnitFile, backup: paths.activationRotationUnitBackup, prior: priorRotationUnit },
+    { path: paths.rotationTimerFile, backup: paths.activationRotationTimerBackup, prior: priorRotationTimer }
+  ];
+  for (const unit of priorUnits) if (lstatOptional(unit.backup)) throw new Error(`release activation backup already exists: ${unit.backup}`);
+  atomicWrite(paths.activationMarker, JSON.stringify({ version: 1, candidate, priorCurrent, priorUnits: priorUnits.map(({ path, backup, prior }) => ({ path, backup: prior ? backup : null, mode: prior?.mode ?? null })), priorEnabled, phase: "prepared" }) + "\n", 0o600);
   try {
-    if (priorUnit) writeFileSync(paths.activationUnitBackup, priorUnit.content, { mode: priorUnit.mode, flag: "wx" });
+    for (const unit of priorUnits) if (unit.prior) writeFileSync(unit.backup, unit.prior.content, { mode: unit.prior.mode, flag: "wx" });
     mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
-    atomicWrite(paths.unitFile, renderUnit(paths, identity, runtimeEnvironment), 0o600);
+    writeUnits(paths, identity, runtimeEnvironment);
     let failureCode = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (failureCode !== 0) throw new ReleaseActivationCommandError("daemon-reload", failureCode);
     failureCode = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
@@ -285,7 +303,7 @@ function activateRelease(paths: RuntimePaths, environment: NodeJS.ProcessEnv, id
     replaceCurrentLink(paths, candidate, renameActivationLink);
   } catch (error) {
     try {
-      restoreActivation(paths, environment, priorCurrent, priorUnit, priorEnabled, renameActivationLink);
+      restoreActivation(paths, environment, priorCurrent, priorUnits, priorEnabled, renameActivationLink);
       removeActivationEvidence(paths);
     } catch (rollbackError) {
       throw new Error(`release activation failed (${safeMessage(error)}); rollback failed (${safeMessage(rollbackError)}); recovery marker retained at ${paths.activationMarker}`);
@@ -332,11 +350,11 @@ function readPriorCurrent(paths: RuntimePaths): string | null {
   return target;
 }
 
-function readPriorUnit(paths: RuntimePaths): { content: string; mode: number } | null {
-  if (!existsSync(paths.unitFile)) return null;
-  const status = lstatSync(paths.unitFile);
-  if (!status.isFile() || status.isSymbolicLink()) throw new Error(`service unit must be a regular file: ${paths.unitFile}`);
-  return { content: readFileSync(paths.unitFile, "utf8"), mode: status.mode & 0o777 };
+function readPriorUnit(path: string): { content: string; mode: number } | null {
+  if (!existsSync(path)) return null;
+  const status = lstatSync(path);
+  if (!status.isFile() || status.isSymbolicLink()) throw new Error(`service unit must be a regular file: ${path}`);
+  return { content: readFileSync(path, "utf8"), mode: status.mode & 0o777 };
 }
 
 function releaseWorkingDirectory(paths: RuntimePaths, unit: string): string | null {
@@ -368,14 +386,16 @@ function replaceCurrentLink(paths: RuntimePaths, target: string | null, renameLi
   try { renameLink(temporary, paths.currentLink); } catch (error) { unlinkSync(temporary); throw error; }
 }
 
-function restoreActivation(paths: RuntimePaths, environment: NodeJS.ProcessEnv, priorCurrent: string | null, priorUnit: { content: string; mode: number } | null, priorEnabled: PriorEnabledState, renameActivationLink: typeof renameSync): void {
+function restoreActivation(paths: RuntimePaths, environment: NodeJS.ProcessEnv, priorCurrent: string | null, priorUnits: readonly { path: string; prior: { content: string; mode: number } | null }[], priorEnabled: PriorEnabledState, renameActivationLink: typeof renameSync): void {
   replaceCurrentLink(paths, priorCurrent, renameActivationLink);
   if (priorEnabled !== "enabled") {
     const disabled = delegate("systemctl", ["--user", "disable", paths.serviceName], environment, true);
     if (disabled !== 0) throw new Error(`rollback disable failed with exit code ${disabled}`);
   }
-  if (priorUnit) atomicWrite(paths.unitFile, priorUnit.content, priorUnit.mode);
-  else if (existsSync(paths.unitFile)) unlinkSync(paths.unitFile);
+  for (const unit of priorUnits) {
+    if (unit.prior) atomicWrite(unit.path, unit.prior.content, unit.prior.mode);
+    else if (existsSync(unit.path)) unlinkSync(unit.path);
+  }
   const reload = delegate("systemctl", ["--user", "daemon-reload"], environment, true);
   if (reload !== 0) throw new Error(`rollback daemon-reload failed with exit code ${reload}`);
   if (priorEnabled === "enabled") {
@@ -385,7 +405,7 @@ function restoreActivation(paths: RuntimePaths, environment: NodeJS.ProcessEnv, 
 }
 
 function removeActivationEvidence(paths: RuntimePaths): void {
-  if (lstatOptional(paths.activationUnitBackup)) unlinkSync(paths.activationUnitBackup);
+  for (const backup of [paths.activationUnitBackup, paths.activationRotationUnitBackup, paths.activationRotationTimerBackup]) if (lstatOptional(backup)) unlinkSync(backup);
   if (lstatOptional(paths.activationMarker)) unlinkSync(paths.activationMarker);
 }
 
@@ -410,7 +430,10 @@ function pruneReleases(paths: RuntimePaths, retained: ReadonlySet<string>, keepI
 
 function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
   delegate("systemctl", ["--user", "disable", "--now", paths.serviceName], environment, true);
+  delegate("systemctl", ["--user", "disable", "--now", "herdr-agent-swarm-log-rotate.timer"], environment, true);
   if (existsSync(paths.unitFile)) unlinkSync(paths.unitFile);
+  if (existsSync(paths.rotationUnitFile)) unlinkSync(paths.rotationUnitFile);
+  if (existsSync(paths.rotationTimerFile)) unlinkSync(paths.rotationTimerFile);
   const result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) process.stdout.write(`removed ${paths.serviceName}; configuration and state were preserved\n`);
   return result;
@@ -434,17 +457,37 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     `Environment=BRIDGE_DATABASE_PATH=${systemdEscape(resolve(environment.BRIDGE_DATABASE_PATH || resolve(paths.stateDirectory, "bridge.db")))}`,
     ...(environment.HERDR_SOCKET_PATH ? [`Environment=HERDR_SOCKET_PATH=${systemdEscape(environment.HERDR_SOCKET_PATH)}`] : []),
     `Environment=BRIDGE_EXPECTED_BUILD_ID=${systemdEscape(identity.buildId)}`,
+    `Environment=BRIDGE_LOG_PATH=${systemdEscape(paths.logFile)}`,
     `ExecStart=${systemdEscape(paths.nodeExecutable)} --enable-source-maps ${systemdEscape(paths.entrypoint)}`,
-    `StandardOutput=append:${systemdEscape(paths.logFile)}`,
-    `StandardError=append:${systemdEscape(paths.logFile)}`,
+    "StandardOutput=null",
+    "StandardError=null",
     "Restart=on-failure",
     "RestartSec=5",
     "TimeoutStopSec=50",
     "",
     "[Install]",
+    "Also=herdr-agent-swarm-log-rotate.timer",
     "WantedBy=default.target",
     ""
   ].join("\n");
+}
+
+function writeUnits(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): void {
+  atomicWrite(paths.unitFile, renderUnit(paths, identity, environment), 0o600);
+  atomicWrite(paths.rotationUnitFile, [
+    "[Unit]", "Description=Rotate Herdr Agent Swarm private log",
+    "[Service]", "Type=oneshot",
+    `Environment=SWARM_ROOT=${systemdEscape(paths.root)}`,
+    `Environment=SWARM_CONFIG_DIR=${systemdEscape(paths.configDirectory)}`,
+    `Environment=SWARM_STATE_DIR=${systemdEscape(paths.stateDirectory)}`,
+    `Environment=BRIDGE_SYSTEMD_UNIT_DIR=${systemdEscape(dirname(paths.unitFile))}`,
+    `ExecStart=${systemdEscape(paths.nodeExecutable)} ${systemdEscape(resolve(paths.root, "dist/cli/service-lifecycle.js"))} rotate-logs`, ""
+  ].join("\n"), 0o600);
+  atomicWrite(paths.rotationTimerFile, [
+    "[Unit]", "Description=Periodically rotate Herdr Agent Swarm private log",
+    "[Timer]", "OnBootSec=15min", "OnUnitActiveSec=1h", "Persistent=true", "RandomizedDelaySec=5min",
+    "[Install]", "WantedBy=timers.target", ""
+  ].join("\n"), 0o600);
 }
 
 function requiredUserUnit(value: string | undefined): string | null {
@@ -467,6 +510,7 @@ function convergeLogPaths(paths: RuntimePaths): void {
   const descriptor = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
   try { fchmodSync(descriptor, 0o600); } finally { closeSync(descriptor); }
   for (const rotated of paths.rotatedLogFiles) validateOptionalRegularLogFile(rotated);
+  for (const obsolete of [`${paths.logFile}.2`, `${paths.logFile}.3`]) { validateOptionalRegularLogFile(obsolete); if (existsSync(obsolete)) unlinkSync(obsolete); }
 }
 
 function rotateLogs(paths: RuntimePaths, renameFile: (source: string, destination: string) => void): void {
@@ -476,16 +520,12 @@ function rotateLogs(paths: RuntimePaths, renameFile: (source: string, destinatio
   if (size <= 16 * 1024 * 1024) return;
   for (const rotated of paths.rotatedLogFiles) validateOptionalRegularLogFile(rotated);
   const first = paths.rotatedLogFiles[0]!;
-  const second = paths.rotatedLogFiles[1]!;
-  const third = paths.rotatedLogFiles[2]!;
-  const displaced = `${third}.pending-${process.pid}`;
+  const displaced = `${first}.pending-${process.pid}`;
   if (lstatOptional(displaced)) throw new Error(`stale log rotation file exists: ${displaced}`);
   const completed: Array<[string, string]> = [];
   try {
     const move = (source: string, destination: string) => { renameFile(source, destination); completed.push([source, destination]); };
-    if (existsSync(third)) move(third, displaced);
-    if (existsSync(second)) move(second, third);
-    if (existsSync(first)) move(first, second);
+    if (existsSync(first)) move(first, displaced);
     move(paths.logFile, first);
     const replacement = openRegularLogFile(paths.logFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_EXCL, 0o600);
     closeSync(replacement);
@@ -496,6 +536,73 @@ function rotateLogs(paths: RuntimePaths, renameFile: (source: string, destinatio
     }
     throw error;
   }
+}
+
+async function rotateServiceLogs(paths: RuntimePaths, environment: NodeJS.ProcessEnv, options: LifecycleOptions): Promise<number> {
+  requireInstalled(paths);
+  convergeLogPaths(paths);
+  const lockPath = resolve(paths.stateDirectory, ".log-rotation.lock");
+  let lock: number;
+  try { lock = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`log rotation already active: ${lockPath}`);
+    throw error;
+  }
+  try {
+    const descriptor = openRegularLogFile(paths.logFile, constants.O_RDONLY);
+    let size: number;
+    try { size = fstatSync(descriptor).size; } finally { closeSync(descriptor); }
+    const activity = unitActivity(paths.serviceName, environment);
+    if (activity === "indeterminate") throw new Error(`cannot determine ${paths.serviceName} activity; refusing active log rotation`);
+    let mainPid: number | null = null;
+    const hasOpenFile = options.processHasOpenFile ?? processHasOpenFile;
+    if (activity === "active") {
+      mainPid = readMainPid(paths.serviceName, environment);
+      if (mainPid === null) throw new Error(`active log rotation requires a canonical MainPID for ${paths.serviceName}`);
+      if (size <= 16 * 1024 * 1024) {
+        if (hasOpenFile(mainPid, paths.logFile)) return 0;
+        const rotated = paths.rotatedLogFiles[0]!;
+        if (!existsSync(rotated) || !hasOpenFile(mainPid, rotated)) throw new Error(`active log rotation requires the canonical MainPID to own ${paths.logFile}`);
+        await signalAndVerifyLogReopen(mainPid, paths.logFile, hasOpenFile, options.signalProcess ?? process.kill);
+        return 0;
+      }
+      if (!hasOpenFile(mainPid, paths.logFile)) throw new Error(`active log rotation requires the canonical MainPID to own ${paths.logFile}`);
+    }
+    if (size <= 16 * 1024 * 1024) return 0;
+    rotateLogs(paths, options.renameLogFile ?? renameSync);
+    if (mainPid !== null) await signalAndVerifyLogReopen(mainPid, paths.logFile, hasOpenFile, options.signalProcess ?? process.kill);
+    return 0;
+  } finally { closeSync(lock); unlinkSync(lockPath); }
+}
+
+async function signalAndVerifyLogReopen(pid: number, path: string, hasOpenFile: (pid: number, path: string) => boolean, signal: (pid: number, signal: NodeJS.Signals) => void): Promise<void> {
+  signal(pid, "SIGUSR2");
+  const deadline = Date.now() + 2_000;
+  while (!hasOpenFile(pid, path)) {
+    if (Date.now() >= deadline) throw new Error(`MainPID ${pid} did not reopen ${path}`);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+}
+
+function readMainPid(serviceName: string, environment: NodeJS.ProcessEnv): number | null {
+  const result = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "MainPID", "--value"], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024 });
+  const parsed = Number(result.stdout.trim());
+  return result.status === 0 && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function processHasOpenFile(pid: number, path: string): boolean {
+  const effectiveUid = process.geteuid?.();
+  if (effectiveUid === undefined) return false;
+  let target: ReturnType<typeof statSync>;
+  try {
+    if (statSync(`/proc/${pid}`).uid !== effectiveUid) return false;
+    target = statSync(path);
+  } catch { return false; }
+  try {
+    return readdirSync(`/proc/${pid}/fd`).some((fd) => {
+      try { const opened = statSync(`/proc/${pid}/fd/${fd}`); return opened.dev === target.dev && opened.ino === target.ino; } catch { return false; }
+    });
+  } catch { return false; }
 }
 
 function openRegularLogFile(path: string, flags: number, mode?: number): number {
@@ -537,7 +644,7 @@ function lstatOptional(path: string): ReturnType<typeof lstatSync> | null {
 
 function rewriteUnit(paths: RuntimePaths, environment: NodeJS.ProcessEnv): void {
   const runtimeEnvironment = loadRuntimeEnvironment(paths, environment);
-  atomicWrite(paths.unitFile, renderUnit(paths, loadBuildIdentity(paths.buildInfo), runtimeEnvironment), 0o600);
+  writeUnits(paths, loadBuildIdentity(paths.buildInfo), runtimeEnvironment);
 }
 
 function printLogs(paths: RuntimePaths, readChunk: typeof readSync, query: LogQueryOptions): number {
@@ -665,16 +772,17 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
   let observedOwnership = "unavailable";
   let unitState = "inactive";
   do {
-    const active = isUnitActive(paths.serviceName, base);
-    unitState = active ? "active" : "inactive";
-    const startup = active ? await probeStartupStatus(config.http.host, config.http.port) : null;
-    const ownership = active && startup?.connectedAddress ? probeListenerOwnership(paths.serviceName, startup.connectedAddress, config.http.port, base) : null;
+    const unit = sampleUnitRuntime(paths.serviceName, base);
+    unitState = unit.activeState;
+    const startup = unit.active ? await probeStartupStatus(config.http.host, config.http.port) : null;
     observedStatus = startup?.status ?? "unavailable";
     observedBuildId = startup?.buildId ?? "unavailable";
     observedStartupState = startup?.startupRecoveryState ?? "unavailable";
+    const candidate = (startup?.status === "ok" || startup?.status === "degraded") && startup.serviceId === AGENT_SWARM_SERVICE_ID
+      && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed";
+    const ownership = candidate && startup.connectedAddress ? probeListenerOwnershipForPid(unit.mainPid, startup.connectedAddress, config.http.port, base) : null;
     observedOwnership = ownership?.detail ?? "unavailable";
-    const healthy = (startup?.status === "ok" || startup?.status === "degraded") && startup.serviceId === AGENT_SWARM_SERVICE_ID
-      && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed" && ownership?.matches === true;
+    const healthy = candidate && ownership?.matches === true;
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
       const readiness = await probeStatus(config.http.host, config.http.port, "/ready");
@@ -717,10 +825,35 @@ interface ListenerOwnership {
   detail: string;
 }
 
+interface UnitRuntimeSample {
+  active: boolean;
+  activeState: string;
+  mainPid: number | null;
+}
+
+function sampleUnitRuntime(serviceName: string, environment: NodeJS.ProcessEnv): UnitRuntimeSample {
+  const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "ActiveState", "--property", "MainPID"], {
+    env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024
+  });
+  if (unit.status !== 0) return { active: false, activeState: "unavailable", mainPid: null };
+  const properties = new Map(unit.stdout.split("\n").map((line) => {
+    const separator = line.indexOf("=");
+    return separator > 0 ? [line.slice(0, separator), line.slice(separator + 1)] : ["", ""];
+  }));
+  const activeState = properties.get("ActiveState") || "unavailable";
+  const parsedMainPid = Number(properties.get("MainPID"));
+  const mainPid = Number.isSafeInteger(parsedMainPid) && parsedMainPid > 0 ? parsedMainPid : null;
+  return { active: activeState === "active", activeState, mainPid };
+}
+
 function probeListenerOwnership(serviceName: string, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
   const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "MainPID", "--value"], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024 });
   const parsedMainPid = Number(unit.stdout.trim());
   const mainPid = unit.status === 0 && Number.isSafeInteger(parsedMainPid) && parsedMainPid > 0 ? parsedMainPid : null;
+  return probeListenerOwnershipForPid(mainPid, host, port, environment);
+}
+
+function probeListenerOwnershipForPid(mainPid: number | null, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
   const sockets = spawnSync("ss", ["-H", "-ltnp"], { env: environment, encoding: "utf8", timeout: 5_000, maxBuffer: 1024 * 1024 });
   const listenerPids = sockets.status === 0 ? listenerPidsForEndpoint(sockets.stdout, host, port) : [];
   const matches = mainPid !== null && listenerPids.includes(mainPid);
@@ -846,12 +979,12 @@ export function isServiceLifecycleEntrypoint(moduleUrl: string, argvPath: string
 }
 
 if (isServiceLifecycleEntrypoint(import.meta.url, process.argv[1])) {
-  const validAction = action && ["install", "uninstall", "start", "status", "restart", "stop", "logs"].includes(action);
+  const validAction = action && ["install", "uninstall", "start", "status", "restart", "stop", "logs", "rotate-logs"].includes(action);
   const validRestart = action === "restart" && (flags.length === 0 || flags.length === 1 && flags[0] === "--force");
   const validLogs = action === "logs";
   const validPlain = action !== "restart" && action !== "logs" && flags.length === 0;
   if (!validAction || !(validRestart || validLogs || validPlain)) {
-    process.stderr.write("usage: service-lifecycle <install|uninstall|start|status|restart|stop|logs> [--force for restart] [logs options]\n"); process.exitCode = 2;
+    process.stderr.write("usage: service-lifecycle <install|uninstall|start|status|restart|stop|logs|rotate-logs> [--force for restart] [logs options]\n"); process.exitCode = 2;
   } else {
     let logQuery: LogQueryOptions | undefined;
     try { if (action === "logs") logQuery = parseLogQueryArgs(flags); } catch (error) { process.stderr.write(`service lifecycle failed: ${safeMessage(error)}\n`); process.exitCode = 2; }

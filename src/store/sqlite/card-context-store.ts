@@ -9,7 +9,7 @@ import type { TopicViewState } from "../../domain/topic-view.js";
 import { updateTopicWorkerContext } from "../../domain/topic-view.js";
 import { selectWorkerMainView, type WorkerMainProjectionSource } from "../../domain/worker-main-selector.js";
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
-import { updateWorkerTurnCardTargets, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
+import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { Binding, MainCardReservationOutcome } from "../../domain/types.js";
 import type { SqliteContext } from "./context.js";
 import { mapWorkerTurnCard } from "./worker-turn-store.js";

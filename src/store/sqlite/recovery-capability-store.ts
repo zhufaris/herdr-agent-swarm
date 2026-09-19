@@ -38,7 +38,6 @@ export class SqliteStartupRecoveryCapabilityStore implements StartupRecoveryStor
 
 export class SqliteStartupViewCapabilityStore implements StartupViewStore {
   constructor(
-    private readonly bindings: SqliteBindingLifecycleStore,
     private readonly prompts: SqlitePromptStore,
     private readonly projections: SqliteProjectionStore,
     private readonly outbox: SqliteOutboxStore

@@ -597,6 +597,42 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("gates repeated bulk snapshot failures and records one recovery", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const warnings: object[] = [];
+    const infos: object[] = [];
+    const logger = { warn(value: object) { warnings.push(value); }, info(value: object) { infos.push(value); }, error() {}, debug() {} } as unknown as pino.Logger;
+    const listAllPanes = vi.fn().mockRejectedValueOnce(new Error("snapshot offline")).mockRejectedValueOnce(new Error("snapshot offline")).mockResolvedValue([]);
+    const reconciler = fixture(store, { listAllPanes, async listPanes() { return []; } } as unknown as HerdrPort, undefined, logger);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(warnings.filter((value) => (value as { event?: string }).event === "herdr-snapshot-fallback")).toHaveLength(1);
+    expect(infos.filter((value) => (value as { event?: string }).event === "herdr-snapshot-recovered")).toHaveLength(1);
+    store.close();
+  });
+
+  it("gates repeated pane reconciliation failures and records one recovery", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const warnings: object[] = [];
+    const infos: object[] = [];
+    const logger = { warn(value: object) { warnings.push(value); }, info(value: object) { infos.push(value); }, error() {}, debug() {} } as unknown as pino.Logger;
+    const discoverPane = vi.fn().mockRejectedValueOnce(new Error("create failed")).mockRejectedValueOnce(new Error("create failed"))
+      .mockResolvedValue({ id: "b1", paneId: pane.paneId });
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, discoverPane, logger);
+
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+    await reconciler.reconcile();
+
+    expect(warnings.filter((value) => (value as { event?: string }).event === "pane-reconciliation-failed")).toHaveLength(1);
+    expect(infos.filter((value) => (value as { event?: string }).event === "reconciliation-recovered")).toHaveLength(1);
+    store.close();
+  });
+
   it("converges healthy workspaces while reporting a partial discovery failure", async () => {
     const store = new SqliteBindingStore(":memory:");
     const listPanes = vi.fn(async (workspaceId: string) => {

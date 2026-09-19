@@ -144,6 +144,10 @@ curl -fsS http://127.0.0.1:8787/ready
 The response must contain `"status":"ready"`. If setup selected another
 `BRIDGE_HTTP_PORT`, use that port.
 
+Herdr events drive low-latency convergence. `RECONCILE_INTERVAL_MS` controls the
+periodic full recovery scan, accepts 5,000 through 3,600,000 milliseconds, and
+defaults to 30,000. The shipped environment example uses a five-minute scan.
+
 ### Update a source installation
 
 Update to the intended committed revision, rebuild, and install another immutable
@@ -223,9 +227,9 @@ npm run swarm:logs
 
 Run `npm run swarm:doctor` for read-only environment diagnosis. The service
 log is private, bounded, and available through `swarm:logs`; host journal
-access is not required. Pino writes structured JSON to stdout/stderr and the
-user systemd unit is the sole local file writer. Logs rotate only while the
-unit is confirmed stopped, at 16 MiB, retaining `service.log.1` through `.3`.
+access is not required. In installed mode, one application-owned Pino
+destination writes the private file. A user-systemd timer rotates at 16 MiB and
+signals the exact service MainPID to reopen it, retaining only `service.log.1`.
 The default command prints the final 100 complete lines from at most 1 MiB.
 Agent-oriented filtering is available without journal access, for example:
 

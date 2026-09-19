@@ -83,9 +83,9 @@ describe("coordinator concurrency controls", () => {
 
   it("continues startup after a recoverable view convergence stage fails", async () => {
     const store = new SqliteBindingStore(":memory:");
-    const originalListBindings = store.listBindings.bind(store);
+    const originalListStartupViewBindings = store.listStartupViewBindings.bind(store);
     let first = true;
-    store.listBindings = () => { if (first) { first = false; throw new Error("one startup view is unreadable"); } return originalListBindings(); };
+    store.listStartupViewBindings = (...args) => { if (first) { first = false; throw new Error("one startup view is unreadable"); } return originalListStartupViewBindings(...args); };
     const lark = quietLark();
     const start = vi.spyOn(lark, "start");
     const bus = new BridgeEventBus();

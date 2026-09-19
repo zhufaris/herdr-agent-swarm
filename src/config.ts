@@ -56,7 +56,7 @@ const environmentSchema = z.object({
   COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   LARK_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),
-  RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(30_000),
   OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
   HERDR_CIRCUIT_OPEN_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),

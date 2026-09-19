@@ -103,11 +103,12 @@ Candidate staging does not move `${SWARM_STATE_DIR}/current`; lifecycle
 installation commits that link only after unit reload and enable succeed. If a
 failed compensation leaves `.release-activation.json`, inspect and reconcile the
 unit and `current` target before retrying install, start, or restart.
-The canonical unit appends stdout and stderr to
+The canonical unit gives the application one Pino destination at
 `${SWARM_STATE_DIR}/logs/service.log`; the lifecycle keeps `logs/` private at
-`0700` and the log at `0600`. Logs rotate at 16 MiB while the unit is stopped,
-retaining `service.log.1` through `.3` and the current file. Host journal access
-is not required for supported log inspection. `npm run swarm:logs -- <options>`
+`0700` and the log at `0600`. A user-systemd timer rotates at 16 MiB, verifies
+the exact service `MainPID`, and sends `SIGUSR2` for reopen, retaining only
+`service.log.1` and the current file. Host journal access is not required for
+supported log inspection. `npm run swarm:logs -- <options>`
 supports bounded rotated-history, level, time, component, and correlation-ID
 filters; use `--json` for headerless JSONL output.
 
@@ -215,6 +216,9 @@ Common optional settings include `BRIDGE_HTTP_HOST`, `BRIDGE_HTTP_PORT`,
 `INSTANCE_LEASE_HEARTBEAT_MS`, `MAX_QUEUE_DEPTH`, and
 `LARK_MESSAGE_CHUNK_SIZE`. The actual environment schema in `src/config.ts` is
 the source for defaults and valid ranges.
+`RECONCILE_INTERVAL_MS` accepts 5,000 through 3,600,000 milliseconds; its
+default is 30,000. Events remain the low-latency path and the interval controls
+the periodic full recovery scan.
 
 `projects.json` must contain a non-empty `projects` array and a
 `defaultProjectId` that references one entry. Each project needs a unique

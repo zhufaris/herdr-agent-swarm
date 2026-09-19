@@ -379,6 +379,6 @@ Primary/Worker writers, ordered durable delivery, and local-only approval.
    checks to concrete tests, source evidence, query plans, or lifecycle fixtures.
 4. Inspect Git status, every new commit, and the complete outgoing range. Confirm
    no installation, restart, or push occurred.
-5. Record the hook-injected `Co-authored-by: TRAE CLI` trailers as a blocking
+5. Record any hook-injected CLI co-author trailers as a blocking
    cleanup requirement before any future push, then run `npm run public:audit` if
    and only if a push is requested.

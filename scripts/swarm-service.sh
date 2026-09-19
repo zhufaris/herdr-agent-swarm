@@ -21,7 +21,7 @@ case "$ACTION" in
     printf 'Created private Herdr Agent Swarm configuration in %s\nEdit .env and projects.json, then run: npm run swarm:install\n' "$CONFIG_DIR"
     exit 0
     ;;
-  install|uninstall|start|status|restart|stop|logs) ;;
+  install|uninstall|start|status|restart|stop|logs|rotate-logs) ;;
   *) printf 'usage: %s <setup|doctor|init|install|uninstall|start|status|restart|stop|logs> [options]\n' "$0" >&2; exit 2 ;;
 esac
 exec node "$ROOT/dist/cli/service-lifecycle.js" "$ACTION" "${@:2}"

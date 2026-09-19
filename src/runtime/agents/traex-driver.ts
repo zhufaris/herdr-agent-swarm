@@ -3,6 +3,7 @@ import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, Dispatc
 import type { HerdrPort } from "../../domain/ports/external.js";
 import { classifyPromptSubmissionFailure } from "../../domain/prompt-submission.js";
 import { safeLogError } from "../safe-error.js";
+import { managedAgentName, primaryToolMcpArguments } from "./agent-startup.js";
 
 export class TraexDriver implements AgentRuntimeDriver {
   readonly kind = "traex" as const;
@@ -24,9 +25,9 @@ export class TraexDriver implements AgentRuntimeDriver {
   async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
     const args = [
       ...(options?.model ? ["--model", options.model] : []),
-      ...(options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...mcpArguments(options.primaryTools)] : [])
+      ...(options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...primaryToolMcpArguments(options.primaryTools)] : [])
     ];
-    if (this.herdr.startAgent) await this.herdr.startAgent(runtime.paneId, { name: managedName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
+    if (this.herdr.startAgent) await this.herdr.startAgent(runtime.paneId, { name: managedAgentName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
     else await this.herdr.startTraex(runtime.paneId, this.executable, args);
   }
 
@@ -53,16 +54,4 @@ export class TraexDriver implements AgentRuntimeDriver {
     try { await this.herdr.sendEscape(runtime.paneId); return { status: "interrupted" }; }
     catch (error) { return { status: "failed", reason: safeLogError(error).message }; }
   }
-}
-
-function mcpArguments(server: { command: string; args: string[] }): string[] {
-  return [
-    "-c", `mcp_servers.herdr_agent_swarm.command=${JSON.stringify(server.command)}`,
-    "-c", `mcp_servers.herdr_agent_swarm.args=${JSON.stringify(server.args)}`,
-    "-c", 'mcp_servers.herdr_agent_swarm.env_vars=["SWARM_PRIMARY_CAPABILITY"]'
-  ];
-}
-function managedName(projectId: string | undefined, name: string): string {
-  const prefix = `${projectId ?? "agent"}-${name}`.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z]+/, "a-");
-  return prefix.slice(0, 32).replace(/[-_]$/, "") || "agent";
 }

@@ -53,7 +53,9 @@ function groupProjects(projects: readonly ProjectConfig[], keyFor: (project: Pro
   const grouped = new Map<string, ProjectConfig[]>();
   for (const project of projects) {
     const key = keyFor(project);
-    grouped.set(key, [...(grouped.get(key) ?? []), project]);
+    const bucket = grouped.get(key);
+    if (bucket) bucket.push(project);
+    else grouped.set(key, [project]);
   }
   return grouped;
 }

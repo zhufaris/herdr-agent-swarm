@@ -67,11 +67,17 @@ describe("service lifecycle", () => {
   it("restores the previous unit and current release when daemon reload fails", async () => {
     const fixture = createActivationFixture({ previous: true, failFirstReload: true, priorEnabled: "enabled" });
     const priorUnit = readFileSync(fixture.unit, "utf8");
+    const rotationUnit = join(fixture.units, "herdr-agent-swarm-log-rotate.service");
+    const rotationTimer = join(fixture.units, "herdr-agent-swarm-log-rotate.timer");
+    writeFileSync(rotationUnit, "previous rotation service\n", { mode: 0o640 });
+    writeFileSync(rotationTimer, "previous rotation timer\n", { mode: 0o640 });
 
     await expect(runServiceLifecycle("install", fixture.environment)).resolves.toBe(7);
 
     expect(realpathSync(fixture.current)).toBe(fixture.previous);
     expect(readFileSync(fixture.unit, "utf8")).toBe(priorUnit);
+    expect(readFileSync(rotationUnit, "utf8")).toBe("previous rotation service\n");
+    expect(readFileSync(rotationTimer, "utf8")).toBe("previous rotation timer\n");
     expect(existsSync(fixture.marker)).toBe(false);
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user enable herdr-agent-swarm.service\n");
   });
@@ -83,6 +89,8 @@ describe("service lifecycle", () => {
 
     expect(existsSync(fixture.current)).toBe(false);
     expect(existsSync(fixture.unit)).toBe(false);
+    expect(existsSync(join(fixture.units, "herdr-agent-swarm-log-rotate.service"))).toBe(false);
+    expect(existsSync(join(fixture.units, "herdr-agent-swarm-log-rotate.timer"))).toBe(false);
     expect(existsSync(fixture.marker)).toBe(false);
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable herdr-agent-swarm.service\n");
   });
@@ -270,9 +278,13 @@ describe("service lifecycle", () => {
     expect(unit).toContain(`ExecStart=${process.execPath} --enable-source-maps ${fixture.root}/dist/main.js`);
     expect(unit).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:test-build");
     expect(unit).toContain("Environment=HERDR_SOCKET_PATH=/tmp/test-herdr.sock");
+    expect(unit).toContain(`Environment=BRIDGE_LOG_PATH=${fixture.state}/logs/service.log`);
     expect(unit).toContain("Restart=on-failure");
-    expect(unit).toContain(`StandardOutput=append:${fixture.state}/logs/service.log`);
-    expect(unit).toContain(`StandardError=append:${fixture.state}/logs/service.log`);
+    expect(unit).toContain("Also=herdr-agent-swarm-log-rotate.timer");
+    expect(unit).toContain("StandardOutput=null");
+    expect(unit).toContain("StandardError=null");
+    expect(readFileSync(join(fixture.units, "herdr-agent-swarm-log-rotate.service"), "utf8")).toContain("rotate-logs");
+    expect(readFileSync(join(fixture.units, "herdr-agent-swarm-log-rotate.timer"), "utf8")).toContain("OnUnitActiveSec=1h");
     expect(statSync(join(fixture.state, "logs")).mode & 0o777).toBe(0o700);
     expect(statSync(join(fixture.state, "logs/service.log")).mode & 0o777).toBe(0o600);
     await expect(runServiceLifecycle("stop", fixture.environment)).resolves.toBe(0);
@@ -447,25 +459,21 @@ describe("service lifecycle", () => {
     expect(statSync(join(logs, "service.log")).size).toBe(16 * 1024 * 1024 + 1);
   });
 
-  it("rolls back every generation when rotation fails after moving history", async () => {
+  it("rolls back the retained generation when rotation fails after displacement", async () => {
     const fixture = createFixture({ active: false });
     const logs = join(fixture.state, "logs");
     mkdirSync(logs);
     writeFileSync(join(logs, "service.log"), "current");
     truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
     writeFileSync(join(logs, "service.log.1"), "one");
-    writeFileSync(join(logs, "service.log.2"), "two");
-    writeFileSync(join(logs, "service.log.3"), "three");
     let calls = 0;
     await expect(runServiceLifecycle("install", fixture.environment, { renameLogFile: (source, destination) => {
       calls += 1;
-      if (calls === 3) throw new Error("injected mid-rotation failure");
+      if (calls === 2) throw new Error("injected mid-rotation failure");
       renameSync(source, destination);
     } })).rejects.toThrow(/mid-rotation/);
     expect(readFileSync(join(logs, "service.log"), "utf8").startsWith("current")).toBe(true);
     expect(readFileSync(join(logs, "service.log.1"), "utf8")).toBe("one");
-    expect(readFileSync(join(logs, "service.log.2"), "utf8")).toBe("two");
-    expect(readFileSync(join(logs, "service.log.3"), "utf8")).toBe("three");
   });
 
   it("escapes systemd path metacharacters in log directives", async () => {
@@ -477,8 +485,7 @@ describe("service lifecycle", () => {
 
     const unit = readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8");
     const escaped = `${fixture.root}/${String.raw`state\x20path%%\x5c\x22quoted/logs/service.log`}`;
-    expect(unit).toContain(`StandardOutput=append:${escaped}`);
-    expect(unit).toContain(`StandardError=append:${escaped}`);
+    expect(unit).toContain(`Environment=BRIDGE_LOG_PATH=${escaped}`);
   });
 
   it.each(["\t", "\u0001"])("rejects systemd paths containing control character %j", async (control) => {
@@ -572,20 +579,73 @@ describe("service lifecycle", () => {
     expect(() => parseLogQueryArgs(["--unknown"])).toThrow(/invalid logs option/);
   });
 
-  it("retains three rotated generations", async () => {
+  it("retains one rotated generation", async () => {
     const fixture = createFixture({ active: false });
     const logs = join(fixture.state, "logs");
     mkdirSync(logs);
     writeFileSync(join(logs, "service.log.1"), "one");
-    writeFileSync(join(logs, "service.log.2"), "two");
-    writeFileSync(join(logs, "service.log.3"), "three");
     writeFileSync(join(logs, "service.log"), "current");
     truncateSync(join(logs, "service.log"), 16 * 1024 * 1024 + 1);
     await runServiceLifecycle("install", fixture.environment);
     expect(readFileSync(join(logs, "service.log.1"), "utf8").startsWith("current")).toBe(true);
-    expect(readFileSync(join(logs, "service.log.2"), "utf8")).toBe("one");
-    expect(readFileSync(join(logs, "service.log.3"), "utf8")).toBe("two");
     expect(statSync(join(logs, "service.log")).size).toBe(0);
+  });
+
+  it("rotates an active service log and signals only its verified MainPID to reopen", async () => {
+    const fixture = createFixture({ active: true, mainPid: 4242 });
+    await runServiceLifecycle("install", fixture.environment);
+    const logFile = join(fixture.state, "logs/service.log");
+    writeFileSync(logFile, "current");
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+    let probeCount = 0;
+    const signalProcess = vi.fn();
+
+    await expect(runServiceLifecycle("rotate-logs", fixture.environment, {
+      signalProcess, processHasOpenFile: (pid, path) => { expect(pid).toBe(4242); expect(path).toBe(logFile); return ++probeCount !== 2; }
+    })).resolves.toBe(0);
+
+    expect(signalProcess).toHaveBeenCalledWith(4242, "SIGUSR2");
+    expect(statSync(logFile).size).toBe(0);
+    expect(statSync(logFile).mode & 0o777).toBe(0o600);
+    expect(statSync(`${logFile}.1`).size).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it("fails closed before rotation when active MainPID does not own the log", async () => {
+    const fixture = createFixture({ active: true, mainPid: 4242 });
+    await runServiceLifecycle("install", fixture.environment);
+    const logFile = join(fixture.state, "logs/service.log");
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+    const signalProcess = vi.fn();
+
+    await expect(runServiceLifecycle("rotate-logs", fixture.environment, { signalProcess, processHasOpenFile: () => false }))
+      .rejects.toThrow(/MainPID.*own/);
+    expect(signalProcess).not.toHaveBeenCalled();
+    expect(statSync(logFile).size).toBe(16 * 1024 * 1024 + 1);
+  });
+
+  it("retries reopen without rotating again after a prior signal failure", async () => {
+    const fixture = createFixture({ active: true, mainPid: 4242 });
+    await runServiceLifecycle("install", fixture.environment);
+    const logFile = join(fixture.state, "logs/service.log");
+    truncateSync(logFile, 16 * 1024 * 1024 + 1);
+    const firstSignal = vi.fn(() => { throw new Error("signal failed"); });
+    await expect(runServiceLifecycle("rotate-logs", fixture.environment, { signalProcess: firstSignal, processHasOpenFile: (_pid, path) => path.endsWith(".1") ? false : true }))
+      .rejects.toThrow(/signal failed/);
+    const rotatedSize = statSync(`${logFile}.1`).size;
+    let reopened = false;
+    const retrySignal = vi.fn(() => { reopened = true; });
+
+    await expect(runServiceLifecycle("rotate-logs", fixture.environment, { signalProcess: retrySignal, processHasOpenFile: (_pid, path) => path === logFile ? reopened : !reopened }))
+      .resolves.toBe(0);
+    expect(retrySignal).toHaveBeenCalledOnce();
+    expect(statSync(`${logFile}.1`).size).toBe(rotatedSize);
+  });
+
+  it("rejects concurrent log rotation through the state lock", async () => {
+    const fixture = createFixture({ active: false });
+    await runServiceLifecycle("install", fixture.environment);
+    writeFileSync(join(fixture.state, ".log-rotation.lock"), "held");
+    await expect(runServiceLifecycle("rotate-logs", fixture.environment)).rejects.toThrow(/already active/);
   });
 
   it("applies custom line and byte limits", async () => {
@@ -1243,9 +1303,11 @@ describe("service lifecycle", () => {
   });
 
   it("rejects a healthy response from a stale build", async () => {
+    let statusRequests = 0;
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
+      statusRequests += 1;
       response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:stale-build" } })));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1254,6 +1316,10 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("install", fixture.environment);
       await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
         .rejects.toThrow(/expected build sha256:test-build.*observed build sha256:stale-build.*startup completed/);
+      expect(existsSync(fixture.ssCalls) ? readFileSync(fixture.ssCalls, "utf8") : "").toBe("");
+      const runtimeSamples = readFileSync(fixture.calls, "utf8").split("\n").filter((call) => call.includes("--property ActiveState"));
+      expect(runtimeSamples).toHaveLength(statusRequests);
+      expect(runtimeSamples.every((call) => call.includes("--property MainPID"))).toBe(true);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -1341,7 +1407,7 @@ function createFixture(options: { active?: boolean; activeStatus?: "unknown"; st
   writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
   const activity = options.activeStatus === "unknown" ? "echo unknown; exit 4" : active ? "echo active; exit 0" : "echo inactive; exit 3";
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then echo ${options.mainPid ?? process.pid}; exit 0; fi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nexit 0\n`);
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nexit 0\n`);
   const ssOutput = options.ssOutput ?? `LISTEN 0 511 127.0.0.1:${options.port ?? 39001} 0.0.0.0:* users:(("node",pid=${options.listenerPid ?? process.pid},fd=20))`;
   writeFileSync(join(bin, "ss"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(ssCalls)}\nprintf '%b\n' ${JSON.stringify(ssOutput)}\nexit ${options.ssExit ?? 0}\n`);
   writeFileSync(join(bin, "journalctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(journalCalls)}\nexit 0\n`);

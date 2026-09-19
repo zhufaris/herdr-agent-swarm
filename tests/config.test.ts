@@ -118,6 +118,14 @@ describe("project registry configuration", () => {
     expect(loadConfig({ ...requiredEnvironment, CODEX_BIN: "/opt/codex", CLAUDE_CODE_BIN: "/opt/claude", PI_BIN: "/opt/pi" }).agents).toEqual({ codex: "/opt/codex", claudeCode: "/opt/claude", pi: "/opt/pi" });
   });
 
+  it("bounds the periodic full reconciliation interval", () => {
+    expect(loadConfig(requiredEnvironment).reconcileIntervalMs).toBe(30_000);
+    expect(loadConfig({ ...requiredEnvironment, RECONCILE_INTERVAL_MS: "5000" }).reconcileIntervalMs).toBe(5_000);
+    expect(loadConfig({ ...requiredEnvironment, RECONCILE_INTERVAL_MS: "3600000" }).reconcileIntervalMs).toBe(3_600_000);
+    expect(() => loadConfig({ ...requiredEnvironment, RECONCILE_INTERVAL_MS: "4999" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, RECONCILE_INTERVAL_MS: "3600001" })).toThrow();
+  });
+
   it("configures Lark request timeout independently from command execution", () => {
     expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000" }).lark.requestTimeoutMs).toBe(30_000);
     expect(loadConfig({ ...requiredEnvironment, COMMAND_TIMEOUT_MS: "45000", LARK_REQUEST_TIMEOUT_MS: "12000" })).toMatchObject({

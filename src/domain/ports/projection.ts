@@ -1,7 +1,6 @@
 import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, MainCardReservationOutcome, OutboundWorkClass } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
-import type { InstanceStore } from "./instance.js";
 import type { ModelPreference } from "../model-selection.js";
 
 export interface AnswerPageStore {

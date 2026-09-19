@@ -78,14 +78,17 @@ function isInTopicPaneScope(projects: readonly ProjectConfig[], binding: Binding
 export function buildSpaceDirectoryGroups(projects: readonly ProjectConfig[], panesByWorkspace: ReadonlyMap<string, HerdrPane[]>, errors: ReadonlyMap<string, string>): SpaceDirectoryGroup[] {
   const groups = new Map<string, SpaceDirectoryGroup>();
   const groupsByRoute = new Map<string, SpaceDirectoryGroup>();
+  const directoriesByGroup = new Map<string, Set<string>>();
   for (const project of projects) {
     const spaceName = projectSpaceName(project);
     const key = `${project.workspaceId}\0${spaceName}`;
     const group = groups.get(key) ?? { spaceName, workspaceId: project.workspaceId, directories: [], panes: [] };
-    if (!group.directories.includes(project.cwd)) group.directories.push(project.cwd);
+    const directories = directoriesByGroup.get(key) ?? new Set<string>();
+    if (!directories.has(project.cwd)) { directories.add(project.cwd); group.directories.push(project.cwd); }
     const error = errors.get(project.workspaceId);
     if (error) group.error = error;
     groups.set(key, group);
+    directoriesByGroup.set(key, directories);
     groupsByRoute.set(`${project.workspaceId}\0${project.cwd}`, group);
   }
   const result = [...groups.values()];

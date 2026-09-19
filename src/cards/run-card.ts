@@ -544,15 +544,3 @@ function projectWorkSummary(input: TopicViewState): string {
   if (input.phase === "done") return `${cardSection("🎯", "当前任务")}\n当前 Pane 没有正在执行的请求${input.queueDepth > 0 ? `；下一条请求正在等待调度（${input.queueDepth} 条）。` : "。"}`;
   return `${cardSection("🎯", "当前任务")}\n${STATE_VIEW[input.phase].label}`;
 }
-function progressLine(event: RunCardView["progressEvents"][number]): string {
-  const label = progressLabel(event.label);
-  if (event.kind === "step") return `${event.state === "pending" ? "☐" : event.state === "active" ? "◌" : event.state === "done" ? "✓" : "✕"} ${label}`;
-  if (event.state === "failed") return `❌ ${label}`;
-  if (event.kind === "test" && event.state === "done") return `✅ ${label}`;
-  const icon = { analyze: "🧠", search: "🔍", read: "📖", edit: "✏️", test: "🧪" }[event.kind];
-  return `${icon} ${label}`;
-}
-function progressLabel(label: string): string {
-  const normalized = label.replace(/\s+/g, " " ).trim();
-  return normalized.length > 200 ? `${normalized.slice(0, 199).trimEnd()}…` : normalized;
-}

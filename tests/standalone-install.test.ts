@@ -115,6 +115,43 @@ describe("standalone installer", () => {
     expect(readdirSync(releases).sort()).toEqual([...names, candidate.split("/").at(-1)!].sort());
   });
 
+  it("reuses an exact validated immutable release without copying or npm install", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "standalone-stage-hit-"));
+    const bin = join(fixture, "bin");
+    const state = join(fixture, "state");
+    const calls = join(fixture, "npm.calls");
+    mkdirSync(bin);
+    executable(join(bin, "npm"), `#!/bin/sh\nprintf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}\nmkdir -p "$2/node_modules"\n`);
+    const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+    const first = spawnSync("/bin/bash", ["scripts/stage-production-runtime.sh", state], { encoding: "utf8", env: environment });
+    expect(first.status, first.stderr).toBe(0);
+    writeFileSync(calls, "");
+
+    const second = spawnSync("/bin/bash", ["scripts/stage-production-runtime.sh", state], { encoding: "utf8", env: environment });
+
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stdout.trim()).toBe(first.stdout.trim());
+    expect(readFileSync(calls, "utf8")).toBe("");
+    expect(readdirSync(join(state, "releases")).filter((name) => name.startsWith(".staging"))).toEqual([]);
+  });
+
+  it("fails closed when an exact release has mismatched build identity", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "standalone-stage-invalid-"));
+    const state = join(fixture, "state");
+    const identity = JSON.parse(readFileSync("dist/build-info.json", "utf8")) as { buildId: string; gitCommit: string };
+    const release = join(state, "releases", `${identity.buildId.slice(7)}-${identity.gitCommit.slice(0, 12)}`);
+    mkdirSync(join(release, "dist"), { recursive: true });
+    mkdirSync(join(release, "node_modules"));
+    writeFileSync(join(release, "package.json"), "{}");
+    writeFileSync(join(release, "package-lock.json"), "{}");
+    writeFileSync(join(release, "dist/build-info.json"), JSON.stringify({ ...identity, buildId: `sha256:${"0".repeat(64)}` }));
+
+    const result = spawnSync("/bin/bash", ["scripts/stage-production-runtime.sh", state], { encoding: "utf8" });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("failed validation");
+  });
+
   it("guards lifecycle installation until private configuration is complete", () => {
     const staging = installScript.indexOf('bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR"');
     const guard = installScript.indexOf("Configuration is missing or still contains placeholders. Run: npm run swarm:setup");

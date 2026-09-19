@@ -12,11 +12,20 @@ RELEASE_KEY="$BUILD_ID-$GIT_COMMIT"
 RELEASES="$STATE_DIR/releases"
 RELEASE="$RELEASES/$RELEASE_KEY"
 install -d -m 700 "$STATE_DIR" "$RELEASES"
+validate_release() {
+    [ -d "$RELEASE" ] && [ ! -L "$RELEASE" ] && [ -r "$RELEASE/dist/build-info.json" ] && [ -r "$RELEASE/package.json" ] && [ -r "$RELEASE/package-lock.json" ] && [ -d "$RELEASE/node_modules" ]
+    node -e 'const fs=require("node:fs"); const expected=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const actual=JSON.parse(fs.readFileSync(process.argv[2], "utf8")); if (actual.buildId !== expected.buildId || actual.gitCommit !== expected.gitCommit) process.exit(1);' "$BUILD_INFO" "$RELEASE/dist/build-info.json"
+}
+if [ -e "$RELEASE" ]; then
+    if validate_release; then printf '%s\n' "$RELEASE"; exit 0; fi
+    echo "Existing immutable release failed validation: $RELEASE" >&2
+    exit 1
+fi
 STAGING="$(mktemp -d "$RELEASES/.staging.XXXXXX")"
 trap 'rm -rf -- "$STAGING"' EXIT
 cp -R "$ROOT/dist" "$STAGING/dist"
 cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGING/"
 npm --prefix "$STAGING" ci --omit=dev >&2
-if [ ! -d "$RELEASE" ]; then mv "$STAGING" "$RELEASE"; else rm -rf -- "$STAGING"; fi
+if [ ! -d "$RELEASE" ]; then mv "$STAGING" "$RELEASE"; elif validate_release; then rm -rf -- "$STAGING"; else echo "Concurrent immutable release failed validation: $RELEASE" >&2; exit 1; fi
 trap - EXIT
 printf '%s\n' "$RELEASE"

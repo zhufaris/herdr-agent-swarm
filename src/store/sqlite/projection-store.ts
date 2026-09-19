@@ -5,7 +5,6 @@ import type { MainCardLiveStatus, RunCardView } from "../../domain/run-card-view
 import { initialTopicView, type TopicViewState } from "../../domain/topic-view.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
 import { mapAnswerPage, mapBinding, type AnswerPageRow, type BindingRow } from "../sqlite-records.js";
-import { outboundLaneKey } from "../outbox-lanes.js";
 import type { SqliteContext } from "./context.js";
 import { linkAnswerRecovery, recordAnswerCoverage } from "./delivery-recovery-evidence.js";
 

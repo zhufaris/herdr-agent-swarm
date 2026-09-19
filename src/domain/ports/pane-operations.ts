@@ -1,4 +1,4 @@
-import type { Binding, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, OutboundReply, SessionSummary } from "../types.js";
+import type { Binding, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, OutboundReply } from "../types.js";
 import type { AgentInstance } from "../agent-instance.js";
 import type { PaneControlOutcome as DomainPaneControlOutcome } from "../pane-control-lifecycle.js";
 import type { RunCardView } from "../run-card-view.js";

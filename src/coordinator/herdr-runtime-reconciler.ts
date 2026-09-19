@@ -11,6 +11,7 @@ import { HerdrSnapshotCollector } from "./herdr-snapshot-collector.js";
 import { BindingRuntimeConverger } from "./binding-runtime-converger.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { reconciliationCooldownCovers } from "./reconciliation-scope-policy.js";
+import { FailureLogGate } from "../runtime/failure-log-gate.js";
 
 const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
 
@@ -51,6 +52,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly reconciliationRunner: PriorityReconciliationRunner;
   private readonly lastReconciledAt = new Map<string, number>();
   private readonly converger: BindingRuntimeConverger;
+  private readonly failureLogs = new FailureLogGate();
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
@@ -93,8 +95,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         const observation = observations.get(paneId) ?? { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" as const };
         if (!observation.pane) { await this.converger.orphan(existing); continue; }
         await this.converger.converge(existing, observation.pane);
+        this.logRecovery(`pane:${paneId}`, { workspaceId: existing.workspaceId, paneId });
       } catch (error) {
-        this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: existing.workspaceId, paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
+        this.logFailure(`pane:${paneId}`, "pane-reconciliation", error, { workspaceId: existing.workspaceId, paneId });
       }
     }
   }
@@ -147,8 +150,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
           continue;
         }
         if (binding.paneId && !paneIdsByWorkspace.get(binding.workspaceId)!.has(binding.paneId)) await this.converger.orphan(binding);
+        this.logRecovery(`binding:${binding.id}:missing-pane`, { bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, phase: "missing-pane" });
       } catch (error) {
-        this.options.logger.warn({ event: "binding-reconciliation-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, phase: "missing-pane", outcome: "deferred" }, "failed to reconcile one binding");
+        this.logFailure(`binding:${binding.id}:missing-pane`, "binding-reconciliation", error, { bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, phase: "missing-pane" });
       }
     }
 
@@ -165,13 +169,14 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         try {
           const observation = await this.options.herdr.observeRuntime(pane.paneId);
           pane = observation.pane ?? pane;
+          this.logRecovery(`probe:${existing.id}`, { bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, phase: "agent-probe" });
           this.options.logger.debug({
             event: "binding-runtime-observed", bindingId: existing.id, paneId: pane.paneId,
             agentState: observation.pane?.agentState ?? "unknown", evidenceSource: observation.evidenceSource
           }, "enriched bound pane from runtime evidence");
         }
         catch (error) {
-          this.options.logger.warn({ event: "binding-agent-probe-failed", err: safeLogError(error), bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" }, "failed to enrich unknown bound pane");
+          this.logFailure(`probe:${existing.id}`, "binding-agent-probe", error, { bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" });
         }
       }
       if (!existing) {
@@ -204,11 +209,13 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         if (this.skippedPaneReasons.has(pane.paneId)) this.options.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: project.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
         existing = await this.options.discoverPane(pane, project);
         bindingByPaneId.set(pane.paneId, existing);
+        this.logRecovery(`pane:${pane.paneId}`, { workspaceId: pane.workspaceId, paneId: pane.paneId });
         continue;
       }
       await this.converger.converge(existing, pane);
+      this.logRecovery(`pane:${snapshotPane.paneId}`, { workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId });
       } catch (error) {
-        this.options.logger.warn({ event: "pane-reconciliation-failed", err: safeLogError(error), workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId, outcome: "deferred" }, "failed to reconcile one Herdr pane");
+        this.logFailure(`pane:${snapshotPane.paneId}`, "pane-reconciliation", error, { workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId });
       }
     }
     if (requestedWorkspaceIds === undefined && panesByWorkspace.size === reconciliationWorkspaceIds.size) {
@@ -217,6 +224,18 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
     return { reconciledWorkspaceIds: new Set(panesByWorkspace.keys()), failures };
+  }
+
+  private logFailure(scope: string, event: string, error: unknown, context: Record<string, unknown>): void {
+    const safe = safeLogError(error);
+    const decision = this.failureLogs.fail(scope, safe.message);
+    if (decision.kind === "suppressed") return;
+    this.options.logger.warn({ ...context, event: decision.kind === "summary" ? `${event}-failure-summary` : `${event}-failed`, err: safe, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "deferred" }, `failed ${event.replaceAll("-", " ")}`);
+  }
+
+  private logRecovery(scope: string, context: Record<string, unknown>): void {
+    const recovery = this.failureLogs.recover(scope);
+    if (recovery) this.options.logger.info({ ...context, event: "reconciliation-recovered", ...recovery, outcome: "recovered" }, "reconciliation recovered");
   }
 
 }

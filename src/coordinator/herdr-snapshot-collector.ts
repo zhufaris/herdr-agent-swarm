@@ -7,6 +7,7 @@ import { safeLogError } from "../runtime/safe-error.js";
 
 export class HerdrSnapshotCollector {
   private readonly workspaceFailureLogs = new FailureLogGate();
+  private readonly snapshotFailureLogs = new FailureLogGate();
   constructor(private readonly herdr: HerdrPort, private readonly logger: Logger) {}
 
   async allOrConfigured(workspaceIds: readonly string[]): Promise<HerdrPane[]> {
@@ -19,11 +20,15 @@ export class HerdrSnapshotCollector {
       try {
         const requested = new Set(workspaceIds);
         const snapshot = await this.herdr.listAllPanes();
+        const recovery = this.snapshotFailureLogs.recover("all");
+        if (recovery) this.logger.info({ event: "herdr-snapshot-recovered", ...recovery, outcome: "recovered" }, "Herdr snapshot recovered");
         for (const workspaceId of workspaceIds) result.set(workspaceId, []);
         for (const pane of snapshot) if (requested.has(pane.workspaceId)) result.get(pane.workspaceId)!.push(pane);
         return { panesByWorkspace: result, failures: [] };
       } catch (error) {
-        this.logger.warn({ event: "herdr-snapshot-fallback", err: safeLogError(error), workspaceIds, outcome: "fallback" }, "Herdr snapshot unavailable; falling back to workspace pane discovery");
+        const safe = safeLogError(error);
+        const decision = this.snapshotFailureLogs.fail("all", safe.message);
+        if (decision.kind !== "suppressed") this.logger.warn({ event: decision.kind === "summary" ? "herdr-snapshot-failure-summary" : "herdr-snapshot-fallback", err: safe, workspaceIds, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "fallback" }, "Herdr snapshot unavailable; falling back to workspace pane discovery");
       }
     }
     const failures: ReconciliationFailure[] = [];
