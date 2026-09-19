@@ -12,8 +12,14 @@ import { BindingRuntimeConverger } from "./binding-runtime-converger.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { reconciliationCooldownCovers } from "./reconciliation-scope-policy.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
+import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 
 const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
+const EXISTING_BINDING_CONCURRENCY = 4;
+
+type ReconciliationPhaseDiagnostics = Pick<ReconciliationDiagnostics,
+  "snapshotDurationMs" | "missingPaneDurationMs" | "existingBindingDurationMs" | "discoveryDurationMs" |
+  "existingBindingCount" | "discoveryCandidateCount">;
 
 interface HerdrRuntimeReconcilerOptions {
   projects: readonly ProjectConfig[];
@@ -53,6 +59,10 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly lastReconciledAt = new Map<string, number>();
   private readonly converger: BindingRuntimeConverger;
   private readonly failureLogs = new FailureLogGate();
+  private phaseDiagnostics: ReconciliationPhaseDiagnostics = {
+    snapshotDurationMs: null, missingPaneDurationMs: null, existingBindingDurationMs: null, discoveryDurationMs: null,
+    existingBindingCount: null, discoveryCandidateCount: null
+  };
 
   constructor(private readonly options: HerdrRuntimeReconcilerOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
@@ -103,7 +113,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   snapshot(): ReconciliationDiagnostics {
-    return this.reconciliationRunner.snapshot();
+    return { ...this.reconciliationRunner.snapshot(), ...this.phaseDiagnostics };
   }
 
   start(intervalMs: number): void {
@@ -130,7 +140,9 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const workspaceIds = requestedWorkspaceIds
       ? [...requestedWorkspaceIds].filter((workspaceId) => reconciliationWorkspaceIds.has(workspaceId))
       : [...reconciliationWorkspaceIds];
+    const snapshotStarted = performance.now();
     const { panesByWorkspace, failures } = await this.snapshots.collect(workspaceIds);
+    const snapshotDurationMs = elapsedMs(snapshotStarted);
 
     const paneIdsByWorkspace = new Map<string, Set<string>>();
     for (const [workspaceId, workspacePanes] of panesByWorkspace) paneIdsByWorkspace.set(workspaceId, new Set(workspacePanes.map((pane) => pane.paneId)));
@@ -140,6 +152,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const bindingByPaneId = new Map(activeBindings.flatMap((binding) => binding.paneId ? [[binding.paneId, binding] as const] : []));
     let pendingBindings: Binding[] | null = null;
     let interruptedProvisioningByProjectId: Map<string, Binding> | null = null;
+    const missingPaneStarted = performance.now();
     for (const binding of activeBindings) {
       try {
         const workspacePanes = panesByWorkspace.get(binding.workspaceId);
@@ -155,31 +168,50 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
         this.logFailure(`binding:${binding.id}:missing-pane`, "binding-reconciliation", error, { bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, phase: "missing-pane" });
       }
     }
+    const missingPaneDurationMs = elapsedMs(missingPaneStarted);
 
     const nextSkippedPaneReasons = requestedWorkspaceIds ? new Map(this.skippedPaneReasons) : new Map<string, string>();
-    for (const [requestedWorkspaceId, panes] of panesByWorkspace) for (const snapshotPane of panes) {
-      try {
-      let pane = snapshotPane;
-      if (pane.workspaceId !== requestedWorkspaceId) {
-        this.options.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId, reportedWorkspaceId: pane.workspaceId, paneId: pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
+    const snapshotPanes = [...panesByWorkspace].flatMap(([requestedWorkspaceId, panes]) => panes.map((pane) => ({ requestedWorkspaceId, pane })));
+    const existingPanes: Array<{ requestedWorkspaceId: string; pane: HerdrPane; binding: Binding }> = [];
+    const discoveryPanes: Array<{ requestedWorkspaceId: string; pane: HerdrPane }> = [];
+    for (const item of snapshotPanes) {
+      if (item.pane.workspaceId !== item.requestedWorkspaceId) {
+        this.options.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId: item.requestedWorkspaceId, reportedWorkspaceId: item.pane.workspaceId, paneId: item.pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
         continue;
       }
-      let existing = bindingByPaneId.get(pane.paneId) ?? this.options.store.findBindingByPane(pane.paneId);
-      if (existing && pane.agentState === "unknown") {
-        try {
-          const observation = await this.options.herdr.observeRuntime(pane.paneId);
-          pane = observation.pane ?? pane;
-          this.logRecovery(`probe:${existing.id}`, { bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, phase: "agent-probe" });
-          this.options.logger.debug({
-            event: "binding-runtime-observed", bindingId: existing.id, paneId: pane.paneId,
-            agentState: observation.pane?.agentState ?? "unknown", evidenceSource: observation.evidenceSource
-          }, "enriched bound pane from runtime evidence");
+      const existing = bindingByPaneId.get(item.pane.paneId) ?? this.options.store.findBindingByPane(item.pane.paneId);
+      if (existing) existingPanes.push({ ...item, binding: existing });
+      else discoveryPanes.push(item);
+    }
+    const existingBindingStarted = performance.now();
+    await mapWithConcurrency(existingPanes, EXISTING_BINDING_CONCURRENCY, async ({ requestedWorkspaceId, pane: snapshotPane, binding }) => {
+      try {
+        let pane = snapshotPane;
+        if (pane.agentState === "unknown") {
+          try {
+            const observation = await this.options.herdr.observeRuntime(pane.paneId);
+            pane = observation.pane ?? pane;
+            this.logRecovery(`probe:${binding.id}`, { bindingId: binding.id, workspaceId: pane.workspaceId, paneId: pane.paneId, phase: "agent-probe" });
+            this.options.logger.debug({
+              event: "binding-runtime-observed", bindingId: binding.id, paneId: pane.paneId,
+              agentState: observation.pane?.agentState ?? "unknown", evidenceSource: observation.evidenceSource
+            }, "enriched bound pane from runtime evidence");
+          }
+          catch (error) {
+            this.logFailure(`probe:${binding.id}`, "binding-agent-probe", error, { bindingId: binding.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" });
+          }
         }
-        catch (error) {
-          this.logFailure(`probe:${existing.id}`, "binding-agent-probe", error, { bindingId: existing.id, workspaceId: pane.workspaceId, paneId: pane.paneId, outcome: "unknown" });
-        }
+        await this.converger.converge(binding, pane);
+        this.logRecovery(`pane:${snapshotPane.paneId}`, { workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId });
+      } catch (error) {
+        this.logFailure(`pane:${snapshotPane.paneId}`, "pane-reconciliation", error, { workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId });
       }
-      if (!existing) {
+    });
+    const existingBindingDurationMs = elapsedMs(existingBindingStarted);
+    const discoveryStarted = performance.now();
+    for (const { requestedWorkspaceId, pane } of discoveryPanes) {
+      try {
+        if (bindingByPaneId.has(pane.paneId) || this.options.store.findBindingByPane(pane.paneId)) continue;
         if (!pane.foregroundExecutables.includes("traex")) continue;
         const matchingProjects = this.projects.projectsForWorkspaceAndCwd(pane.workspaceId, pane.cwd);
         const project = matchingProjects.length === 1 ? matchingProjects[0] : undefined;
@@ -207,22 +239,23 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
           continue;
         }
         if (this.skippedPaneReasons.has(pane.paneId)) this.options.logger.info({ event: "herdr-pane-skip-resolved", workspaceId: pane.workspaceId, paneId: pane.paneId, projectId: project.id, outcome: "registered" }, "previously skipped Herdr pane now matches a project");
-        existing = await this.options.discoverPane(pane, project);
+        const existing = await this.options.discoverPane(pane, project);
         bindingByPaneId.set(pane.paneId, existing);
         this.logRecovery(`pane:${pane.paneId}`, { workspaceId: pane.workspaceId, paneId: pane.paneId });
-        continue;
-      }
-      await this.converger.converge(existing, pane);
-      this.logRecovery(`pane:${snapshotPane.paneId}`, { workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId });
       } catch (error) {
-        this.logFailure(`pane:${snapshotPane.paneId}`, "pane-reconciliation", error, { workspaceId: requestedWorkspaceId, paneId: snapshotPane.paneId });
+        this.logFailure(`pane:${pane.paneId}`, "pane-reconciliation", error, { workspaceId: requestedWorkspaceId, paneId: pane.paneId });
       }
     }
+    const discoveryDurationMs = elapsedMs(discoveryStarted);
     if (requestedWorkspaceIds === undefined && panesByWorkspace.size === reconciliationWorkspaceIds.size) {
       const livePaneIds = new Set([...panesByWorkspace.values()].flatMap((panes) => panes.map((pane) => pane.paneId)));
       this.converger.prune(livePaneIds);
     }
     this.skippedPaneReasons = nextSkippedPaneReasons;
+    this.phaseDiagnostics = {
+      snapshotDurationMs, missingPaneDurationMs, existingBindingDurationMs, discoveryDurationMs,
+      existingBindingCount: existingPanes.length, discoveryCandidateCount: discoveryPanes.length
+    };
     return { reconciledWorkspaceIds: new Set(panesByWorkspace.keys()), failures };
   }
 
@@ -242,4 +275,8 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
 
 function scopeForWorkspaces(workspaceIds?: readonly string[]): PriorityReconciliationScope {
   return workspaceIds === undefined ? { kind: "all" } : { kind: "workspaces", ids: workspaceIds };
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(0, Math.round(performance.now() - startedAt));
 }

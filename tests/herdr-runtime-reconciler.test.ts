@@ -1027,6 +1027,129 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("bounds independent existing-binding convergence at four operations", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const panes = Array.from({ length: 6 }, (_, index) => ({
+      paneId: `w1:p${index + 1}`, terminalId: `term-${index + 1}`, workspaceId: "w1", cwd: `/repo/worktree-${index + 1}`,
+      label: `task-${index + 1}`, agentState: "idle" as const, foregroundExecutables: ["traex"]
+    }));
+    for (const [index, pane] of panes.entries()) {
+      const id = `b${index + 1}`;
+      store.createPendingBinding({ id, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: `topic-${id}`, rootMessageId: `root-${id}`, title: pane.label });
+      store.updateBinding(id, { paneId: pane.paneId, traexSessionId: pane.terminalId, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    }
+    let active = 0;
+    let maximumActive = 0;
+    const worktreeNameFor = vi.fn(async (cwd: string | null | undefined) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      return cwd?.split("/").at(-1) ?? null;
+    });
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { async listAllPanes() { return panes; } } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false,
+      worktreeNameFor, presentation: applicationPresentation
+    });
+
+    await reconciler.reconcile();
+
+    expect(worktreeNameFor).toHaveBeenCalledTimes(6);
+    expect(maximumActive).toBe(4);
+    store.close();
+  });
+
+  it("finishes existing-binding convergence before serial Pane discovery", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "existing", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic-existing", rootMessageId: "root-existing", title: "existing" });
+    store.updateBinding("existing", { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const panes = [
+      { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "existing", agentState: "idle" as const, foregroundExecutables: ["traex"] },
+      { paneId: "w1:p2", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] }
+    ];
+    let releaseExisting!: () => void;
+    const existingBlocked = new Promise<void>((resolve) => { releaseExisting = resolve; });
+    const discoverPane = vi.fn(async (pane: HerdrPane) => store.createPendingBinding({
+      id: "discovered", projectId: "repo", workspaceId: pane.workspaceId, chatId: "chat", topicId: "topic-discovered", rootMessageId: "root-discovered", title: pane.label
+    }));
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { async listAllPanes() { return panes; } } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false,
+      worktreeNameFor: async () => { await existingBlocked; return null; }, presentation: applicationPresentation
+    });
+
+    const reconciliation = reconciler.reconcile();
+    await vi.waitFor(() => expect(reconciler.snapshot().state).toBe("running"));
+    expect(discoverPane).not.toHaveBeenCalled();
+    releaseExisting();
+    await reconciliation;
+
+    expect(discoverPane).toHaveBeenCalledOnce();
+    expect(discoverPane).toHaveBeenCalledWith(panes[1], expect.objectContaining({ id: "repo" }));
+    store.close();
+  });
+
+  it("isolates one existing-binding failure without cancelling the remaining batch", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const panes = [
+      { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo/first", label: "first-new", agentState: "idle" as const, foregroundExecutables: ["traex"] },
+      { paneId: "w1:p2", workspaceId: "w1", cwd: "/repo/second", label: "second-new", agentState: "idle" as const, foregroundExecutables: ["traex"] }
+    ];
+    for (const [index, pane] of panes.entries()) {
+      const id = `b${index + 1}`;
+      store.createPendingBinding({ id, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: `topic-${id}`, rootMessageId: `root-${id}`, title: `old-${id}` });
+      store.updateBinding(id, { paneId: pane.paneId, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    }
+    const logger = pino({ enabled: false });
+    const warning = vi.spyOn(logger, "warn");
+    const observed: string[] = [];
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { async listAllPanes() { return panes; } } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger,
+      discoverPane: async () => { throw new Error("not used"); }, scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false,
+      externalTurnObserver: { observe: async (binding) => { observed.push(binding.id); if (binding.id === "b1") throw new Error("first failed"); } }, presentation: applicationPresentation
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getBinding("b1")?.title).toBe("repo / first-new");
+    expect(store.getBinding("b2")?.title).toBe("repo / second-new");
+    expect(observed.sort()).toEqual(["b1", "b2"]);
+    expect(warning).toHaveBeenCalledWith(expect.objectContaining({ event: "pane-reconciliation-failed", paneId: "w1:p1" }), expect.any(String));
+    store.close();
+  });
+
+  it("reports full-pass reconciliation phase durations and work counts", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "existing", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic-existing", rootMessageId: "root-existing", title: "existing" });
+    store.updateBinding("existing", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const panes = [
+      { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "existing", agentState: "idle" as const, foregroundExecutables: ["traex"] },
+      { paneId: "w1:p2", workspaceId: "w1", cwd: "/repo", label: "new", agentState: "idle" as const, foregroundExecutables: ["traex"] }
+    ];
+    const reconciler = new HerdrRuntimeReconciler({
+      projects: [{ id: "repo", displayName: "Repo", description: "Repo", workspaceId: "w1", cwd: "/repo" }],
+      store, herdr: { async listAllPanes() { return panes; } } as unknown as HerdrPort,
+      lifecycleEvents: new BridgeEventBus(), channelPublisher: { async enqueueRunCardUpdate() {} }, logger: pino({ enabled: false }),
+      discoverPane: async (pane) => store.createPendingBinding({ id: "discovered", projectId: "repo", workspaceId: pane.workspaceId, chatId: "chat", topicId: "topic-discovered", rootMessageId: "root-discovered", title: pane.label }),
+      scheduler: new InProcessPromptWorkScheduler(), isBindingBusy: () => false, presentation: applicationPresentation
+    });
+
+    await reconciler.reconcile();
+
+    expect(reconciler.snapshot()).toMatchObject({
+      snapshotDurationMs: expect.any(Number), missingPaneDurationMs: expect.any(Number), existingBindingDurationMs: expect.any(Number), discoveryDurationMs: expect.any(Number),
+      existingBindingCount: 1, discoveryCandidateCount: 1
+    });
+    store.close();
+  });
+
   it("enriches an unknown bound pane and wakes its queued FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

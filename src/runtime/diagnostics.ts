@@ -10,6 +10,8 @@ export interface ReconciliationDiagnostics {
   lastStartedAt: string | null; lastCompletedAt: string | null; lastDurationMs: number | null; maxDurationMs: number | null; lastOutcome: "succeeded" | "failed" | null; lastFailures: ReconciliationFailure[];
   activeScopeKind?: "panes" | "workspaces" | "all" | null; pendingPaneCount?: number; pendingWorkspaceCount?: number; fullPending?: boolean; priorityPromotionCount?: number;
   lastAcceptedToStartMs?: { panes: number | null; workspaces: number | null; all: number | null }; maxAcceptedToStartMs?: { panes: number | null; workspaces: number | null; all: number | null };
+  snapshotDurationMs?: number | null; missingPaneDurationMs?: number | null; existingBindingDurationMs?: number | null; discoveryDurationMs?: number | null;
+  existingBindingCount?: number | null; discoveryCandidateCount?: number | null;
 }
 export interface OutboxDispatcherDiagnostics { state: "idle" | "running" | "stopping"; activeDeliveries: number; scanPending: boolean; lastScanAt: string | null; lastScanOutcome: "idle" | "delivered" | "failed" | null; lastSuccessfulScanAt: string | null; lastScanFailureAt: string | null; consecutiveScanFailures: number; lastDeliveryAt: string | null; lastDeliveryFailureAt: string | null }
 export interface PromptWorkerDiagnostics { state: "idle" | "running" | "stopping"; activeTurnWorkers: number; currentSafetyScanDelayMs: number | null; nextSafetyScanAt: string | null; lastScanAt: string | null; lastScanOutcome: "idle" | "work_found" | "failed" | null; lastDiscovered: { turns: number; detached: number; recoveredClaims: number; cancelled: number; failedDetached: number }; lastScanFailureAt: string | null }
