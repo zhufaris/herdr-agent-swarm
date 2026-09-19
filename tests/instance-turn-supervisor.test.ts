@@ -147,6 +147,35 @@ describe("InstanceTurnSupervisor", () => {
     expect(store.getInstanceTurn("turn-two")).toMatchObject({ state: "completed" });
   });
 
+  it("bounds concurrent targeted observations without serializing independent turns", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const actor = { kind: "human" as const, userId: "u1" };
+    for (let index = 0; index < 6; index += 1) {
+      const id = `worker-${index}`;
+      store.createAgentInstance({ id, projectId: "p1", name: id, role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: `/repo/${id}`, branch: null, baseCommit: "base" } });
+      const instance = store.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: `w1:${id}`, nativeSessionId: null })!;
+      store.acceptInstanceTurn({ id: `turn-${id}`, idempotencyKey: `turn-${id}`, actor, projectId: "p1", instanceId: id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+      store.claimNextInstanceTurn(id, instance.generation);
+      store.updateInstanceTurn({ turnId: `turn-${id}`, expectedGeneration: instance.generation, state: "running", eventKind: "turn.running" });
+    }
+    let active = 0;
+    let maximumActive = 0;
+    const inspectPane = vi.fn(async (paneId: string) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active -= 1;
+      const id = paneId.slice(3);
+      return { paneId, workspaceId: "w1", cwd: `/repo/${id}`, label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex" as const, terminalId: "term" };
+    });
+    const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake: vi.fn(), presentation: workerPresentation });
+
+    await supervisor.reconcile();
+
+    expect(maximumActive).toBe(4);
+    expect(inspectPane).toHaveBeenCalledTimes(6);
+  });
+
   it("observes only turns attached to a targeted Pane", async () => {
     const { supervisor, inspectPane } = setup("running");
 

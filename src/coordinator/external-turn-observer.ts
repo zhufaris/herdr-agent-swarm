@@ -14,6 +14,7 @@ import { outputFingerprint } from "../runtime/output.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
+import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 
 type ExternalTurnStore = ExternalTurnObservationStore;
 
@@ -29,12 +30,10 @@ interface ExternalTurnObserverOptions {
   presentation: Pick<PrimaryPresentation, "answerCard">;
   pollIntervalMs?: number;
 }
-
 interface TurnProjectionState {
   pendingStarts: Map<string, string>;
   promptsByTurn: Map<string, { promptId: string; output: BoundedTurnOutput }>;
 }
-
 interface ObservedBinding extends TurnProjectionState {
   identity: string;
   cursor: ExactTurnCursor;
@@ -347,15 +346,4 @@ export class ExternalTurnObserver {
   private async publish<T extends Parameters<typeof createBridgeEvent>[1]>(bindingId: string, type: T, origin: EventOrigin, payload: Extract<ReturnType<typeof createBridgeEvent>, { type: T }>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
   }
-}
-
-async function mapWithConcurrency<T>(items: readonly T[], concurrency: number, operation: (item: T) => Promise<void>): Promise<void> {
-  let nextIndex = 0;
-  const worker = async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      await operation(items[index]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
 }

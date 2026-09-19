@@ -6,6 +6,7 @@ import type { AgentState, HerdrPane, HerdrPaneCreationOptions, RuntimeObservatio
 import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
 import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
+import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
@@ -424,20 +425,6 @@ function runtimeObservation(pane: HerdrPane, foregroundExecutables: readonly str
   const observed = { ...pane, foregroundExecutables: [...foregroundExecutables] };
   if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
   return { pane: observed, traexProcess, composerReady: pane.agentState === "idle" || pane.agentState === "done", evidenceSource: pane.agentState === "unknown" ? "process" : "structured" };
-}
-
-async function mapWithConcurrency<T, R>(items: T[], concurrency: number, operation: (item: T) => Promise<R>): Promise<R[]> {
-  const result = new Array<R>(items.length);
-  let nextIndex = 0;
-  const worker = async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      result[index] = await operation(items[index]!);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
-  return result;
 }
 
 function findPaneRecord(value: unknown): z.infer<typeof paneSchema> | null {

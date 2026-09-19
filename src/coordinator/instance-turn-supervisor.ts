@@ -4,11 +4,13 @@ import type { InstanceTurnSupervisionStore } from "../domain/ports/instance.js";
 import type { PaneHost } from "../runtime/herdr/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
+import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnObserver } from "./worker-turn-observer.js";
 
 interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "info" | "warn"> }
+const OBSERVATION_CONCURRENCY = 4;
 
 export class InstanceTurnSupervisor {
   private timer: NodeJS.Timeout | null = null;
@@ -78,7 +80,7 @@ export class InstanceTurnSupervisor {
   }
 
   private async observeTurns(turns: ReturnType<InstanceTurnSupervisionStore["listObservableInstanceTurns"]>, panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null): Promise<void> {
-    for (const turn of turns) {
+    await mapWithConcurrency(turns, OBSERVATION_CONCURRENCY, async (turn) => {
       try {
         await this.observe(turn.id, panesById);
         const recovery = this.failureLogs.recover(turn.instanceId);
@@ -90,7 +92,7 @@ export class InstanceTurnSupervisor {
         const decision = this.failureLogs.fail(turn.instanceId, safe.message);
         if (decision.kind !== "suppressed") this.options.logger?.warn({ event: decision.kind === "summary" ? "instance-turn-observation-failure-summary" : "instance-turn-observation-failed", err: safe, instanceId: turn.instanceId, turnId: turn.id, repeatCount: decision.count, firstFailureAt: decision.firstFailureAt, outcome: "retry_later" }, "instance turn observation failed");
       }
-    }
+    });
   }
 
   private async observe(turnId: string, panesById: Map<string, Awaited<ReturnType<PaneHost["inspectPane"]>>> | null): Promise<void> {
