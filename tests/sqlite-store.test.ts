@@ -2790,6 +2790,32 @@ describe("SQLite store", () => {
     expect(store.inspectIntegrity(20)).toEqual({ quickCheck: "ok", issues: [], truncated: false });
   });
 
+  it("accepts published thread ownership while a matching parent binding is orphaned", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4);
+    expect(worker.outcome).toBe("created");
+    store.database.prepare("INSERT INTO binding_thread_aliases(id, publication_key, binding_id, binding_generation, chat_id, pane_id, source_main_message_id, action_message_id, topic_id, root_message_id, state, created_at, updated_at) VALUES ('alias', 'alias-key', 'b1', 1, 'chat', 'w1:primary', 'primary-root', 'action', 'alias-topic', 'alias-root', 'active', 'now', 'now')").run();
+    store.database.prepare("INSERT INTO worker_session_threads(id, publication_key, worker_id, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id, chat_id, mode, topic_id, root_message_id, state, created_at, activated_at, updated_at) VALUES ('thread', 'thread-key', 'reviewer', 1, 'b1', 1, 'w1:primary', 'chat', 'canonical-main', 'worker-topic', 'worker-root', 'active', 'now', 'now', 'now')").run();
+
+    store.updateBinding("b1", { state: "orphaned" });
+
+    expect(store.inspectIntegrity(20)).toEqual({ quickCheck: "ok", issues: [], truncated: false });
+    expect(store.findBindingByLarkScope("alias-topic", "alias-root")).toBeNull();
+    expect(store.workerSessionThreads.resolveScope({ chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root" })).toMatchObject({ kind: "stale" });
+
+    store.database.prepare("UPDATE binding_thread_aliases SET binding_generation = 2 WHERE id = 'alias'").run();
+    store.database.prepare("UPDATE worker_session_threads SET parent_pane_id = 'w1:other' WHERE id = 'thread'").run();
+    expect(store.inspectIntegrity(20).issues.map(({ rule }) => rule)).toEqual(expect.arrayContaining([
+      "thread_alias_binding_mismatch", "worker_thread_owner_mismatch"
+    ]));
+  });
+
   it("detects dangling business references and contradictory outbox lane state without exposing identifiers", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "sensitive-binding", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Secret title" });
