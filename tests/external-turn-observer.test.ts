@@ -48,6 +48,7 @@ describe("ExternalTurnObserver", () => {
     const observer = new ExternalTurnObserver({ store, transcriptReader, bus, outboundWork: { wake() { void publisher.requestScan(); } }, logger, presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external-1" });
     const binding = store.getBinding("b1")!;
     const router = new HerdrEventRouter({
+      invalidateAll: vi.fn(),
       invalidateWorkspace() {}, invalidatePanes() {}, reconcileBindings: () => observer.observe(binding), reconcileInstances: async () => {},
       observePrimaryTurns: (paneIds) => paneIds ? observer.observeByPane(paneIds) : observer.scanActiveBindings(),
       observeInstanceTurns: async () => {}, retryRetiredPanes: async () => {}, logger

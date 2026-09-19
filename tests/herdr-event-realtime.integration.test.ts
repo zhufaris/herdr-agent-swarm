@@ -37,7 +37,7 @@ describe("Herdr event real-time convergence", () => {
     });
     const instanceRuntime = new InstanceRuntimeReconciler({ projects: [project], store, paneHost: new HerdrPaneHost(herdr), wake: vi.fn() });
     const router = new HerdrEventRouter({
-      invalidateWorkspace: vi.fn(), invalidatePanes: vi.fn(),
+      invalidateAll: vi.fn(), invalidateWorkspace: vi.fn(), invalidatePanes: vi.fn(),
       reconcileBindings: (scope) => scope?.paneIds ? bindingRuntime.requestPaneReconciliation(scope.paneIds) : bindingRuntime.requestReconciliation(scope?.workspaceIds),
       reconcileInstances: (scope) => instanceRuntime.requestReconciliation(scope), observePrimaryTurns: async () => undefined, observeInstanceTurns: async () => undefined,
       retryRetiredPanes: async () => undefined, logger: pino({ enabled: false })

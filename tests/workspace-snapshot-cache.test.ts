@@ -216,6 +216,24 @@ describe("workspace snapshot cache", () => {
     expect(listAllPanes).toHaveBeenCalledTimes(2);
   });
 
+  it("invalidates every cached and in-flight snapshot after full-scope uncertainty", async () => {
+    const releases: Array<(panes: ReturnType<typeof pane>[]) => void> = [];
+    const listAllPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { releases.push(resolve); }));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }));
+
+    const stale = cache.listAllPanes();
+    cache.invalidateAll();
+    const current = cache.listAllPanes();
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+
+    releases[0]!([pane("w1", 1)]);
+    await stale;
+    expect(cache.status().entries).toBe(0);
+    releases[1]!([pane("w1", 2)]);
+    expect((await current)[0]?.label).toBe("v2");
+    expect((await cache.listAllPanes())[0]?.label).toBe("v2");
+  });
+
   it("forwards runtime observation and updates the cached pane without refreshing the workspace", async () => {
     const unknown = { ...pane("w1", 1), agentState: "unknown" as const, foregroundExecutables: [] };
     const observed = { ...unknown, agentState: "idle" as const, foregroundExecutables: ["traex"] };

@@ -4,6 +4,7 @@ import { HerdrEventRouter } from "../src/runtime/herdr-event-router.js";
 
 function setup() {
   const calls = {
+    invalidateAll: vi.fn(),
     invalidateWorkspace: vi.fn(),
     invalidatePanes: vi.fn(),
     reconcileBindings: vi.fn(async () => undefined),
@@ -61,6 +62,8 @@ describe("HerdrEventRouter", () => {
     const { calls, router } = setup();
     await router.handle({ kind: "socket-recovered", scope: "all", workspaceIds: [], paneIds: [] });
 
+    expect(calls.invalidateAll).toHaveBeenCalledOnce();
+    expect(calls.invalidateAll.mock.invocationCallOrder[0]).toBeLessThan(calls.reconcileBindings.mock.invocationCallOrder[0]!);
     expect(calls.reconcileBindings).toHaveBeenCalledWith();
     expect(calls.reconcileInstances).toHaveBeenCalledWith();
     expect(calls.observePrimaryTurns).toHaveBeenCalledWith();

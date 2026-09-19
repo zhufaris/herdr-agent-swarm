@@ -244,7 +244,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
 
   private workspaceGeneration(workspaceId: string): number { return this.workspaceGenerations.get(workspaceId) ?? 0; }
 
-  private invalidateAll(): void {
+  invalidateAll(): void {
     this.resetGeneration += 1;
     this.allGeneration += 1;
     this.workspaceGenerations.clear();

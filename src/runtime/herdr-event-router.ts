@@ -3,6 +3,7 @@ import { mergeHerdrRuntimeHints, type HerdrRuntimeHint } from "./herdr-event-hin
 import { safeLogError } from "./safe-error.js";
 
 export interface HerdrEventRouterOptions {
+  invalidateAll(): void;
   invalidateWorkspace(workspaceId: string): void;
   invalidatePanes(paneIds: readonly string[]): void;
   reconcileBindings(scope?: { paneIds?: readonly string[]; workspaceIds?: readonly string[] }): Promise<void>;
@@ -83,6 +84,7 @@ export class HerdrEventRouter {
       return;
     }
     this.fullHints += 1;
+    this.options.invalidateAll();
     await this.run(hint, [
       this.options.reconcileBindings().then(() => this.options.observePrimaryTurns()),
       this.options.reconcileInstances(),
