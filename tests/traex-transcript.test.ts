@@ -910,7 +910,7 @@ describe("TraexTranscriptReader", () => {
 
   it("evicts a missing cached path and discovers its replacement", async () => {
     const { root, path } = await createTranscript();
-    const reader = new TraexTranscriptReader({ sessionsRoot: root });
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, discoveryIndexTtlMs: 0 });
     await expect(reader.open(session())).resolves.toMatchObject({ mode: "typed" });
     const replacement = join(root, "replacement", `rollout-replacement-${sessionId}.jsonl`);
     await mkdir(dirname(replacement), { recursive: true });

@@ -48,11 +48,29 @@ describe("Traex transcript path cache", () => {
     ]);
   });
 
+  it("coalesces concurrent default discovery across different sessions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "traex-transcript-shared-index-")); roots.push(root);
+    for (const id of sessionIds.slice(0, 2)) await writeTranscript(root, "primary", id!);
+    let scans = 0;
+    const scan = vi.fn(async (sessionsRoot: string, maxEntries: number) => {
+      scans += 1;
+      const { scanTranscriptPaths } = await import("../src/runtime/traex-transcript.js");
+      return scanTranscriptPaths(sessionsRoot, maxEntries);
+    });
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, scan });
+
+    await expect(Promise.all(sessionIds.slice(0, 2).map((id) => reader.open(session(id!))))).resolves.toEqual([
+      expect.objectContaining({ mode: "typed" }),
+      expect.objectContaining({ mode: "typed" })
+    ]);
+    expect(scans).toBe(1);
+  });
+
   it("evicts the least recently used validated path", async () => {
     const root = await mkdtemp(join(tmpdir(), "traex-transcript-cache-"));
     roots.push(root);
     for (const id of sessionIds) await writeTranscript(root, "primary", id);
-    const reader = new TraexTranscriptReader({ sessionsRoot: root, maxCachedPaths: 2 });
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, maxCachedPaths: 2, discoveryIndexTtlMs: 0 });
 
     await expect(reader.open(session(sessionIds[0]!))).resolves.toMatchObject({ mode: "typed" });
     await expect(reader.open(session(sessionIds[1]!))).resolves.toMatchObject({ mode: "typed" });

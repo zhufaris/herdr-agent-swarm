@@ -14,12 +14,14 @@ const DEFAULT_MAX_RENDERED_DELTA_CHARS = MAX_TURN_OUTPUT_CHARS;
 const DEFAULT_MAX_DISCOVERY_ENTRIES = 100_000;
 const DEFAULT_MAX_CACHED_PATHS = 256;
 const DEFAULT_NEGATIVE_CACHE_TTL_MS = 250;
+const DEFAULT_DISCOVERY_INDEX_TTL_MS = 1_000;
 const SESSION_META_SCAN_BYTES = 256 * 1024;
 const SESSION_META_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_RECOVERY_SCAN_BYTES = 64 * 1024 * 1024;
-const RECOVERY_SCAN_CHUNK_BYTES = 64 * 1024;
+const RECOVERY_SCAN_CHUNK_BYTES = 1024 * 1024;
 const MAX_RECOVERY_RECORD_BYTES = SESSION_META_MAX_BYTES;
 const MAX_EPOCH_SECONDS = 10_000_000_000;
+const BASELINE_EVENT_MARKERS = ["task_started", "task_complete", "turn_aborted", "token_count"].map((value) => Buffer.from(value));
 
 const envelopeSchema = z.object({
   type: z.string(),
@@ -53,8 +55,10 @@ export interface TraexTranscriptReaderOptions {
   maxDiscoveryEntries?: number;
   maxCachedPaths?: number;
   negativeCacheTtlMs?: number;
+  discoveryIndexTtlMs?: number;
   now?: () => number;
   discover?: (root: string, sessionId: string, maxEntries: number) => Promise<TranscriptDiscoveryResult>;
+  scan?: (root: string, maxEntries: number) => Promise<TranscriptPathIndex>;
 }
 
 export class TraexTranscriptReader implements TraexTranscriptReaderPort {
@@ -64,11 +68,15 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   private readonly maxDiscoveryEntries: number;
   private readonly maxCachedPaths: number;
   private readonly negativeCacheTtlMs: number;
+  private readonly discoveryIndexTtlMs: number;
   private readonly now: () => number;
-  private readonly discover: (root: string, sessionId: string, maxEntries: number) => Promise<TranscriptDiscoveryResult>;
+  private readonly discover: ((root: string, sessionId: string, maxEntries: number) => Promise<TranscriptDiscoveryResult>) | undefined;
+  private readonly scan: (root: string, maxEntries: number) => Promise<TranscriptPathIndex>;
   private readonly pathsBySessionId = new Map<string, string>();
   private readonly missingUntilBySessionId = new Map<string, number>();
   private readonly discoveryBySessionId = new Map<string, Promise<TranscriptDiscoveryResult>>();
+  private discoveryIndex: { value: TranscriptPathIndex; expiresAt: number } | null = null;
+  private discoveryIndexInFlight: Promise<TranscriptPathIndex> | null = null;
 
   constructor(options: TraexTranscriptReaderOptions = {}) {
     this.sessionsRoot = resolve(options.sessionsRoot ?? resolve(homedir(), ".trae/cli/sessions"));
@@ -77,8 +85,10 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     this.maxDiscoveryEntries = options.maxDiscoveryEntries ?? DEFAULT_MAX_DISCOVERY_ENTRIES;
     this.maxCachedPaths = Math.max(1, Math.floor(options.maxCachedPaths ?? DEFAULT_MAX_CACHED_PATHS));
     this.negativeCacheTtlMs = Math.max(0, options.negativeCacheTtlMs ?? DEFAULT_NEGATIVE_CACHE_TTL_MS);
+    this.discoveryIndexTtlMs = Math.max(0, options.discoveryIndexTtlMs ?? DEFAULT_DISCOVERY_INDEX_TTL_MS);
     this.now = options.now ?? Date.now;
-    this.discover = options.discover ?? findExactTranscriptPaths;
+    this.discover = options.discover;
+    this.scan = options.scan ?? scanTranscriptPaths;
   }
 
   async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
@@ -215,10 +225,28 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   private discoverOnce(sessionId: string): Promise<TranscriptDiscoveryResult> {
     const existing = this.discoveryBySessionId.get(sessionId);
     if (existing) return existing;
-    const discovery = this.discover(this.sessionsRoot, sessionId, this.maxDiscoveryEntries);
+    const discovery = this.discover
+      ? this.discover(this.sessionsRoot, sessionId, this.maxDiscoveryEntries)
+      : this.discoverFromIndex(sessionId);
     this.discoveryBySessionId.set(sessionId, discovery);
     void discovery.finally(() => { if (this.discoveryBySessionId.get(sessionId) === discovery) this.discoveryBySessionId.delete(sessionId); });
     return discovery;
+  }
+
+  private async discoverFromIndex(sessionId: string): Promise<TranscriptDiscoveryResult> {
+    const timestamp = this.now();
+    if (this.discoveryIndex && this.discoveryIndex.expiresAt > timestamp) {
+      return { paths: this.discoveryIndex.value.pathsBySessionId.get(sessionId) ?? [], exhausted: this.discoveryIndex.value.exhausted };
+    }
+    if (!this.discoveryIndexInFlight) {
+      const scan = this.scan(this.sessionsRoot, this.maxDiscoveryEntries);
+      this.discoveryIndexInFlight = scan;
+      void scan.then((value) => {
+        this.discoveryIndex = { value, expiresAt: this.now() + this.discoveryIndexTtlMs };
+      }).finally(() => { if (this.discoveryIndexInFlight === scan) this.discoveryIndexInFlight = null; });
+    }
+    const index = await this.discoveryIndexInFlight;
+    return { paths: index.pathsBySessionId.get(sessionId) ?? [], exhausted: index.exhausted };
   }
 
   private rememberMissing(sessionId: string): void {
@@ -391,8 +419,9 @@ async function latestTranscriptBaseline(path: string, end: number, maxBytes: num
     let carry = Buffer.alloc(0);
     let carryOffset = start;
     let skipPartialFirstRecord = start > 0;
-    const inspect = (line: string, offset: number) => {
-      const envelope = parseEnvelope(line);
+    const inspect = (record: Buffer, offset: number) => {
+      if (!isBaselineEventRecord(record)) return;
+      const envelope = parseEnvelope(record.toString("utf8"));
       if (!envelope) return;
       if (envelope.type === "event_msg") {
         const started = taskStartedEventSchema.safeParse(envelope.payload);
@@ -415,7 +444,7 @@ async function latestTranscriptBaseline(path: string, end: number, maxBytes: num
         const newline = source.indexOf(0x0a, recordStart);
         if (newline < 0) break;
         if (skipPartialFirstRecord) skipPartialFirstRecord = false;
-        else inspect(source.subarray(recordStart, newline).toString("utf8"), sourceOffset + recordStart);
+        else inspect(source.subarray(recordStart, newline), sourceOffset + recordStart);
         recordStart = newline + 1;
       }
       carry = source.subarray(recordStart);
@@ -423,11 +452,15 @@ async function latestTranscriptBaseline(path: string, end: number, maxBytes: num
       if (carry.length > MAX_RECOVERY_RECORD_BYTES) throw new Error("TraeX baseline record exceeds bounded size");
       readOffset += bytesRead;
     }
-    if (!skipPartialFirstRecord && carry.length > 0) inspect(carry.toString("utf8"), carryOffset);
+    if (!skipPartialFirstRecord && carry.length > 0) inspect(carry, carryOffset);
     return { tokenCount: activeTurnOffset === null ? tokenCount : activeTurnTokenBaseline, turnLifecycle, replayOffset: turnLifecycle?.state === "active" ? activeTurnOffset : null };
   } finally {
     await handle.close();
   }
+}
+
+function isBaselineEventRecord(record: Buffer): boolean {
+  return BASELINE_EVENT_MARKERS.some((marker) => record.includes(marker));
 }
 
 async function findCompletedTurnBoundary(path: string, end: number, turnId: string, startedAt: string): Promise<number | "missing" | "incomplete"> {
@@ -531,6 +564,38 @@ async function findTurnStartBoundary(path: string, end: number, turnId: string, 
 interface TranscriptDiscoveryResult {
   paths: string[];
   exhausted: boolean;
+}
+
+export interface TranscriptPathIndex {
+  pathsBySessionId: Map<string, string[]>;
+  exhausted: boolean;
+}
+
+export async function scanTranscriptPaths(root: string, maxEntries: number): Promise<TranscriptPathIndex> {
+  const rootPath = await realpath(root);
+  const pathsBySessionId = new Map<string, string[]>();
+  const state = { visited: 0, exhausted: false };
+  const visit = async (directory: string): Promise<void> => {
+    if (state.exhausted) return;
+    const entries = await opendir(directory);
+    for await (const entry of entries) {
+      if (state.exhausted) break;
+      if (state.visited >= maxEntries) { state.exhausted = true; break; }
+      state.visited += 1;
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) {
+        const match = basename(path).match(/-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
+        if (match) {
+          const paths = pathsBySessionId.get(match[1]!) ?? [];
+          paths.push(path);
+          pathsBySessionId.set(match[1]!, paths);
+        }
+      }
+    }
+  };
+  await visit(rootPath);
+  return { pathsBySessionId, exhausted: state.exhausted };
 }
 
 async function findExactTranscriptPaths(root: string, sessionId: string, maxEntries: number): Promise<TranscriptDiscoveryResult> {
