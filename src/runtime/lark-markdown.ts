@@ -59,6 +59,11 @@ export function renderLarkMarkdownPage(source: string, pageStart: number, limit:
   return renderLarkMarkdownPageMode(source, pageStart, limit, true);
 }
 
+/** Renders one page and reserves a suffix only when the source actually overflows. */
+export function renderLarkMarkdownPageWithSuffix(source: string, pageStart: number, limit: number, suffix: string): RenderedLarkMarkdownPage {
+  return renderLarkMarkdownPageMode(source, pageStart, limit, true, suffix);
+}
+
 /** Renders one proven canonical range with safe Markdown normalization and command detail. */
 export function renderDetailedLarkMarkdownRange(source: string, pageStart: number, pageEnd: number): string {
   const start = Math.max(0, Math.min(pageStart, source.length));
@@ -66,19 +71,21 @@ export function renderDetailedLarkMarkdownRange(source: string, pageStart: numbe
   return renderDetailedMarkdownRange(source, start, end);
 }
 
-function renderLarkMarkdownPageMode(source: string, pageStart: number, limit: number, compactTools: boolean): RenderedLarkMarkdownPage {
+function renderLarkMarkdownPageMode(source: string, pageStart: number, limit: number, compactTools: boolean, continuationSuffix = ""): RenderedLarkMarkdownPage {
   const start = Math.max(0, Math.min(pageStart, source.length));
   const boundedLimit = Math.max(0, limit);
   const blocks = markdownBlocks(source);
   const complete = renderDetailedMarkdownRange(source, start, source.length, blocks);
   if (complete.length <= boundedLimit) return { page: compactTools ? compactAnswerToolActivity(complete) : complete, nextPageStart: null };
+  const suffix = boundedLimit > continuationSuffix.length ? continuationSuffix : "";
+  const pageLimit = boundedLimit - suffix.length;
 
   const lineEnds: number[] = [];
   for (let index = source.indexOf("\n", start); index >= 0; index = source.indexOf("\n", index + 1)) {
     const end = index + 1;
     if (end < source.length) lineEnds.push(end);
   }
-  const protectedRanges = atomicToolActivityRanges(source, boundedLimit);
+  const protectedRanges = atomicToolActivityRanges(source, pageLimit);
   const candidates: number[] = [];
   let rangeIndex = 0;
   for (const end of lineEnds) {
@@ -86,23 +93,23 @@ function renderLarkMarkdownPageMode(source: string, pageStart: number, limit: nu
     const range = protectedRanges[rangeIndex];
     if (!range || end <= range.start || end >= range.end) candidates.push(end);
   }
-  const lineEnd = latestFittingEnd(source, start, boundedLimit, candidates, blocks);
-  if (lineEnd !== null) return { page: renderPageRange(source, start, lineEnd, blocks, compactTools), nextPageStart: lineEnd };
+  const lineEnd = latestFittingEnd(source, start, pageLimit, candidates, blocks);
+  if (lineEnd !== null) return { page: `${renderPageRange(source, start, lineEnd, blocks, compactTools)}${suffix}`, nextPageStart: lineEnd };
 
   let low = start + 1;
   let high = source.length - 1;
   let hardEnd: number | null = null;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    if (renderDetailedMarkdownRange(source, start, middle, blocks).length <= boundedLimit) {
+    if (renderDetailedMarkdownRange(source, start, middle, blocks).length <= pageLimit) {
       hardEnd = middle;
       low = middle + 1;
     } else high = middle - 1;
   }
-  if (hardEnd !== null) return { page: renderPageRange(source, start, hardEnd, blocks, compactTools), nextPageStart: hardEnd };
+  if (hardEnd !== null) return { page: `${renderPageRange(source, start, hardEnd, blocks, compactTools)}${suffix}`, nextPageStart: hardEnd };
 
-  const forcedEnd = Math.min(source.length, start + Math.max(1, boundedLimit));
-  return { page: source.slice(start, forcedEnd).slice(0, boundedLimit), nextPageStart: forcedEnd < source.length ? forcedEnd : null };
+  const forcedEnd = Math.min(source.length, start + Math.max(1, pageLimit));
+  return { page: `${source.slice(start, forcedEnd).slice(0, pageLimit)}${suffix}`, nextPageStart: forcedEnd < source.length ? forcedEnd : null };
 }
 
 function renderPageRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[], compactTools: boolean): string {

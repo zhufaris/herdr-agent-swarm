@@ -15,8 +15,8 @@ function fixture(answer: string, phase: "running" | "completed" = "running") {
 describe("answer page planner", () => {
   it("streams content before finishing a terminal page", () => {
     const { view, page } = fixture("done", "completed");
-    expect(planAnswerPage(view, page, { latestContent: null, finishPending: false, continuationPending: false })).toEqual({ type: "stream-content", content: answerStreamContent(view) });
     const content = answerStreamContent(view);
+    expect(planAnswerPage(view, page, { latestContent: null, finishPending: false, continuationPending: false })).toEqual({ type: "stream-content", content, source: content, sourceEnd: content.length });
     expect(planAnswerPage(view, page, { latestContent: { content, sequence: 1, state: "delivered" }, finishPending: false, continuationPending: false })).toEqual({ type: "finish-terminal", summary: "Completed" });
   });
 

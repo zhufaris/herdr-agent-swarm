@@ -10,7 +10,7 @@ export interface AnswerPagePlanningPort {
 
 export type AnswerPagePlan =
   | { type: "wait" }
-  | { type: "stream-content"; content: string }
+  | { type: "stream-content"; content: string; source: string; sourceEnd: number }
   | { type: "finish-terminal"; summary: "Completed" | "Failed" }
   | { type: "rebuild"; currentSummary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; initialContent: string }
   | { type: "continue"; currentSummary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; initialContent: string };
@@ -44,7 +44,9 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
     }
     return { type: "wait" };
   }
-  if (facts.latestContent?.content !== rendered.page) return { type: "stream-content", content: rendered.page };
+  if (facts.latestContent?.content !== rendered.page) return {
+    type: "stream-content", content: rendered.page, source: content.slice(page.sourceStart, rendered.nextPageStart ?? content.length), sourceEnd: rendered.nextPageStart ?? content.length
+  };
   if (rendered.nextPageStart !== null) {
     if (facts.finishPending) return { type: "wait" };
     const nextPageIndex = page.pageIndex + 1;

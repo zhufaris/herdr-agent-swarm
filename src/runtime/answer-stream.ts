@@ -1,5 +1,5 @@
 import type { RunCardView } from "../domain/run-card-view.js";
-import { renderDetailedLarkMarkdownRange, renderLarkMarkdownPage } from "./lark-markdown.js";
+import { renderDetailedLarkMarkdownRange, renderLarkMarkdownPageWithSuffix } from "./lark-markdown.js";
 
 /**
  * A Lark streaming element is visually rendered as a whole-card refresh. Keep
@@ -25,10 +25,7 @@ export function answerStreamContent(view: RunCardView): string {
 
 /** Builds a render-safe page without changing the canonical Answer stream. */
 export function renderAnswerStreamPage(content: string, pageStart: number, limit = ANSWER_STREAM_PAGE_LIMIT): RenderedAnswerStreamPage {
-  const rendered = renderLarkMarkdownPage(content, pageStart, limit);
-  if (rendered.nextPageStart === null || limit <= CONTINUATION_SUFFIX.length) return rendered;
-  const bounded = renderLarkMarkdownPage(content, pageStart, limit - CONTINUATION_SUFFIX.length);
-  return { page: `${bounded.page}${CONTINUATION_SUFFIX}`, nextPageStart: bounded.nextPageStart };
+  return renderLarkMarkdownPageWithSuffix(content, pageStart, limit, CONTINUATION_SUFFIX);
 }
 
 export function renderFinalAnswerPage(content: string, pageStart: number, pageEnd = content.length): RenderedAnswerStreamPage {

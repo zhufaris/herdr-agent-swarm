@@ -47,9 +47,7 @@ export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
     const plan = planAnswerPage(view, page, facts, this.planning);
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
     if (plan.type === "stream-content") {
-      const source = this.planning.answerStreamContent(view);
-      const rendered = this.planning.renderAnswerStreamPage(source, page.sourceStart, this.planning.pageLimit);
-      outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content, source: source.slice(page.sourceStart, rendered.nextPageStart ?? source.length), workClass });
+      outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content, source: plan.source, workClass });
     }
     else if (plan.type === "finish-terminal") outcome = this.store.reserveAnswerFinish({
       promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId!, summary: plan.summary,
