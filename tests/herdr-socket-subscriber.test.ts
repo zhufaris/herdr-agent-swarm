@@ -424,4 +424,32 @@ describe("Herdr socket subscriber", () => {
     for (const client of clients) client.destroy();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
+
+  it("replaces stale Pane subscriptions from the authoritative reconnect snapshot", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-replace-subscriptions-")), "herdr.sock");
+    const subscriptions: Array<Array<Record<string, string>>> = [];
+    const clients = new Set<Socket>();
+    let paneIds = ["w1:stale"];
+    const server = createServer((socket) => {
+      clients.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string; method: string; params: { subscriptions: Array<Record<string, string>> } };
+        if (request.method !== "events.subscribe") return;
+        subscriptions.push(request.params.subscriptions);
+        socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
+        if (subscriptions.length === 1) { paneIds = ["w1:current"]; socket.destroy(); }
+      });
+      socket.once("close", () => clients.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => paneIds, () => {}, pino({ enabled: false }), 5, 20);
+    subscriber.start();
+    await vi.waitFor(() => expect(subscriptions.length).toBeGreaterThanOrEqual(2));
+    const paneSubscriptions = subscriptions.at(-1)!.filter(({ type }) => type === "pane.agent_status_changed");
+    expect(paneSubscriptions).toEqual([{ type: "pane.agent_status_changed", pane_id: "w1:current" }]);
+    await subscriber.stop();
+    for (const client of clients) client.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
 });

@@ -104,6 +104,7 @@ export class HerdrSocketSubscriber {
     this.eventsConnected = false;
     this.rejectPending("socket_stopped");
     this.resolveAllPaneWaiters(false);
+    this.subscribedPaneIds.clear();
     this.failureLogs.clear();
     const socket = this.socket;
     this.socket = null;
@@ -190,6 +191,7 @@ export class HerdrSocketSubscriber {
     try { paneIds = await this.paneIds(); }
     catch (error) { this.failed(error); return; }
     if (this.stopped) return;
+    this.subscribedPaneIds.clear();
     for (const paneId of paneIds) this.subscribedPaneIds.add(paneId);
     const socket = createConnection({ path: this.socketPath });
     this.socket = socket;

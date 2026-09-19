@@ -40,6 +40,7 @@ export interface SwarmCommandGatewayPort {
 export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   private readonly laneWorkers = new Map<string, Promise<void>>();
   private readonly workerResults = new Map<string, CreateWorkerResult>();
+  private readonly awaitedWorkerResults = new Set<string>();
   constructor(private readonly options: Options) {}
 
   async handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void> {
@@ -82,7 +83,8 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   }
 
   private async resultForWorkerCreate(intentId: string, laneKey: string): Promise<CreateWorkerResult> {
-    await this.drainLane(laneKey);
+    this.awaitedWorkerResults.add(intentId);
+    try { await this.drainLane(laneKey); } finally { this.awaitedWorkerResults.delete(intentId); }
     const result = this.workerResults.get(intentId);
     if (result) {
       this.workerResults.delete(intentId);
@@ -180,7 +182,8 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
       else if (command.kind === "worker_create") {
         if (!intent.context.projectId || !intent.context.primary) throw new Error("Worker creation requires Primary context");
         const result = await this.options.instanceControl.createWorker({ actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, projectId: intent.context.projectId, bindingId: intent.context.primary.bindingId, name: command.name, agentKind: command.agentKind, model: command.model, start: command.start });
-        this.workerResults.set(intent.id, result); operation = { operationKind: "worker", operationId: result.instance.id };
+        if (this.awaitedWorkerResults.has(intent.id)) this.workerResults.set(intent.id, result);
+        operation = { operationKind: "worker", operationId: result.instance.id };
         if (!intent.context.rootMessageId) throw new Error("Worker creation requires a Primary root message");
         const entryRegistered = this.options.store.registerWorkerThreadEntry({ commandIntentId: intent.id, workerId: result.instance.id, workerSessionGeneration: result.instance.workerSessionGeneration, bindingId: intent.context.primary.bindingId, bindingGeneration: intent.context.primary.bindingGeneration, rootMessageId: intent.context.rootMessageId });
         if (entryRegistered) this.options.wakeCardContext();
