@@ -106,6 +106,34 @@ describe("card context boundaries", () => {
     expect(wakeOutbound).toHaveBeenCalledTimes(1);
   });
 
+  it("runs one follow-up pass when durable work wakes an active scan", async () => {
+    const first = {
+      targetKind: "worker-session" as const, targetId: "first", targetGeneration: 1,
+      requestedDependencyRevision: 1, projectedDependencyRevision: 0, reason: "turn.accepted",
+      createdAt: "2026-09-19T00:00:00.000Z", updatedAt: "2026-09-19T00:00:00.000Z"
+    };
+    const second = { ...first, targetId: "second" };
+    let pending = [first];
+    const work = new InProcessOutboundWorkNotifier();
+    const projectCardContext = vi.fn((invalidation: typeof first) => {
+      pending = [];
+      if (invalidation.targetId === "first") { pending = [second]; work.wake(); }
+      return "current" as const;
+    });
+    const listPendingCardContextInvalidations = vi.fn(() => pending);
+    const rebuilder = new CardContextRebuilder(
+      { listPendingCardContextInvalidations, projectCardContext },
+      () => {}, { debug() {}, error() {} } as never, applicationPresentation, work
+    );
+
+    rebuilder.start(60_000);
+    await vi.waitFor(() => expect(projectCardContext).toHaveBeenCalledTimes(2));
+    await rebuilder.stop();
+
+    expect(projectCardContext.mock.calls.map(([invalidation]) => invalidation.targetId)).toEqual(["first", "second"]);
+    expect(listPendingCardContextInvalidations).toHaveBeenCalledTimes(2);
+  });
+
   it("converges the three visible card aggregates, freezes Answer context, and keeps late Worker state in its owning boundary", async () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding", projectId: "project", workspaceId: "herdr", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });

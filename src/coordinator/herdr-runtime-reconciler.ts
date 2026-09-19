@@ -149,7 +149,8 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const activeBindings = requestedWorkspaceIds
       ? allActiveBindings.filter((binding) => requestedWorkspaceIds.has(binding.workspaceId))
       : allActiveBindings;
-    const bindingByPaneId = new Map(activeBindings.flatMap((binding) => binding.paneId ? [[binding.paneId, binding] as const] : []));
+    const ownedBindings = [...activeBindings, ...orphanedBindings.filter((binding) => !requestedWorkspaceIds || requestedWorkspaceIds.has(binding.workspaceId))];
+    const bindingByPaneId = new Map(ownedBindings.flatMap((binding) => binding.paneId ? [[binding.paneId, binding] as const] : []));
     let pendingBindings: Binding[] | null = null;
     let interruptedProvisioningByProjectId: Map<string, Binding> | null = null;
     const missingPaneStarted = performance.now();

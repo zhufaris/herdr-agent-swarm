@@ -3,44 +3,37 @@ import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { CardContextInvalidation } from "../domain/card-context-invalidation.js";
 import type { CardContextProjectionStore } from "../domain/ports/card-context.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { CoalescingDrain } from "../runtime/coalescing-drain.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 
 export class CardContextRebuilder {
   private static readonly batchSize = 100;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private running: Promise<void> | null = null;
-  private stopping = false;
+  private readonly drain = new CoalescingDrain({ drain: () => this.scan(), onError: () => {} });
+  private started = false;
+  private stopped = false;
   private unsubscribe: (() => void) | null = null;
 
   constructor(private readonly store: CardContextProjectionStore, private readonly wakeOutbound: () => void, private readonly logger: Pick<Logger, "debug" | "error">, private readonly presentation: Pick<ApplicationPresentation, "workerMain" | "workerThreadEntryReady" | "workerTurn" | "mainCard" | "paneEntryCard" | "answerCard">, private readonly work?: OutboundWorkNotifier) {}
 
   start(intervalMs: number): void {
-    if (this.timer) return;
-    this.stopping = false;
-    this.unsubscribe = this.work?.subscribe(() => this.wake()) ?? null;
-    this.timer = setInterval(() => this.wake(), intervalMs);
-    this.timer.unref?.();
-    this.wake();
+    if (this.started) return;
+    this.started = true;
+    this.stopped = false;
+    this.unsubscribe = this.work?.subscribe(() => this.drain.wake()) ?? null;
+    this.drain.start(intervalMs);
   }
 
   requestScan(): Promise<void> {
-    if (this.stopping) return Promise.resolve();
-    if (this.running) return this.running;
-    this.running = this.scan().finally(() => { this.running = null; });
-    return this.running;
+    if (this.stopped) return Promise.resolve();
+    return this.started ? this.drain.request() : this.scan();
   }
 
   async stop(): Promise<void> {
-    this.stopping = true;
+    this.stopped = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    await this.running;
-  }
-
-  private wake(): void {
-    void this.requestScan().catch(() => {});
+    await this.drain.stop();
+    this.started = false;
   }
 
   private async scan(): Promise<void> {
@@ -48,7 +41,6 @@ export class CardContextRebuilder {
     try {
       let previousFullBatch = "";
       for (;;) {
-        if (this.stopping) break;
         const invalidations = this.store.listPendingCardContextInvalidations(CardContextRebuilder.batchSize);
         if (invalidations.length === 0) break;
         const batchIdentity = invalidations.map(({ targetKind, targetId, targetGeneration, requestedDependencyRevision }) => `${targetKind}:${targetId}:${targetGeneration}:${requestedDependencyRevision}`).join("\n");

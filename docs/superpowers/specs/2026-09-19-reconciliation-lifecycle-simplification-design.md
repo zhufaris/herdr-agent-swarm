@@ -14,9 +14,9 @@ pane.
 
 - Delegate Card Context scheduling to `CoalescingDrain`. Keep projection batching,
   no-progress detection, durable invalidations, and outbound wake-up behavior inside
-  `CardContextRebuilder`. Explicit `requestScan()` continues to surface the current
-  pass failure to callers, while background start/wake failures remain logged and
-  recoverable on later wakes.
+  `CardContextRebuilder`. Explicit scans before background start continue to surface
+  failures to callers; once started, all requests share the background drain, where
+  failures remain logged and recoverable on later wakes.
 - Seed the runtime reconciliation pane map with both active and orphaned bindings.
   Existing convergence remains limited by lifecycle policy, while ownership checks
   no longer repeat SQLite reads for bindings already loaded in the pass.

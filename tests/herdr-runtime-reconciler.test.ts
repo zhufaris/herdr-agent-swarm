@@ -1150,6 +1150,20 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("uses the preloaded orphaned binding map instead of looking up its Pane again", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "orphaned", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "orphaned" });
+    store.updateBinding("orphaned", { paneId: "w1:p1", state: "orphaned", lifecycle: "active", attachment: "orphaned", provisioningCheckpoint: "activated" });
+    const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "restored", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const findBindingByPane = vi.spyOn(store, "findBindingByPane");
+    const reconciler = fixture(store, { async listAllPanes() { return [pane]; } } as unknown as HerdrPort);
+
+    await reconciler.reconcile();
+
+    expect(findBindingByPane).not.toHaveBeenCalled();
+    store.close();
+  });
+
   it("enriches an unknown bound pane and wakes its queued FIFO", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
