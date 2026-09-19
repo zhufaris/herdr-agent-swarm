@@ -314,6 +314,34 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
+  it("bounds concurrent transcript observation across active bindings", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    for (let index = 0; index < 8; index += 1) {
+      const id = `b${index}`;
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w1:p${index}`, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: `session-${index}` });
+    }
+    let active = 0; let peak = 0;
+    const releases: Array<() => void> = [];
+    const open = vi.fn(async () => {
+      active += 1; peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } } };
+    });
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
+
+    const scan = observer.scanActiveBindings();
+    await vi.waitFor(() => expect(releases).toHaveLength(4));
+    expect(peak).toBe(4);
+    while (releases.length > 0) { releases.shift()!(); await Promise.resolve(); }
+    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(8));
+    while (releases.length > 0) releases.shift()!();
+    await scan;
+    expect(peak).toBe(4);
+    await observer.stop(); store.close();
+  });
+
   it("does not open TraeX transcripts for a non-TraeX Primary binding", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", agentKind: "pi" });

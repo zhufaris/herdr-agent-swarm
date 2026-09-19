@@ -44,6 +44,7 @@ interface ObservedBinding extends TurnProjectionState {
 
 const MAX_DRAIN_OBSERVATIONS = 8;
 const MAX_AWAKE_OBSERVATIONS = 256;
+const ACTIVE_BINDING_OBSERVATION_CONCURRENCY = 4;
 const IDLE_WITHOUT_TERMINAL_CONFIRMATIONS = 2;
 const MISSING_TERMINAL_EVENT_ERROR = "TraeX returned idle without a terminal transcript event; the outcome is unknown and the prompt was not replayed";
 
@@ -156,7 +157,7 @@ export class ExternalTurnObserver {
     if (this.scan) return this.scan;
     const scan = this.track(async () => {
       const active = this.options.store.listBindingsByState("active").filter((binding) => binding.agentKind === "traex");
-      await Promise.all(active.map((binding) => this.observe(binding)));
+      await mapWithConcurrency(active, ACTIVE_BINDING_OBSERVATION_CONCURRENCY, (binding) => this.observe(binding));
       this.releaseInactiveBindings(new Set(active.map(({ id }) => id)));
     });
     this.scan = scan;
@@ -346,4 +347,15 @@ export class ExternalTurnObserver {
   private async publish<T extends Parameters<typeof createBridgeEvent>[1]>(bindingId: string, type: T, origin: EventOrigin, payload: Extract<ReturnType<typeof createBridgeEvent>, { type: T }>["payload"]): Promise<void> {
     await this.options.bus.publish(createBridgeEvent(bindingId, type, origin, payload));
   }
+}
+
+async function mapWithConcurrency<T>(items: readonly T[], concurrency: number, operation: (item: T) => Promise<void>): Promise<void> {
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      await operation(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
 }
