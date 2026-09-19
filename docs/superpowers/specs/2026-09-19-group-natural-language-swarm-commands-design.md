@@ -12,6 +12,15 @@ The feature must also remove the ambiguity exposed by `@Bot create new project`:
 `/swarm new` creates a new Primary task/session in a configured project. It does
 not create a project, workspace, or edit `projects.json`.
 
+## Success criteria
+
+The design is successful when an authorized Group user can explicitly mention
+the bot and express every common existing Swarm operation in natural language;
+the system either executes a read-only query, asks for a durable confirmation,
+routes an unmistakable engineering task, or explains what is missing. It must
+never silently reinterpret an unsupported or ambiguous control request as agent
+work, and no Agent-generated text may directly become a Herdr side effect.
+
 ## Scope
 
 The first release covers the common operations already exposed by typed Swarm
@@ -89,6 +98,43 @@ use Herdr CLI to create, observe, and prompt the Controller; all requested Swarm
 effects remain behind the application workflows. This makes the Agent an
 interpreter and planner, not an alternate operator authority.
 
+The Controller may use the Herdr skill for vocabulary and bounded observation.
+Its CLI allowlist is limited to read-only commands equivalent to workspace,
+pane, and agent list/get/read operations. It cannot use pane run, send-keys,
+close, split, agent prompt, agent interrupt, workspace creation, or server
+control. When the user asks to change state, the Controller must submit a typed
+proposal to the Swarm MCP instead of invoking a Herdr mutation directly.
+
+### Controller lifecycle and configuration
+
+Controller operation is enabled by validated configuration rather than inferred
+from whichever pane happens to be focused. The configuration fixes the agent
+kind, optional model, workspace, cwd, reserved name, request timeout, and maximum
+response size. Defaults are TraeX, the configured default project's workspace
+and cwd, name herdr-swarm-controller, and a dedicated background tab.
+
+At service startup the Controller manager:
+
+1. loads the durable controller record and queries a fresh Herdr snapshot;
+2. reuses a pane only when workspace, cwd, reserved name, agent kind, terminal
+   identity, and generation all match;
+3. otherwise marks the old runtime stale and creates one replacement dedicated
+   tab through the Herdr adapter;
+4. starts the configured agent with only the Controller MCP and controller skill;
+5. records the verified pane, terminal, native session, generation, and
+   capability hash before accepting interpretation jobs.
+
+Only one Controller runtime may be current. The service lease fences Controller
+creation and job claims. Losing the Controller degrades natural-language
+interpretation but does not make the whole service unready: health and status
+report controller availability separately, while explicit slash commands,
+ordinary tasks, and deterministic fast-path commands continue to work.
+
+Shutdown stops job admission, waits for the current bounded observation, marks
+an unresolved dispatched job uncertain, revokes the MCP capability, and leaves
+the Herdr pane intact for diagnosis. Restart reconciles that exact pane and turn;
+it does not create a second Controller or resend an uncertain request.
+
 ### Durable interpretation requests
 
 Each eligible Group message is first recorded as a durable interpretation job
@@ -101,11 +147,24 @@ The Controller must finish by submitting exactly one versioned result: a typed
 command proposal, an explicit ordinary-task classification, a clarification
 with bounded choices, or an unsupported-operation explanation.
 
+The Controller prompt contains a generated request ID, sanitized user text,
+conversation facts, and a bounded catalog snapshot. It explicitly instructs the
+Agent to call submit_interpretation exactly once and not to perform the requested
+operation itself. Prose printed by the Agent is diagnostic only and is never
+parsed as an executable command.
+
 The process-local scheduler is only a wake-up mechanism. SQLite owns the job and
 result. If a prompt may have reached the Controller but no structured result was
 recorded, the job becomes uncertain; the service observes the exact Controller
 turn for a result but never automatically sends the interpretation prompt again.
 This applies the same no-replay rule used for project prompts.
+
+Interpretation job states are accepted, dispatching, observing, succeeded,
+clarification, unsupported, failed, and uncertain. A stable source-message key
+deduplicates admission. Accepted jobs may be dispatched after restart because no
+Controller prompt was sent; dispatching or observing jobs become uncertain and
+are only reconciled against the recorded Controller session and turn. Terminal
+results are immutable.
 
 ### Typed interpreter port
 
@@ -125,6 +184,18 @@ allowlisted command union. Unknown command kinds, additional keys, invalid
 arguments, low confidence, or multiple candidates become clarification. The
 Controller cannot call workflows or construct terminal input. Deterministic
 matches always win.
+
+The Controller MCP is intentionally smaller than the Primary MCP:
+
+| Tool | Access | Purpose |
+| --- | --- | --- |
+| get_interpretation_context | Read-only | Return the current request, project aliases, scoped Primary, Workers, pane IDs, and supported command schema |
+| inspect_swarm_target | Read-only | Resolve one named configured project, Primary, Worker, or pane without exposing terminal content |
+| submit_interpretation | Proposal only | Persist one schema-validated command, task, clarification, or unsupported result for the fenced request |
+
+No Controller tool executes a command. Even read-only Herdr CLI observations are
+advisory; the existing context resolver obtains fresh authoritative state again
+before query execution or confirmation creation.
 
 ### Deterministic fast path and degraded mode
 
@@ -165,6 +236,25 @@ and attachments. Pane/topology closure keeps its existing second close-code
 confirmation after the generic natural-language confirmation. Thus confirming
 “close this pane” requests a close plan; it never bypasses the close code.
 
+Command coverage maps onto the current control surface rather than inventing
+new effects:
+
+| Natural-language capability | Existing typed command or workflow |
+| --- | --- |
+| Help, project/space/pane/session/failure/status/model queries | BridgeCommand through SwarmCommandGateway |
+| New Primary task/session, reset, attach, rename, reattach, replace, resume, awake, skip, stop, steer, model, Worker create | BridgeCommand through SwarmCommandGateway after confirmation |
+| Project/Worker directory and Worker detail | InstanceCommand through InstanceInteractionWorkflow |
+| Send Worker task, steer Worker, stop Worker | InstanceCommand through InstanceInteractionWorkflow after confirmation |
+| Close pane | pane_close_request after confirmation, then existing close-code flow |
+| Create/delete project or workspace, approve TraeX, arbitrary terminal input | Unsupported |
+
+For a bound topic, pronouns such as current, this task, or this Primary resolve
+only to that binding. For an unbound Group root, global queries and creation of a
+Primary task may use the configured default project; session-scoped operations
+must name a target or receive clarification. Worker names must resolve uniquely
+inside the frozen project. The Controller never uses global name similarity to
+guess among multiple targets.
+
 ## Durable confirmation
 
 A dedicated SQLite `natural_language_command_confirmations` record is used
@@ -200,6 +290,12 @@ crash after consumption cannot automatically replay the click.
 Cancellation marks a pending record cancelled. Expired or stale confirmations
 return a warning and require a fresh request. No in-memory state is required for
 correctness.
+
+The Controller interpretation job and mutation confirmation are separate facts.
+The first records what the Agent proposed; the second records what the human
+agreed to execute. A successful task classification records its final routing
+decision before the existing prompt acceptance transaction. A successful query
+records its interpretation result before invoking the existing query handler.
 
 ## Cards and user feedback
 
