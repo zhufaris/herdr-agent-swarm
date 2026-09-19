@@ -504,6 +504,16 @@ authoritative pane still has the same workspace, pane, generation, terminal,
 and (when persisted) native Agent session identity. Recovery does not recreate
 or replay prompt work that orphaning already made terminal.
 
+The configured Lark group uses `defaultProjectId` for an otherwise unbound root
+text message that explicitly mentions the bot. This automatic route atomically
+persists a processing project selection with its selected project already
+frozen, then reuses the normal binding provisioning checkpoints. It creates no
+selector card. A duplicate source message converges on the same selection,
+binding, pane, thread, and initial Prompt. Existing bindings always retain their
+persisted project and workspace route. A project without an explicit
+`spaceName` resolves to the display and attach name `herdr`; the explicit
+`workspaceId` remains the Herdr runtime identity.
+
 Pane lookup retains historical bindings so an archived pane remains owned and
 cannot be rediscovered as a new session. Runtime convergence itself accepts only
 `active` and `draining` lifecycles. `provisioning`, `archived`, `closed`, and
@@ -744,10 +754,13 @@ change during the target decomposition without changing these steps.
    pane-close then retain their existing pane-control, provisioning-checkpoint,
    and close-confirmation authorities. Interrupted running Session operations
    become `uncertain` and are never blindly replayed.
-   A natural-language root mention first persists a project selection and its
-   original text. Only an explicit project callback provisions the binding; the
-   original message ID is then reused as the prompt idempotency key, including
-   startup recovery after selection completion.
+   A natural-language root mention from an administrator atomically persists a
+   processing selection for `defaultProjectId` and provisions it without a
+   selector callback. The original message ID is reused as the prompt
+   idempotency key, including startup recovery after selection completion. A
+   processing automatic selection with no linked binding is safe to resume
+   because pane creation has not started; once a binding exists, the ordinary
+   conservative checkpoint rules prevent blind pane or Prompt replay.
    Main/Answer Card callbacks carry only binding and prompt identity. The focused
    card-interaction workflow reloads SQLite state, checks binding generation,
    creator or operator scope, expiry, and the captured parent turn before

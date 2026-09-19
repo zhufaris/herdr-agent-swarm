@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { basename, isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 import type { ProjectConfig } from "./domain/types.js";
@@ -165,5 +165,5 @@ export function validateProjectDirectories(projects: readonly ProjectConfig[]): 
 }
 
 export function projectSpaceName(project: ProjectConfig): string {
-  return project.spaceName?.trim() || basename(project.cwd) || project.displayName;
+  return project.spaceName?.trim() || "herdr";
 }

@@ -25,6 +25,7 @@ export class SqliteBindingSessionCapabilityStore implements BindingProvisioningS
   completeProjectSelection(...args: Parameters<BindingProvisioningStore["completeProjectSelection"]>): ReturnType<BindingProvisioningStore["completeProjectSelection"]> { return this.inboundProjects.completeProjectSelection(...args); }
   countPendingPrompts(bindingId: string): number { return this.prompts.countPendingPrompts(bindingId); }
   createPendingBinding(input: Parameters<BindingProvisioningStore["createPendingBinding"]>[0]): ReturnType<BindingProvisioningStore["createPendingBinding"]> { return this.bindings.createPendingBinding(input); }
+  createAutomaticProjectSelection(input: Parameters<BindingProvisioningStore["createAutomaticProjectSelection"]>[0]): ReturnType<BindingProvisioningStore["createAutomaticProjectSelection"]> { return this.inboundProjects.createAutomaticProjectSelection(input); }
   createProjectSelection(input: Parameters<BindingProvisioningStore["createProjectSelection"]>[0]): ReturnType<BindingProvisioningStore["createProjectSelection"]> { return this.inboundProjects.createProjectSelection(input); }
   failProjectSelection(...args: Parameters<BindingProvisioningStore["failProjectSelection"]>): ReturnType<BindingProvisioningStore["failProjectSelection"]> { return this.inboundProjects.failProjectSelection(...args); }
   findBindingByLarkScope(...args: Parameters<BindingProvisioningStore["findBindingByLarkScope"]>): ReturnType<BindingProvisioningStore["findBindingByLarkScope"]> { return this.bindings.findBindingByLarkScope(...args); }

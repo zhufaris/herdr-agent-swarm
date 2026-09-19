@@ -27,6 +27,7 @@ import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null, agentKind?: AgentKind): Promise<void>;
+  provisionDefaultProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null, agentKind?: AgentKind): Promise<{ binding: Binding; selection: ProjectSelection } | null>;
   completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null>;
   attach(message: IncomingLarkMessage, spaceName: string, paneReference: string): Promise<boolean>;
   reset(message: IncomingLarkMessage, binding: Binding | null, requestedTitle: string | null): Promise<boolean>;
@@ -87,6 +88,10 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
 
   async selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null = null, agentKind: AgentKind = "traex"): Promise<void> {
     return this.projectSelection.begin(message, requestedTitle, initialPromptText, agentKind);
+  }
+
+  async provisionDefaultProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null = null, agentKind: AgentKind = "traex"): Promise<{ binding: Binding; selection: ProjectSelection } | null> {
+    return this.projectSelection.beginDefault(message, requestedTitle, initialPromptText, agentKind, this.options.config.defaultProjectId);
   }
 
   async completeSelection(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {

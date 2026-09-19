@@ -128,8 +128,8 @@ describe("HerdrRuntimeReconciler", () => {
 
     await reconciler.reconcile();
 
-    expect(store.getBinding("b1")?.title).toBe("repo / task-esk0");
-    expect(store.loadTopicView("b1")?.title).toBe("repo / task-esk0");
+    expect(store.getBinding("b1")?.title).toBe("herdr / task-esk0");
+    expect(store.loadTopicView("b1")?.title).toBe("herdr / task-esk0");
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" })]);
     expect(wakeOutbound).toHaveBeenCalledOnce();
 
@@ -1118,8 +1118,8 @@ describe("HerdrRuntimeReconciler", () => {
 
     await reconciler.reconcile();
 
-    expect(store.getBinding("b1")?.title).toBe("repo / first-new");
-    expect(store.getBinding("b2")?.title).toBe("repo / second-new");
+    expect(store.getBinding("b1")?.title).toBe("herdr / first-new");
+    expect(store.getBinding("b2")?.title).toBe("herdr / second-new");
     expect(observed.sort()).toEqual(["b1", "b2"]);
     expect(warning).toHaveBeenCalledWith(expect.objectContaining({ event: "pane-reconciliation-failed", paneId: "w1:p1" }), expect.any(String));
     store.close();

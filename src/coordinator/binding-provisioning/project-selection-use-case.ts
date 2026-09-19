@@ -25,6 +25,28 @@ export class ProjectSelectionUseCase {
     catch (error) { this.options.logger.warn({ event: "project-selector-immediate-delivery-failed", err: safeLogError(error), selectionId, eventId: message.eventId, outcome: "deferred" }, "immediate project selector delivery failed; durable outbox retry remains scheduled"); }
   }
 
+  async beginDefault(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null, agentKind: AgentKind, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {
+    const project = this.projects.projectById(projectId);
+    if (!project) throw new Error(`Default project is not configured: ${projectId}`);
+    let selection = this.options.store.createAutomaticProjectSelection({ id: randomUUID(), commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText, agentKind, projectId, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() });
+    if (selection.selectedProjectId !== projectId || selection.chatId !== message.chatId || selection.actorOpenId !== message.actorOpenId) throw new Error("Automatic project selection identity conflicts with the persisted source message");
+    if (selection.state === "completed") {
+      const binding = selection.bindingId ? this.options.store.getBinding(selection.bindingId) : null;
+      return binding ? { binding, selection } : null;
+    }
+    if (selection.state !== "processing") return null;
+    try {
+      const binding = await this.options.provision(selection, project, selection.bindingId === null);
+      selection = this.options.store.completeProjectSelection(selection.id, binding.id);
+      this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.create.default", target: binding.id, outcome: "success" });
+      return { binding, selection };
+    } catch (error) {
+      this.options.store.pauseProjectSelection(selection.id, errorMessage(error));
+      this.options.logger.error({ event: "default-project-selection-paused", err: safeLogError(error), selectionId: selection.id, projectId, outcome: "retry_on_restart" }, "default project provisioning paused at a recoverable checkpoint");
+      return null;
+    }
+  }
+
   async complete(action: IncomingLarkCardAction, selectionId: string, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {
     const claim = this.options.store.claimProjectSelection({ selectionId, projectId, messageId: action.messageId, chatId: action.chatId, actorOpenId: action.operatorOpenId, allowedProjectIds: this.options.projects.map((project) => project.id) });
     this.options.logger.info({ event: "project-selection-decided", selectionId, projectId, messageId: action.messageId, outcome: claim.outcome }, "processed project selection action");
@@ -58,15 +80,16 @@ export class ProjectSelectionUseCase {
 
   async recover(selection: ProjectSelection): Promise<void> {
     const project = selection.selectedProjectId ? this.projects.projectById(selection.selectedProjectId) ?? null : null;
-    if (!selection.bindingId || !project) { this.options.store.failProjectSelection(selection.id, "Interrupted before recoverable project identity was persisted"); return; }
+    const automaticBeforePane = !selection.bindingId && !selection.selectorMessageId && project;
+    if ((!selection.bindingId && !automaticBeforePane) || !project) { this.options.store.failProjectSelection(selection.id, "Interrupted before recoverable project identity was persisted"); return; }
     try {
-      const binding = await this.options.provision(selection, project, false);
+      const binding = await this.options.provision(selection, project, Boolean(automaticBeforePane));
       this.options.store.completeProjectSelection(selection.id, binding.id);
       if (selection.selectorMessageId) await this.success(selection.id, selection.selectorMessageId, project, binding);
       this.options.logger.info({ event: "project-selection-recovered", selectionId: selection.id, bindingId: binding.id, paneId: binding.paneId, outcome: "completed" }, "resumed interrupted project provisioning");
     } catch (error) {
       if (error instanceof ProvisionedPaneMissingError) {
-        const binding = this.options.store.getBinding(selection.bindingId);
+        const binding = selection.bindingId ? this.options.store.getBinding(selection.bindingId) : null;
         if (binding?.lifecycle === "provisioning") this.options.store.transitionBinding(binding.id, { type: "provisioning_failed" });
         this.options.store.failProjectSelection(selection.id, error.message);
         if (selection.selectorMessageId) await this.status(selection.selectorMessageId, selection.id, { status: "failed", projectName: project.displayName, spaceName: projectSpaceName(project), message: error.message });

@@ -50,6 +50,16 @@ export class SqliteInboundProjectStore {
     });
   }
 
+  createAutomaticProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; projectId: string; expiresAt: string }): ProjectSelection {
+    return this.context.transaction(() => {
+      const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
+      if (existing) return mapProjectSelection(existing);
+      const timestamp = now();
+      this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, agent_kind, selected_project_id, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?)` ).run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.agentKind ?? "traex", input.projectId, input.expiresAt, timestamp, timestamp);
+      return this.getProjectSelection(input.id)!;
+    });
+  }
+
   getProjectSelection(id: string): ProjectSelection | null { const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(id) as ProjectSelectionRow | undefined; return row ? mapProjectSelection(row) : null; }
 
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim {

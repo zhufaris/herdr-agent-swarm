@@ -48,7 +48,7 @@ describe("Herdr event real-time convergence", () => {
     const elapsedMs = performance.now() - startedAt;
 
     expect(elapsedMs).toBeLessThan(1_000);
-    expect(store.getBinding("b1")).toMatchObject({ title: "repo / fresh", lastAgentState: "working" });
+    expect(store.getBinding("b1")).toMatchObject({ title: "herdr / fresh", lastAgentState: "working" });
     expect(store.getAgentInstance("i1")).toMatchObject({ observedState: "working" });
     expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" })]));
     expect(bindingRuntime.snapshot()).toMatchObject({ lastAcceptedToStartMs: { panes: expect.any(Number) } });
@@ -70,7 +70,7 @@ describe("Herdr event real-time convergence", () => {
     });
 
     bindingRuntime.start(10);
-    await vi.waitFor(() => expect(store.getBinding("b1")).toMatchObject({ title: "repo / periodic", lastAgentState: "working" }), { timeout: 1_000 });
+    await vi.waitFor(() => expect(store.getBinding("b1")).toMatchObject({ title: "herdr / periodic", lastAgentState: "working" }), { timeout: 1_000 });
     expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" })]));
     await bindingRuntime.stop();
     store.close();

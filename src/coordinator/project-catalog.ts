@@ -13,7 +13,7 @@ export class ProjectCatalog {
   constructor(readonly projects: readonly ProjectConfig[]) {
     this.byId = new Map(projects.map((project) => [project.id, project]));
     this.bySpaceName = groupProjects(projects, (project) => projectSpaceName(project));
-    this.byExplicitSpaceName = groupProjects(projects.filter((project) => project.spaceName), (project) => project.spaceName!);
+    this.byExplicitSpaceName = this.bySpaceName;
     this.byWorkspace = groupProjects(projects, (project) => project.workspaceId);
     this.byWorkspaceAndCwd = groupProjects(projects, (project) => workspaceCwdKey(project.workspaceId, project.cwd));
   }

@@ -25,6 +25,7 @@ export interface BindingProvisioningStore {
   completeProjectSelection(id: string, bindingId: string): ProjectSelection;
   countPendingPrompts(bindingId: string): number;
   createPendingBinding(input: { id: string; gatewayId?: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; agentKind?: AgentKind; creatorOpenId?: string | null }): Binding;
+  createAutomaticProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; projectId: string; expiresAt: string }): ProjectSelection;
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; expiresAt: string; card: object }): ProjectSelection;
   failProjectSelection(id: string, error: string): ProjectSelection;
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;

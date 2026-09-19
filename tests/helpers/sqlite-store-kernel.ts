@@ -243,6 +243,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.inboundProjects.createProjectSelection(input);
   }
 
+  createAutomaticProjectSelection(input: Parameters<SqliteInboundProjectStore["createAutomaticProjectSelection"]>[0]): ProjectSelection {
+    return this.inboundProjects.createAutomaticProjectSelection(input);
+  }
+
   getProjectSelection(id: string): ProjectSelection | null {
     return this.inboundProjects.getProjectSelection(id);
   }

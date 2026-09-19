@@ -3019,6 +3019,22 @@ describe("SQLite store", () => {
     expect(store.claimProjectSelection({ selectionId: "s1", projectId: "bridge", messageId: "selector-1", chatId: "c1", actorOpenId: "u1", allowedProjectIds: ["bridge"] })).toMatchObject({ outcome: "processing" });
   });
 
+  it("atomically freezes an automatic project selection without a selector card", () => {
+    store = new SqliteBindingStore(":memory:");
+    const input = {
+      id: "auto-1", commandMessageId: "root-message", chatId: "c1", topicId: "root-message", rootMessageId: "root-message",
+      actorOpenId: "u1", requestedTitle: "Ship it", initialPromptText: "Ship it", agentKind: "traex" as const, projectId: "bridge", expiresAt: "2099-01-01T00:00:00.000Z"
+    };
+
+    const selection = store.createAutomaticProjectSelection(input);
+    const duplicate = store.createAutomaticProjectSelection({ ...input, id: "auto-duplicate" });
+
+    expect(selection).toMatchObject({ id: "auto-1", state: "processing", selectedProjectId: "bridge", selectorMessageId: null });
+    expect(duplicate.id).toBe("auto-1");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.listProcessingProjectSelections()).toEqual([selection]);
+  });
+
   it("expires stale selections and fails interrupted processing without replay", () => {
     store = new SqliteBindingStore(":memory:");
     store.createProjectSelection({ id: "expired", commandMessageId: "cmd-old", chatId: "c1", topicId: null, rootMessageId: "root-old", actorOpenId: "u1", requestedTitle: null, expiresAt: "2000-01-01T00:00:00.000Z", card: {} });

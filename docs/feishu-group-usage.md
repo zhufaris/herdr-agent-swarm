@@ -14,14 +14,17 @@ Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以 Herdr L
 管理员完成 `npm run swarm:setup`、配置 `LARK_ALLOWED_OPEN_IDS` 与
 `LARK_ADMIN_OPEN_IDS`、启动服务，并确认 `npm run swarm:status` 正常后，
 允许名单内的群成员即可开始操作。实例创建、删除、停止、steer 及会话拓扑操作仅
-允许管理员名单成员。Primary 流程的第一个飞书动作是在目标话题群发送：
+允许管理员名单成员。Primary 流程最直接的入口是在目标群发送顶层自然语言任务并
+`@Bot`：
 
 ```text
-@Bot /swarm new 任务说明 --agent pi
+@Bot 请排查登录超时并修复
 ```
 
-它只会展示项目选择卡；选择项目后才创建 Pane 并提交首个请求。安装、密钥和服务恢复
-属于管理员操作，不在飞书群内完成。
+Bridge 会直接使用 `projects.json.defaultProjectId` 创建 Primary Pane 和飞书 Thread，
+并将这条消息恰好提交一次。默认项目未显式配置 `spaceName` 时，卡片和命令中的
+Space 名为 `herdr`；真实 Herdr 路由仍使用项目的 `workspaceId`。未 `@Bot` 的普通群聊
+不会创建任务。安装、密钥和服务恢复属于管理员操作，不在飞书群内完成。
 
 多 Agent 模式先选择项目，再打开实例目录：
 
@@ -152,8 +155,10 @@ Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane�
 @Bot 请定位登录超时问题并修复
 ```
 
-Bridge 仍会先要求你明确选择项目；选择成功后，这条原始消息才会作为首个请求
-恰好提交一次。项目选择前不会创建 Pane，也不会把任务发送到默认项目。
+Bridge 会直接使用 `projects.json.defaultProjectId` 创建 Herdr pane 和新的飞书话题，
+然后将这条原始消息作为首个请求恰好提交一次。同一飞书消息的重复事件不会重复创建
+Pane、Binding、话题或 Prompt。已有话题固定使用创建时保存的项目和 workspace；以后修改
+`defaultProjectId` 只影响新建话题。
 
 ## 更自然的卡片操作
 
@@ -306,7 +311,8 @@ prompt。失败任务只用于诊断。
 /swarm attach datasage_semantic_knowledge cum7
 ```
 
-`space` 必须精确匹配项目配置中显式声明的 `spaceName`。`pane` 可以是精确 Pane ID、
+`space` 必须精确匹配项目解析后的 Space 名；未显式声明 `spaceName` 时使用 `herdr`。
+`pane` 可以是精确 Pane ID、
 该 Space 中唯一的精确 Pane 名称，或 Pane 名称中可见的 4 字 token（例如 `task-cum7`
 可输入 `cum7`）；名称或 token 重名时会返回候选 ID。Bridge 只会在该项目的
 Herdr workspace 中查找指定 pane，并从 Herdr 结构化身份发现 TraeX、Pi、Codex 或 Claude Code。重复执行同一命令
@@ -416,7 +422,8 @@ Worker 会被保留，不阻止其他安全 Worker 和 Primary 关闭。飞书�
 /swarm resume
 ```
 
-如果项目创建在 Pane ID 落库前中断，Bridge 不会在重启后自动新建第二个
+自动默认项目选择若在 Binding 和 Pane 创建前中断，可以从已冻结的项目选择安全恢复。
+如果项目创建在 Binding 已落库但 Pane ID 尚未确认时中断，Bridge 不会在重启后自动新建第二个
 Pane。请先检查对应 Space；已有 Pane 时发送
 `/swarm attach <space> <pane>`，确认不存在时再发送 `/swarm new`。
 

@@ -154,14 +154,14 @@ describe("project selection flow", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("requires an explicit project click before dispatching a natural-language root request", async () => {
-    let onAction: ((action: IncomingLarkCardAction) => Promise<unknown>) | undefined;
+  it("dispatches a mentioned natural-language root request through the default project exactly once", async () => {
     const created: string[] = [];
     const prompts: string[] = [];
     const selectorCards: object[] = [];
+    const groupCards: object[] = [];
     const lark: LarkPort = {
-      async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
-      async createTopic() { return { topicId: "task-topic", rootMessageId: "task-root" }; },
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic(card) { groupCards.push(card); return { topicId: "task-topic", rootMessageId: "task-root" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card" }; },
       async updateCard() {}
@@ -179,20 +179,18 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "natural-e1", messageId: "natural-m1", chatId: "chat", topicId: "natural-topic", rootMessageId: "natural-m1", actorOpenId: "user-1", text: "帮我排查登录超时", mentionsBot: true, isRootMessage: true });
-    await publisher.drain();
-    expect(created).toEqual([]);
-    expect(prompts).toEqual([]);
-    expect(store.listBindings()).toEqual([]);
-    const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
-    expect(store.getProjectSelection(value.selectionId)).toMatchObject({ requestedTitle: "帮我排查登录超时", initialPromptText: "帮我排查登录超时" });
-
-    await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
-    await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
+    const message = { eventId: "natural-e1", messageId: "natural-m1", chatId: "chat", topicId: "natural-topic", rootMessageId: "natural-m1", actorOpenId: "user-1", text: "帮我排查登录超时", mentionsBot: true, isRootMessage: true };
+    await coordinator.handleMessage(message);
+    await coordinator.handleMessage(message);
     await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
     expect(created).toHaveLength(1);
     expect(created[0]).toMatch(/^[a-z0-9]{4}$/);
-    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", title: `alpha / ${created[0]}` });
+    expect(selectorCards).toHaveLength(1);
+    expect(JSON.stringify(selectorCards)).not.toContain('\"action\":\"project_select\"');
+    expect(groupCards).toHaveLength(1);
+    expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", projectId: "alpha", workspaceId: "w1", title: `herdr / ${created[0]}` });
+    const selection = store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("natural-m1") as { id: string };
+    expect(store.getProjectSelection(selection.id)).toMatchObject({ state: "completed", selectedProjectId: "alpha", requestedTitle: "帮我排查登录超时", initialPromptText: "帮我排查登录超时" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
@@ -365,8 +363,8 @@ describe("project selection flow", () => {
 
     const paneName = created[0]?.title;
     expect(paneName).toMatch(/^[a-z0-9]{4}$/);
-    expect(store.findBindingByPane("w1:p7")).toMatchObject({ title: `alpha / ${paneName}` });
-    expect(JSON.stringify(groupCards[0])).toContain(`alpha / ${paneName}`);
+    expect(store.findBindingByPane("w1:p7")).toMatchObject({ title: `herdr / ${paneName}` });
+    expect(JSON.stringify(groupCards[0])).toContain(`herdr / ${paneName}`);
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

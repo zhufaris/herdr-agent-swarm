@@ -78,7 +78,13 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       else if (command) { decision = `command:${command.kind}`; await this.options.swarmCommands.handle(message, command); }
       else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
-      else if (message.isRootMessage && message.mentionsBot) { decision = "create_binding"; await this.options.provisioning.selectProject(message, deriveTopicTitle(message.text), message.text); disposition = "command_completed"; }
+      else if (message.isRootMessage && message.mentionsBot && this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) {
+        decision = "create_binding";
+        const provisioned = await this.options.provisioning.provisionDefaultProject(message, deriveTopicTitle(message.text), message.text);
+        if (provisioned) { await this.enqueueInitialProjectPrompt(provisioned.binding, provisioned.selection); disposition = "prompt_queued"; }
+        else disposition = "rejected";
+      }
+      else if (message.isRootMessage && message.mentionsBot) { decision = "create_binding_rejected"; await this.reject(message, "你没有 Agent 管理权限。"); disposition = "rejected"; }
       else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, this.options.presentation.disconnectedTopic(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
     } catch (error) {
       const rejection = this.options.instanceInteractions ? permanentInstanceCommandRejection(error) : null;

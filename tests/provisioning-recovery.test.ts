@@ -165,6 +165,23 @@ describe("project provisioning recovery", () => {
     expect(harness.created).toBe(0);
     await harness.close();
   });
+
+  it("resumes an automatic default selection before any pane was created", async () => {
+    const harness = createHarness({ paneAppearsOnCreate: true });
+    const selection = harness.store.createAutomaticProjectSelection({
+      id: "automatic-1", commandMessageId: "root-task", chatId: "chat", topicId: "root-task", rootMessageId: "root-task", actorOpenId: "user",
+      requestedTitle: "task", initialPromptText: "do the work", projectId: "alpha", expiresAt: "2099-01-01T00:00:00.000Z"
+    });
+
+    await harness.coordinator.start();
+
+    expect(harness.created).toBe(1);
+    expect(harness.started).toBe(1);
+    expect(harness.topics).toBe(1);
+    expect(harness.store.getProjectSelection(selection.id)).toMatchObject({ state: "completed", selectedProjectId: "alpha", bindingId: expect.any(String), error: null });
+    expect(harness.store.listBindings()).toEqual([expect.objectContaining({ projectId: "alpha", workspaceId: "w1", state: "active" })]);
+    await harness.close();
+  });
 });
 
 function createProcessingSelection(store: SqliteBindingStore) {
@@ -175,15 +192,15 @@ function createProcessingSelection(store: SqliteBindingStore) {
   return selection;
 }
 
-function createHarness(options: { terminalId?: string; paneMissing?: boolean; occupiedUnreadyPane?: boolean } = {}) {
+function createHarness(options: { terminalId?: string; paneMissing?: boolean; occupiedUnreadyPane?: boolean; paneAppearsOnCreate?: boolean } = {}) {
   const store = new SqliteBindingStore(":memory:");
   let created = 0; let started = 0; let topics = 0; const topicKeys: Array<string | undefined> = []; const startedPaneIds: string[] = [];
   const createdCalls: Array<Record<string, unknown>> = []; const startedCalls: Array<{ paneId: string; args: string[] | undefined }> = [];
   const pane: HerdrPane = { paneId: "w1:p9", terminalId: options.terminalId ?? "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const replacement: HerdrPane = { paneId: "w1:p10", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"] };
   const herdr: HerdrPort = {
-    async assertWorkspace() {}, async listPanes() { return options.paneMissing ? [] : [pane]; },
-    async getPane(paneId) { return options.paneMissing ? null : paneId === replacement.paneId ? replacement : pane; },
+    async assertWorkspace() {}, async listPanes() { return options.paneMissing || options.paneAppearsOnCreate ? [] : [pane]; },
+    async getPane(paneId) { return options.paneMissing || options.paneAppearsOnCreate && created === 0 ? null : paneId === replacement.paneId ? replacement : pane; },
     async observeRuntime(paneId) {
       if (paneId === replacement.paneId) return { pane: replacement, traexProcess: true, composerReady: true, evidenceSource: "structured" };
       return { pane, traexProcess: true, composerReady: !options.occupiedUnreadyPane, evidenceSource: options.occupiedUnreadyPane ? "process" : "structured" };

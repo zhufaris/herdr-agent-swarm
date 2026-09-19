@@ -58,10 +58,11 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     this.startupViewRecovery.start();
     const recoveredInbound = inboundDispatcher.recoverProcessingMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
-    const workspaceAssertions = new Map<string, { workspaceId: string; spaceName: string }>();
+    const workspaceAssertions = new Map<string, { workspaceId: string; spaceName: string; explicitSpaceName: boolean }>();
     for (const project of config.projects) {
       const spaceName = projectSpaceName(project);
-      workspaceAssertions.set(`${project.workspaceId}\u0000${spaceName}`, { workspaceId: project.workspaceId, spaceName });
+      const existing = workspaceAssertions.get(project.workspaceId);
+      if (!existing || !existing.explicitSpaceName && Boolean(project.spaceName)) workspaceAssertions.set(project.workspaceId, { workspaceId: project.workspaceId, spaceName, explicitSpaceName: Boolean(project.spaceName) });
     }
     await Promise.all([...workspaceAssertions.values()].map(({ workspaceId, spaceName }) => herdr.assertWorkspace(workspaceId, spaceName)));
     await this.runStage("runtime-baselines", () => reconciler.captureBaselines());

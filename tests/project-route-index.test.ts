@@ -23,7 +23,7 @@ describe("ProjectCatalog", () => {
 
   it("falls back to a uniquely configured workspace", () => {
     expect(routes.projectForBinding({ projectId: null, workspaceId: "unique" })).toBe(projects[2]);
-    expect(routes.spaceNameForBinding({ projectId: null, workspaceId: "unique" })).toBe("gamma");
+    expect(routes.spaceNameForBinding({ projectId: null, workspaceId: "unique" })).toBe("herdr");
   });
 
   it("does not retarget a stale project ID through the workspace", () => {
@@ -43,11 +43,13 @@ describe("ProjectCatalog", () => {
 
   it("resolves only unique space names", () => {
     expect(routes.projectsForSpaceName("alpha-space")).toEqual([projects[0]]);
+    expect(routes.projectsForSpaceName("herdr")).toEqual([projects[1], projects[2]]);
     expect(routes.projectsForSpaceName("missing")).toEqual([]);
   });
 
   it("keeps explicit attachment names separate from display-name fallbacks", () => {
     expect(routes.projectsForExplicitSpaceName("alpha-space")).toEqual([projects[0]]);
+    expect(routes.projectsForExplicitSpaceName("herdr")).toEqual([projects[1], projects[2]]);
     expect(routes.projectsForExplicitSpaceName("gamma")).toEqual([]);
   });
 

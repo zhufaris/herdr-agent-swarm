@@ -7,6 +7,39 @@ import { InstanceTargetError } from "../src/domain/instance-target-error.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
+  it("provisions the configured default project for a mentioned root task", async () => {
+    const selection = { id: "selection-1", commandMessageId: "message-1", initialPromptText: "ship it" };
+    const binding = { id: "binding-1", projectId: "default", workspaceId: "w1", paneId: "w1:p1", rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1 };
+    const provisioning = { selectProject: vi.fn(), provisionDefaultProject: vi.fn(async () => ({ binding, selection })) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { defaultProjectId: "default", projects: [], lark: { adminOpenIds: ["operator"] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 0), acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false }, commitState: "committed", consumeEffects: () => [] })) }),
+      provisioning, presentation: primaryPresentation, logger: pino({ enabled: false }), promptRun: { activeTurn: vi.fn(() => null) }
+    } as never);
+    const message = { eventId: "event-1", messageId: "message-1", parentMessageId: null, chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "operator", text: "ship it", mentionsBot: true, isRootMessage: true };
+
+    await workflow.handle(message);
+
+    expect(provisioning.provisionDefaultProject).toHaveBeenCalledWith(message, "ship it", "ship it");
+    expect(provisioning.selectProject).not.toHaveBeenCalled();
+  });
+
+  it("does not provision the default project for an unmentioned root message", async () => {
+    const provisioning = { selectProject: vi.fn(), provisionDefaultProject: vi.fn() };
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { defaultProjectId: "default", projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      provisioning, outbound, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-plain", messageId: "message-plain", parentMessageId: null, chatId: "chat", topicId: "message-plain", rootMessageId: "message-plain", actorOpenId: "operator", text: "ordinary chat", mentionsBot: false, isRootMessage: true };
+
+    await workflow.handle(message);
+
+    expect(provisioning.provisionDefaultProject).not.toHaveBeenCalled();
+    expect(outbound.enqueueCard).toHaveBeenCalledOnce();
+  });
+
   it("routes a fixed Worker Session thread before global commands or Primary binding lookup", async () => {
     const store = { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) };
     const workerSessionThreads = { handleMessage: vi.fn(async () => ({ handled: true as const, disposition: "command_completed" as const })) };
