@@ -74,6 +74,19 @@ describe("PriorityReconciliationRunner", () => {
     expect(runner.snapshot()).toMatchObject({ state: "idle", runCount: 3, successCount: 2, failureCount: 1, lastOutcome: "succeeded" });
   });
 
+  it("drains a request submitted synchronously by a completed waiter", async () => {
+    const scopes: PriorityReconciliationScope[] = [];
+    const runner = new PriorityReconciliationRunner({ execute: async (scope) => { scopes.push(scope); } });
+
+    let followUp!: Promise<void>;
+    const first = runner.request({ kind: "all" });
+    void first.then(() => { followUp = runner.request({ kind: "panes", ids: ["p1"] }); });
+    await first;
+    await vi.waitFor(() => expect(scopes).toEqual([{ kind: "all" }, { kind: "panes", ids: ["p1"] }]));
+    await expect(followUp).resolves.toBeUndefined();
+    expect(runner.snapshot()).toMatchObject({ state: "idle", pendingPaneCount: 0 });
+  });
+
   it("stops accepting work, discards pending hints, and waits for the active pass", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });

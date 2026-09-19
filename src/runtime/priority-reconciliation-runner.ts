@@ -89,7 +89,11 @@ export class PriorityReconciliationRunner {
   private startDrain(): void {
     const active = this.drain();
     this.active = active;
-    void active.finally(() => { if (this.active === active) this.active = null; }).catch(() => {});
+    void active.finally(() => {
+      if (this.active !== active) return;
+      this.active = null;
+      if (!this.stopping && this.hasPending()) this.startDrain();
+    }).catch(() => {});
   }
 
   private async drain(): Promise<void> {
@@ -132,6 +136,9 @@ export class PriorityReconciliationRunner {
   }
 
   private clock(): number { return this.options.clock?.() ?? performance.now(); }
+  private hasPending(): boolean {
+    return this.panes.waiters.length > 0 || this.workspaces.waiters.length > 0 || this.all.requested;
+  }
   private recordStartDelay(kind: PriorityReconciliationScope["kind"], acceptedAt: number): void {
     const delay = Math.max(0, Math.round(this.clock() - acceptedAt));
     this.lastAcceptedToStartMs[kind] = delay;
