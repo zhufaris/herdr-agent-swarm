@@ -57,9 +57,9 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     const retiredWorkerTaskCardIntents = this.store.retireUndeliveredWorkerTaskCardIntents();
     const recovered = this.store.recoverStaleOutboxQuarantines();
     const deliveryRecovered = recovered.retriedAnswerPromptIds.length > 0 || recovered.rolledBackAnswerPromptIds.length > 0 || recovered.dismissedNotices > 0
-      || recovered.dismissedRejectedImmutableEffects > 0 || recovered.resolvedSupersededAnswerTargets > 0;
+      || recovered.dismissedRejectedImmutableEffects > 0 || recovered.resolvedSupersededAnswerTargets > 0 || recovered.releasedSupersededWorkerMainUpdates > 0;
     const deliveryWorkReleased = recovered.retriedAnswerPromptIds.length > 0 || recovered.rolledBackAnswerPromptIds.length > 0
-      || recovered.dismissedNotices > 0 || recovered.resolvedSupersededAnswerTargets > 0;
+      || recovered.dismissedNotices > 0 || recovered.resolvedSupersededAnswerTargets > 0 || recovered.releasedSupersededWorkerMainUpdates > 0;
     if (retiredWorkerTaskCardIntents > 0 || deliveryRecovered || recovered.terminalizedQuarantines > 0) {
       if (deliveryWorkReleased) this.outboundWork.wake();
       this.logger?.warn({ event: "startup-outbox-quarantines-recovered", retiredWorkerTaskCardIntents, ...recovered, outcome: "converging" }, "recovered stale outbox quarantines and retired undelivered legacy Worker Task Card intents");

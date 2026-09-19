@@ -1390,6 +1390,20 @@ replacement create as proof, releases the quarantine, dismisses all but the
 newest pending revision, and refreshes the lane head atomically. The uncertain
 failed update remains a dead letter and is never retried. Missing identity, an
 unrelated pending row, or any prior claim keeps the whole candidate blocked.
+Legacy rows that classified such an Answer `card_update` lane as `immutable`
+remain eligible only for this same complete replacement-target proof; no
+immutable create, text, or other operation is admitted by that compatibility
+case.
+
+Startup can also advance one narrower same-target Worker Main quarantine. The
+failed effect must be an uncertain `card_update`; the current Worker Main view
+must retain the same message and exact Worker Session identity; and its newest
+pending revision must match that authoritative view version. Every pending row
+in the lane must be an unclaimed update with the same Gateway, binding, Worker,
+generation, message, and roles. Older pending snapshots are dismissed, the
+newest remains eligible, and the recovery obligation stays replacement-pending
+until that exact update receives a delivery ACK. The failed row is never
+retried and its uncertainty remains in the audit history.
 
 For a closed Primary Answer stream replaced by one static page, migration 32
 adds explicit content-coverage evidence. Before claiming a stream update or a

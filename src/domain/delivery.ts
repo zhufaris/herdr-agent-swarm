@@ -53,6 +53,7 @@ export interface StaleOutboxQuarantineRecovery {
   dismissedNotices: number;
   dismissedRejectedImmutableEffects: number;
   resolvedSupersededAnswerTargets: number;
+  releasedSupersededWorkerMainUpdates: number;
   terminalizedQuarantines: number;
 }
 export interface AnswerPage { promptId: string; pageIndex: number; messageId: string | null; cardId: string | null; elementId: string; sourceStart: number; sequence: number; state: AnswerPageState; deliveryMode: AnswerPageDeliveryMode; createdAt: string; updatedAt: string }

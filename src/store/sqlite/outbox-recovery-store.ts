@@ -343,7 +343,7 @@ export class SqliteOutboxRecoveryStore {
             WHERE candidate.lane_key = q.lane_key AND candidate.state = 'pending'
             ORDER BY candidate.snapshot_revision DESC, candidate.delivery_order DESC LIMIT 1
           )
-        WHERE q.state = 'active' AND q.lane_class = 'replaceable_card'
+        WHERE q.state = 'active' AND q.lane_class IN ('replaceable_card', 'immutable')
           AND failed.state = 'dead_letter' AND failed.kind = 'card_update'
           AND failed.card_role = 'answer' AND failed.prompt_id IS NOT NULL
           AND failed.root_message_id IS NOT NULL AND failed.effect_certainty = 'uncertain'
@@ -378,6 +378,66 @@ export class SqliteOutboxRecoveryStore {
         this.queue.refreshLaneHead(row.lane_key);
         resolvedSupersededAnswerTargets += 1;
       }
+      const supersededUpdates = this.context.database.prepare(`
+        SELECT q.lane_key, failed.id AS failed_reply_id, pending.id AS latest_reply_id
+        FROM outbox_lane_quarantines q
+        JOIN outbound_replies failed ON failed.id = q.failed_reply_id
+        JOIN worker_main_views main ON main.worker_id = failed.worker_id
+          AND main.worker_session_generation = failed.worker_session_generation
+          AND main.message_id = failed.root_message_id
+        JOIN outbound_replies pending ON pending.lane_key = q.lane_key
+          AND pending.state = 'pending' AND pending.kind = 'card_update'
+          AND pending.gateway_id = failed.gateway_id
+          AND pending.binding_id IS failed.binding_id
+          AND pending.worker_id IS failed.worker_id
+          AND pending.worker_session_generation IS failed.worker_session_generation
+          AND pending.root_message_id IS failed.root_message_id
+          AND pending.card_role IS failed.card_role AND pending.target_role IS failed.target_role
+          AND pending.view_version = main.view_version
+          AND pending.delivery_order > failed.delivery_order
+          AND pending.id = (
+            SELECT candidate.id FROM outbound_replies candidate
+            WHERE candidate.lane_key = q.lane_key AND candidate.state = 'pending'
+            ORDER BY candidate.view_version DESC, candidate.delivery_order DESC LIMIT 1
+          )
+        WHERE q.state = 'active' AND q.lane_class = 'replaceable_card'
+          AND failed.state = 'dead_letter' AND failed.kind = 'card_update'
+          AND failed.effect_certainty = 'uncertain'
+          AND failed.worker_id IS NOT NULL AND failed.worker_session_generation IS NOT NULL
+          AND failed.prompt_id IS NULL AND failed.worker_turn_id IS NULL
+          AND failed.root_message_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM outbound_replies unsafe
+            WHERE unsafe.lane_key = q.lane_key AND unsafe.state = 'pending'
+              AND (unsafe.claim_attempt_id IS NOT NULL OR unsafe.first_claimed_at IS NOT NULL
+                OR unsafe.kind != 'card_update' OR unsafe.gateway_id != failed.gateway_id
+                OR unsafe.binding_id IS NOT failed.binding_id
+                OR unsafe.worker_id IS NOT failed.worker_id
+                OR unsafe.worker_session_generation IS NOT failed.worker_session_generation
+                OR unsafe.prompt_id IS NOT NULL OR unsafe.worker_turn_id IS NOT NULL
+                OR unsafe.root_message_id IS NOT failed.root_message_id
+                OR unsafe.card_role IS NOT failed.card_role OR unsafe.target_role IS NOT failed.target_role
+                OR unsafe.delivery_order <= failed.delivery_order)
+          )
+        ORDER BY q.created_at, failed.delivery_order
+      `).all() as Array<{ lane_key: string; failed_reply_id: string; latest_reply_id: string }>;
+      let releasedSupersededWorkerMainUpdates = 0;
+      for (const row of supersededUpdates) {
+        this.context.database.prepare(`UPDATE outbound_replies
+          SET state = 'dismissed', error = 'Superseded by a newer authoritative snapshot', updated_at = ?
+          WHERE lane_key = ? AND state = 'pending' AND id != ?
+            AND claim_attempt_id IS NULL AND first_claimed_at IS NULL`).run(timestamp, row.lane_key, row.latest_reply_id);
+        const recovery = this.context.database.prepare(`UPDATE delivery_recoveries
+          SET state = 'replacement_pending', action = 'released_newer_snapshot', replacement_reply_id = ?, updated_at = ?
+          WHERE failed_reply_id = ? AND state IN ('unresolved','replacement_pending')`).run(row.latest_reply_id, timestamp, row.failed_reply_id);
+        if (recovery.changes !== 1) throw new Error(`Failed to supersede update recovery ${row.failed_reply_id}`);
+        const released = this.context.database.prepare(`UPDATE outbox_lane_quarantines
+          SET state = 'released', action = 'released_newer_snapshot', released_at = ?, updated_at = ?
+          WHERE lane_key = ? AND failed_reply_id = ? AND state = 'active'`).run(timestamp, timestamp, row.lane_key, row.failed_reply_id);
+        if (released.changes !== 1) throw new Error(`Failed to release superseded update quarantine ${row.failed_reply_id}`);
+        this.queue.refreshLaneHead(row.lane_key);
+        releasedSupersededWorkerMainUpdates += 1;
+      }
       const terminalRows = this.context.database.prepare(`
         SELECT q.lane_key, q.failed_reply_id
         FROM outbox_lane_quarantines q
@@ -400,7 +460,7 @@ export class SqliteOutboxRecoveryStore {
         this.queue.refreshLaneHead(row.lane_key);
         terminalizedQuarantines += 1;
       }
-      return { retriedAnswerPromptIds, rolledBackAnswerPromptIds, dismissedNotices, dismissedRejectedImmutableEffects, resolvedSupersededAnswerTargets, terminalizedQuarantines };
+      return { retriedAnswerPromptIds, rolledBackAnswerPromptIds, dismissedNotices, dismissedRejectedImmutableEffects, resolvedSupersededAnswerTargets, releasedSupersededWorkerMainUpdates, terminalizedQuarantines };
     });
   }
 
