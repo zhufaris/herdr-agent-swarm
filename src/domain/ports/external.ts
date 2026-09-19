@@ -38,6 +38,7 @@ export interface HerdrPort {
   listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;
   observeRuntime(paneId: string): Promise<RuntimeObservation>;
+  observeRuntimes?(paneIds: readonly string[]): Promise<ReadonlyMap<string, RuntimeObservation>>;
   waitForRuntimeChange?(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void>;
   createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane>;
   startTraex(paneId: string, executable: string, args?: string[]): Promise<void>;

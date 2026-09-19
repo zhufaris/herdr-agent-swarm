@@ -27,6 +27,29 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("reconciles multiple targeted panes from one batched observation", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    for (const id of ["p1", "p2"]) {
+      store.createPendingBinding({ id, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { paneId: `w1:${id}`, state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle" });
+    }
+    const observeRuntimes = vi.fn(async (paneIds: readonly string[]) => new Map(paneIds.map((paneId) => [paneId, {
+      pane: { paneId, workspaceId: "w1", cwd: "/repo", label: paneId, agentState: "working" as const, foregroundExecutables: ["traex"] },
+      traexProcess: true, composerReady: false, evidenceSource: "structured" as const
+    }])));
+    const observeRuntime = vi.fn();
+    const reconciler = fixture(store, { observeRuntimes, observeRuntime } as unknown as HerdrPort);
+
+    await reconciler.requestPaneReconciliation(["w1:p1", "w1:p2"]);
+
+    expect(observeRuntimes).toHaveBeenCalledOnce();
+    expect(observeRuntimes).toHaveBeenCalledWith(["w1:p1", "w1:p2"]);
+    expect(observeRuntime).not.toHaveBeenCalled();
+    expect(store.getBinding("p1")?.lastAgentState).toBe("working");
+    expect(store.getBinding("p2")?.lastAgentState).toBe("working");
+    store.close();
+  });
+
   it("keeps external turn observation live while handling a targeted Pane event", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

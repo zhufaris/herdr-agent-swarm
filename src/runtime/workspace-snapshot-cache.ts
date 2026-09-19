@@ -150,6 +150,21 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     }
     return observation;
   }
+  async observeRuntimes(paneIds: readonly string[]): Promise<ReadonlyMap<string, RuntimeObservation>> {
+    if (!this.delegate.observeRuntimes) {
+      const observations = await Promise.all(paneIds.map(async (paneId) => [paneId, await this.observeRuntime(paneId)] as const));
+      return new Map(observations);
+    }
+    const observations = await this.delegate.observeRuntimes(paneIds);
+    for (const observation of observations.values()) {
+      if (!observation.pane) continue;
+      this.rememberPane(observation.pane);
+      const snapshot = this.snapshots.get(observation.pane.workspaceId);
+      if (snapshot) replaceCachedPane(snapshot, observation.pane);
+      if (this.allSnapshot) replaceCachedPane(this.allSnapshot, observation.pane);
+    }
+    return new Map([...observations].map(([paneId, observation]) => [paneId, cloneObservation(observation)]));
+  }
   async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     if (this.delegate.waitForRuntimeChange) await this.delegate.waitForRuntimeChange(paneId, timeoutMs, signal);
     else await new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
@@ -260,6 +275,10 @@ function clonePanes(panes: readonly HerdrPane[]): HerdrPane[] {
 
 function clonePane(pane: HerdrPane): HerdrPane {
   return { ...pane, ...(pane.agentSession ? { agentSession: { ...pane.agentSession } } : {}), foregroundExecutables: [...pane.foregroundExecutables] };
+}
+
+function cloneObservation(observation: RuntimeObservation): RuntimeObservation {
+  return { ...observation, pane: observation.pane ? clonePane(observation.pane) : null };
 }
 
 function replaceCachedPane(snapshot: Snapshot, pane: HerdrPane): void {

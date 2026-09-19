@@ -108,14 +108,17 @@ export class HerdrCliAdapter implements HerdrPort {
     if (!pane) return { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" };
     const nativeTraex = pane.agentKind === "traex";
     const foregroundExecutables = nativeTraex ? pane.foregroundExecutables : await this.foregroundExecutables(paneId);
-    const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
-    const observed = { ...pane, foregroundExecutables };
-    if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
-    return {
-      pane: observed, traexProcess,
-      composerReady: pane.agentState === "idle" || pane.agentState === "done",
-      evidenceSource: pane.agentState === "unknown" ? "process" : "structured"
-    };
+    return runtimeObservation(pane, foregroundExecutables);
+  }
+
+  async observeRuntimes(paneIds: readonly string[]): Promise<ReadonlyMap<string, RuntimeObservation>> {
+    const requested = new Set(paneIds);
+    const panes = (await this.listAllPanes()).filter((pane) => requested.has(pane.paneId));
+    const observations = await mapWithConcurrency(panes, PROCESS_INFO_CONCURRENCY, async (pane) => {
+      if (pane.agentKind === "traex") return runtimeObservation(pane, pane.foregroundExecutables);
+      return runtimeObservation(pane, await this.foregroundExecutables(pane.paneId));
+    });
+    return new Map(observations.map((observation) => [observation.pane!.paneId, observation]));
   }
 
   async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
@@ -413,6 +416,14 @@ export function herdrRetryDelay(attempt: number): number { return Math.min(1_000
 
 function managedTraexName(paneId: string): string {
   return `traex-${paneId.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`.slice(0, 32);
+}
+
+function runtimeObservation(pane: HerdrPane, foregroundExecutables: readonly string[]): RuntimeObservation {
+  const nativeTraex = pane.agentKind === "traex";
+  const traexProcess = nativeTraex || foregroundExecutables.includes("traex");
+  const observed = { ...pane, foregroundExecutables: [...foregroundExecutables] };
+  if (!traexProcess) return { pane: { ...observed, agentState: "unknown" }, traexProcess, composerReady: false, evidenceSource: "process" };
+  return { pane: observed, traexProcess, composerReady: pane.agentState === "idle" || pane.agentState === "done", evidenceSource: pane.agentState === "unknown" ? "process" : "structured" };
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, operation: (item: T) => Promise<R>): Promise<R[]> {

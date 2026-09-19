@@ -195,6 +195,23 @@ describe("Herdr adapter structured control", () => {
     });
   });
 
+  it("observes multiple runtimes from one snapshot with bounded process probes", async () => {
+    let active = 0; let peak = 0;
+    const native = { request: vi.fn(async (method: string, params: { pane_id?: string }) => {
+      if (method === "session.snapshot") return { snapshot: { panes: Array.from({ length: 6 }, (_, index) => ({ pane_id: `w1:p${index}`, workspace_id: "w1", agent_status: "unknown" })), agents: [] } };
+      if (method === "pane.process_info") { active += 1; peak = Math.max(peak, active); await Promise.resolve(); active -= 1; return { process_info: { foreground_processes: [{ name: "traex" }] } }; }
+      throw new Error(`unexpected method: ${method}:${params.pane_id}`);
+    }) };
+    const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
+
+    const observations = await new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).observeRuntimes!(["w1:p0", "w1:p1", "w1:p2", "w1:p3", "w1:p4", "w1:p5"]);
+
+    expect(native.request.mock.calls.filter(([method]) => method === "session.snapshot")).toHaveLength(1);
+    expect(native.request.mock.calls.filter(([method]) => method === "pane.process_info")).toHaveLength(6);
+    expect(peak).toBeLessThanOrEqual(4);
+    expect(observations.size).toBe(6);
+  });
+
   it("temporarily bypasses a failing native transport and probes it after cooldown", async () => {
     let now = 0;
     const native = { request: vi.fn(async () => { throw new Error("native unavailable"); }) };

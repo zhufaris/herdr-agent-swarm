@@ -82,11 +82,15 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private async reconcilePanes(paneIds: readonly string[]): Promise<void> {
-    for (const paneId of [...new Set(paneIds)]) {
+    const uniquePaneIds = [...new Set(paneIds)];
+    const observations = this.options.herdr.observeRuntimes
+      ? await this.options.herdr.observeRuntimes(uniquePaneIds)
+      : new Map(await Promise.all(uniquePaneIds.map(async (paneId) => [paneId, await this.options.herdr.observeRuntime(paneId)] as const)));
+    for (const paneId of uniquePaneIds) {
       const existing = this.options.store.findBindingByPane(paneId);
       if (!existing || (existing.state !== "active" && existing.state !== "orphaned")) continue;
       try {
-        const observation = await this.options.herdr.observeRuntime(paneId);
+        const observation = observations.get(paneId) ?? { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" as const };
         if (!observation.pane) { await this.converger.orphan(existing); continue; }
         await this.converger.converge(existing, observation.pane);
       } catch (error) {
