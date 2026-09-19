@@ -96,11 +96,16 @@ describe("coordinator concurrency controls", () => {
     expect(start).toHaveBeenCalledOnce();
     expect(coordinator.snapshot()).toMatchObject({
       state: "degraded", completedAt: expect.any(String),
+      startupViews: { state: "retry_wait", fullRescanPending: true },
       stages: expect.arrayContaining([
         { name: "view-convergence", state: "failed", error: "one startup view is unreadable", durationMs: expect.any(Number) },
         { name: "runtime-reconciliation", state: "completed", durationMs: expect.any(Number) }
       ])
     });
+    await vi.waitFor(() => expect(coordinator.snapshot()).toMatchObject({
+      state: "completed",
+      startupViews: { state: "idle", fullRescanPending: false, retryCount: 1 }
+    }), { timeout: 2_000 });
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });

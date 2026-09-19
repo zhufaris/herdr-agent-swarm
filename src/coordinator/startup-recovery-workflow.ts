@@ -18,6 +18,7 @@ import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-work
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
+import { StartupViewRecovery } from "./startup-view-recovery.js";
 
 export interface StartupRecoveryWorkflowPort {
   prepareDelivery(): Promise<void>;
@@ -36,9 +37,15 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
   private prepareDeliveryPromise: Promise<void> | null = null;
+  private readonly startupViewRecovery: StartupViewRecovery;
   private diagnostics: StartupRecoveryDiagnostics = { state: "idle", startedAt: null, completedAt: null, stages: [] };
 
-  constructor(private readonly options: StartupRecoveryWorkflowOptions) {}
+  constructor(private readonly options: StartupRecoveryWorkflowOptions) {
+    this.startupViewRecovery = new StartupViewRecovery({
+      convergeAll: () => options.startupViews.converge(),
+      convergeBindings: (bindingIds) => options.startupViews.convergeBindings(bindingIds)
+    });
+  }
 
   prepareDelivery(): Promise<void> {
     this.prepareDeliveryPromise ??= this.performPrepareDelivery();
@@ -48,6 +55,7 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   async start(): Promise<void> {
     const { config, herdr, gatewayIngress, gatewaySink, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, inboundDispatcher } = this.options;
     await this.prepareDelivery();
+    this.startupViewRecovery.start();
     const recoveredInbound = inboundDispatcher.recoverProcessingMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     const workspaceAssertions = new Map<string, { workspaceId: string; spaceName: string }>();
@@ -77,9 +85,19 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   async stop(): Promise<void> {
     this.stopInboundSubscription?.(); this.stopInboundSubscription = null;
     this.stopControlSubscription?.(); this.stopControlSubscription = null;
+    await this.startupViewRecovery.stop();
   }
 
-  snapshot(): StartupRecoveryDiagnostics { return { ...this.diagnostics, stages: this.diagnostics.stages.map((stage) => ({ ...stage })) }; }
+  snapshot(): StartupRecoveryDiagnostics {
+    const startupViews = this.startupViewRecovery.snapshot();
+    const viewRecoveryPending = startupViews.pendingCount > 0 || startupViews.fullRescanPending;
+    const viewRecovered = startupViews.retryCount > 0 && !viewRecoveryPending && startupViews.lastFailure === null;
+    const stages = this.diagnostics.stages.map((stage) => viewRecovered && stage.name === "view-convergence"
+      ? { name: stage.name, state: "completed" as const, durationMs: stage.durationMs }
+      : { ...stage });
+    const state = viewRecoveryPending || stages.some((stage) => stage.state === "failed") ? "degraded" : this.diagnostics.state === "running" ? "running" : "completed";
+    return { ...this.diagnostics, state, stages, startupViews };
+  }
 
   private async performPrepareDelivery(): Promise<void> {
     const { store, logger, promptRun, startupViews } = this.options;
@@ -87,7 +105,10 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
-    await this.runStage("view-convergence", () => startupViews.converge());
+    let failedBindingIds: readonly string[] = [];
+    const converged = await this.runStage("view-convergence", async () => { failedBindingIds = await startupViews.converge(); });
+    if (converged) this.startupViewRecovery.add(failedBindingIds);
+    else this.startupViewRecovery.requestFullRescan();
   }
 
   private async recoverInitialProjectPrompts(): Promise<void> {
@@ -98,14 +119,16 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     }
   }
 
-  private async runStage(stage: string, operation: () => Promise<void>): Promise<void> {
+  private async runStage(stage: string, operation: () => Promise<void>): Promise<boolean> {
     const startedAt = Date.now();
     try {
       await operation(); this.diagnostics.stages.push({ name: stage, state: "completed", durationMs: Date.now() - startedAt });
       this.options.logger.info({ event: "startup-recovery-stage-completed", stage, durationMs: Date.now() - startedAt, outcome: "completed" }, "startup recovery stage completed");
+      return true;
     } catch (error) {
       this.diagnostics.stages.push({ name: stage, state: "failed", durationMs: Date.now() - startedAt, error: errorMessage(error).slice(0, 500) });
       this.options.logger.warn({ event: "startup-recovery-stage-failed", stage, durationMs: Date.now() - startedAt, err: safeLogError(error), outcome: "deferred" }, "startup recovery stage failed; periodic convergence will retry durable work");
+      return false;
     }
   }
 }

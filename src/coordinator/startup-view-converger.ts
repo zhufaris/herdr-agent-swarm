@@ -14,7 +14,7 @@ import type { Logger } from "pino";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
-export interface StartupViewConvergerPort { converge(): Promise<void>; }
+export interface StartupViewConvergerPort { converge(): Promise<readonly string[]>; convergeBindings(bindingIds: readonly string[]): Promise<readonly string[]>; }
 export interface StartupViewProjectionStores {
   startupViews: StartupViewStore;
   answerPages: AnswerPageStore;
@@ -53,7 +53,7 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     this.projectRoutes = new ProjectCatalog(options.config.projects);
   }
 
-  async converge(): Promise<void> {
+  async converge(): Promise<readonly string[]> {
     const retiredWorkerTaskCardIntents = this.store.retireUndeliveredWorkerTaskCardIntents();
     const recovered = this.store.recoverStaleOutboxQuarantines();
     const deliveryRecovered = recovered.retriedAnswerPromptIds.length > 0 || recovered.rolledBackAnswerPromptIds.length > 0 || recovered.dismissedNotices > 0
@@ -64,13 +64,25 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       if (deliveryWorkReleased) this.outboundWork.wake();
       this.logger?.warn({ event: "startup-outbox-quarantines-recovered", retiredWorkerTaskCardIntents, ...recovered, outcome: "converging" }, "recovered stale outbox quarantines and retired undelivered legacy Worker Task Card intents");
     }
-    for (const binding of this.store.listBindings()) {
+    return this.convergeSelectedBindings(this.store.listBindings());
+  }
+
+  async convergeBindings(bindingIds: readonly string[]): Promise<readonly string[]> {
+    const requested = new Set(bindingIds);
+    return this.convergeSelectedBindings(this.store.listBindings().filter((binding) => requested.has(binding.id)));
+  }
+
+  private async convergeSelectedBindings(bindings: readonly Binding[]): Promise<readonly string[]> {
+    const failed: string[] = [];
+    for (const binding of bindings) {
       try {
         await this.convergeBinding(binding);
       } catch (error) {
+        failed.push(binding.id);
         this.logger?.warn({ event: "startup-view-binding-failed", err: safeLogError(error), bindingId: binding.id, workspaceId: binding.workspaceId, paneId: binding.paneId, outcome: "deferred" }, "failed to converge one binding's startup views");
       }
     }
+    return failed;
   }
 
   private async convergeBinding(binding: Binding): Promise<void> {

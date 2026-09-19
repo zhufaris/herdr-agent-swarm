@@ -99,7 +99,7 @@ describe("StartupViewConverger", () => {
     const logger = { warn: vi.fn() };
     const converger = createConverger(store, { mainCardWorkflow: mainCards, logger });
 
-    await expect(converger.converge()).resolves.toBeUndefined();
+    await expect(converger.converge()).resolves.toEqual(["bad"]);
     expect(mainCards.project).toHaveBeenCalledTimes(2);
     expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "startup-view-binding-failed", bindingId: "bad" }), expect.any(String));
     store.close();
