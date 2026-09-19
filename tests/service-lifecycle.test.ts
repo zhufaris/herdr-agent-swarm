@@ -1118,9 +1118,33 @@ describe("service lifecycle", () => {
       await runServiceLifecycle("install", fixture.environment);
 
       await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user show herdr-agent-swarm.service --property MainPID --value");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user show herdr-agent-swarm.service --property ActiveState --property MainPID");
       expect(readFileSync(fixture.ssCalls, "utf8")).toContain("-H -ltnp");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
+  it("reports an unavailable unit instead of inactive when the user bus cannot be queried", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    let output = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string | Uint8Array) => { output += chunk.toString(); return true; }) as typeof process.stdout.write);
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port, systemctlError: "Failed to connect to bus: No data available" });
+
+      await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
+
+      const status = JSON.parse(output) as { active: boolean; unitState?: string; unitStatusDetail?: string | null; ownership?: { detail?: string } };
+      expect(status.active).toBe(false);
+      expect(status.unitState).toBe("unavailable");
+      expect(status.unitStatusDetail).toBe("Failed to connect to bus: No data available");
+      expect(status.ownership?.detail).toContain("systemd unavailable: Failed to connect to bus: No data available");
+    } finally {
+      write.mockRestore();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("rejects canonical IPv6 ownership when the configured IPv4 endpoint is foreign", async () => {
@@ -1387,7 +1411,7 @@ exit 0
   return { ...base, candidate, previous, current, unit, marker: join(base.state, ".release-activation.json"), environment: { ...base.environment, SWARM_ROOT: candidate, SWARM_RELEASE_CANDIDATE: candidate } };
 }
 
-function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number } = {}) {
+function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number; systemctlError?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "agent-swarm-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -1407,7 +1431,7 @@ function createFixture(options: { active?: boolean; activeStatus?: "unknown"; st
   writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
   const activity = options.activeStatus === "unknown" ? "echo unknown; exit 4" : active ? "echo active; exit 0" : "echo inactive; exit 3";
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nexit 0\n`);
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n${options.systemctlError ? `printf '%s\n' ${JSON.stringify(options.systemctlError)} >&2; exit 1` : ""}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nexit 0\n`);
   const ssOutput = options.ssOutput ?? `LISTEN 0 511 127.0.0.1:${options.port ?? 39001} 0.0.0.0:* users:(("node",pid=${options.listenerPid ?? process.pid},fd=20))`;
   writeFileSync(join(bin, "ss"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(ssCalls)}\nprintf '%b\n' ${JSON.stringify(ssOutput)}\nexit ${options.ssExit ?? 0}\n`);
   writeFileSync(join(bin, "journalctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(journalCalls)}\nexit 0\n`);

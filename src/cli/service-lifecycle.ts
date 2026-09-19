@@ -802,19 +802,22 @@ function restartTimeoutMs(environment: NodeJS.ProcessEnv): number { return posit
 
 async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
-  const active = isUnitActive(paths.serviceName, base);
+  const unit = sampleUnitRuntime(paths.serviceName, base);
+  const active = unit.active;
   let bridge: unknown = null;
   let ownership: ListenerOwnership | null = null;
   try {
     const config = loadConfig(loadRuntimeEnvironment(paths, base));
     const response = await getJsonResponse(config.http.host, config.http.port, "/status");
     bridge = response.body;
-    ownership = probeListenerOwnership(paths.serviceName, response.connectedAddress, config.http.port, base);
+    ownership = unit.detail
+      ? unavailableListenerOwnership(unit.detail)
+      : probeListenerOwnershipForPid(unit.mainPid, response.connectedAddress, config.http.port, base);
   } catch (error) { bridge = { status: "unreachable", error: safeMessage(error) }; }
   const observed = bridge && typeof bridge === "object" && "identity" in bridge ? (bridge as { identity: unknown }).identity : null;
   const observedIdentity = asRecord(observed);
   const identityMatches = observedIdentity?.serviceId === expected.serviceId && observedIdentity?.buildId === expected.buildId;
-  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitFile: paths.unitFile, expectedIdentity: expected, observedIdentity: observed, ownership, bridge }) + "\n");
+  process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitState: unit.activeState, unitStatusDetail: unit.detail, unitFile: paths.unitFile, expectedIdentity: expected, observedIdentity: observed, ownership, bridge }) + "\n");
   return active && identityMatches && ownership?.matches === true ? 0 : 1;
 }
 
@@ -827,30 +830,35 @@ interface ListenerOwnership {
 
 interface UnitRuntimeSample {
   active: boolean;
-  activeState: string;
+  activeState: "active" | "inactive" | "unavailable";
   mainPid: number | null;
+  detail: string | null;
 }
 
 function sampleUnitRuntime(serviceName: string, environment: NodeJS.ProcessEnv): UnitRuntimeSample {
   const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "ActiveState", "--property", "MainPID"], {
     env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024
   });
-  if (unit.status !== 0) return { active: false, activeState: "unavailable", mainPid: null };
+  if (unit.status !== 0) return { active: false, activeState: "unavailable", mainPid: null, detail: processFailureDetail(unit) };
   const properties = new Map(unit.stdout.split("\n").map((line) => {
     const separator = line.indexOf("=");
     return separator > 0 ? [line.slice(0, separator), line.slice(separator + 1)] : ["", ""];
   }));
-  const activeState = properties.get("ActiveState") || "unavailable";
+  const observedState = properties.get("ActiveState") || "unavailable";
+  const activeState = observedState === "active" || observedState === "inactive" ? observedState : "unavailable";
   const parsedMainPid = Number(properties.get("MainPID"));
   const mainPid = Number.isSafeInteger(parsedMainPid) && parsedMainPid > 0 ? parsedMainPid : null;
-  return { active: activeState === "active", activeState, mainPid };
+  const detail = activeState === "unavailable" ? `unexpected systemd ActiveState: ${observedState}` : null;
+  return { active: activeState === "active", activeState, mainPid, detail };
 }
 
-function probeListenerOwnership(serviceName: string, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
-  const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "MainPID", "--value"], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024 });
-  const parsedMainPid = Number(unit.stdout.trim());
-  const mainPid = unit.status === 0 && Number.isSafeInteger(parsedMainPid) && parsedMainPid > 0 ? parsedMainPid : null;
-  return probeListenerOwnershipForPid(mainPid, host, port, environment);
+function processFailureDetail(result: ReturnType<typeof spawnSync>): string {
+  const raw = result.error?.message || String(result.stderr || "").trim() || `systemctl exited with status ${result.status ?? "unknown"}`;
+  return raw.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+function unavailableListenerOwnership(detail: string): ListenerOwnership {
+  return { matches: false, mainPid: null, listenerPids: [], detail: `systemd unavailable: ${detail}` };
 }
 
 function probeListenerOwnershipForPid(mainPid: number | null, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
