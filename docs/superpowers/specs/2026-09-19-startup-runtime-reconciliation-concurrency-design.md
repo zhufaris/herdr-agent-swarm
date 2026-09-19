@@ -159,4 +159,3 @@ After A passes production validation:
    codes, delivery targets, and durable outbox evidence.
 2. C removes redundant scan/lifecycle code only after A and B behavior is protected
    by tests.
-

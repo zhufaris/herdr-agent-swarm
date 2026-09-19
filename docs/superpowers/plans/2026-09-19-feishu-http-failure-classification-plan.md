@@ -9,4 +9,3 @@
    one attempt and permanent rejection.
 5. Run focused tests, typecheck, build, architecture check, and the full suite.
 6. Commit the behavior independently before proceeding to code-simplification work.
-

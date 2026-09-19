@@ -33,4 +33,3 @@ remains serial.
 - Prove an orphaned pane is classified from the pass-local map without calling
   `findBindingByPane`.
 - Run focused tests, typecheck, build, architecture validation, and the full suite.
-

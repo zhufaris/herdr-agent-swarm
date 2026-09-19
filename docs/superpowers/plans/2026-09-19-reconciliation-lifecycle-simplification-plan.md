@@ -7,4 +7,3 @@
    orphaned binding, then seed the ownership map from active plus orphaned rows.
 4. Run focused tests, typecheck, build, architecture check, and the full suite.
 5. Commit the simplification independently and include it in production activation.
-

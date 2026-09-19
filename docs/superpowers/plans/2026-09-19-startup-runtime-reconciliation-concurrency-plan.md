@@ -70,4 +70,3 @@ convergence design in
 - After B passes production validation, design and implement C: evidence-backed code
   simplification and duplicate lifecycle/scan removal.
 - Keep each stage independently tested and committed.
-

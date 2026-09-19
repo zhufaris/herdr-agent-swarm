@@ -47,4 +47,3 @@ old dead letters and does not add any new delivery mechanism.
 - Update the dispatcher integration test to prove a generic 400 makes one provider
   call and is immediately dead-lettered.
 - Run focused tests, typecheck, build, architecture validation, and the full suite.
-
