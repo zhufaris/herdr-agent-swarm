@@ -178,6 +178,27 @@ generation，不支持接管。成功操作以 Toast 和原卡刷新反馈；确
 - 内容接近 CardKit 限制时，当前 Answer 卡被冻结，后续内容会在新的“继续回复”卡片中显示；早期卡片不会被改写或删除。
 - Bridge 不显示模型 reasoning、内部控制标记、prompt 回显、终端装饰或敏感值。高风险审批仍只能在 Herdr 中完成。
 
+## 群内自然语言 Swarm 指令
+
+在已配置的飞书群中，只有显式 `@Bot` 的消息会进入自然语言 Swarm 控制。常见且
+精确的表达走 deterministic fast path；更复杂的引用和参数提取由隔离的 Swarm
+Controller Agent 解释。未显式提及 Bot 的普通群消息不会被当作命令。
+
+例如：
+
+- `@Bot 查看项目`、`@Bot 查看状态`、`@Bot 列出所有 pane`
+- `@Bot 在 datasage 创建新任务：修复登录`
+- `@Bot 创建 reviewer worker 并启动`
+- `@Bot 发送给 worker reviewer: run tests`
+
+只读查询直接执行。任何改变状态的自然语言命令都会先生成 durable confirmation
+卡片；只有同一群中的原始发起者能在过期前确认。关闭 Pane 仍需已有的 close-code
+二次确认。高风险 TraeX 审批仍只能在 Herdr 本地完成。
+
+自然语言不能创建或删除已配置项目或 Herdr Workspace；`projects.json` 仍是路由和
+安全边界。需要直接、确定的命令入口时使用 `/swarm ...`。Controller 不可用时，
+精确 fast-path 命令仍可工作；有歧义的请求会被拒绝，不会退化为项目 Agent 任务。
+
 ## 当前可用指令
 
 ### `/swarm reset [说明]`

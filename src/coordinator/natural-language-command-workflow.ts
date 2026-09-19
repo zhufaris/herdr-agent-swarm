@@ -19,7 +19,7 @@ interface Options {
 export class NaturalLanguageCommandWorkflow {
   constructor(private readonly options: Options) {}
 
-  async handle(message: IncomingLarkMessage, result: Exclude<NaturalLanguageCommandResult, { outcome: "task" }>): Promise<void> {
+  async handle(message: IncomingLarkMessage, result: Exclude<NaturalLanguageCommandResult, { outcome: "task" | "unresolved" }>): Promise<void> {
     if (result.outcome === "clarification" || result.outcome === "unsupported") {
       await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `natural-language-guidance:${message.messageId}`, this.options.presentation.naturalLanguageCommandGuidance({ title: result.outcome === "unsupported" ? "不支持的 Swarm 操作" : "需要补充信息", message: result.message, examples: result.examples, warning: true }));
       return;

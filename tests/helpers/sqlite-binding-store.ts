@@ -3,13 +3,14 @@ import type { InboundMessageDispatchStore } from "../../src/domain/ports/workflo
 import type { WorkerCardDisplayStore } from "../../src/domain/ports/worker-card-display.js";
 import type { CommandIntentStore } from "../../src/domain/ports/swarm-command.js";
 import type { NaturalLanguageCommandConfirmationStore } from "../../src/domain/ports/natural-language-command-confirmation.js";
+import type { ControllerInterpretationStore } from "../../src/domain/ports/controller-interpretation.js";
 import type { SessionOperationStore } from "../../src/domain/ports/workflow.js";
 import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 import { createOutboxTestDriver } from "./outbox-test-driver.js";
 
 export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & LeaseStore & HealthStore &
-  InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & NaturalLanguageCommandConfirmationStore & SessionOperationStore & {
+  InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & NaturalLanguageCommandConfirmationStore & ControllerInterpretationStore & SessionOperationStore & {
     inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
     getSessionOperation: ReturnType<SqliteStoreKernel["capabilityModules"]>["sessionOperations"]["getSessionOperation"];
   } & ReturnType<SqliteStoreKernel["capabilityModules"]>["approvals"] &
@@ -56,6 +57,7 @@ export const SqliteBindingStore: StoreConstructor = class {
       reserveWorkerCardDisplay: modules.workerCardDisplay.reserveWorkerCardDisplay.bind(modules.workerCardDisplay),
       ...bindMethods(modules.commandIntents, ["acceptCommandIntent", "getCommandIntent", "claimNextCommandIntent", "finishCommandIntent", "listRecoverableCommandIntents", "recoverExecutingCommandIntents", "registerWorkerThreadEntry"]),
       ...bindMethods(modules.naturalLanguageCommandConfirmations, ["stageNaturalLanguageCommandConfirmation", "getNaturalLanguageCommandConfirmation", "decideNaturalLanguageCommandConfirmation", "confirmNaturalLanguageSwarmCommand"]),
+      ...bindMethods(modules.controllerInterpretations, ["acceptControllerInterpretation", "claimNextControllerInterpretation", "markControllerInterpretationDispatched", "finishControllerInterpretation", "failControllerInterpretation", "getControllerInterpretation", "recoverControllerInterpretations", "getControllerRuntime", "saveControllerRuntime", "markControllerRuntimeStale"]),
       ...bindMethods(modules.sessionOperations, ["acceptSessionOperation", "claimNextSessionOperation", "finishSessionOperation", "getSessionOperation", "listRecoverableSessionOperations"])
     });
   }

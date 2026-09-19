@@ -7,6 +7,7 @@ import { SqliteBindingSessionCapabilityStore } from "./binding-session-capabilit
 import { SqliteCardContextStore } from "./card-context-store.js";
 import { SqliteCommandIntentStore } from "./command-intent-store.js";
 import { SqliteNaturalLanguageCommandConfirmationStore } from "./natural-language-command-confirmation-store.js";
+import { SqliteControllerInterpretationStore } from "./controller-interpretation-store.js";
 import { SqliteContext } from "./context.js";
 import { SqliteInboundProjectStore } from "./inbound-project-store.js";
 import { SqliteInstanceCapabilityStore } from "./instance-capability-store.js";
@@ -45,6 +46,7 @@ export class SqliteCapabilityGraph {
   readonly operations: SqliteOperationsStore;
   readonly commandIntents: SqliteCommandIntentStore;
   readonly naturalLanguageCommandConfirmations: SqliteNaturalLanguageCommandConfirmationStore;
+  readonly controllerInterpretations: SqliteControllerInterpretationStore;
   readonly sessionOperations: SqliteSessionOperationStore;
   readonly workerTurns: SqliteWorkerTurnStore;
   readonly projections: SqliteProjectionStore;
@@ -97,6 +99,7 @@ export class SqliteCapabilityGraph {
       invalidateCardContexts: (targets) => this.cardContexts.invalidateCardContexts(targets)
     }, this.threadAliases, this.workerThreads);
     this.naturalLanguageCommandConfirmations = new SqliteNaturalLanguageCommandConfirmationStore(this.context, this.outbox, this.commandIntents);
+    this.controllerInterpretations = new SqliteControllerInterpretationStore(this.context);
     this.bindingProjections = new SqliteBindingProjectionStore(this.context, this.bindings, this.projections, {
       enqueueOutboundReply: (input) => this.outbox.enqueueOutboundReply(input),
       listRunCardsByPhases: (bindingId, phases) => this.projections.listRunCardsByPhases(bindingId, phases)
@@ -197,6 +200,7 @@ export class SqliteCapabilityGraph {
         getBinding: (id) => this.bindings.getBinding(id)
       }),
       naturalLanguageCommandConfirmations: this.naturalLanguageCommandConfirmations,
+      controllerInterpretations: this.controllerInterpretations,
       sessionOperations: new SqliteSessionOperationStoreAdapter(this.sessionOperations, (id) => this.bindings.getBinding(id)),
       projection: this.projections,
       mainCards: this.projections,

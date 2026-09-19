@@ -56,6 +56,9 @@ const environmentSchema = z.object({
   COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   LARK_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(3_600_000),
+  CONTROLLER_ENABLED: z.enum(["true", "false"]).default("true"),
+  CONTROLLER_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(300_000).default(60_000),
+  CONTROLLER_MODEL: z.string().trim().min(1).optional(),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(30_000),
   OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
@@ -108,6 +111,7 @@ function buildConfig(
     logLevel: value.LOG_LEVEL,
     commandTimeoutMs: value.COMMAND_TIMEOUT_MS,
     turnTimeoutMs: value.TURN_TIMEOUT_MS,
+    controller: { enabled: value.CONTROLLER_ENABLED === "true", timeoutMs: value.CONTROLLER_TIMEOUT_MS, model: value.CONTROLLER_MODEL ?? null },
     reconcileIntervalMs: value.RECONCILE_INTERVAL_MS,
     runtimeTuning: {
       ...runtime, outboxSafetyScanIntervalMs: value.OUTBOX_SAFETY_SCAN_INTERVAL_MS

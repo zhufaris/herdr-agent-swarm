@@ -841,6 +841,50 @@ describe("SQLite store", () => {
     expect(store.getCommandIntent("intent-atomic")).toMatchObject({ command, state: "accepted" });
   });
 
+  it("persists Controller interpretation FIFO and never requeues possibly dispatched work", () => {
+    store = new SqliteBindingStore(":memory:");
+    const message = { eventId: "event-1", messageId: "message-1", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "admin", text: "看看当前情况", mentionsBot: true, isRootMessage: true };
+    expect(store.acceptControllerInterpretation({ id: "job-1", message, controllerGeneration: 3, capabilityHash: "a".repeat(64), acceptedAt: "2026-09-19T00:00:00.000Z" })).toMatchObject({ inserted: true, job: { state: "accepted" } });
+    expect(store.acceptControllerInterpretation({ id: "ignored", message, controllerGeneration: 3, capabilityHash: "b".repeat(64), acceptedAt: "2026-09-19T00:00:01.000Z" })).toMatchObject({ inserted: false, job: { id: "job-1" } });
+    expect(store.claimNextControllerInterpretation(3, "c".repeat(64), "2026-09-19T00:00:02.000Z")).toMatchObject({ id: "job-1", state: "dispatching", capabilityHash: "c".repeat(64) });
+    expect(store.markControllerInterpretationDispatched("job-1", 3, "turn-1", "2026-09-19T00:00:03.000Z")).toMatchObject({ state: "observing", runtimeTurnId: "turn-1" });
+    expect(store.recoverControllerInterpretations("2026-09-19T00:01:00.000Z")).toBe(1);
+    expect(store.getControllerInterpretation("job-1")).toMatchObject({ state: "uncertain" });
+    expect(store.claimNextControllerInterpretation(3, "d".repeat(64), "2026-09-19T00:02:00.000Z")).toBeNull();
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 48").get()).toEqual({ version: 48 });
+  });
+
+  it("accepts one schema-validated structured Controller result", () => {
+    store = new SqliteBindingStore(":memory:");
+    const message = { eventId: "event-2", messageId: "message-2", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "admin", text: "do something", mentionsBot: true, isRootMessage: true };
+    store.acceptControllerInterpretation({ id: "job-2", message, controllerGeneration: 1, capabilityHash: "a".repeat(64), acceptedAt: "2026-09-19T00:00:00.000Z" });
+    store.claimNextControllerInterpretation(1, "b".repeat(64), "2026-09-19T00:00:01.000Z");
+    store.markControllerInterpretationDispatched("job-2", 1, "turn-2", "2026-09-19T00:00:02.000Z");
+    expect(store.finishControllerInterpretation("job-2", 1, { outcome: "command", source: "controller", family: "swarm", command: { kind: "panes" } }, "2026-09-19T00:00:03.000Z")).toMatchObject({ state: "succeeded", result: { outcome: "command", command: { kind: "panes" } } });
+    expect(store.finishControllerInterpretation("job-2", 1, { outcome: "task", source: "controller" }, "2026-09-19T00:00:04.000Z")).toBeNull();
+  });
+
+  it("accepts a late structured result for an uncertain job without redispatching it", () => {
+    store = new SqliteBindingStore(":memory:");
+    const message = { eventId: "event-late", messageId: "message-late", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "root", actorOpenId: "admin", text: "看看 reviewer", mentionsBot: true, isRootMessage: true };
+    store.acceptControllerInterpretation({ id: "job-late", message, controllerGeneration: 2, capabilityHash: "a".repeat(64), acceptedAt: "2026-09-19T00:00:00.000Z" });
+    store.claimNextControllerInterpretation(2, "b".repeat(64), "2026-09-19T00:00:01.000Z");
+    store.markControllerInterpretationDispatched("job-late", 2, "turn-late", "2026-09-19T00:00:02.000Z");
+    store.failControllerInterpretation("job-late", 2, "uncertain", "restart", "2026-09-19T00:00:03.000Z");
+    expect(store.finishControllerInterpretation("job-late", 2, { outcome: "clarification", message: "Which worker?", examples: ["reviewer"] }, "2026-09-19T00:00:04.000Z")).toMatchObject({ state: "clarification" });
+    expect(store.claimNextControllerInterpretation(2, "c".repeat(64), "2026-09-19T00:00:05.000Z")).toBeNull();
+  });
+
+  it("persists and generation-fences the singleton Controller runtime", () => {
+    store = new SqliteBindingStore(":memory:");
+    expect(store.getControllerRuntime()).toBeNull();
+    expect(store.saveControllerRuntime({ generation: 1, paneId: "w1:p1", terminalId: "term-1", nativeSessionId: "session-1", state: "active" }, "2026-09-19T00:00:00.000Z")).toMatchObject({ generation: 1, state: "active" });
+    expect(store.markControllerRuntimeStale(2, "2026-09-19T00:01:00.000Z")).toBe(false);
+    expect(store.markControllerRuntimeStale(1, "2026-09-19T00:01:00.000Z")).toBe(true);
+    expect(store.getControllerRuntime()).toMatchObject({ generation: 1, state: "stale" });
+    expect(store.saveControllerRuntime({ generation: 2, paneId: "w1:p2", terminalId: "term-2", nativeSessionId: "session-2", state: "active" }, "2026-09-19T00:02:00.000Z")).toMatchObject({ generation: 2, paneId: "w1:p2", state: "active" });
+  });
+
   it("backfills safe Worker, Primary Main, and mutable Answer invalidations on upgrade", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-card-context-backfill-"));
     const path = join(temporaryDirectory, "bridge.db");

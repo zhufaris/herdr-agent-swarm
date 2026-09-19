@@ -8,6 +8,7 @@ import type { PromptAcceptanceStore, PromptDispatchStore, PromptRecoveryStore, P
 import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore } from "../domain/ports/projection.js";
 import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
 import type { NaturalLanguageCommandConfirmationStore } from "../domain/ports/natural-language-command-confirmation.js";
+import type { ControllerInterpretationStore } from "../domain/ports/controller-interpretation.js";
 import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 import type { CardInteractionStore, DeliveryRecoveryStore, ExternalTurnObservationStore, InboundMessageDispatchStore, InboundRoutingStore, ModelSelectionStore, OperationsQueryStore, PaneRetentionStore, SessionAdministrationStore, SessionOperationStore, StartupRecoveryStore, StartupViewStore } from "../domain/ports/workflow.js";
@@ -65,6 +66,7 @@ export interface SqliteStoreBundle {
   readonly paneRetention: PaneRetentionStore;
   readonly commandIntents: CommandIntentWorkflowStore;
   readonly naturalLanguageCommandConfirmations: NaturalLanguageCommandConfirmationStore;
+  readonly controllerInterpretations: ControllerInterpretationStore;
   readonly startupRecovery: StartupRecoveryStore;
   readonly startupViews: StartupViewStore;
   readonly retention: SqliteRetentionStore;
@@ -91,7 +93,7 @@ function createSqliteStoreBundleFromGraph(graph: SqliteCapabilityGraph): SqliteS
     paneClose: modules.paneClose, inboundRouting: modules.inboundRouting, inboundDispatch: modules.inboundDispatch, operationsQuery: modules.operationsQuery,
     deliveryRecovery: modules.deliveryRecovery, cardInteraction: modules.cardInteraction, externalTurns: modules.externalTurns,
     sessionOperations: modules.sessionOperations, modelSelection: modules.modelSelection, sessionAdministration: modules.sessionAdministration,
-    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, naturalLanguageCommandConfirmations: modules.naturalLanguageCommandConfirmations,
+    paneRetention: modules.paneRetention, commandIntents: modules.commandIntents, naturalLanguageCommandConfirmations: modules.naturalLanguageCommandConfirmations, controllerInterpretations: modules.controllerInterpretations,
     startupRecovery: modules.startupRecovery, startupViews: modules.startupViews, retention: modules.retention, workerCardDisplay: modules.workerCardDisplay, workerSessionThreads: modules.workerSessionThreads
   };
 }

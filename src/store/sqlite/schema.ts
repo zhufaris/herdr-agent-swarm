@@ -142,6 +142,15 @@ export function createLatestSchema(context: SqliteContext): void {
     CHECK((expected_instance_id IS NULL) = (expected_instance_generation IS NULL))
   );
   CREATE INDEX IF NOT EXISTS natural_language_command_confirmations_pending ON natural_language_command_confirmations(state, expires_at, created_at);
+  CREATE TABLE IF NOT EXISTS controller_interpretation_jobs(
+    id TEXT PRIMARY KEY, source_message_id TEXT NOT NULL UNIQUE, message_json TEXT NOT NULL, controller_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('accepted','dispatching','observing','succeeded','clarification','unsupported','task','failed','uncertain')), result_json TEXT, runtime_turn_id TEXT, dispatched_at TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS controller_interpretation_jobs_queue ON controller_interpretation_jobs(state, created_at);
+  CREATE TABLE IF NOT EXISTS controller_runtime(
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1), generation INTEGER NOT NULL, pane_id TEXT NOT NULL, terminal_id TEXT NOT NULL, native_session_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','stale')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS prompt_jobs(
     id TEXT PRIMARY KEY, binding_id TEXT NOT NULL REFERENCES bindings(id), lark_message_id TEXT UNIQUE NOT NULL,
     actor_open_id TEXT NOT NULL, body TEXT NOT NULL, parent_prompt_id TEXT REFERENCES prompt_jobs(id), execution_origin TEXT NOT NULL DEFAULT 'bridge' CHECK(execution_origin IN ('bridge','herdr')), priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','priority')), was_detached INTEGER NOT NULL DEFAULT 0 CHECK(was_detached IN (0,1)),

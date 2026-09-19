@@ -89,6 +89,17 @@ Every arrow across an external-effect boundary has a durable fact on the SQLite
 side. Process-local events and wake-ups reduce latency; durable scans and fresh
 Herdr observations provide convergence when a hint is lost.
 
+Explicit bot mentions in the configured group have one additional bounded
+interpretation path. A deterministic parser handles common exact phrases first.
+Only unresolved phrases enter a durable FIFO owned by the service-managed
+`herdr-swarm-controller` Agent in a dedicated background tab. That Agent runs
+read-only, receives only three request-scoped MCP tools, and can submit a typed
+proposal but cannot execute Swarm, Herdr, terminal, or approval actions. Queries
+reuse the existing gateways; mutations first create a durable confirmation card.
+Possible Controller prompt delivery is never replayed after restart: the job is
+marked uncertain and only a late, generation-fenced structured result may settle
+it. The Controller pane is not a Primary or Worker and consumes no project slot.
+
 Delivery intent schema version 2 stores only the typed intent kind; the
 canonical materialized body remains in the row's immutable `payload` column.
 Version 1 envelopes with an embedded `materializedPayload` remain readable. The

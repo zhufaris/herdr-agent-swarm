@@ -1,17 +1,26 @@
 import type { AgentKind } from "./agent-instance.js";
-import type { BridgeCommand, InstanceCommand, ProjectConfig } from "./types.js";
+import type { BridgeCommand, IncomingLarkMessage, InstanceCommand, ProjectConfig } from "./types.js";
 
 export type NaturalLanguageTypedCommand =
   | { family: "swarm"; command: BridgeCommand }
   | { family: "instance"; command: InstanceCommand };
 
 export type NaturalLanguageCommandResult =
-  | ({ outcome: "command"; source: "deterministic" } & NaturalLanguageTypedCommand)
-  | { outcome: "task" }
+  | ({ outcome: "command"; source: "deterministic" | "controller" } & NaturalLanguageTypedCommand)
+  | { outcome: "task"; source: "deterministic" | "controller" }
   | { outcome: "clarification"; message: string; examples: string[] }
-  | { outcome: "unsupported"; message: string; examples: string[] };
+  | { outcome: "unsupported"; message: string; examples: string[] }
+  | { outcome: "unresolved" };
 
-export interface NaturalLanguageCommandInterpreter { interpret(text: string): NaturalLanguageCommandResult }
+export interface NaturalLanguageCommandInterpreter { interpret(text: string, message?: IncomingLarkMessage): NaturalLanguageCommandResult | Promise<NaturalLanguageCommandResult> }
+
+export class FallbackNaturalLanguageCommandInterpreter implements NaturalLanguageCommandInterpreter {
+  constructor(private readonly fastPath: NaturalLanguageCommandInterpreter, private readonly fallback: NaturalLanguageCommandInterpreter) {}
+  async interpret(text: string, message?: IncomingLarkMessage): Promise<NaturalLanguageCommandResult> {
+    const result = await this.fastPath.interpret(text, message);
+    return result.outcome === "unresolved" ? this.fallback.interpret(text, message) : result;
+  }
+}
 
 const AGENT_KINDS = new Set<AgentKind>(["traex", "pi", "codex", "claude-code"]);
 const COMMAND_LEADS = /^(?:请|帮我|麻烦)?(?:查看|显示|列出|打开|切换|选择|创建|新建|重置|重新连接|连接|替换|恢复|唤醒|跳过|停止|终止|中断|修改|重命名|关闭|发送|告诉|追加|补充|转向|steer(?:\s|$)|show(?:\s|$)|list(?:\s|$)|open(?:\s|$)|switch(?:\s|$)|select(?:\s|$)|create(?:\s|$)|new(?:\s|$)|reset(?:\s|$)|reattach(?:\s|$)|attach(?:\s|$)|replace(?:\s|$)|resume(?:\s|$)|awake(?:\s|$)|skip(?:\s|$)|stop(?:\s|$)|interrupt(?:\s|$)|rename(?:\s|$)|close(?:\s|$)|send(?:\s|$))/i;
@@ -22,7 +31,7 @@ export class DeterministicNaturalLanguageCommandInterpreter implements NaturalLa
 
   interpret(rawText: string): NaturalLanguageCommandResult {
     const text = normalize(rawText);
-    if (!text) return { outcome: "task" };
+    if (!text) return { outcome: "task", source: "deterministic" };
     if (/^(?:(?:创建|新建)(?:一个)?(?:新)?(?:项目|workspace|space)|(?:create|add)\s+(?:(?:a|one)\s+)?(?:new\s+)?(?:project|workspace|space))(?:\s|$)/i.test(text)) {
       return unsupported("飞书自然语言不能新增项目或 Herdr Workspace；项目来自受控的 projects.json。你可以查看已配置项目，或在项目中创建新的 Primary 任务/会话。", ["查看项目", "在 <项目> 创建新任务：<标题>"]);
     }
@@ -85,9 +94,9 @@ export class DeterministicNaturalLanguageCommandInterpreter implements NaturalLa
     if (/^(?:唤醒|awake)(?:\s*(?:会话|session))?$/i.test(text)) return swarm({ kind: "awake" });
     if (/^(?:跳过|skip)(?:\s*(?:detached\s*)?(?:任务|prompt))?$/i.test(text)) return swarm({ kind: "skip" });
 
-    if (TASK_LEADS.test(text)) return { outcome: "task" };
+    if (TASK_LEADS.test(text)) return { outcome: "task", source: "deterministic" };
     if (COMMAND_LEADS.test(text)) return clarify("无法唯一确定要执行的 Swarm 指令，不会作为 Agent 任务发送。", ["查看帮助", "查看状态", "创建新任务：<标题>"]);
-    return { outcome: "task" };
+    return { outcome: "unresolved" };
   }
 
   private exactQuery(text: string): NaturalLanguageTypedCommand | null {

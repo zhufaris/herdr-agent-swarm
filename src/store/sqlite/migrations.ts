@@ -102,6 +102,7 @@ export class SqliteMigrations {
     this.prompt.ensureTurnControlOperations();
     this.prompt.ensureSwarmCommandIntents();
     this.ensureNaturalLanguageCommandConfirmations();
+    this.ensureControllerInterpretationJobs();
     this.worker.ensureWorkerCardDisplayRequests();
     this.worker.ensureWorkerSessionThreads();
     this.worker.ensureWorkerThreadEntryRequests();
@@ -168,6 +169,21 @@ export class SqliteMigrations {
       );
       CREATE INDEX IF NOT EXISTS natural_language_command_confirmations_pending ON natural_language_command_confirmations(state, expires_at, created_at);
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (47);
+    `);
+  }
+
+  private ensureControllerInterpretationJobs(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS controller_interpretation_jobs(
+        id TEXT PRIMARY KEY, source_message_id TEXT NOT NULL UNIQUE, message_json TEXT NOT NULL, controller_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('accepted','dispatching','observing','succeeded','clarification','unsupported','task','failed','uncertain')), result_json TEXT, runtime_turn_id TEXT, dispatched_at TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS controller_interpretation_jobs_queue ON controller_interpretation_jobs(state, created_at);
+      CREATE TABLE IF NOT EXISTS controller_runtime(
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1), generation INTEGER NOT NULL, pane_id TEXT NOT NULL, terminal_id TEXT NOT NULL, native_session_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('active','stale')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (48);
     `);
   }
 }

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { DeterministicNaturalLanguageCommandInterpreter } from "../src/domain/natural-language-command.js";
+import { describe, expect, it, vi } from "vitest";
+import { DeterministicNaturalLanguageCommandInterpreter, FallbackNaturalLanguageCommandInterpreter } from "../src/domain/natural-language-command.js";
 
 const interpreter = new DeterministicNaturalLanguageCommandInterpreter([
   { id: "datasage", displayName: "DataSage", spaceName: "datasage-space", description: "Data", workspaceId: "w1", cwd: "/repo" }
@@ -31,13 +31,26 @@ describe("DeterministicNaturalLanguageCommandInterpreter", () => {
   });
 
   it("keeps explicit engineering work as an ordinary task", () => {
-    expect(interpreter.interpret("帮我实现登录页")).toEqual({ outcome: "task" });
-    expect(interpreter.interpret("fix the flaky test")).toEqual({ outcome: "task" });
+    expect(interpreter.interpret("帮我实现登录页")).toEqual({ outcome: "task", source: "deterministic" });
+    expect(interpreter.interpret("fix the flaky test")).toEqual({ outcome: "task", source: "deterministic" });
+    expect(interpreter.interpret("看看 reviewer 然后决定怎么办")).toEqual({ outcome: "unresolved" });
   });
 
   it("clarifies incomplete or command-shaped input without task fallback", () => {
     expect(interpreter.interpret("停一下")).toMatchObject({ outcome: "clarification" });
     expect(interpreter.interpret("创建 worker")).toMatchObject({ outcome: "clarification" });
     expect(interpreter.interpret("切换项目 missing")).toMatchObject({ outcome: "clarification" });
+  });
+});
+
+describe("FallbackNaturalLanguageCommandInterpreter", () => {
+  it("calls the Controller only for unresolved fast-path input and forwards message scope", async () => {
+    const fallback = { interpret: vi.fn(async () => ({ outcome: "task", source: "controller" as const })) };
+    const composite = new FallbackNaturalLanguageCommandInterpreter(interpreter, fallback);
+    const message = { messageId: "m1" } as never;
+    await expect(composite.interpret("看看 reviewer 然后决定怎么办", message)).resolves.toEqual({ outcome: "task", source: "controller" });
+    expect(fallback.interpret).toHaveBeenCalledWith("看看 reviewer 然后决定怎么办", message);
+    await expect(composite.interpret("查看项目", message)).resolves.toMatchObject({ outcome: "command", source: "deterministic" });
+    expect(fallback.interpret).toHaveBeenCalledOnce();
   });
 });

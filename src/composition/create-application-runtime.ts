@@ -14,12 +14,13 @@ import type { ApplicationPresentation, PanePresentation, PrimaryPresentation } f
 import { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
 import { createCommandControlRuntime } from "./create-command-control-runtime.js";
 import { createIngressRecoveryRuntime } from "./create-ingress-recovery-runtime.js";
+import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
 
 export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
   | "retiredPaneCleanup" | "bindingProvisioning" | "modelSelection" | "paneControl"
   | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose"
   | "paneRetention" | "sessionOperations" | "cardInteraction" | "runtimeReconciliation"
-  | "inboundRouting" | "commandIntents" | "naturalLanguageCommandConfirmations" | "instance" | "workerSessionThreads"
+  | "inboundRouting" | "commandIntents" | "naturalLanguageCommandConfirmations" | "controllerInterpretations" | "instance" | "workerSessionThreads"
   | "inboundDispatch" | "promptAcceptance" | "startupRecovery" | "startupViews"
   | "answerPages" | "mainCards">;
 
@@ -29,12 +30,13 @@ export function createApplicationRuntime(options: {
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   presentation?: { application: ApplicationPresentation; primary: PrimaryPresentation; pane: PanePresentation };
+  controllerInterpreter?: NaturalLanguageCommandInterpreter;
 }) {
   const { config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker } = options;
   const presentation = options.presentation ?? { application: feishuGatewayApplicationPresentation, primary: feishuGatewayPrimaryPresentation, pane: feishuGatewayPanePresentation };
   const shared = { config, stores, logger, scheduler, infrastructure, delivery, primary, worker, presentation };
   const bindingSession = createBindingSessionRuntime({ ...shared, bus });
   const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession });
-  const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl });
+  const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl, ...(options.controllerInterpreter ? { controllerInterpreter: options.controllerInterpreter } : {}) });
   return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter, swarmCommands: commandControl.swarmCommands };
 }
