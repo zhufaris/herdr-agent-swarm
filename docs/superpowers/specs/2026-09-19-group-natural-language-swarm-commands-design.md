@@ -66,7 +66,46 @@ Examples:
 | `@Bot 帮我实现登录页` | ordinary task | Route as a prompt |
 | `@Bot 停一下` | ambiguous | Ask whether to stop the active turn; do not execute |
 
-## Parsing architecture
+## Controller Agent architecture
+
+Natural-language interpretation is owned by one service-managed default Swarm
+Controller Agent. The service starts and observes it through the existing Herdr
+CLI adapter in a dedicated tab of the configured default project's workspace.
+The Controller is not a project Primary, has no Lark Binding, and does not
+consume a user task slot. Its pane carries a reserved controller identity so
+reconciliation and directory rendering can distinguish it from project work.
+
+The service provides a controller-specific skill and MCP surface. The skill
+defines the Swarm vocabulary, the project/session distinction, Chinese and
+English examples, and the rule that ambiguity must be returned rather than
+guessed. The MCP surface exposes only bounded read-only Swarm context and a
+submit_interpretation operation that records one validated interpretation for
+the current request.
+
+The Controller receives no Primary capability and cannot call the existing
+effectful create_worker, prompt_instance, steer_instance, or interrupt_instance
+tools. It does not receive a general Herdr mutation tool. The bridge itself may
+use Herdr CLI to create, observe, and prompt the Controller; all requested Swarm
+effects remain behind the application workflows. This makes the Agent an
+interpreter and planner, not an alternate operator authority.
+
+### Durable interpretation requests
+
+Each eligible Group message is first recorded as a durable interpretation job
+with source identity, actor, conversation scope, sanitized text, state, and
+controller-generation fence. Jobs are processed FIFO, one at a time, so replies
+cannot be associated with the wrong message. The controller MCP capability is
+bound to the current job and expires when that job settles.
+
+The Controller must finish by submitting exactly one versioned result: a typed
+command proposal, an explicit ordinary-task classification, a clarification
+with bounded choices, or an unsupported-operation explanation.
+
+The process-local scheduler is only a wake-up mechanism. SQLite owns the job and
+result. If a prompt may have reached the Controller but no structured result was
+recorded, the job becomes uncertain; the service observes the exact Controller
+turn for a result but never automatically sends the interpretation prompt again.
+This applies the same no-replay rule used for project prompts.
 
 ### Typed interpreter port
 
@@ -77,25 +116,28 @@ I/O or effects. A successful command result contains an existing
 `BridgeCommand` or `InstanceCommand`; downstream workflows never consume free
 form model output.
 
-### Phase-one deterministic interpreter
+The production interpreter composes two implementations: a small deterministic
+fast path for exact, high-frequency expressions, and the Controller Agent for
+open-ended language, references, and parameter extraction.
 
-The initial implementation uses bounded local grammar and aliases for Chinese
-and English. It recognizes complete command-shaped sentences, quoted arguments,
-configured project aliases, known agent kinds, and explicit Worker names. Rules
-are ordered from specific to general and tested as a table. A match must consume
-the whole normalized utterance; partial matches are clarification or task
-classification, not silent argument truncation.
+The Agent result is accepted only after strict Zod validation against the same
+allowlisted command union. Unknown command kinds, additional keys, invalid
+arguments, low confidence, or multiple candidates become clarification. The
+Controller cannot call workflows or construct terminal input. Deterministic
+matches always win.
 
-This implementation requires no new network dependency, credential, model, or
-runtime availability.
+### Deterministic fast path and degraded mode
 
-### Future structured classifier
+The local grammar covers exact common Chinese and English forms, obvious
+ordinary engineering-task prefixes, and dangerous unsupported phrases such as
+dynamic project creation. A match must consume the whole normalized utterance;
+partial matches never silently discard arguments.
 
-The port permits a later classifier for paraphrases the grammar cannot cover. A
-classifier adapter may return only a versioned Zod-validated allowlist schema.
-Unknown command kinds, additional keys, invalid arguments, low confidence, or
-multiple candidates become clarification. The adapter cannot call workflows,
-construct shell input, or bypass policy. Deterministic matches always win.
+If the Controller is unavailable, exact fast-path queries still work, exact
+mutation requests can still produce confirmation cards, obvious engineering
+tasks retain the existing default-project path, and every other command-shaped
+message receives an unavailable or clarification card. Degraded mode never
+guesses and never turns a failed interpretation into an Agent task.
 
 ## Routing and safety policy
 
@@ -104,7 +146,8 @@ Ingress order becomes:
 1. route Worker-session thread messages through their existing exact route;
 2. parse explicit slash commands;
 3. locate the binding and alias context;
-4. for an explicit bot mention, run the natural-language interpreter;
+4. for an explicit bot mention, run the deterministic fast path and, when
+   needed, enqueue a Controller interpretation job;
 5. dispatch a query, stage a mutation confirmation, emit clarification, or
    continue through the ordinary-task path;
 6. retain existing alias restrictions and default-project task provisioning.
@@ -187,8 +230,10 @@ rows record requested, confirmed, cancelled, expired, stale, unauthorized, and
 executed outcomes.
 
 Parser failure is user feedback, not an exception. SQLite or outbox failure is
-retryable inbound failure. Schema-invalid persisted payloads are rejected and
-audited rather than executed. Gateway failures retain the current command-intent
+retryable inbound failure. Controller startup and availability are surfaced in
+health/status diagnostics. A schema-invalid Controller proposal is rejected and
+audited rather than executed. Controller prompt delivery uncertainty is retained
+and observed without replay. Gateway failures retain the current command-intent
 uncertain-state semantics; they are never repaired by interpreting card state.
 
 ## Testing
@@ -197,6 +242,10 @@ Tests cover:
 
 - table-driven Chinese/English grammar for every common command and its missing,
   ambiguous, unsupported, and ordinary-task neighbors;
+- Controller lifecycle, single-job FIFO, capability/request fencing, structured
+  proposal validation, timeouts, and restart recovery without prompt replay;
+- proof that the Controller cannot invoke the effectful Primary MCP tools or a
+  generic Herdr mutation surface;
 - the `create new project` regression in root and bound contexts;
 - explicit mention gating and preservation of slash-command behavior;
 - direct query routing versus mutation confirmation;
@@ -211,7 +260,7 @@ Tests cover:
 ## Rollout
 
 The feature is enabled for the configured Feishu group after installation. The
-deterministic interpreter and confirmation workflow ship together so no
-natural-language mutation can execute without the safety layer. A future
-structured classifier is a separate, explicitly configured change and is not
-required for this release.
+Controller Agent, deterministic fast path, and confirmation workflow ship
+together so no natural-language mutation can execute without the safety layer.
+Readiness reports Controller availability separately; degraded-mode behavior is
+available while the Controller is being repaired.

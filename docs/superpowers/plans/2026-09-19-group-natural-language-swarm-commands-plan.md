@@ -2,13 +2,15 @@
 
 ## Objective
 
-Add a deterministic natural-language interpretation layer for common Swarm and
-instance commands in the configured Feishu group. Queries execute through the
-existing gateways; mutations require a durable, fenced confirmation card.
+Add a default Herdr-managed Swarm Controller Agent plus a deterministic fast
+path for natural-language commands in the configured Feishu group. The Agent
+submits only typed proposals through a restricted MCP capability. Queries then
+execute through existing gateways; mutations require a durable, fenced
+confirmation card.
 
 ## Work packages
 
-### 1. Domain interpretation contract
+### 1. Domain interpretation contract and fast path
 
 - Add a pure `NaturalLanguageCommandInterpreter` contract and discriminated
   command/task/clarification/unsupported results.
@@ -17,7 +19,17 @@ existing gateways; mutations require a durable, fenced confirmation card.
 - Add table-driven tests, including task-neighbor and dynamic-project regression
   cases.
 
-### 2. Durable confirmation model
+### 2. Durable Controller runtime
+
+- Add durable interpretation jobs, controller runtime identity/generation, and
+  FIFO claim/recovery state.
+- Add a dedicated Controller MCP server with read-only context and one strictly
+  validated submit_interpretation tool.
+- Start, observe, and prompt the Controller through the existing Herdr adapter;
+  install its controller-specific skill/instructions at startup.
+- Prove uncertain prompt delivery is observed but never automatically replayed.
+
+### 3. Durable confirmation model
 
 - Add the confirmation domain type, state transitions, and consumer-shaped store
   port.
@@ -26,7 +38,7 @@ existing gateways; mutations require a durable, fenced confirmation card.
   consume/cancel it with actor, expiry, schema, and generation checks.
 - Cover idempotency and restart states in SQLite tests.
 
-### 3. Confirmation workflow and cards
+### 4. Confirmation workflow and cards
 
 - Add a workflow that stages typed mutations and handles confirm/cancel actions.
 - Add strict CardKit action parsing and rendering for confirmation and
@@ -35,7 +47,7 @@ existing gateways; mutations require a durable, fenced confirmation card.
   commands through the existing instance workflow with frozen target evidence.
 - Verify repeated callbacks and stale cards do not execute effects.
 
-### 4. Ingress integration
+### 5. Ingress integration
 
 - Interpret only explicit bot mentions after slash parsing and before ordinary
   prompt fallback.
@@ -45,7 +57,7 @@ existing gateways; mutations require a durable, fenced confirmation card.
 - Add routing integration tests proving command-shaped failures never become
   prompts.
 
-### 5. Documentation and verification
+### 6. Documentation and verification
 
 - Update help cards and `docs/feishu-group-usage.md` terminology and examples.
 - Run focused parser, store, card-action, command-gateway, and ingress tests.
