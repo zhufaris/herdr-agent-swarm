@@ -844,16 +844,18 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("persists unknown generic 400 failures and never automatically reopens them", async () => {
+  it("permanently rejects a generic 400 after one attempt and never automatically reopens it", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
     const failure = Object.assign(new Error("Request failed with status code 400"), { response: { status: 400, data: {} } });
     const store = new SqliteBindingStore(":memory:");
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({ async updateCard() { throw failure; } }), pino({ enabled: false }));
+    const updateCard = vi.fn(async () => { throw failure; });
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard }), pino({ enabled: false }));
     store.enqueueOutboundReply({ id: "unknown-400", idempotencyKey: "unknown-400", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
 
-    for (let attempt = 0; attempt < 5; attempt += 1) await publisher.requestScan(true);
-    expect(store.database.prepare("SELECT state, failure_class, http_status, auto_recovery_count FROM outbound_replies WHERE id = 'unknown-400'").get()).toEqual({ state: "dead_letter", failure_class: "unknown", http_status: 400, auto_recovery_count: 0 });
+    await publisher.requestScan(true);
+    expect(updateCard).toHaveBeenCalledOnce();
+    expect(store.database.prepare("SELECT state, failure_class, http_status, auto_recovery_count FROM outbound_replies WHERE id = 'unknown-400'").get()).toEqual({ state: "dead_letter", failure_class: "permanent", http_status: 400, auto_recovery_count: 0 });
     vi.setSystemTime(new Date("2026-08-25T01:00:00.000Z"));
     await publisher.requestScan();
     expect(store.database.prepare("SELECT state, auto_recovery_count FROM outbound_replies WHERE id = 'unknown-400'").get()).toEqual({ state: "dead_letter", auto_recovery_count: 0 });

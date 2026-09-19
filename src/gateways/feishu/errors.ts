@@ -3,6 +3,7 @@ import { safeLogError } from "../../runtime/safe-error.js";
 
 const PERMANENT_CODES = new Set(["10002", "200740", "200750", "230028", "230031", "230099", "300309", "300317"]);
 const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT"]);
+const RETRYABLE_CLIENT_STATUSES = new Set([408, 409, 425, 429]);
 
 export async function performFeishuDelivery<T>(intent: GatewayDeliveryIntent, providerOperation: string, operation: () => Promise<T>): Promise<T> {
   try { return await operation(); }
@@ -20,7 +21,8 @@ export function classifyFeishuFailure(error: unknown, intent: GatewayDeliveryInt
   else if (code !== null && PRE_CONNECT_CODES.has(code)) effectCertainty = "not-started";
   let failureClass: GatewayFailure["failureClass"] = "unknown";
   if (providerCode !== null && PERMANENT_CODES.has(providerCode)) failureClass = "permanent";
-  else if (httpStatus === 429 || httpStatus !== null && httpStatus >= 500 || effectCertainty === "not-started") failureClass = "transient";
+  else if (httpStatus !== null && (RETRYABLE_CLIENT_STATUSES.has(httpStatus) || httpStatus >= 500) || effectCertainty === "not-started") failureClass = "transient";
+  else if (httpStatus !== null && httpStatus >= 400 && httpStatus < 500) failureClass = "permanent";
   else if (timeout || effectCertainty === "uncertain") failureClass = "unknown";
   const recoveryKind = providerCode === "300309" && providerOperation === "stream_card_content" && intent.purpose === "primary-answer"
     ? "closed_answer_stream" as const

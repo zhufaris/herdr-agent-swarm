@@ -7,7 +7,12 @@ const viewIntent = (purpose: GatewayDeliveryIntent["purpose"] = "operation-resul
 describe("Feishu delivery error normalization", () => {
   it.each([
     [{ response: { status: 429, headers: { "retry-after": "7" } } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, retryAfterMs: 7_000 }],
+    [{ response: { status: 408 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 408 }],
+    [{ response: { status: 409 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 409 }],
+    [{ response: { status: 425 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 425 }],
     [{ response: { status: 503 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 503 }],
+    [{ response: { status: 400, data: {} } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400 }],
+    [{ response: { status: 404, data: { code: 230011 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 404, providerCode: "230011" }],
     [Object.assign(new Error("DNS lookup failed"), { code: "ENOTFOUND" }), { failureClass: "transient", effectCertainty: "not-started" }],
     [Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" }), { failureClass: "transient", effectCertainty: "not-started" }],
     [Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" }), { failureClass: "transient", effectCertainty: "not-started" }],
