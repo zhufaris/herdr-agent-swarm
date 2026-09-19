@@ -10,6 +10,7 @@ import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import { evaluatePaneClosureSafety } from "../domain/pane-retention-policy.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { matchesHerdrAgentKind } from "../domain/agent-instance.js";
+import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 
 interface Options { config: BridgeConfig; store: PaneCloseStore; herdr: Pick<HerdrPort, "closePane" | "getPane">; lifecycleEvents: LifecycleEventPublisher; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: PanePresentation; isBindingBusy(bindingId: string): boolean; confirmationTtlMs?: number; }
 export interface PaneClosureWorkflowPort { recover(): Promise<void>; requestPaneClose(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; confirmPaneClose(message: IncomingLarkMessage, binding: Binding | null, code: string): Promise<boolean>; }
@@ -101,7 +102,7 @@ export class PaneClosureWorkflow implements PaneClosureWorkflowPort {
     if (!safety.allowed) { await this.reject(message, safety.reason === "pane runtime state is idle" || safety.reason === "pane runtime state is done" ? "Pane 状态不允许关闭。" : safety.reason === "pane runtime identity changed" ? "Pane identity 已变化，不能关闭。" : "当前 Pane 正在执行任务或仍有排队请求，不能关闭。"); store.audit({ actorOpenId: message.actorOpenId, action: "pane.close.rejected", target: binding.id, outcome: safety.reason }); return null; } return { binding, pane };
   }
   private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }
-  private async reply(message: IncomingLarkMessage, card: object): Promise<void> { const root = message.rootMessageId ?? message.messageId; await this.options.outbound.enqueueCard(root, "standalone:" + root + ":" + JSON.stringify(card), card); }
+  private async reply(message: IncomingLarkMessage, card: object): Promise<void> { const root = message.rootMessageId ?? message.messageId; await this.options.outbound.enqueueCard(root, contentIdempotencyKey(`standalone:${root}`, card), card); }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, "rejected:" + message.messageId, this.options.presentation.requestRejected(reason)); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
 }

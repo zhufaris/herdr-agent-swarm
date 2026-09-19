@@ -23,6 +23,7 @@ import { BindingStartupRecovery } from "./binding-provisioning/binding-startup-r
 import { ProjectCatalog } from "./project-catalog.js";
 import { agentKindFromHerdr, matchesAgentKind, type AgentKind } from "../domain/agent-instance.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null, agentKind?: AgentKind): Promise<void>;
@@ -285,7 +286,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`, this.options.presentation.attachStatus({ spaceName, paneId: binding.paneId, ...(binding.rootMessageId ? { bindingId: binding.id } : {}), alreadyAttached, resumeRequired }));
   }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
-  private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, `standalone:${rootMessageId}:${JSON.stringify(card)}`, card); }
+  private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, contentIdempotencyKey(`standalone:${rootMessageId}`, card), card); }
   private async publish(bindingId: string, type: Parameters<typeof createBridgeEvent>[1], origin: Parameters<typeof createBridgeEvent>[2], payload: Parameters<typeof createBridgeEvent>[3]): Promise<void> { await this.options.lifecycleEvents.publish(createBridgeEvent(bindingId, type, origin, payload) as ReturnType<typeof createBridgeEvent>); }
 }
 

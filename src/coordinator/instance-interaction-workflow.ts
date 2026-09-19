@@ -13,6 +13,7 @@ import { InstanceViewQuery } from "./instance-interactions/instance-view-query.j
 import { WorkerCardActions } from "./instance-interactions/worker-card-actions.js";
 import { WorkerLifecycleActions, type WorkerCreationGateway } from "./instance-interactions/worker-lifecycle-actions.js";
 import type { InstanceCardActionCommand } from "./card-action-command.js";
+import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 export type { InstanceCardActionCommand } from "./card-action-command.js";
 
 interface Options {
@@ -77,6 +78,6 @@ export class InstanceInteractionWorkflow {
   }
 
   private isOperator(openId: string): boolean { return this.options.adminOpenIds.includes(openId); }
-  private reply(message: IncomingLarkMessage, card: object): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `instance:${message.messageId}:${JSON.stringify(card)}`, card); }
+  private reply(message: IncomingLarkMessage, card: object): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, contentIdempotencyKey(`instance:${message.messageId}`, card), card); }
   private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.reply(message, this.options.presentation.requestRejected(reason)); }
 }
