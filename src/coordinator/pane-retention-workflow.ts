@@ -8,7 +8,7 @@ import { evaluatePaneClosureSafety, evaluatePaneRetention } from "../domain/pane
 import type { ProjectConfig } from "../domain/types.js";
 import { PeriodicWorkflowRunner } from "../runtime/periodic-workflow-runner.js";
 
-interface Options { projects: readonly ProjectConfig[]; store: PaneRetentionStore; herdr: Pick<HerdrPort, "getPane" | "closePane">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "paneRetentionWarning">; isBindingBusy(bindingId: string): boolean; logger: Pick<Logger, "info" | "warn">; }
+interface Options { projects: readonly ProjectConfig[]; store: PaneRetentionStore; herdr: Pick<HerdrPort, "listAllPanes" | "getPane" | "closePane">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "paneRetentionWarning">; isBindingBusy(bindingId: string): boolean; logger: Pick<Logger, "info" | "warn">; }
 export interface PaneRetentionWorkflowPort { start(intervalMs: number): void; stop(): Promise<void>; scan(): Promise<void>; }
 
 export class PaneRetentionWorkflow implements PaneRetentionWorkflowPort {
@@ -30,11 +30,13 @@ export class PaneRetentionWorkflow implements PaneRetentionWorkflowPort {
   private async scanOnce(): Promise<void> {
     const now = new Date().toISOString();
     const unresolved = new Set(this.options.store.listUnresolvedPaneCloseOperations().map((operation) => operation.bindingId));
+    const snapshot = this.options.herdr.listAllPanes ? await this.options.herdr.listAllPanes({ forceRefresh: true }) : null;
+    const panesById = snapshot ? new Map(snapshot.map((pane) => [pane.paneId, pane])) : null;
     for (const binding of this.options.store.listBindings()) {
       if (this.runner.isStopping || !binding.paneId || !binding.projectId || unresolved.has(binding.id)) continue;
       const policy = this.projects.get(binding.projectId)?.paneRetention;
       if (policy?.mode !== "ephemeral") continue;
-      const pane = await this.options.herdr.getPane(binding.paneId);
+      const pane = panesById ? panesById.get(binding.paneId) ?? null : await this.options.herdr.getPane(binding.paneId);
       const decision = evaluatePaneRetention({ binding, now, enabled: true, pendingWork: this.options.store.countPendingPrompts(binding.id) > 0, unresolvedTurn: this.options.isBindingBusy(binding.id), runtimeState: pane?.agentState ?? null, ...(policy.idleAfterMs !== undefined ? { idleAfterMs: policy.idleAfterMs } : {}), ...(policy.graceMs !== undefined ? { graceMs: policy.graceMs } : {}) });
       if (decision.status === "warning" && binding.rootMessageId) {
         await this.options.outbound.enqueueCard(binding.rootMessageId, `pane-retention-warning:${binding.id}:${decision.warningAt}`, this.options.presentation.paneRetentionWarning({ paneId: pane?.paneId ?? binding.paneId, warningAt: decision.warningAt, closeAt: decision.closeAt }), binding.id, "operation_result");
@@ -43,25 +45,27 @@ export class PaneRetentionWorkflow implements PaneRetentionWorkflowPort {
       if (decision.status !== "eligible" || !pane) continue;
       const current = this.options.store.getBinding(binding.id);
       if (!current || current.generation !== binding.generation || current.paneId !== pane.paneId) continue;
-      const safety = evaluatePaneClosureSafety({ binding: current, pane, pendingWork: this.options.store.countPendingPrompts(current.id) > 0, busy: this.options.isBindingBusy(current.id), expectedPaneId: pane.paneId });
+      const freshPane = await this.options.herdr.getPane(pane.paneId);
+      if (!freshPane) continue;
+      const safety = evaluatePaneClosureSafety({ binding: current, pane: freshPane, pendingWork: this.options.store.countPendingPrompts(current.id) > 0, busy: this.options.isBindingBusy(current.id), expectedPaneId: pane.paneId });
       if (!safety.allowed) {
         this.options.logger.info({ event: "pane-auto-close-blocked", bindingId: current.id, paneId: pane.paneId, reason: safety.reason }, "Automatic pane close was blocked by closure safety policy");
         continue;
       }
       const operationId = randomUUID();
-      this.options.store.createAutomaticPaneCloseOperation({ id: operationId, bindingId: binding.id, paneId: pane.paneId, now });
+      this.options.store.createAutomaticPaneCloseOperation({ id: operationId, bindingId: binding.id, paneId: freshPane.paneId, now });
       unresolved.add(binding.id);
       try {
-        await this.options.herdr.closePane(pane.paneId);
-        const after = await this.options.herdr.getPane(pane.paneId);
+        await this.options.herdr.closePane(freshPane.paneId);
+        const after = await this.options.herdr.getPane(freshPane.paneId);
         if (after) { this.options.store.finishPaneCloseRequest(operationId, "uncertain", "automatic close was not verified"); continue; }
         let closed = this.options.store.transitionBinding(binding.id, { type: "archive_requested", hasActiveTurn: false });
         closed = this.options.store.transitionBinding(closed.id, { type: "closed" });
         this.options.store.finishPaneCloseRequest(operationId, "succeeded", "automatic retention close completed");
-        this.options.logger.info({ event: "pane-auto-close-completed", bindingId: closed.id, paneId: pane.paneId, operationId, outcome: "closed" }, "Automatically closed an idle ephemeral pane");
+        this.options.logger.info({ event: "pane-auto-close-completed", bindingId: closed.id, paneId: freshPane.paneId, operationId, outcome: "closed" }, "Automatically closed an idle ephemeral pane");
       } catch (error) {
         this.options.store.finishPaneCloseRequest(operationId, "uncertain", error instanceof Error ? error.message : String(error));
-        this.options.logger.warn({ event: "pane-auto-close-uncertain", bindingId: binding.id, paneId: pane.paneId, operationId, outcome: "uncertain" }, "Automatic pane close became uncertain; it will not be replayed");
+        this.options.logger.warn({ event: "pane-auto-close-uncertain", bindingId: binding.id, paneId: freshPane.paneId, operationId, outcome: "uncertain" }, "Automatic pane close became uncertain; it will not be replayed");
       }
     }
   }

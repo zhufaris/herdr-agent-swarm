@@ -36,4 +36,18 @@ describe("PaneRetentionWorkflow", () => {
     expect(close).not.toHaveBeenCalled();
     expect(store.createAutomaticPaneCloseOperation).not.toHaveBeenCalled();
   });
+
+  it("uses one bulk snapshot for multiple candidates and refreshes only before close", async () => {
+    const second = { ...binding(), id: "b2", paneId: "w1:p2", topicId: "t2", rootMessageId: "r2" };
+    const paneTwo = { ...pane, paneId: "w1:p2" };
+    const listAllPanes = vi.fn(async () => [pane, paneTwo]);
+    const getPane = vi.fn(async (paneId: string) => paneId === "w1:p1" ? pane : paneTwo);
+    const store = { listBindings: () => [binding(), second], listUnresolvedPaneCloseOperations: () => [], countPendingPrompts: () => 0, getBinding: (id: string) => id === "b1" ? binding() : second, createAutomaticPaneCloseOperation: vi.fn(), finishPaneCloseRequest: vi.fn(), transitionBinding: vi.fn((id: string, transition: { type: string }) => ({ ...(id === "b1" ? binding() : second), id, lifecycle: transition.type === "closed" ? "closed" : "draining" })) };
+    const workflow = new PaneRetentionWorkflow({ projects: [project], store: store as never, herdr: { listAllPanes, getPane, closePane: vi.fn() }, presentation: cardKitPanePresentation, isBindingBusy: () => false, logger: { info: vi.fn(), warn: vi.fn() } });
+
+    await workflow.scan();
+
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(getPane).toHaveBeenCalledTimes(4);
+  });
 });
