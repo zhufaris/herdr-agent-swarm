@@ -110,14 +110,19 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
     if (discovered.length > 1) throw new Error("Multiple Controller panes require operator reconciliation");
     if (discovered.length === 1) {
       const pane = discovered[0]!;
-      if (!pane.terminalId || pane.agentKind !== "traex" || !pane.agentSession?.value) throw new Error("Existing Controller pane is not a verified TraeX runtime");
+      if (!pane.terminalId) throw new Error("Existing Controller pane has no terminal identity");
+      if (pane.agentKind !== "traex" || !pane.agentSession?.value) return this.startRuntime(pane.paneId, generation);
       const saved = this.options.store.saveControllerRuntime({ generation, paneId: pane.paneId, terminalId: pane.terminalId, nativeSessionId: pane.agentSession.value, state: "active" }, this.now());
       return { herdrWorkspaceId: pane.workspaceId, paneId: pane.paneId, nativeSessionId: saved.nativeSessionId, generation };
     }
     const pane = await this.options.herdr.createPane(this.options.project.workspaceId, this.options.project.cwd, { bindingId: "controller", generation, projectId: this.options.project.id, placement: "dedicated-tab", title: CONTROLLER_NAME, titlePolicy: "complete" });
+    return this.startRuntime(pane.paneId, generation);
+  }
+
+  private async startRuntime(paneId: string, generation: number): Promise<AgentRuntimeRef> {
     if (!this.options.herdr.startAgent) throw new Error("Herdr adapter cannot start the Controller Agent");
-    await this.options.herdr.startAgent(pane.paneId, { name: CONTROLLER_NAME, kind: "traex", executable: this.options.traexExecutable, args: controllerAgentArguments(this.options.mcpCommand, this.options.mcpArgs, this.options.model) });
-    const verified = await this.options.herdr.getPane(pane.paneId);
+    await this.options.herdr.startAgent(paneId, { name: CONTROLLER_NAME, kind: "traex", executable: this.options.traexExecutable, args: controllerAgentArguments(this.options.mcpCommand, this.options.mcpArgs, this.options.model), useConfiguredPermissionMode: false });
+    const verified = await this.options.herdr.getPane(paneId);
     if (!verified?.terminalId || !verified.agentSession?.value || verified.agentKind !== "traex") throw new Error("Herdr did not expose a verified Controller runtime identity");
     const saved = this.options.store.saveControllerRuntime({ generation, paneId: verified.paneId, terminalId: verified.terminalId, nativeSessionId: verified.agentSession.value, state: "active" }, this.now());
     this.options.logger.info({ event: "controller-runtime-ready", paneId: saved.paneId, generation: saved.generation, outcome: "ready" }, "Controller Agent is ready");

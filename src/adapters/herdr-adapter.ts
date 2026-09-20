@@ -168,11 +168,11 @@ export class HerdrCliAdapter implements HerdrPort {
     await this.waitUntilTraexAgentReady(paneId);
   }
 
-  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[] }): Promise<void> {
+  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[]; useConfiguredPermissionMode?: boolean }): Promise<void> {
     if (input.kind === "traex") {
       const args = [
         "agent", "start", input.name, "--kind", "traex", "--pane", paneId, "--timeout", String(this.commandTimeoutMs), "--",
-        "--permission-mode", this.traexPermissionMode,
+        ...(input.useConfiguredPermissionMode === false ? [] : ["--permission-mode", this.traexPermissionMode]),
         ...(input.args ?? [])
       ];
       await this.startWhenShellReady(args);

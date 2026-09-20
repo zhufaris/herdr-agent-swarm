@@ -23,8 +23,21 @@ describe("ControllerAgentManager", () => {
     const manager = createManager(store, herdr);
     await manager.start();
     expect(herdr.createPane).toHaveBeenCalledWith("w1", "/repo", expect.objectContaining({ placement: "dedicated-tab", title: "herdr-swarm-controller" }));
-    expect(herdr.startAgent).toHaveBeenCalledWith("w1:p5", expect.objectContaining({ name: "herdr-swarm-controller", args: expect.arrayContaining(["--sandbox", "read-only", "--ask-for-approval", "never"]) }));
+    expect(herdr.startAgent).toHaveBeenCalledWith("w1:p5", expect.objectContaining({ name: "herdr-swarm-controller", useConfiguredPermissionMode: false, args: expect.arrayContaining(["--sandbox", "read-only", "--ask-for-approval", "never"]) }));
     expect(store.saveControllerRuntime).toHaveBeenCalledWith(expect.objectContaining({ generation: 1, paneId: "w1:p5", terminalId: "term-5", nativeSessionId: "session-5" }), expect.any(String));
+    await manager.stop();
+  });
+
+  it("retries startup in the exact reserved Controller shell pane", async () => {
+    const store = memoryStore(null);
+    const shell = { paneId: "w1:p5", tabId: "w1:t5", terminalId: "term-5", agentSession: null, agentKind: null, workspaceId: "w1", cwd: "/repo", label: "herdr-swarm-controller", agentState: "unknown" as const, foregroundExecutables: ["bash"] };
+    const ready = { ...shell, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-5" }, agentKind: "traex", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const herdr = herdrPort(ready);
+    herdr.listPanes.mockResolvedValue([shell]);
+    const manager = createManager(store, herdr);
+    await manager.start();
+    expect(herdr.createPane).not.toHaveBeenCalled();
+    expect(herdr.startAgent).toHaveBeenCalledWith("w1:p5", expect.objectContaining({ useConfiguredPermissionMode: false }));
     await manager.stop();
   });
 

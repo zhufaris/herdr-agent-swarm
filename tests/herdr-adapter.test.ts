@@ -52,6 +52,19 @@ describe("Herdr adapter structured control", () => {
     expect(calls.some((args) => args[0] === "pane" && args[1] === "run")).toBe(false);
   });
 
+  it("can omit the configured permission mode for a sandbox-constrained TraeX agent", async () => {
+    const calls: string[][] = [];
+    const runner: CommandRunner = { async run(_executable, args) {
+      calls.push(args);
+      if (args[0] === "api") return json({ snapshot: { panes: [{ pane_id: "w1:p1", workspace_id: "w1", agent: "traex", agent_status: "idle" }], agents: [] } });
+      return { stdout: "", stderr: "" };
+    } };
+
+    await new HerdrCliAdapter(runner, "/opt/herdr/bin/herdr", 1000).startAgent("w1:p1", { name: "controller", kind: "traex", executable: "/opt/traex", args: ["--sandbox", "read-only"], useConfiguredPermissionMode: false });
+
+    expect(calls[0]).toEqual(["agent", "start", "controller", "--kind", "traex", "--pane", "w1:p1", "--timeout", "1000", "--", "--sandbox", "read-only"]);
+  });
+
   it("uses the formal TraeX agent command for compatibility bridge startup", async () => {
     const calls: string[][] = [];
     const runner: CommandRunner = { async run(_executable, args) {
