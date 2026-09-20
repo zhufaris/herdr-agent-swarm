@@ -41,6 +41,19 @@ describe("ControllerAgentManager", () => {
     await manager.stop();
   });
 
+  it("accepts a named ready Controller before TraeX publishes its first session id", async () => {
+    const store = memoryStore(null);
+    const shell = { paneId: "w1:p5", tabId: "w1:t5", terminalId: "term-5", agentSession: null, agentKind: null, workspaceId: "w1", cwd: "/repo", label: "herdr-swarm-controller", agentState: "unknown" as const, foregroundExecutables: ["bash"] };
+    const ready = { ...shell, agentKind: "traex", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const herdr = herdrPort(ready);
+    herdr.listPanes.mockResolvedValue([shell]);
+    herdr.startAgent.mockRejectedValue(new Error("agent session not available before first turn"));
+    const manager = createManager(store, herdr);
+    await manager.start();
+    expect(store.saveControllerRuntime).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "term-5", nativeSessionId: "term-5", state: "active" }), expect.any(String));
+    await manager.stop();
+  });
+
   it("dispatches one job and returns only its structured MCP result", async () => {
     const runtime = { generation: 1, paneId: "w1:p1", terminalId: "term-1", nativeSessionId: "session-1", state: "active" as const, createdAt: "now", updatedAt: "now" };
     const store = memoryStore(runtime);

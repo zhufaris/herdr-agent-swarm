@@ -102,7 +102,7 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
     const current = this.options.store.getControllerRuntime();
     if (current?.state === "active") {
       const pane = await this.options.herdr.getPane(current.paneId);
-      if (pane && pane.workspaceId === this.options.project.workspaceId && pane.cwd === this.options.project.cwd && pane.label === CONTROLLER_NAME && pane.terminalId === current.terminalId && pane.agentKind === "traex" && pane.agentSession?.value === current.nativeSessionId) return { herdrWorkspaceId: pane.workspaceId, paneId: pane.paneId, nativeSessionId: current.nativeSessionId, generation: current.generation };
+      if (pane && matchesControllerRuntime(pane, this.options.project, current)) return { herdrWorkspaceId: pane.workspaceId, paneId: pane.paneId, nativeSessionId: pane.agentSession?.value ?? current.nativeSessionId, generation: current.generation };
       this.options.store.markControllerRuntimeStale(current.generation, this.now());
     }
     const generation = (current?.generation ?? 0) + 1;
@@ -121,12 +121,18 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
 
   private async startRuntime(paneId: string, generation: number): Promise<AgentRuntimeRef> {
     if (!this.options.herdr.startAgent) throw new Error("Herdr adapter cannot start the Controller Agent");
-    await this.options.herdr.startAgent(paneId, { name: CONTROLLER_NAME, kind: "traex", executable: this.options.traexExecutable, args: controllerAgentArguments(this.options.mcpCommand, this.options.mcpArgs, this.options.model), useConfiguredPermissionMode: false });
+    try {
+      await this.options.herdr.startAgent(paneId, { name: CONTROLLER_NAME, kind: "traex", executable: this.options.traexExecutable, args: controllerAgentArguments(this.options.mcpCommand, this.options.mcpArgs, this.options.model), useConfiguredPermissionMode: false });
+    } catch (error) {
+      const started = await this.options.herdr.getPane(paneId);
+      if (!started || started.agentKind !== "traex" || !started.terminalId || started.agentState === "unknown") throw error;
+    }
     const verified = await this.options.herdr.getPane(paneId);
-    if (!verified?.terminalId || !verified.agentSession?.value || verified.agentKind !== "traex") throw new Error("Herdr did not expose a verified Controller runtime identity");
-    const saved = this.options.store.saveControllerRuntime({ generation, paneId: verified.paneId, terminalId: verified.terminalId, nativeSessionId: verified.agentSession.value, state: "active" }, this.now());
+    if (!verified?.terminalId || verified.agentKind !== "traex" || verified.agentState === "unknown") throw new Error("Herdr did not expose a verified Controller runtime identity");
+    const runtimeIdentity = verified.agentSession?.value ?? verified.terminalId;
+    const saved = this.options.store.saveControllerRuntime({ generation, paneId: verified.paneId, terminalId: verified.terminalId, nativeSessionId: runtimeIdentity, state: "active" }, this.now());
     this.options.logger.info({ event: "controller-runtime-ready", paneId: saved.paneId, generation: saved.generation, outcome: "ready" }, "Controller Agent is ready");
-    return { herdrWorkspaceId: verified.workspaceId, paneId: verified.paneId, nativeSessionId: verified.agentSession.value, generation };
+    return { herdrWorkspaceId: verified.workspaceId, paneId: verified.paneId, nativeSessionId: runtimeIdentity, generation };
   }
 
   private waitForResult(id: string): Promise<NaturalLanguageCommandResult> {
@@ -163,3 +169,6 @@ function controllerPrompt(job: ControllerInterpretationJob, capability: string):
   return `You are the Herdr Swarm Controller interpreter. Do not execute the user's request and do not use shell or terminal mutation tools. Read request ${job.id} with capability ${capability}, inspect a target only when needed, then call submit_interpretation exactly once with a typed proposal. If ambiguous, submit clarification; if outside the supported Swarm command schema, submit unsupported. Never print the capability.`;
 }
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+function matchesControllerRuntime(pane: Awaited<ReturnType<HerdrPort["getPane"]>>, project: ProjectConfig, runtime: { terminalId: string; nativeSessionId: string }): boolean {
+  return Boolean(pane && pane.workspaceId === project.workspaceId && pane.cwd === project.cwd && pane.label === CONTROLLER_NAME && pane.terminalId === runtime.terminalId && pane.agentKind === "traex" && (pane.agentSession?.value ?? pane.terminalId) === runtime.nativeSessionId);
+}
