@@ -55,6 +55,13 @@ durability, and recovery semantics, or the
 [architecture reference](docs/architecture-reference.md) for a maintainer-focused
 module map.
 
+## Documentation
+
+Start with the [maintainer documentation map](docs/README.md) to choose the
+current guide for architecture, module ownership, domain language, Feishu usage,
+releases, or historical decisions. Current guides are kept separate from
+completed specifications, plans, audits, and generated validation artifacts.
+
 ## Security model
 
 An authorized Lark user can cause an Agent process to act with the permissions

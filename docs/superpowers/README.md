@@ -1,13 +1,10 @@
-# Active engineering records
+# Active Engineering Records
 
-This directory holds only engineering work that is still being designed or
-implemented. The current records are:
+This directory contains only engineering work that is still being designed or
+implemented. There are currently no active records.
 
-- `plans/2026-09-03-native-steering.md`
-- `specs/2026-09-03-native-steering-design.md`
-- `specs/2026-09-03-shared-pane-runtime-identity-design.md`
-
-The service's user and operator documentation lives in the repository README,
-the architecture guide, and the Feishu group guide. Completed or superseded
-designs, plans, tickets, and audits are historical records under
-`docs/archive/superpowers/`; they are not behavioral authority.
+The service's current maintainer, user, and operator documentation starts at the
+[maintainer documentation map](../README.md). Completed or superseded designs,
+plans, tickets, and audits live under the
+[historical Superpowers archive](../archive/superpowers/); they are retained as
+engineering evidence and are not behavioral authority.
