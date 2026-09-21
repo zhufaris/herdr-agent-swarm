@@ -107,6 +107,8 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
     rewriteUnit(paths, environment);
     const reloaded = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (reloaded !== 0) return reloaded;
+    const reset = delegate("systemctl", ["--user", "reset-failed", paths.serviceName], environment);
+    if (reset !== 0) return reset;
     const started = delegate("systemctl", ["--user", "start", "--no-block", paths.serviceName], environment);
     if (started !== 0) return started;
     return waitForStartupCompletion(paths, environment, action, restartTimeoutMs(environment), options.requireReady ?? false);
@@ -117,6 +119,8 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
     rewriteUnit(paths, environment);
     const reload = delegate("systemctl", ["--user", "daemon-reload"], environment);
     if (reload !== 0) return reload;
+    const reset = delegate("systemctl", ["--user", "reset-failed", paths.serviceName], environment);
+    if (reset !== 0) return reset;
   }
   const argumentsForAction = action === "start"
     ? ["--user", "enable", "--now", paths.serviceName]
@@ -447,6 +451,8 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     ...(requiredUnit ? [`Requires=${requiredUnit}`] : []),
     `After=network-online.target${requiredUnit ? ` ${requiredUnit}` : ""}`,
     "Wants=network-online.target",
+    "StartLimitIntervalSec=60",
+    "StartLimitBurst=5",
     "",
     "[Service]",
     "Type=simple",

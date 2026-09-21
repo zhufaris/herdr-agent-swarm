@@ -232,6 +232,10 @@ npm run swarm:stop
 npm run swarm:logs
 ~~~
 
+The unit stops retrying after five starts within 60 seconds. After correcting a
+permanent startup error, use `swarm:start` or the safety-gated `swarm:restart`;
+these commands clear the failed start counter before starting the service.
+
 Run `npm run swarm:doctor` for read-only environment diagnosis. The service
 log is private, bounded, and available through `swarm:logs`; host journal
 access is not required. In installed mode, one application-owned Pino

@@ -279,7 +279,11 @@ describe("service lifecycle", () => {
     expect(unit).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:test-build");
     expect(unit).toContain("Environment=HERDR_SOCKET_PATH=/tmp/test-herdr.sock");
     expect(unit).toContain(`Environment=BRIDGE_LOG_PATH=${fixture.state}/logs/service.log`);
+    expect(unit).toContain("StartLimitIntervalSec=60");
+    expect(unit).toContain("StartLimitBurst=5");
     expect(unit).toContain("Restart=on-failure");
+    expect(unit).toContain("RestartSec=5");
+    expect(unit).toContain("TimeoutStopSec=50");
     expect(unit).toContain("Also=herdr-agent-swarm-log-rotate.timer");
     expect(unit).toContain("StandardOutput=null");
     expect(unit).toContain("StandardError=null");
@@ -675,7 +679,7 @@ describe("service lifecycle", () => {
     writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
     await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }, { force: true })).rejects.toThrow();
     expect(readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
-    expect(readFileSync(fixture.calls, "utf8")).toContain("--user stop herdr-agent-swarm.service\n--user daemon-reload\n--user start --no-block herdr-agent-swarm.service");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user stop herdr-agent-swarm.service\n--user daemon-reload\n--user reset-failed herdr-agent-swarm.service\n--user start --no-block herdr-agent-swarm.service");
   });
 
   it("refuses restart when an inactive unit still has a service on the configured listener", async () => {
@@ -707,7 +711,7 @@ describe("service lifecycle", () => {
     expect(statSync(logFile).size).toBe(0);
     expect(statSync(`${logFile}.1`).size).toBe(16 * 1024 * 1024 + 1);
     expect(statSync(logFile).mode & 0o777).toBe(0o600);
-    expect(readFileSync(fixture.calls, "utf8")).toContain("--user is-active herdr-agent-swarm.service\n--user daemon-reload\n--user enable --now herdr-agent-swarm.service");
+    expect(readFileSync(fixture.calls, "utf8")).toContain("--user is-active herdr-agent-swarm.service\n--user daemon-reload\n--user reset-failed herdr-agent-swarm.service\n--user enable --now herdr-agent-swarm.service");
   });
 
   it("fails closed when restart cannot stop the active writer", async () => {
@@ -726,6 +730,19 @@ describe("service lifecycle", () => {
     expect(statSync(logFile).size).toBe(16 * 1024 * 1024 + 1);
     expect(existsSync(`${logFile}.1`)).toBe(false);
     expect(readFileSync(unitFile, "utf8")).toBe(unitBefore);
+  });
+
+  it.each(["start", "restart"] as const)("fails closed when %s cannot clear the systemd start limit", async (action) => {
+    const fixture = createFixture({ active: false, resetFailedExit: 9 });
+    await runServiceLifecycle("install", fixture.environment);
+    writeFileSync(fixture.calls, "");
+
+    await expect(runServiceLifecycle(action, fixture.environment, action === "restart" ? { force: true } : {})).resolves.toBe(9);
+
+    const calls = readFileSync(fixture.calls, "utf8");
+    expect(calls).toContain("--user reset-failed herdr-agent-swarm.service");
+    expect(calls).not.toContain("--user enable --now herdr-agent-swarm.service");
+    expect(calls).not.toContain("--user start --no-block herdr-agent-swarm.service");
   });
 
   it("refuses an unforced restart while the running service reports active turns", async () => {
@@ -1067,7 +1084,7 @@ describe("service lifecycle", () => {
       writeFileSync(join(fixture.root, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:rebuilt", gitCommit: null }));
       await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1000" })).resolves.toBe(0);
       expect(readFileSync(join(fixture.units, "herdr-agent-swarm.service"), "utf8")).toContain("Environment=BRIDGE_EXPECTED_BUILD_ID=sha256:rebuilt");
-      expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user enable --now herdr-agent-swarm.service");
+      expect(readFileSync(fixture.calls, "utf8")).toContain("--user daemon-reload\n--user reset-failed herdr-agent-swarm.service\n--user enable --now herdr-agent-swarm.service");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -1491,7 +1508,7 @@ exit 0
   return { ...base, candidate, previous, current, unit, marker: join(base.state, ".release-activation.json"), environment: { ...base.environment, SWARM_ROOT: candidate, SWARM_RELEASE_CANDIDATE: candidate } };
 }
 
-function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number; systemctlError?: string } = {}) {
+function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; resetFailedExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number; systemctlError?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "agent-swarm-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -1511,7 +1528,7 @@ function createFixture(options: { active?: boolean; activeStatus?: "unknown"; st
   writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
   const activity = options.activeStatus === "unknown" ? "echo unknown; exit 4" : active ? "echo active; exit 0" : "echo inactive; exit 3";
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n${options.systemctlError ? `printf '%s\n' ${JSON.stringify(options.systemctlError)} >&2; exit 1` : ""}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nexit 0\n`);
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n${options.systemctlError ? `printf '%s\n' ${JSON.stringify(options.systemctlError)} >&2; exit 1` : ""}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nif [ "$2" = "reset-failed" ]; then exit ${options.resetFailedExit ?? 0}; fi\nexit 0\n`);
   const ssOutput = options.ssOutput ?? `LISTEN 0 511 127.0.0.1:${options.port ?? 39001} 0.0.0.0:* users:(("node",pid=${options.listenerPid ?? process.pid},fd=20))`;
   writeFileSync(join(bin, "ss"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(ssCalls)}\nprintf '%b\n' ${JSON.stringify(ssOutput)}\nexit ${options.ssExit ?? 0}\n`);
   writeFileSync(join(bin, "journalctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(journalCalls)}\nexit 0\n`);

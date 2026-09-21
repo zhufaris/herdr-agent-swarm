@@ -1535,6 +1535,12 @@ configuration is valid, `./install.sh` builds and stages the immutable release
 and enables the unit without starting it; `npm run swarm:start` performs the
 explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
 `npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
+The generated unit permits at most five starts in 60 seconds while retaining a
+five-second restart delay, so permanent startup failures converge to a failed
+unit instead of producing an unbounded restart loop. Explicit `swarm:start` and
+`swarm:restart` clear that rate-limit state only after rewriting and reloading
+the unit; restart still passes the active-work safety gate before any lifecycle
+mutation.
 Pino remains the application-side structured JSON logger. In installed mode it
 owns one private file destination; foreground development still uses stdout. A
 user-systemd timer invokes the lifecycle CLI, which verifies the file and exact
