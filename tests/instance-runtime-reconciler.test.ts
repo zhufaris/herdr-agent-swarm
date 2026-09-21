@@ -44,6 +44,76 @@ function setupPending(snapshot: HerdrPane[]) {
 }
 
 describe("instance runtime reconciliation", () => {
+  it("reuses one pane snapshot across projects in the same workspace", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const projects = [
+      { id: "p1", name: "One", description: "one", workspaceId: "shared-w", cwd: "/repo/one" },
+      { id: "p2", name: "Two", description: "two", workspaceId: "shared-w", cwd: "/repo/two" }
+    ] as ProjectConfig[];
+    for (const candidate of projects) {
+      store.createAgentInstance({ id: `worker-${candidate.id}`, projectId: candidate.id, name: `worker-${candidate.id}`, role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: `lease-${candidate.id}`, kind: "shared-read-only", cwd: candidate.cwd, branch: null, baseCommit: "base" } });
+      store.attachAgentInstanceRuntime({ instanceId: `worker-${candidate.id}`, expectedGeneration: 1, herdrWorkspaceId: candidate.workspaceId, paneId: `${candidate.workspaceId}:${candidate.id}`, nativeSessionId: null });
+    }
+    const listPanes = vi.fn(async () => projects.map((candidate) => pane({ paneId: `${candidate.workspaceId}:${candidate.id}`, workspaceId: candidate.workspaceId, cwd: candidate.cwd })));
+    const reconciler = new InstanceRuntimeReconciler({ projects, store, paneHost: { listPanes } as unknown as PaneHost, wake: vi.fn() });
+
+    await reconciler.reconcile();
+
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledWith("shared-w");
+    expect(store.getAgentInstance("worker-p1")).toMatchObject({ observedState: "idle" });
+    expect(store.getAgentInstance("worker-p2")).toMatchObject({ observedState: "idle" });
+  });
+
+  it("loads each distinct workspace exactly once per reconciliation", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const projects = [
+      { id: "p1", name: "One", description: "one", workspaceId: "w1", cwd: "/repo/one" },
+      { id: "p2", name: "Two", description: "two", workspaceId: "w2", cwd: "/repo/two" },
+      { id: "p3", name: "Three", description: "three", workspaceId: "w1", cwd: "/repo/three" }
+    ] as ProjectConfig[];
+    const listPanes = vi.fn(async () => []);
+    const reconciler = new InstanceRuntimeReconciler({ projects, store, paneHost: { listPanes } as unknown as PaneHost, wake: vi.fn() });
+
+    await reconciler.reconcile();
+
+    expect(listPanes.mock.calls).toEqual([["w1"], ["w2"]]);
+  });
+
+  it("reconciles every project in a requested workspace from one snapshot", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const projects = [
+      { id: "p1", name: "One", description: "one", workspaceId: "shared-w", cwd: "/repo/one" },
+      { id: "p2", name: "Two", description: "two", workspaceId: "shared-w", cwd: "/repo/two" },
+      { id: "p3", name: "Three", description: "three", workspaceId: "other-w", cwd: "/repo/three" }
+    ] as ProjectConfig[];
+    for (const candidate of projects) {
+      store.createAgentInstance({ id: `worker-${candidate.id}`, projectId: candidate.id, name: `worker-${candidate.id}`, role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: `lease-${candidate.id}`, kind: "shared-read-only", cwd: candidate.cwd, branch: null, baseCommit: "base" } });
+      store.attachAgentInstanceRuntime({ instanceId: `worker-${candidate.id}`, expectedGeneration: 1, herdrWorkspaceId: candidate.workspaceId, paneId: `${candidate.workspaceId}:${candidate.id}`, nativeSessionId: null });
+    }
+    const listPanes = vi.fn(async (workspaceId: string) => projects.filter((candidate) => candidate.workspaceId === workspaceId).map((candidate) => pane({ paneId: `${candidate.workspaceId}:${candidate.id}`, workspaceId: candidate.workspaceId, cwd: candidate.cwd, agentState: "working" })));
+    const reconciler = new InstanceRuntimeReconciler({ projects, store, paneHost: { listPanes } as unknown as PaneHost, wake: vi.fn() });
+
+    await reconciler.requestReconciliation({ workspaceIds: ["shared-w"] });
+
+    expect(listPanes.mock.calls).toEqual([["shared-w"]]);
+    expect(store.getAgentInstance("worker-p1")).toMatchObject({ observedState: "working" });
+    expect(store.getAgentInstance("worker-p2")).toMatchObject({ observedState: "working" });
+    expect(store.getAgentInstance("worker-p3")).toMatchObject({ observedState: "idle" });
+  });
+
+  it("retries a failed workspace snapshot in the next reconciliation", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const listPanes = vi.fn().mockRejectedValueOnce(new Error("snapshot unavailable")).mockResolvedValue([]);
+    const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost: { listPanes } as unknown as PaneHost, wake: vi.fn() });
+
+    await expect(reconciler.reconcile()).rejects.toThrow("snapshot unavailable");
+    await reconciler.reconcile();
+
+    expect(listPanes).toHaveBeenCalledTimes(2);
+    expect(reconciler.snapshot()).toMatchObject({ successCount: 1, failureCount: 1, lastError: null });
+  });
+
   it("reports bounded lifecycle and timing diagnostics for successful and coalesced scans", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });

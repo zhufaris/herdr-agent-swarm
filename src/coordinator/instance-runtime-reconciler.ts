@@ -72,10 +72,17 @@ export class InstanceRuntimeReconciler {
       }
       if (scope && !scope.workspaceIds?.length) { this.completed = true; this.lastError = null; return; }
       const workspaceIds = scope?.workspaceIds ? new Set(scope.workspaceIds) : null;
+      const panesByWorkspace = new Map<string, Promise<ReadonlyMap<string, HerdrPane>>>();
+      const panesForWorkspace = (workspaceId: string): Promise<ReadonlyMap<string, HerdrPane>> => {
+        const existing = panesByWorkspace.get(workspaceId);
+        if (existing) return existing;
+        const loading = this.options.paneHost.listPanes(workspaceId).then((panes) => new Map(panes.map((pane) => [pane.paneId, pane])));
+        panesByWorkspace.set(workspaceId, loading);
+        return loading;
+      };
       for (const project of this.options.projects) {
         if (workspaceIds && !workspaceIds.has(project.workspaceId)) continue;
-        const panes = await this.options.paneHost.listPanes(project.workspaceId);
-        const panesById = new Map(panes.map((pane) => [pane.paneId, pane]));
+        const panesById = await panesForWorkspace(project.workspaceId);
         for (const instance of this.options.store.listAgentInstances(project.id)) if (!reconciledInstanceIds.has(instance.id)) await this.reconcileInstance(instance, project, panesById);
       }
       this.completed = true; this.lastError = null;

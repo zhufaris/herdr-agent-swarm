@@ -251,6 +251,10 @@ runs immediately afterward, ahead of lower-priority pending work. The two runner
 instances do not share an execution queue or failure boundary. Their process-local
 scope state carries no Prompt, turn, card, or delivery payload, and a lost hint is
 recovered by startup or periodic full reconciliation against SQLite and Herdr.
+Within one Worker instance reconciliation execution, projects that share a Herdr
+workspace also share one pane snapshot and pane-ID map. Project iteration and
+project-scoped instance queries remain independent; the snapshot is not retained
+across executions, so periodic and retry passes still obtain fresh Herdr state.
 
 ### Recovery converges from canonical state
 
