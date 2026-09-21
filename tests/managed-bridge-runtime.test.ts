@@ -138,6 +138,75 @@ describe("ManagedBridgeRuntime", () => {
     ]);
   });
 
+  it("starts independent local ingress runtimes concurrently", async () => {
+    let releasePrimaryTools!: () => void;
+    const primaryToolsReady = new Promise<void>((resolve) => { releasePrimaryTools = resolve; });
+    const { runtime, calls } = fixture({
+      primaryToolGateway: {
+        async start() { calls.push("primary-tools:start"); await primaryToolsReady; },
+        async stop() { calls.push("primary-tools:stop"); }
+      }
+    });
+    const starting = runtime.start();
+
+    try {
+      await vi.waitFor(() => expect(calls).toContain("natural-language:start"));
+      expect(calls).not.toContain("integrity:start");
+    } finally {
+      releasePrimaryTools();
+      await starting;
+      await runtime.stop("SIGTERM");
+    }
+  });
+
+  it("settles concurrent ingress starts before cleaning up a startup failure", async () => {
+    let releaseNaturalLanguage!: () => void;
+    const naturalLanguageReady = new Promise<void>((resolve) => { releaseNaturalLanguage = resolve; });
+    const { runtime, calls } = fixture({
+      primaryToolGateway: {
+        async start() { calls.push("primary-tools:start"); throw new Error("primary failed"); },
+        async stop() { calls.push("primary-tools:stop"); }
+      },
+      naturalLanguageCommands: {
+        async start() { calls.push("natural-language:start"); await naturalLanguageReady; },
+        async stop() { calls.push("natural-language:stop"); },
+        async interpret() { return { outcome: "unresolved" as const }; }
+      }
+    });
+    const starting = runtime.start();
+
+    await vi.waitFor(() => expect(calls).toContain("natural-language:start"));
+    expect(calls).not.toContain("primary-tools:stop");
+    releaseNaturalLanguage();
+    await expect(starting).rejects.toThrow("primary failed");
+    expect(calls.indexOf("natural-language:start")).toBeLessThan(calls.indexOf("natural-language:stop"));
+    expect(calls.indexOf("primary-tools:start")).toBeLessThan(calls.indexOf("primary-tools:stop"));
+  });
+
+  it("settles concurrent ingress starts before external shutdown cleanup", async () => {
+    let releaseNaturalLanguage!: () => void;
+    const naturalLanguageReady = new Promise<void>((resolve) => { releaseNaturalLanguage = resolve; });
+    const { runtime, calls } = fixture({
+      naturalLanguageCommands: {
+        async start() { calls.push("natural-language:start"); await naturalLanguageReady; },
+        async stop() { calls.push("natural-language:stop"); },
+        async interpret() { return { outcome: "unresolved" as const }; }
+      }
+    });
+    const starting = runtime.start();
+    await vi.waitFor(() => expect(calls).toContain("natural-language:start"));
+
+    const stopping = runtime.stop("SIGTERM");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(calls).not.toContain("natural-language:stop");
+    expect(calls).not.toContain("primary-tools:stop");
+    releaseNaturalLanguage();
+
+    await expect(stopping).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    await expect(starting).rejects.toThrow("startup interrupted");
+    expect(calls.indexOf("natural-language:start")).toBeLessThan(calls.indexOf("natural-language:stop"));
+  });
+
   it("completes durable startup repair before the publisher can claim work", async () => {
     let releaseRepair!: () => void;
     const repair = new Promise<void>((resolve) => { releaseRepair = resolve; });

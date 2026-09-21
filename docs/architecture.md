@@ -265,6 +265,10 @@ view convergence, runtime baselines, and reconciliation against fresh Herdr stat
 remain ordered lifecycle phases. Lost events and process restarts may delay
 convergence but must not change the final state. Recovery never treats stale card
 text or a coarse idle observation as proof that an exact turn completed.
+The Primary tool socket and natural-language Controller runtime are independent
+local ingress resources, so they start concurrently. Both startup attempts settle
+before failure cleanup begins; recovery and external ingress remain gated on their
+successful completion.
 
 ## Lark authorization
 

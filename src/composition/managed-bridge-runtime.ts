@@ -157,10 +157,16 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       });
       this.assertStarting();
       d.instanceTurns.prepareRecovery();
-      this.registerCleanup("primaryToolGateway", "ingress", "writer", () => d.primaryToolGateway.stop());
-      await d.primaryToolGateway.start();
-      this.registerCleanup("naturalLanguageCommands", "ingress", "writer", () => d.naturalLanguageCommands.stop());
-      await d.naturalLanguageCommands.start();
+      let ingressStarts: Promise<PromiseSettledResult<void>[]> | null = null;
+      this.registerCleanup("primaryToolGateway", "ingress", "writer", async () => { await ingressStarts; await d.primaryToolGateway.stop(); });
+      this.registerCleanup("naturalLanguageCommands", "ingress", "writer", async () => { await ingressStarts; await d.naturalLanguageCommands.stop(); });
+      ingressStarts = Promise.allSettled([
+        Promise.resolve().then(() => d.primaryToolGateway.start()),
+        Promise.resolve().then(() => d.naturalLanguageCommands.start())
+      ]);
+      const ingressResults = await ingressStarts;
+      const ingressFailure = ingressResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (ingressFailure) throw ingressFailure.reason;
       this.assertStarting();
       this.registerCleanup("integrityAuditor", "workers", "non-writer", (context) => d.sqliteIntegrity.stop(context));
       d.sqliteIntegrity.start();
