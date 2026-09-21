@@ -129,6 +129,44 @@ describe("MainCardWorkflow", () => {
     store.close();
   });
 
+  it("coalesces a burst of unclaimed Pane Entry snapshots to the newest version", async () => {
+    const { stores, store } = setupStore();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "alias-root", undefined, "alias-topic");
+    const workflow = new MainCardWorkflow(stores.mainCards, vi.fn(), primaryPresentation);
+
+    for (const viewVersion of [2, 3, 4]) {
+      await workflow.project({ ...initialTopicView("b1"), title: `Version ${viewVersion}`, viewVersion });
+    }
+
+    const paneEntries = store.listPendingOutboundReplies().filter((reply) => reply.laneKey.includes("pane-entry:"));
+    expect(paneEntries).toEqual([expect.objectContaining({ viewVersion: 4 })]);
+    expect(paneEntries[0]!.payload).toContain("Version 4");
+    store.close();
+  });
+
+  it("preserves a claimed Pane Entry snapshot while coalescing newer unclaimed versions", async () => {
+    const { stores, store } = setupStore();
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.reservePaneThreadAlias({ publicationKey: "pane-entry-1", actionMessageId: "directory", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "main-1", targetChatId: "c1", card: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "alias-root", undefined, "alias-topic");
+    const workflow = new MainCardWorkflow(stores.mainCards, vi.fn(), primaryPresentation);
+    await workflow.project({ ...initialTopicView("b1"), title: "Claimed", viewVersion: 2 });
+    const claimed = store.listPendingOutboundReplies().find((reply) => reply.laneKey.includes("pane-entry:"))!;
+    expect(store.claimOutboundReply(claimed.id, null)).not.toBeNull();
+
+    await workflow.project({ ...initialTopicView("b1"), title: "Intermediate", viewVersion: 3 });
+    await workflow.project({ ...initialTopicView("b1"), title: "Newest", viewVersion: 4 });
+
+    const paneEntries = store.listPendingOutboundReplies().filter((reply) => reply.laneKey.includes("pane-entry:"));
+    expect(paneEntries.map((reply) => reply.viewVersion)).toEqual([2, 4]);
+    expect(paneEntries[0]).toMatchObject({ id: claimed.id });
+    store.close();
+  });
+
   it("repairs a missing Pane Entry version after the canonical Main Card is current", async () => {
     const { stores, store } = setupStore();
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });

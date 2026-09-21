@@ -70,6 +70,14 @@ export class SqliteOutboxQueueStore {
             AND claim_attempt_id IS NULL AND first_claimed_at IS NULL AND attempt_count = 0
             AND card_id_checkpoint IS NULL AND projection_key IS NULL
         `).run(input.bindingId, rootMessageId, laneKey);
+      } else if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId && logicalLaneKey.startsWith("pane-entry:")) {
+        this.context.database.prepare(`
+          DELETE FROM outbound_replies
+          WHERE binding_id = ? AND prompt_id IS NULL AND root_message_id = ?
+            AND lane_key = ? AND kind = 'card_update' AND state = 'pending'
+            AND claim_attempt_id IS NULL AND first_claimed_at IS NULL AND attempt_count = 0
+            AND card_id_checkpoint IS NULL AND projection_key IS NULL
+        `).run(input.bindingId, rootMessageId, laneKey);
       } else if (input.kind === "card_update" && input.bindingId && !input.promptId && rootMessageId) {
         this.context.database.prepare(`
           DELETE FROM outbound_replies
