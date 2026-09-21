@@ -771,29 +771,43 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
   let observedStartupState = "unavailable";
   let observedOwnership = "unavailable";
   let unitState = "inactive";
-  do {
-    const unit = sampleUnitRuntime(paths.serviceName, base);
+  let unsuccessfulPolls = 0;
+  let firstPoll = true;
+  while (firstPoll || Date.now() < deadline) {
+    firstPoll = false;
+    const unit = sampleUnitRuntime(paths.serviceName, base, remainingProbeBudget(deadline, 5_000));
     unitState = unit.activeState;
-    const startup = unit.active ? await probeStartupStatus(config.http.host, config.http.port) : null;
+    if (Date.now() >= deadline) break;
+    const startup = unit.active ? await probeStartupStatus(config.http.host, config.http.port, remainingProbeBudget(deadline, 1_500)) : null;
     observedStatus = startup?.status ?? "unavailable";
     observedBuildId = startup?.buildId ?? "unavailable";
     observedStartupState = startup?.startupRecoveryState ?? "unavailable";
     const candidate = (startup?.status === "ok" || startup?.status === "degraded") && startup.serviceId === AGENT_SWARM_SERVICE_ID
       && startup.buildId === expected.buildId && startup.startupRecoveryState === "completed";
-    const ownership = candidate && startup.connectedAddress ? probeListenerOwnershipForPid(unit.mainPid, startup.connectedAddress, config.http.port, base) : null;
+    if (Date.now() >= deadline) break;
+    const ownership = candidate && startup.connectedAddress ? probeListenerOwnershipForPid(unit.mainPid, startup.connectedAddress, config.http.port, base, remainingProbeBudget(deadline, 5_000)) : null;
     observedOwnership = ownership?.detail ?? "unavailable";
-    const healthy = candidate && ownership?.matches === true;
+    const healthy = Date.now() < deadline && candidate && ownership?.matches === true;
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
-      const readiness = await probeStatus(config.http.host, config.http.port, "/ready");
+      const readiness = await probeStatus(config.http.host, config.http.port, "/ready", remainingProbeBudget(deadline, 1_500));
+      if (Date.now() >= deadline) break;
       process.stdout.write(`bridge startup completed (${paths.serviceName}); readiness=${readiness.status}\n`);
       if (readiness.status !== "ready") process.stdout.write(`bridge dependencies are degraded: ${readiness.detail}\n`);
       if (requireReady && readiness.status !== "ready") throw new Error(`bridge ${action} completed but readiness is ${readiness.status}; inspect swarm:status and swarm:logs`);
       return 0;
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-  } while (Date.now() < deadline);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    const retryDelayMs = healthy ? 100 : Math.min(2_000, 100 * 2 ** Math.min(unsuccessfulPolls, 5));
+    unsuccessfulPolls = healthy ? 0 : unsuccessfulPolls + 1;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(retryDelayMs, remainingMs)));
+  }
   throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; status ${observedStatus}; observed build ${observedBuildId}; startup ${observedStartupState}; listener ownership ${observedOwnership}; configured listener PID must belong to canonical unit MainPID; inspect systemctl --user status ${paths.serviceName}`);
+}
+
+function remainingProbeBudget(deadline: number, maximumMs: number): number {
+  return Math.max(1, Math.min(maximumMs, deadline - Date.now()));
 }
 
 function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.SWARM_SERVICE_START_TIMEOUT_MS, 15_000); }
@@ -835,9 +849,9 @@ interface UnitRuntimeSample {
   detail: string | null;
 }
 
-function sampleUnitRuntime(serviceName: string, environment: NodeJS.ProcessEnv): UnitRuntimeSample {
+function sampleUnitRuntime(serviceName: string, environment: NodeJS.ProcessEnv, timeoutMs = 5_000): UnitRuntimeSample {
   const unit = spawnSync("systemctl", ["--user", "show", serviceName, "--property", "ActiveState", "--property", "MainPID"], {
-    env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000, maxBuffer: 256 * 1024
+    env: userSystemdEnvironment(environment), encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024
   });
   if (unit.status !== 0) return { active: false, activeState: "unavailable", mainPid: null, detail: processFailureDetail(unit) };
   const properties = new Map(unit.stdout.split("\n").map((line) => {
@@ -861,8 +875,8 @@ function unavailableListenerOwnership(detail: string): ListenerOwnership {
   return { matches: false, mainPid: null, listenerPids: [], detail: `systemd unavailable: ${detail}` };
 }
 
-function probeListenerOwnershipForPid(mainPid: number | null, host: string, port: number, environment: NodeJS.ProcessEnv): ListenerOwnership {
-  const sockets = spawnSync("ss", ["-H", "-ltnp"], { env: environment, encoding: "utf8", timeout: 5_000, maxBuffer: 1024 * 1024 });
+function probeListenerOwnershipForPid(mainPid: number | null, host: string, port: number, environment: NodeJS.ProcessEnv, timeoutMs = 5_000): ListenerOwnership {
+  const sockets = spawnSync("ss", ["-H", "-ltnp"], { env: environment, encoding: "utf8", timeout: timeoutMs, maxBuffer: 1024 * 1024 });
   const listenerPids = sockets.status === 0 ? listenerPidsForEndpoint(sockets.stdout, host, port) : [];
   const matches = mainPid !== null && listenerPids.includes(mainPid);
   const detail = `MainPID=${mainPid ?? "unavailable"}, listenerPIDs=${listenerPids.length > 0 ? listenerPids.join(",") : "unavailable"}`;
@@ -925,9 +939,9 @@ function delegate(command: string, args: string[], environment: NodeJS.ProcessEn
   return result.status ?? 1;
 }
 
-async function probeStartupStatus(host: string, port: number): Promise<{ status?: string; serviceId?: string; buildId?: string; startupRecoveryState?: string; connectedAddress?: string } | null> {
+async function probeStartupStatus(host: string, port: number, timeoutMs = 1_500): Promise<{ status?: string; serviceId?: string; buildId?: string; startupRecoveryState?: string; connectedAddress?: string } | null> {
   try {
-    const response = await getJsonResponse(host, port, "/status");
+    const response = await getJsonResponse(host, port, "/status", false, timeoutMs);
     const record = asRecord(response.body);
     if (!record) return null;
     const identity = asRecord(record.identity);
@@ -947,9 +961,9 @@ function positiveMilliseconds(value: string | undefined, fallback: number): numb
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-async function probeStatus(host: string, port: number, path: string): Promise<{ status: string; detail: string }> {
+async function probeStatus(host: string, port: number, path: string, timeoutMs = 1_500): Promise<{ status: string; detail: string }> {
   try {
-    const result = await getJson(host, port, path, true);
+    const result = await getJson(host, port, path, true, timeoutMs);
     const status = typeof result === "object" && result !== null && typeof (result as { status?: unknown }).status === "string"
       ? String((result as { status: string }).status) : "unknown";
     return { status, detail: JSON.stringify(result).slice(0, 1_000) };
@@ -958,22 +972,27 @@ async function probeStatus(host: string, port: number, path: string): Promise<{ 
   }
 }
 
-function getJson(host: string, port: number, path: string, acceptErrorStatus = false): Promise<unknown> {
-  return getJsonResponse(host, port, path, acceptErrorStatus).then((response) => response.body);
+function getJson(host: string, port: number, path: string, acceptErrorStatus = false, timeoutMs = 1_500): Promise<unknown> {
+  return getJsonResponse(host, port, path, acceptErrorStatus, timeoutMs).then((response) => response.body);
 }
 
-function getJsonResponse(host: string, port: number, path: string, acceptErrorStatus = false): Promise<{ body: unknown; connectedAddress: string }> {
+function getJsonResponse(host: string, port: number, path: string, acceptErrorStatus = false, timeoutMs = 1_500): Promise<{ body: unknown; connectedAddress: string }> {
   return new Promise((resolvePromise, reject) => {
-    const outgoing = request({ host, port, path, method: "GET", timeout: 1_500 }, (response) => {
+    let settled = false;
+    let deadlineTimer: ReturnType<typeof setTimeout>;
+    const settle = <T>(callback: (value: T) => void, value: T): void => { if (settled) return; settled = true; clearTimeout(deadlineTimer); callback(value); };
+    const outgoing = request({ host, port, path, method: "GET" }, (response) => {
       const connectedAddress = response.socket.remoteAddress;
       let body = ""; response.setEncoding("utf8"); response.on("data", (chunk: string) => { if (body.length < 1_000_000) body += chunk; });
       response.on("end", () => {
-        if (!response.statusCode || response.statusCode >= 400 && !acceptErrorStatus) { reject(new Error(`HTTP ${response.statusCode ?? "unknown"}`)); return; }
-        if (!connectedAddress) { reject(new Error("connected address unavailable")); return; }
-        try { resolvePromise({ body: JSON.parse(body), connectedAddress: normalizeIpAddress(connectedAddress) }); } catch { reject(new Error("invalid JSON response")); }
+        if (!response.statusCode || response.statusCode >= 400 && !acceptErrorStatus) { settle(reject, new Error(`HTTP ${response.statusCode ?? "unknown"}`)); return; }
+        if (!connectedAddress) { settle(reject, new Error("connected address unavailable")); return; }
+        try { settle(resolvePromise, { body: JSON.parse(body), connectedAddress: normalizeIpAddress(connectedAddress) }); } catch { settle(reject, new Error("invalid JSON response")); }
       });
     });
-    outgoing.on("timeout", () => outgoing.destroy(new Error("request timed out"))); outgoing.on("error", reject); outgoing.end();
+    deadlineTimer = setTimeout(() => outgoing.destroy(new Error("request timed out")), timeoutMs);
+    deadlineTimer.unref?.();
+    outgoing.on("error", (error) => settle(reject, error)); outgoing.end();
   });
 }
 

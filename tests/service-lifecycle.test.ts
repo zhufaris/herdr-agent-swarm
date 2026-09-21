@@ -1338,12 +1338,92 @@ describe("service lifecycle", () => {
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1000" }))
         .rejects.toThrow(/expected build sha256:test-build.*observed build sha256:stale-build.*startup completed/);
       expect(existsSync(fixture.ssCalls) ? readFileSync(fixture.ssCalls, "utf8") : "").toBe("");
       const runtimeSamples = readFileSync(fixture.calls, "utf8").split("\n").filter((call) => call.includes("--property ActiveState"));
       expect(runtimeSamples).toHaveLength(statusRequests);
       expect(runtimeSamples.every((call) => call.includes("--property MainPID"))).toBe(true);
+      expect(runtimeSamples.length).toBeGreaterThanOrEqual(3);
+      expect(runtimeSamples.length).toBeLessThanOrEqual(5);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("does not poll again after the startup deadline", async () => {
+    let statusRequests = 0;
+    const server = createServer((_request, response) => {
+      statusRequests += 1;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:stale-build" } })));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "100" }))
+        .rejects.toThrow(/did not complete startup/);
+
+      expect(statusRequests).toBe(1);
+      const runtimeSamples = readFileSync(fixture.calls, "utf8").split("\n").filter((call) => call.includes("--property ActiveState"));
+      expect(runtimeSamples).toHaveLength(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("does not accept a healthy confirmation that completes after the startup deadline", async () => {
+    let statusRequests = 0;
+    const server = createServer((_request, response) => {
+      statusRequests += 1;
+      const delayMs = statusRequests === 2 ? 100 : 0;
+      setTimeout(() => {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(completedStartupStatus()));
+      }, delayMs);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "150" }))
+        .rejects.toThrow(/did not complete startup/);
+
+      expect(statusRequests).toBe(2);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("does not accept readiness that completes after the startup deadline", async () => {
+    let readyRequests = 0;
+    const server = createServer((request, response) => {
+      if (request.url === "/ready") {
+        readyRequests += 1;
+        response.setHeader("content-type", "application/json");
+        response.write('{"status":');
+        const trickle = setInterval(() => response.write(" "), 50);
+        response.on("close", () => clearInterval(trickle));
+        setTimeout(() => { clearInterval(trickle); response.end('"ready"}'); }, 500);
+        return;
+      }
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      const startedAt = Date.now();
+
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "300" }))
+        .rejects.toThrow(/did not complete startup/);
+
+      expect(readyRequests).toBe(1);
+      expect(Date.now() - startedAt).toBeLessThan(450);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
