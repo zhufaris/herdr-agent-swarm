@@ -34,7 +34,7 @@
     "smoke:headless-multi-agent": "tsx scripts/smoke-headless-multi-agent.ts"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.56.0",
+    "@larksuiteoapi/node-sdk": "^1.74.0",
     "pino": "^9.7.0",
     "yaml": "^2.9.0",
     "zod": "^3.25.76"
