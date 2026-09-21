@@ -84,6 +84,23 @@ describe("QueueFeedbackProjector", () => {
     expect(clearIntervalFn).toHaveBeenCalledWith(interval);
   });
 
+  it("keeps successful periodic projection summaries below info level", async () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 2, occurredAt: "start" });
+    const logger = { debug: vi.fn(), info: vi.fn(), error: vi.fn() };
+    const store = {
+      listBindings: () => [{ id: "b1" }],
+      loadQueueFeedbackInputs: () => ({ activeStartedAt: null, queued: [view], durationsMs: [] }),
+      projectQueuedRunCards: vi.fn(({ projections }: { projections: Array<{ view: RunCardView }> }) => ({ projected: projections.map(({ view: projected }) => projected), stalePromptIds: [], outboxReserved: false }))
+    };
+    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: logger as never, presentation: primaryPresentation, now: () => "2026-08-29T12:00:00.000Z" });
+
+    await projector.converge();
+
+    expect(logger.debug).toHaveBeenCalledWith(expect.objectContaining({ event: "queued-run-cards-projected", bindingId: "b1", candidateCount: 1, projectedCount: 1 }), "projected queued run cards");
+    expect(logger.info).not.toHaveBeenCalled();
+    await projector.stop();
+  });
+
   it("converges durable queued cards after restart without prompt workflow wake-up and stops scheduling when empty", async () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     const queuedRows: RunCardView[] = [queued];

@@ -81,7 +81,7 @@ export class QueueFeedbackProjector {
     }
     if (projections.length === 0) return;
     const result = this.options.store.projectQueuedRunCards({ bindingId, projections });
-    this.options.logger.info({ event: "queued-run-cards-projected", bindingId, candidateCount: projections.length, projectedCount: result.projected.length, staleCount: result.stalePromptIds.length, outboxReserved: result.outboxReserved }, "projected queued run cards");
+    this.options.logger.debug({ event: "queued-run-cards-projected", bindingId, candidateCount: projections.length, projectedCount: result.projected.length, staleCount: result.stalePromptIds.length, outboxReserved: result.outboxReserved }, "projected queued run cards");
     if (result.outboxReserved) this.options.outboundWork.wake();
   }
 
