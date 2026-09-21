@@ -34,10 +34,7 @@ for command_name in node npm; do
 done
 node "$ROOT/scripts/check-node-version.mjs"
 
-npm ci
-npm run build
 STATE_DIR="${SWARM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-agent-swarm}"
-SWARM_RUNTIME_ROOT="$(bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR")"
 CONFIG_DIR="${SWARM_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-agent-swarm}"
 ENV_FILE="$CONFIG_DIR/.env"
 PROJECTS_FILE="$CONFIG_DIR/projects.json"
@@ -49,6 +46,12 @@ else
         if grep -Fq -- "$placeholder" "$ENV_FILE" "$PROJECTS_FILE"; then
             CONFIGURATION_INCOMPLETE=1
             break
+        else
+            GREP_STATUS=$?
+            if [ "$GREP_STATUS" -ne 1 ]; then
+                echo "Unable to inspect configuration for setup placeholders." >&2
+                exit 1
+            fi
         fi
     done
 fi
@@ -56,6 +59,10 @@ if [ "$CONFIGURATION_INCOMPLETE" -eq 1 ]; then
     echo "Configuration is missing or still contains placeholders. Run: npm run swarm:setup" >&2
     exit 1
 fi
+
+npm ci
+npm run build
+SWARM_RUNTIME_ROOT="$(bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR")"
 
 SWARM_ROOT="$SWARM_RUNTIME_ROOT" SWARM_RELEASE_CANDIDATE="$SWARM_RUNTIME_ROOT" SWARM_CONFIG_DIR="$CONFIG_DIR" SWARM_STATE_DIR="$STATE_DIR" \
     node "$SWARM_RUNTIME_ROOT/dist/cli/service-lifecycle.js" install

@@ -153,6 +153,7 @@ describe("standalone installer", () => {
   });
 
   it("guards lifecycle installation until private configuration is complete", () => {
+    const npmInstall = installScript.indexOf("\nnpm ci\n");
     const staging = installScript.indexOf('bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR"');
     const guard = installScript.indexOf("Configuration is missing or still contains placeholders. Run: npm run swarm:setup");
     const lifecycle = installScript.indexOf('dist/cli/service-lifecycle.js" install');
@@ -163,10 +164,77 @@ describe("standalone installer", () => {
     for (const placeholder of ["replace-me", "REPLACE_WITH_HERDR_WORKSPACE_ID", "/absolute/path/to/your/project"]) {
       expect(installScript).toContain(placeholder);
     }
-    expect(guard).toBeGreaterThan(staging);
+    expect(guard).toBeLessThan(npmInstall);
+    expect(npmInstall).toBeLessThan(staging);
     expect(lifecycle).toBeGreaterThan(guard);
     expect(installScript).not.toMatch(/(?:source|\.)\s+["']?\$CONFIG_DIR\/.env/);
     expect(installScript).not.toMatch(/\b(?:cat|sed|awk)\b[^\n]*"\$(?:ENV_FILE|PROJECTS_FILE)"/);
+  });
+
+  it("rejects incomplete configuration before dependency installation or staging", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "standalone-preflight-"));
+    const bin = join(fixture, "bin");
+    const calls = join(fixture, "calls");
+    mkdirSync(bin);
+    executable(join(bin, "npm"), `#!/bin/sh\nprintf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}\n`);
+
+    const result = spawnSync("/bin/bash", ["install.sh"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SWARM_CONFIG_DIR: join(fixture, "missing-config"), SWARM_STATE_DIR: join(fixture, "state") }
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Configuration is missing or still contains placeholders");
+    expect(existsSync(calls)).toBe(false);
+    expect(existsSync(join(fixture, "state"))).toBe(false);
+  });
+
+  it.each([
+    ["environment", "LARK_APP_SECRET=replace-me\n", '{"projects":[]}\n'],
+    ["projects", "LARK_APP_SECRET=configured\n", '{"projects":[{"workspaceId":"REPLACE_WITH_HERDR_WORKSPACE_ID"}]}\n']
+  ])("rejects %s placeholders before dependency installation or staging", (_source, environmentContent, projectsContent) => {
+    const fixture = mkdtempSync(join(tmpdir(), "standalone-placeholder-preflight-"));
+    const bin = join(fixture, "bin");
+    const config = join(fixture, "config");
+    const calls = join(fixture, "calls");
+    mkdirSync(bin);
+    mkdirSync(config);
+    writeFileSync(join(config, ".env"), environmentContent);
+    writeFileSync(join(config, "projects.json"), projectsContent);
+    executable(join(bin, "npm"), `#!/bin/sh\nprintf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}\n`);
+
+    const result = spawnSync("/bin/bash", ["install.sh"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SWARM_CONFIG_DIR: config, SWARM_STATE_DIR: join(fixture, "state") }
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Configuration is missing or still contains placeholders");
+    expect(existsSync(calls)).toBe(false);
+    expect(existsSync(join(fixture, "state"))).toBe(false);
+  });
+
+  it("fails closed when placeholder inspection fails", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "standalone-preflight-error-"));
+    const bin = join(fixture, "bin");
+    const config = join(fixture, "config");
+    const calls = join(fixture, "calls");
+    mkdirSync(bin);
+    mkdirSync(config);
+    writeFileSync(join(config, ".env"), "LARK_APP_SECRET=configured\n");
+    writeFileSync(join(config, "projects.json"), '{"projects":[]}\n');
+    executable(join(bin, "grep"), "#!/bin/sh\nexit 2\n");
+    executable(join(bin, "npm"), `#!/bin/sh\nprintf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}\n`);
+
+    const result = spawnSync("/bin/bash", ["install.sh"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SWARM_CONFIG_DIR: config, SWARM_STATE_DIR: join(fixture, "state") }
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Unable to inspect configuration for setup placeholders");
+    expect(existsSync(calls)).toBe(false);
+    expect(existsSync(join(fixture, "state"))).toBe(false);
   });
 
   it("keeps source maps but excludes declarations from production artifacts", () => {
