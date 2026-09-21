@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -79,7 +79,8 @@ describe("standalone installer", () => {
     expect(lifecycle).toBeGreaterThan(stage);
     expect(installScript).toContain('SWARM_RUNTIME_ROOT="$(bash "$ROOT/scripts/stage-production-runtime.sh" "$STATE_DIR")"');
     expect(installScript).toContain('SWARM_RELEASE_CANDIDATE="$SWARM_RUNTIME_ROOT"');
-    expect(productionBuildScript).toContain('npm --prefix "$STAGING" ci --omit=dev');
+    expect(productionBuildScript).toContain('npm --prefix "$CACHE_WORK" ci --omit=dev --include=optional --ignore-scripts=false --install-strategy=hoisted');
+    expect(productionBuildScript).toContain('tar -xzf "$CACHE_ARCHIVE" -C "$STAGING"');
     expect(productionBuildScript).toContain('RELEASE_KEY="$BUILD_ID-$GIT_COMMIT"');
     expect(productionBuildScript).not.toContain('$STATE_DIR/current');
     expect(packagedInstallScript).toContain('SWARM_RELEASE_CANDIDATE="$RELEASE"');
@@ -94,7 +95,7 @@ describe("standalone installer", () => {
     const releases = join(state, "releases");
     mkdirSync(bin);
     mkdirSync(releases, { recursive: true });
-    executable(join(bin, "npm"), "#!/bin/sh\nmkdir -p node_modules\n");
+    executable(join(bin, "npm"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '11.11.0\\n'; exit 0; fi\nif [ \"$3 $4 $5\" = \"config list --json\" ]; then printf '{}\\n'; exit 0; fi\nmkdir -p \"$2/node_modules\"\n");
     const names = Array.from({ length: 5 }, (_, index) => `${String(index + 1).repeat(64)}-${String(index + 1).repeat(12)}`);
     for (const [index, name] of names.entries()) {
       const path = join(releases, name);
@@ -121,7 +122,7 @@ describe("standalone installer", () => {
     const state = join(fixture, "state");
     const calls = join(fixture, "npm.calls");
     mkdirSync(bin);
-    executable(join(bin, "npm"), `#!/bin/sh\nprintf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}\nmkdir -p "$2/node_modules"\n`);
+    executable(join(bin, "npm"), `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '11.11.0\n'; exit 0; fi\nif [ "$3 $4 $5" = "config list --json" ]; then printf '{}\n'; exit 0; fi\nprintf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}\nmkdir -p "$2/node_modules"\n`);
     const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
     const first = spawnSync("/bin/bash", ["scripts/stage-production-runtime.sh", state], { encoding: "utf8", env: environment });
     expect(first.status, first.stderr).toBe(0);
@@ -133,6 +134,114 @@ describe("standalone installer", () => {
     expect(second.stdout.trim()).toBe(first.stdout.trim());
     expect(readFileSync(calls, "utf8")).toBe("");
     expect(readdirSync(join(state, "releases")).filter((name) => name.startsWith(".staging"))).toEqual([]);
+  });
+
+  it("reuses a validated production dependency cache across build identities", () => {
+    const fixture = createProductionStageFixture("standalone-dependency-cache-hit-");
+    const calls = join(fixture.root, "npm.calls");
+    writeFakeNpm(fixture.bin, calls);
+    const environment = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}` };
+
+    const first = spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment });
+    expect(first.status, first.stderr).toBe(0);
+    writeFileSync(join(first.stdout.trim(), "node_modules/fake-package/index.js"), "release-local mutation\n");
+    writeBuildCommit(fixture.project, "1".repeat(40));
+    const second = spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment });
+
+    expect(second.status, second.stderr).toBe(0);
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(readFileSync(join(second.stdout.trim(), "node_modules/fake-package/index.js"), "utf8")).toBe("export default true;\n");
+    expect(readdirSync(join(fixture.state, "releases")).filter((name) => !name.startsWith("."))).toHaveLength(2);
+    const cacheEntries = readdirSync(join(fixture.state, "cache/production-dependencies")).filter((name) => /^[a-f0-9]{64}$/.test(name));
+    expect(cacheEntries).toHaveLength(1);
+    const manifest = readFileSync(join(fixture.state, "cache/production-dependencies", cacheEntries[0]!, "manifest"), "utf8");
+    for (const field of ["schemaVersion", "lockSha256", "packageSha256", "nodeVersion", "nodeModules", "nodeNapi", "platform", "arch", "kernelRelease", "osReleaseSha256", "libc", "npmVersion", "npmConfigSha256", "archiveSha256"]) {
+      expect(manifest).toContain(`${field}=`);
+    }
+  });
+
+  it("does not reuse production dependencies after the lockfile changes", () => {
+    const fixture = createProductionStageFixture("standalone-dependency-cache-key-");
+    const calls = join(fixture.root, "npm.calls");
+    writeFakeNpm(fixture.bin, calls);
+    const environment = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}` };
+
+    expect(spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment }).status).toBe(0);
+    writeFileSync(join(fixture.project, "package-lock.json"), `${readFileSync(join(fixture.project, "package-lock.json"), "utf8")}\n`);
+    writeBuildCommit(fixture.project, "2".repeat(40));
+    const second = spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment });
+
+    expect(second.status, second.stderr).toBe(0);
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2);
+    expect(readdirSync(join(fixture.state, "cache/production-dependencies")).filter((name) => /^[a-f0-9]{64}$/.test(name))).toHaveLength(2);
+  });
+
+  it("atomically rebuilds a corrupt production dependency cache entry", () => {
+    const fixture = createProductionStageFixture("standalone-dependency-cache-corrupt-");
+    const calls = join(fixture.root, "npm.calls");
+    writeFakeNpm(fixture.bin, calls);
+    const environment = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}` };
+
+    expect(spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment }).status).toBe(0);
+    const cacheRoot = join(fixture.state, "cache/production-dependencies");
+    const entry = readdirSync(cacheRoot).find((name) => /^[a-f0-9]{64}$/.test(name))!;
+    writeFileSync(join(cacheRoot, entry, "node_modules.tar.gz"), "corrupt");
+    writeBuildCommit(fixture.project, "3".repeat(40));
+    const second = spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment });
+
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stderr).toContain("Rebuilding invalid production dependency cache");
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("leaves no published cache or staging directory when dependency rebuild fails", () => {
+    const fixture = createProductionStageFixture("standalone-dependency-cache-failure-");
+    const environment = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}` };
+    executable(join(fixture.bin, "npm"), "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '11.11.0\\n'; exit 0; fi\nif [ \"$3 $4 $5\" = \"config list --json\" ]; then printf '{}\\n'; exit 0; fi\nexit 42\n");
+
+    const result = spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8", env: environment });
+
+    expect(result.status).toBe(42);
+    expect(readdirSync(join(fixture.state, "cache/production-dependencies"))).toEqual([]);
+    expect(readdirSync(join(fixture.state, "releases")).filter((name) => name.startsWith(".staging"))).toEqual([]);
+  });
+
+  it.each(["state", "locks", "cache"])("rejects a symlinked %s directory without modifying its target", (component) => {
+    const fixture = createProductionStageFixture(`standalone-dependency-symlink-${component}-`);
+    const target = join(fixture.root, "target");
+    const sentinel = join(target, "sentinel");
+    mkdirSync(target);
+    writeFileSync(sentinel, "preserve\n");
+    if (component === "state") symlinkSync(target, fixture.state);
+    else {
+      mkdirSync(fixture.state);
+      symlinkSync(target, join(fixture.state, component));
+    }
+
+    const result = spawnSync("/bin/bash", [fixture.script, fixture.state], { encoding: "utf8" });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Refusing unsafe managed directory");
+    expect(readFileSync(sentinel, "utf8")).toBe("preserve\n");
+  });
+
+  it("serializes concurrent dependency staging and publishes one valid release", async () => {
+    const fixture = createProductionStageFixture("standalone-dependency-cache-concurrent-");
+    const calls = join(fixture.root, "npm.calls");
+    writeFakeNpm(fixture.bin, calls, "sleep 0.2");
+    const environment = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}` };
+
+    const [first, second] = await Promise.all([
+      runScript(fixture.script, fixture.state, environment),
+      runScript(fixture.script, fixture.state, environment)
+    ]);
+
+    expect(first.status, first.stderr).toBe(0);
+    expect(second.status, second.stderr).toBe(0);
+    expect(first.stdout.trim()).toBe(second.stdout.trim());
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(readdirSync(join(fixture.state, "releases")).filter((name) => name.startsWith(".staging"))).toEqual([]);
+    expect(existsSync(join(first.stdout.trim(), "node_modules/fake-package/index.js"))).toBe(true);
   });
 
   it("fails closed when an exact release has mismatched build identity", () => {
@@ -303,4 +412,50 @@ describe("standalone installer", () => {
 function executable(path: string, content: string): void {
   writeFileSync(path, content);
   chmodSync(path, 0o755);
+}
+
+function createProductionStageFixture(prefix: string) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  const project = join(root, "project");
+  const bin = join(root, "bin");
+  const state = join(root, "state");
+  mkdirSync(join(project, "scripts"), { recursive: true });
+  mkdirSync(join(project, "dist"));
+  mkdirSync(bin);
+  copyFileSync("scripts/stage-production-runtime.sh", join(project, "scripts/stage-production-runtime.sh"));
+  copyFileSync("scripts/npm-config-fingerprint.mjs", join(project, "scripts/npm-config-fingerprint.mjs"));
+  copyFileSync("scripts/production-dependency-cache-key.mjs", join(project, "scripts/production-dependency-cache-key.mjs"));
+  copyFileSync("package.json", join(project, "package.json"));
+  copyFileSync("package-lock.json", join(project, "package-lock.json"));
+  copyFileSync("dist/build-info.json", join(project, "dist/build-info.json"));
+  writeFileSync(join(project, "dist/main.js"), "export {};\n");
+  return { root, project, bin, state, script: join(project, "scripts/stage-production-runtime.sh") };
+}
+
+function writeFakeNpm(bin: string, calls: string, beforeInstall = ""): void {
+  executable(join(bin, "npm"), `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '11.11.0\n'; exit 0; fi
+if [ "$3 $4 $5" = "config list --json" ]; then printf '{}\n'; exit 0; fi
+printf 'npm %s\n' "$*" >> ${JSON.stringify(calls)}
+${beforeInstall}
+mkdir -p "$2/node_modules/fake-package"
+printf 'export default true;\n' > "$2/node_modules/fake-package/index.js"
+`);
+}
+
+function writeBuildCommit(project: string, gitCommit: string): void {
+  const path = join(project, "dist/build-info.json");
+  const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  writeFileSync(path, `${JSON.stringify({ ...value, gitCommit })}\n`);
+}
+
+function runScript(script: string, state: string, env: NodeJS.ProcessEnv): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("/bin/bash", [script, state], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }

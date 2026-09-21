@@ -1570,6 +1570,16 @@ runs only after activation and retains the current release, the previous `curren
 target, and any valid release directory referenced by the previously installed
 unit's `WorkingDirectory`. This protects a still-running old process when multiple
 candidates are installed before the normal safety-gated restart.
+Source installs cache the locked production dependency tree under the private
+state directory. The cache key fences the package manifests, Node/ABI/N-API and
+npm version and effective configuration, platform and architecture, kernel and
+operating-system release, and libc. A private cache lock admits one builder; an
+archive checksum and exact manifest validate every hit. Missing or corrupt entries
+are rebuilt into a temporary directory and atomically published. Each release
+extracts its own `node_modules` copy, so releases remain immutable and never share
+writable dependency inodes. The cache prepares only an inactive candidate and does
+not participate in the transactional `current` activation. Packaged releases
+remain self-contained and do not use this source-install cache.
 
 Inside the process, `ManagedBridgeRuntime` starts components in explicit phases:
 ownership and fencing; recovery preparation and integrity checks; instance, turn,

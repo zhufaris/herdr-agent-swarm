@@ -169,6 +169,13 @@ npm run swarm:status
 npm run swarm:restart
 ~~~
 
+Source installation keeps a private, checksummed production-dependency cache in
+the service state directory. Repeated builds with the same lockfile and runtime
+platform reuse that cache while extracting an independent `node_modules` tree
+for every immutable release. A changed package manifest, Node/npm ABI or
+configuration, operating system, architecture, kernel, or libc identity builds a
+separate cache entry; a damaged entry is rebuilt before staging continues.
+
 Inspect status before restarting. The ordinary restart refuses to interrupt
 running or queued prompts, active Worker work, or pending delivery. Prefer to
 let the work drain. When an intentional observer handoff is required:
