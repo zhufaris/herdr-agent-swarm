@@ -8,7 +8,14 @@ import { prepareOutboundGatewayIntent } from "./outbound-gateway-intent.js";
 import { PermanentDeliveryError } from "./outbound-target-validation.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 
-export type OutboundDeliveryOutcome = "delivered" | "failed";
+export interface OutboundDeliveryResult {
+  outcome: "delivered" | "failed";
+  externalDurationMs: number;
+  checkpointDurationMs: number;
+}
+export class DeliveryCheckpointError extends Error {
+  timing: OutboundDeliveryResult = deliveryResult("failed");
+}
 type AnswerCheckpoint = (promptId: string, viewVersion: number) => void;
 type WorkerTurnCheckpoint = (turnId: string, viewVersion: number) => void;
 type WorkerMainCheckpoint = (workerId: string, workerSessionGeneration: number, viewVersion: number) => void;
@@ -30,55 +37,69 @@ export class OutboundDeliveryExecutor {
   onMainCardCheckpoint(listener: MainCardCheckpoint): () => void { return subscribe(this.mainCardCheckpoints, listener); }
   connectPromptScheduler(scheduler: PromptWorkScheduler): void { this.scheduler = scheduler; }
 
-  async deliver(candidate: OutboundReply, dueAt: string | null): Promise<OutboundDeliveryOutcome> {
-    if ((candidate.kind === "stream_content" || candidate.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(candidate.id)) return "delivered";
+  async deliver(candidate: OutboundReply, dueAt: string | null): Promise<OutboundDeliveryResult> {
+    if ((candidate.kind === "stream_content" || candidate.kind === "stream_finish") && this.store.dismissSupersededAnswerStream(candidate.id)) return deliveryResult("delivered");
     if (candidate.gatewayPlanJson === null) {
       let intent: ReturnType<typeof prepareOutboundGatewayIntent>["intent"];
       try { intent = prepareOutboundGatewayIntent(this.store, candidate).intent; }
       catch (error) {
         if (!(error instanceof PermanentDeliveryError)) throw error;
         this.store.rejectUnclaimedOutboundReply(candidate.id, safeLogError(error).message, { failureClass: "permanent", effectCertainty: "rejected", larkErrorCode: null, httpStatus: null });
-        return "failed";
+        return deliveryResult("failed");
       }
       const plan = this.gateway.prepare(intent);
       this.store.prepareOutboundGatewayPlan(candidate.id, { gatewayId: plan.gatewayId, gatewayProfileId: plan.profileId, gatewayPlanJson: JSON.stringify(plan) });
     }
     const claim = this.store.claimOutboundReply(candidate.id, dueAt);
-    if (!claim) return "failed";
+    if (!claim) return deliveryResult("failed");
     const reply = claim.reply;
+    const startedAt = Date.now();
+    let externalDurationMs = 0;
+    let checkpointDurationMs = 0;
+    const checkpoint = (operation: () => boolean): void => {
+      const checkpointStartedAt = Date.now();
+      try { this.checkpoint(operation); }
+      finally { checkpointDurationMs += Date.now() - checkpointStartedAt; }
+    };
     try {
       const prepared = prepareOutboundGatewayIntent(this.store, reply);
       if (prepared.emptyStreamContent) {
         this.logger.info({ event: "gateway-outbox-empty-stream-content-skipped", gatewayId: reply.gatewayId, replyId: reply.id, bindingId: reply.bindingId, promptId: reply.promptId, sequence: reply.viewVersion, outcome: "checkpointed" }, "checkpointed empty Gateway stream content without an external call");
-        this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, reply.rootMessageId!));
+        checkpoint(() => this.store.markOutboundReplyDelivered(claim, reply.rootMessageId!));
       } else {
         const plan = decodeGatewayPlan(reply.gatewayPlanJson);
         if (plan.gatewayId !== reply.gatewayId || plan.profileId !== reply.gatewayProfileId) throw new Error(`Gateway plan identity mismatch for reply ${reply.id}`);
-        const receipt = await this.gateway.execute(plan, {
-          attemptId: claim.attemptId, leaseFencingToken: claim.fencingToken, idempotencyKey: reply.idempotencyKey,
-          priorCheckpoints: reply.cardIdCheckpoint ? [{ kind: "surface", ref: { gatewayId: reply.gatewayId, kind: "surface", opaqueId: reply.cardIdCheckpoint } }] : [],
-          checkpoint: async (value) => { this.checkpoint(() => this.store.checkpointOutboundReplyCard(claim, value.ref.opaqueId) !== null); }
-        });
-        this.settle(claim, receipt);
+        const externalStartedAt = Date.now();
+        const checkpointBeforeExecuteMs = checkpointDurationMs;
+        let receipt: GatewayDeliveryReceipt;
+        try {
+          receipt = await this.gateway.execute(plan, {
+            attemptId: claim.attemptId, leaseFencingToken: claim.fencingToken, idempotencyKey: reply.idempotencyKey,
+            priorCheckpoints: reply.cardIdCheckpoint ? [{ kind: "surface", ref: { gatewayId: reply.gatewayId, kind: "surface", opaqueId: reply.cardIdCheckpoint } }] : [],
+            checkpoint: async (value) => { checkpoint(() => this.store.checkpointOutboundReplyCard(claim, value.ref.opaqueId) !== null); }
+          });
+        } finally { externalDurationMs = Math.max(0, Date.now() - externalStartedAt - (checkpointDurationMs - checkpointBeforeExecuteMs)); }
+        this.settle(claim, receipt, checkpoint);
       }
       this.afterDelivery(reply, prepared.streamMetadata);
-      return "delivered";
+      return deliveryResult("delivered", externalDurationMs, checkpointDurationMs);
     } catch (error) {
       if (error instanceof DeliveryCheckpointError) {
-        this.logger.error({ event: "gateway-outbox-checkpoint-uncertain", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, outcome: "uncertain" }, "external delivery completed but its checkpoint could not be confirmed");
+        error.timing = deliveryResult("failed", externalDurationMs, checkpointDurationMs);
+        this.logger.error({ event: "gateway-outbox-checkpoint-uncertain", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, durationMs: Date.now() - startedAt, externalDurationMs, checkpointDurationMs, outcome: "uncertain" }, "external delivery completed but its checkpoint could not be confirmed");
         throw error;
       }
-      return this.fail(claim, error);
+      return this.fail(claim, error, startedAt, externalDurationMs, checkpointDurationMs);
     }
   }
 
-  private settle(claim: OutboundDeliveryClaim, receipt: GatewayDeliveryReceipt): void {
+  private settle(claim: OutboundDeliveryClaim, receipt: GatewayDeliveryReceipt, checkpoint: (operation: () => boolean) => void): void {
     const reply = claim.reply;
     const messageId = findRef(receipt.refs, "message")?.opaqueId ?? reply.rootMessageId;
     const surfaceId = findRef(receipt.refs, "surface")?.opaqueId;
     const threadId = findRef(receipt.refs, "thread")?.opaqueId;
     if (!messageId) throw new Error(`Gateway delivery returned no message identity for reply ${reply.id}`);
-    this.checkpoint(() => this.store.markOutboundReplyDelivered(claim, messageId, surfaceId, threadId));
+    checkpoint(() => this.store.markOutboundReplyDelivered(claim, messageId, surfaceId, threadId));
     if (reply.kind === "card_reply" || reply.kind === "stream_card_create" || reply.kind === "text") this.runPostDelivery("bridge-message", reply, () => this.store.recordBridgeMessage(messageId));
   }
 
@@ -98,19 +119,21 @@ export class OutboundDeliveryExecutor {
     catch { throw new DeliveryCheckpointError("outbound_checkpoint_uncertain"); }
   }
 
-  private fail(claim: OutboundDeliveryClaim, error: unknown): OutboundDeliveryOutcome {
+  private fail(claim: OutboundDeliveryClaim, error: unknown, startedAt: number, externalDurationMs: number, checkpointDurationMs: number): OutboundDeliveryResult {
     const reply = claim.reply;
     const gatewayFailure = error instanceof GatewayDeliveryError ? error.failure : null;
     const classified = gatewayFailure ?? classifyCoreDeliveryFailure(error);
     const metadata = { failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, larkErrorCode: classified.providerCode, ...(classified.recoveryKind === undefined ? {} : { recoveryKind: classified.recoveryKind }) };
+    const checkpointStartedAt = Date.now();
     const transition = this.store.markOutboundReplyFailedWithQuarantine(claim, classified.safeMessage, metadata, classified.retryAfterMs);
-    if (!transition) { this.logger.warn({ event: "gateway-outbox-stale-receipt", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, outcome: "ignored" }, "ignored a stale Gateway delivery receipt"); return "failed"; }
+    checkpointDurationMs += Date.now() - checkpointStartedAt;
+    if (!transition) { this.logger.warn({ event: "gateway-outbox-stale-receipt", gatewayId: reply.gatewayId, replyId: reply.id, attemptId: claim.attemptId, durationMs: Date.now() - startedAt, externalDurationMs, checkpointDurationMs, outcome: "ignored" }, "ignored a stale Gateway delivery receipt"); return deliveryResult("failed", externalDurationMs, checkpointDurationMs); }
     const failed = transition.reply;
-    const context = { event: failed.state === "dead_letter" ? "gateway-outbox-dead-lettered" : "gateway-outbox-retry-scheduled", err: safeLogError(error instanceof GatewayDeliveryError ? error.cause ?? error : error), gatewayId: reply.gatewayId, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed.attemptCount, nextAttemptAt: failed.nextAttemptAt, failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, providerCode: classified.providerCode, deliveryOperation: classified.providerOperation, deliveryTarget: preparedPurpose(reply), autoRecoveryCount: failed.autoRecoveryCount, laneClass: transition.laneClass, quarantineAction: transition.action, outcome: failed.state === "dead_letter" ? "dead_letter" : "retry" };
+    const context = { event: failed.state === "dead_letter" ? "gateway-outbox-dead-lettered" : "gateway-outbox-retry-scheduled", err: safeLogError(error instanceof GatewayDeliveryError ? error.cause ?? error : error), gatewayId: reply.gatewayId, replyId: reply.id, replyKind: reply.kind, bindingId: reply.bindingId, promptId: reply.promptId, attempt: failed.attemptCount, nextAttemptAt: failed.nextAttemptAt, failureClass: classified.failureClass, effectCertainty: classified.effectCertainty, httpStatus: classified.httpStatus, providerCode: classified.providerCode, deliveryOperation: classified.providerOperation, deliveryTarget: preparedPurpose(reply), autoRecoveryCount: failed.autoRecoveryCount, laneClass: transition.laneClass, quarantineAction: transition.action, durationMs: Date.now() - startedAt, externalDurationMs, checkpointDurationMs, outcome: failed.state === "dead_letter" ? "dead_letter" : "retry" };
     if (failed.state === "dead_letter") this.logger.error(context, classified.failureClass === "permanent" ? "Gateway outbox reply was permanently rejected" : "Gateway outbox reply exhausted retries");
     else this.logger.warn(context, "Gateway outbox reply delivery failed; retry scheduled");
     if (transition.action === "rebuild_answer" && transition.promptId) this.notify("answer", this.answerCheckpoints, (listener) => listener(transition.promptId!, failed.viewVersion ?? 0), reply);
-    return "failed";
+    return deliveryResult("failed", externalDurationMs, checkpointDurationMs);
   }
 
   private notify<Listener>(name: string, listeners: ReadonlySet<Listener>, invoke: (listener: Listener) => void, reply: OutboundReply): void { for (const listener of listeners) this.runPostDelivery(name, reply, () => invoke(listener)); }
@@ -128,10 +151,10 @@ function decodeGatewayPlan(value: string | null): import("../gateways/contract/p
 function preparedPurpose(reply: OutboundReply): string {
   if (reply.workerTurnId) return "worker-turn"; if (reply.workerId) return "worker-main"; if (reply.targetRole === "session_status") return "primary-main"; if (reply.cardRole === "answer") return "primary-answer"; return "operation-result";
 }
-class DeliveryCheckpointError extends Error {}
 function classifyCoreDeliveryFailure(error: unknown): import("../gateways/contract/plugin.js").GatewayFailure {
   const safe = safeLogError(error);
   if (error instanceof PermanentDeliveryError) return { failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: safe.message };
   return { failureClass: "unknown", effectCertainty: "uncertain", providerCode: null, httpStatus: null, safeMessage: safe.message };
 }
 function subscribe<Listener>(listeners: Set<Listener>, listener: Listener): () => void { listeners.add(listener); return () => listeners.delete(listener); }
+function deliveryResult(outcome: OutboundDeliveryResult["outcome"], externalDurationMs = 0, checkpointDurationMs = 0): OutboundDeliveryResult { return { outcome, externalDurationMs, checkpointDurationMs }; }

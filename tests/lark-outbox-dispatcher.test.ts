@@ -810,11 +810,44 @@ describe("Lark channel publisher", () => {
     const publisher = new LarkOutboxDispatcher(store, lark, logger);
 
     await connectedWriter(store, publisher).enqueueCard("root-1", "failure:1", { secret: "private card payload" }, "b1");
-    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-retry-scheduled", replyKind: "card_reply", attempt: 1, outcome: "retry" }), expect.any(String));
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-retry-scheduled", replyKind: "card_reply", attempt: 1, durationMs: expect.any(Number), externalDurationMs: expect.any(Number), checkpointDurationMs: expect.any(Number), outcome: "retry" }), expect.any(String));
+    expect(debug).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-scan-completed", attempted: 1, delivered: 0, failed: 1, durationMs: expect.any(Number), externalDurationMs: expect.any(Number), checkpointDurationMs: expect.any(Number), maxExternalDurationMs: expect.any(Number), maxCheckpointDurationMs: expect.any(Number), outcome: "failed" }), "Gateway outbox scan completed");
     for (let attempt = 0; attempt < 4; attempt += 1) await publisher.requestScan(true);
     expect(error).toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-dead-lettered", attempt: 5, outcome: "dead_letter" }), expect.any(String));
     expect(JSON.stringify([...warn.mock.calls, ...error.mock.calls])).not.toContain("private card payload");
     expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, pendingOutbox: 0 });
+    store.close();
+  });
+
+  it("logs one bounded phase-timing summary for a multi-delivery scan", async () => {
+    const debug = vi.fn();
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug } as unknown as Logger;
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ async replyCard() { return { messageId: "delivered" }; } }), logger);
+
+    store.enqueueOutboundReply({ id: "timing-1", idempotencyKey: "success:timing:1", rootMessageId: "root-1", kind: "card_reply", payload: JSON.stringify({ text: "safe-one" }) });
+    store.enqueueOutboundReply({ id: "timing-2", idempotencyKey: "success:timing:2", rootMessageId: "root-2", kind: "card_reply", payload: JSON.stringify({ text: "safe-two" }) });
+    await publisher.requestScan();
+
+    expect(debug).toHaveBeenCalledTimes(1);
+    expect(debug).toHaveBeenCalledWith(expect.objectContaining({
+      event: "gateway-outbox-scan-completed", attempted: 2, delivered: 2, failed: 0,
+      durationMs: expect.any(Number), externalDurationMs: expect.any(Number),
+      checkpointDurationMs: expect.any(Number), maxExternalDurationMs: expect.any(Number),
+      maxCheckpointDurationMs: expect.any(Number), outcome: "delivered"
+    }), "Gateway outbox scan completed");
+    expect(JSON.stringify(debug.mock.calls)).not.toMatch(/safe-one|safe-two/);
+    store.close();
+  });
+
+  it("does not log a phase-timing summary for an empty scan", async () => {
+    const debug = vi.fn();
+    const store = new SqliteBindingStore(":memory:");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark(), { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug } as unknown as Logger);
+
+    await publisher.requestScan();
+
+    expect(debug).not.toHaveBeenCalledWith(expect.objectContaining({ event: "gateway-outbox-scan-completed" }), expect.any(String));
     store.close();
   });
 
@@ -1020,12 +1053,21 @@ describe("Lark channel publisher", () => {
   it("does not replay remote success when the local delivery checkpoint fails", async () => {
     const store = new SqliteBindingStore(":memory:");
     const sent = vi.fn(async () => {});
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard: sent }), pino({ enabled: false }));
+    const debug = vi.fn();
+    const error = vi.fn();
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ updateCard: sent }), { warn: vi.fn(), info: vi.fn(), error, debug } as unknown as Logger);
     store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "{}" });
     const checkpoint = vi.spyOn(store, "markOutboundReplyDelivered").mockImplementationOnce(() => { throw new Error("disk failure"); });
     const failed = vi.spyOn(store, "markOutboundReplyFailedWithQuarantine");
     try {
       await expect(publisher.requestScan()).rejects.toThrow("outbound_checkpoint_uncertain");
+      const uncertain = error.mock.calls.find(([context]) => context.event === "gateway-outbox-checkpoint-uncertain")?.[0];
+      expect(debug).toHaveBeenCalledTimes(1);
+      expect(debug).toHaveBeenCalledWith(expect.objectContaining({
+        event: "gateway-outbox-scan-completed", attempted: 1, delivered: 0, failed: 1,
+        externalDurationMs: uncertain.externalDurationMs, checkpointDurationMs: uncertain.checkpointDurationMs,
+        maxExternalDurationMs: uncertain.externalDurationMs, maxCheckpointDurationMs: uncertain.checkpointDurationMs, outcome: "failed"
+      }), "Gateway outbox scan completed");
       checkpoint.mockRestore();
       await publisher.requestScan(true);
       expect(sent).toHaveBeenCalledOnce();

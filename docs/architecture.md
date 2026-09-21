@@ -1548,6 +1548,10 @@ MainPID, rotates at 16 MiB, and sends `SIGUSR2` for an in-process reopen. The
 lifecycle owns permissions and rotation, retaining one rotated generation.
 `swarm:logs` retains its bounded default and can include rotated generations or
 filter JSON records by level, time, component, and correlation identifiers.
+The outbound dispatcher emits one debug summary for each non-empty scan, with
+attempt, success, failure, provider-call, and durable-checkpoint timing. Delivery
+failures carry the same phase timing at warn or error level without including
+message or card payloads.
 Staging creates an inactive candidate and does not change `current`. The install
 lifecycle validates that candidate, snapshots the prior unit and enabled state,
 reloads and enables the candidate-pinned unit, and atomically switches `current`
