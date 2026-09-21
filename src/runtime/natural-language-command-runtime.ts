@@ -48,6 +48,7 @@ export function createNaturalLanguageCommandRuntime(options: NaturalLanguageComm
   const start = async () => {
     if (!endpoint || !manager) return;
     try {
+      manager.prepareRecovery();
       await endpoint.start();
       await manager.start();
       controllerAvailable = true;
@@ -60,9 +61,12 @@ export function createNaturalLanguageCommandRuntime(options: NaturalLanguageComm
   };
   const stop = async () => {
     controllerAvailable = false;
-    const results = await Promise.allSettled([manager?.stop(), endpoint?.stop()]);
-    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failures.length) throw new AggregateError(failures.map(({ reason }) => reason), "Natural-language Controller shutdown failed");
+    let managerFailure: unknown;
+    try { await manager?.stop(); } catch (error) { managerFailure = error; }
+    let endpointFailure: unknown;
+    try { await endpoint?.stop(); } catch (error) { endpointFailure = error; }
+    const failures = [managerFailure, endpointFailure].filter((failure) => failure !== undefined);
+    if (failures.length) throw new AggregateError(failures, "Natural-language Controller shutdown failed");
   };
 
   return {

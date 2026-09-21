@@ -41,6 +41,7 @@ export interface ControllerAgentManagerOptions {
 
 export class ControllerAgentManager implements NaturalLanguageCommandInterpreter {
   private runtime: AgentRuntimeRef | null = null;
+  private recovered = false;
   private activeAbort: AbortController | null = null;
   private readonly drain: CoalescingDrain;
   private readonly waiters = new Map<string, Set<() => void>>();
@@ -50,11 +51,21 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
   }
 
   async start(): Promise<void> {
+    this.prepareRecovery();
+    await this.startRuntimeOwner();
+    this.drain.start(this.options.pollIntervalMs ?? 1_000);
+  }
+
+  prepareRecovery(): void {
+    if (this.recovered) return;
+    this.recovered = true;
     const recovered = this.options.store.recoverControllerInterpretations(this.now());
     if (recovered) this.options.logger.warn({ event: "controller-interpretations-recovered", recovered, outcome: "uncertain" }, "retained possibly dispatched Controller jobs without replay");
+  }
+
+  private async startRuntimeOwner(): Promise<void> {
     try { this.runtime = await this.ensureRuntime(); }
     catch (error) { this.options.logger.warn({ event: "controller-runtime-unavailable", err: safeLogError(error), outcome: "degraded" }, "Controller Agent is unavailable; deterministic commands remain active"); }
-    this.drain.start(this.options.pollIntervalMs ?? 1_000);
   }
 
   async stop(): Promise<void> { this.activeAbort?.abort(new Error("Controller manager stopping")); await this.drain.stop(); this.runtime = null; }
