@@ -1,5 +1,13 @@
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ManagedBridgeRuntime, type ManagedBridgeRuntimeDependencies } from "../src/composition/managed-bridge-runtime.js";
+import { validateEnvironmentAndRegistry } from "../src/config.js";
+import { AGENT_SWARM_SERVICE_ID } from "../src/runtime/build-identity.js";
+import { createManagedBridgeRuntime, ManagedBridgeRuntime, type ManagedBridgeRuntimeDependencies } from "../src/composition/managed-bridge-runtime.js";
+import { openSqliteLeaseBootstrap } from "../src/store/sqlite-lease-bootstrap.js";
 
 function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
   const calls: string[] = [];
@@ -32,9 +40,87 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
   return { runtime: new ManagedBridgeRuntime(dependencies), runtimeDependencies: dependencies, calls, loseLease: async () => { await onLeaseLost?.(); } };
 }
 
+function gatedFactoryFixture() {
+  const directory = mkdtempSync(join(tmpdir(), "herdr-managed-runtime-"));
+  const databasePath = join(directory, "bridge.db");
+  const probeStartedPath = join(directory, "probe-started");
+  const probeGatePath = join(directory, "probe-gate");
+  const executablePath = join(directory, "agent-runtime");
+  writeFileSync(probeGatePath, "blocked");
+  writeFileSync(executablePath, [
+    "#!/bin/sh",
+    `touch ${JSON.stringify(probeStartedPath)}`,
+    `while [ -e ${JSON.stringify(probeGatePath)} ]; do sleep 0.01; done`,
+    "printf 'possible values: codex, claude, pi\n'"
+  ].join("\n"));
+  chmodSync(executablePath, 0o700);
+  const config = validateEnvironmentAndRegistry({
+    LARK_APP_ID: "app", LARK_APP_SECRET: "secret", LARK_CHAT_ID: "chat", LARK_BOT_OPEN_ID: "bot",
+    LARK_ALLOWED_OPEN_IDS: "ou_user", LARK_ADMIN_OPEN_IDS: "ou_user",
+    PROJECTS_CONFIG_PATH: join(directory, "projects.json"), BRIDGE_DATABASE_PATH: databasePath,
+    HERDR_BIN: executablePath, CODEX_BIN: executablePath, CLAUDE_CODE_BIN: executablePath, PI_BIN: executablePath,
+    COMMAND_TIMEOUT_MS: "10000"
+  }, {
+    defaultProjectId: "default",
+    projects: [{ id: "default", displayName: "Default", description: "Test", workspaceId: "w1", cwd: directory, maxInstances: 8 }]
+  });
+  const creating = createManagedBridgeRuntime({
+    config,
+    buildIdentity: { serviceId: AGENT_SWARM_SERVICE_ID, version: "0.4.0", buildId: "sha256:test-build", gitCommit: null },
+    logger: pino({ enabled: false })
+  });
+  return {
+    databasePath, probeStartedPath, creating,
+    releaseProbe() { rmSync(probeGatePath, { force: true }); },
+    cleanup() { rmSync(probeGatePath, { force: true }); rmSync(directory, { recursive: true, force: true }); }
+  };
+}
+
 afterEach(() => vi.useRealTimers());
 
 describe("ManagedBridgeRuntime", () => {
+  it("acquires the SQLite lease while Agent capability detection is still running", async () => {
+    const test = gatedFactoryFixture();
+
+    try {
+      await vi.waitFor(() => expect(existsSync(test.probeStartedPath)).toBe(true));
+      const inspector = new DatabaseSync(test.databasePath);
+      try {
+        expect(inspector.prepare("SELECT COUNT(*) AS count FROM instance_lease").get()).toEqual({ count: 1 });
+      } finally { inspector.close(); }
+    } finally {
+      test.releaseProbe();
+      const runtime = await test.creating;
+      await runtime.stop("SIGTERM");
+      test.cleanup();
+    }
+  });
+
+  it("rejects startup when lease ownership changes during Agent capability detection", async () => {
+    const test = gatedFactoryFixture();
+
+    try {
+      await vi.waitFor(() => expect(existsSync(test.probeStartedPath)).toBe(true));
+      const inspector = new DatabaseSync(test.databasePath);
+      inspector.prepare("UPDATE instance_lease SET expires_at = ? WHERE singleton_id = 1").run(new Date(Date.now() - 1_000).toISOString());
+      inspector.close();
+      const contender = openSqliteLeaseBootstrap(test.databasePath);
+      const now = Date.now();
+      const lease = contender.lease.acquireInstanceLease("contender", new Date(now).toISOString(), new Date(now + 3_000).toISOString());
+      expect(lease).toMatchObject({ ownerId: "contender", fencingToken: 2 });
+      contender.close();
+      test.releaseProbe();
+      const outcome = await test.creating.then((runtime) => ({ runtime }), (error: unknown) => ({ error }));
+      if ("runtime" in outcome) {
+        await outcome.runtime.stop("SIGTERM");
+        expect.fail("startup returned a runtime after losing its SQLite lease");
+      }
+      expect(outcome.error).toEqual(expect.objectContaining({ message: "Bridge database lease expired during Agent capability detection" }));
+    } finally {
+      test.cleanup();
+    }
+  });
+
   it("starts the bridge in ownership, recovery, delivery, ingress, and observation order", async () => {
     const { runtime, calls } = fixture();
 

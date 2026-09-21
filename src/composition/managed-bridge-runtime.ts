@@ -59,10 +59,13 @@ export async function createManagedBridgeRuntime(options: {
 }): Promise<ManagedBridgeRuntimePort> {
   const { config, buildIdentity, logger, onFatalStop } = options;
   const availabilityRunner = new ExecFileCommandRunner(config.commandTimeoutMs);
-  const { codex, claude, pi } = await detectAgentRuntimeAvailabilities({
+  const availabilityPromise = detectAgentRuntimeAvailabilities({
     runner: availabilityRunner, herdrExecutable: config.herdr.executable,
     agents: { codex: config.agents.codex, claude: config.agents.claudeCode, pi: config.agents.pi }
-  });
+  }).then(
+    (availability) => ({ availability } as const),
+    (error: unknown) => ({ error } as const)
+  );
   const bootstrap = openSqliteLeaseBootstrap(config.databasePath);
   const lease = new InstanceLeaseController(bootstrap.lease, config.instanceLease, logger);
   let stores: ReturnType<typeof bootstrap.complete> | null = null;
@@ -73,6 +76,10 @@ export async function createManagedBridgeRuntime(options: {
     const completedStores = bootstrap.complete(lease.writeFence());
     stores = completedStores;
     if (!lease.renewNow()) throw new Error("Bridge database lease expired during schema migration");
+    const availabilityResult = await availabilityPromise;
+    if ("error" in availabilityResult) throw availabilityResult.error;
+    if (!lease.renewNow()) throw new Error("Bridge database lease expired during Agent capability detection");
+    const { codex, claude, pi } = availabilityResult.availability;
     const runtime = createBridgeRuntime(config, completedStores, logger, { codex, claude, pi });
     const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, naturalLanguageCommands, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, bus, sessionOperations, reconciler, promptRun } = runtime;
     return new ManagedBridgeRuntime({

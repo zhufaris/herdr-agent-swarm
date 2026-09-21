@@ -258,12 +258,13 @@ across executions, so periodic and retry passes still obtain fresh Herdr state.
 
 ### Recovery converges from canonical state
 
-Startup acquires the fenced SQLite lease, runs migrations and integrity checks,
-recovers interrupted local claims, converges durable views, establishes runtime
-baselines, and reconciles against fresh Herdr state. Lost events and process
-restarts may delay convergence but must not change the final state. Recovery
-never treats stale card text or a coarse idle observation as proof that an exact
-turn completed.
+Startup begins Agent capability detection while it acquires the fenced SQLite
+lease and runs migrations, then joins the detection result before constructing
+the runtime graph. Integrity checks, interrupted local-claim recovery, durable
+view convergence, runtime baselines, and reconciliation against fresh Herdr state
+remain ordered lifecycle phases. Lost events and process restarts may delay
+convergence but must not change the final state. Recovery never treats stale card
+text or a coarse idle observation as proof that an exact turn completed.
 
 ## Lark authorization
 
