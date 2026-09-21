@@ -408,6 +408,24 @@ idempotent `instance_lease` table. After the process acquires the durable lease,
 the bootstrap runs business-schema migrations and constructs one internal
 `SqliteCapabilityGraph` over the same connection. A contender that cannot acquire
 the lease closes its bootstrap without inspecting or mutating business schema.
+Capability-graph construction is explicit and fixed: it first adopts the context
+and runs migrations, then creates low-coupling foundation-store factories plus
+one transaction-participating store cluster, and finally publishes
+consumer-shaped capabilities. Foundation factories are invoked at their
+historical construction positions, so late-bound callbacks retain the same
+initialization order while every store continues to share the one context. They
+are private construction seams, not a container, registry, or resource-owner
+boundary.
+
+`SqliteMigrations.run()` is likewise a fixed sequence of named phases: stale-view
+preparation, latest-schema creation, initial compatibility, Binding and Prompt
+compatibility, Worker and projection compatibility, delivery and control
+compatibility, view/index restoration, historical Answer convergence, and final
+delivery/Gateway compatibility. Calls retain their absolute historical order.
+Versions 2, 3, and 4 remain separate `BEGIN IMMEDIATE` transactions, and repeated
+outbound-order, Gateway-identity, and claim passes remain deliberate convergence
+steps rather than dynamically sorted migrations.
+
 All production bundle entries are named capabilities;
 none route through `SqliteStoreKernel`. Cross-table operations remain in focused
 prompt, binding-session, control, recovery, instance, and outbox aggregate modules

@@ -96,7 +96,9 @@ describe("application composition boundaries", () => {
     expect(kernel).not.toContain("new SqliteMigrations");
     expect(capabilityGraph).toContain('typeof pathOrContext === "string" ? new SqliteContext(pathOrContext) : pathOrContext');
     expect(capabilityGraph).toContain("this.migrations.run()");
-    expect(capabilityGraph.indexOf("this.migrations.run()")).toBeLessThan(capabilityGraph.indexOf("new SqliteBindingLifecycleStore"));
+    expect(capabilityGraph).toContain("const foundation = createFoundationStoreFactories(this.context)");
+    expect(capabilityGraph).toContain("Object.assign(this, createStoreCluster(this.context, foundation))");
+    expect(capabilityGraph.indexOf("this.migrations.run()")).toBeLessThan(capabilityGraph.indexOf("createFoundationStoreFactories(this.context)"));
     const bindingProjection = readFileSync(new URL("../src/store/sqlite/binding-projection-store.ts", import.meta.url), "utf8");
     expect(bindingProjection).toContain('listRunCardsByPhases(input.bindingId, ["running", "blocked", "queued"])');
     expect(bindingProjection).not.toContain("listRunCards(input.bindingId)");

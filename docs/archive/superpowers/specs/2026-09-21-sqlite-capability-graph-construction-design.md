@@ -96,10 +96,12 @@ The graph adopts an existing `SqliteContext` and lease store or creates them
 from a path exactly as it does today. It creates `SqliteMigrations`, completes
 the fixed migration sequence, and only then creates business capabilities.
 
-Low-coupling foundation stores are constructed first. These include stores whose
-dependencies do not require the central cyclic cluster, such as lease, thread
-alias, Worker Session thread, operations, command-intent, inbound-project, and
-approval persistence.
+Low-coupling foundation stores are represented by a named private factory group.
+The factories are invoked at each store's historical construction position so
+this behavior-preserving refactor does not reorder constructor side effects.
+These include stores whose dependencies do not require the central cyclic
+cluster, such as lease, thread alias, Worker Session thread, operations,
+command-intent, inbound-project, and approval persistence.
 
 The exact membership of this internal construction group may follow existing
 constructor dependencies. It is not a new public interface or an ownership

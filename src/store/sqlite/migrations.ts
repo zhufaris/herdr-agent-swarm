@@ -25,9 +25,24 @@ export class SqliteMigrations {
   }
 
   run(): void {
+    const runCardViewNeedsRebuild = this.prepareRunCardView();
+    createLatestSchema(this.context);
+    this.applyInitialCompatibility();
+    this.applyBindingAndPromptCompatibility();
+    this.applyWorkerAndProjectionCompatibility();
+    this.applyDeliveryAndControlCompatibility();
+    this.restoreRunCardViewAndIndexes(runCardViewNeedsRebuild);
+    this.runHistoricalAnswerConvergence();
+    this.applyFinalDeliveryAndGatewayCompatibility();
+  }
+
+  private prepareRunCardView(): boolean {
     const runCardViewNeedsRebuild = this.cards.runCardViewNeedsRebuild();
     if (runCardViewNeedsRebuild) this.context.database.exec("DROP VIEW IF EXISTS run_cards_view");
-    createLatestSchema(this.context);
+    return runCardViewNeedsRebuild;
+  }
+
+  private applyInitialCompatibility(): void {
     this.cards.ensureOutboundReplyColumns();
     this.cards.ensureMainCardSequences();
     this.worker.ensureAgentInstanceLifecycleColumns();
@@ -47,6 +62,9 @@ export class SqliteMigrations {
     this.cards.ensureStreamingCardColumns();
     this.cards.ensureAnswerPageDeliveryMode();
     this.cards.ensureAnswerPages();
+  }
+
+  private applyBindingAndPromptCompatibility(): void {
     this.binding.ensureProjectSelectionColumns();
     this.binding.ensurePrimaryAgentKindColumns();
     this.binding.ensureBindingLifecycleColumns();
@@ -68,6 +86,9 @@ export class SqliteMigrations {
     this.cards.ensureRunCardActivityColumn();
     this.retired.convergeRetiredPromptSteering();
     this.prompt.ensurePrimaryContinuationLineage();
+  }
+
+  private applyWorkerAndProjectionCompatibility(): void {
     this.cards.ensureOutboundDeliveryOrder();
     this.cards.ensureOutboundDismissedState();
     this.cards.ensureOutboundDeliveryOrder();
@@ -90,6 +111,9 @@ export class SqliteMigrations {
     this.worker.ensureCardContextStartupInvalidations();
     this.worker.ensureWorkerPaneCloseSteps();
     this.worker.ensureWorkerPaneCloseRetainedState();
+  }
+
+  private applyDeliveryAndControlCompatibility(): void {
     this.cards.ensureOutboundLaneKey();
     this.cards.ensureOutboxLaneQuarantines();
     this.cards.ensureOutboxLaneHeads();
@@ -107,8 +131,14 @@ export class SqliteMigrations {
     this.worker.ensureWorkerSessionThreads();
     this.worker.ensureWorkerThreadEntryRequests();
     this.worker.ensureWorkerThreadEntryInvalidations();
+  }
+
+  private restoreRunCardViewAndIndexes(runCardViewNeedsRebuild: boolean): void {
     if (runCardViewNeedsRebuild) this.cards.recreateRunCardsView();
     this.cards.ensureQueryIndexes();
+  }
+
+  private runHistoricalAnswerConvergence(): void {
     const answerTargetMigration = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 2").get();
     if (!answerTargetMigration) {
       this.context.database.exec("BEGIN IMMEDIATE");
@@ -136,6 +166,9 @@ export class SqliteMigrations {
         this.context.database.exec("COMMIT");
       } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
     }
+  }
+
+  private applyFinalDeliveryAndGatewayCompatibility(): void {
     this.cards.ensureOutboundWorkClass();
     this.gateway.ensureGatewayIdentityAndPlans();
     this.cards.ensureOutboundClaims();
