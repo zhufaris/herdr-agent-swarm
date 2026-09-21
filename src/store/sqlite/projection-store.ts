@@ -8,6 +8,43 @@ import { mapAnswerPage, mapBinding, type AnswerPageRow, type BindingRow } from "
 import type { SqliteContext } from "./context.js";
 import { linkAnswerRecovery, recordAnswerCoverage } from "./delivery-recovery-evidence.js";
 
+export const answerPageDeliveryFactsSql = {
+  latestContent: `
+    SELECT payload, state, view_version
+    FROM outbound_replies INDEXED BY outbound_replies_prompt_kind_state_updated
+    WHERE prompt_id = ? AND card_role = 'answer' AND kind = 'stream_content'
+      AND state IN ('pending','delivered','dead_letter','dismissed')
+      AND (
+        stream_page_index = ?
+        OR (stream_page_index IS NULL AND json_valid(payload)
+          AND (json_extract(payload, '$.elementId') = ? OR json_extract(payload, '$.pageIndex') = ?))
+      )
+    ORDER BY delivery_order DESC LIMIT 1
+  `,
+  pendingFinish: `
+    SELECT 1 FROM outbound_replies INDEXED BY outbound_replies_prompt_kind_state_updated
+    WHERE prompt_id = ? AND card_role = 'answer' AND kind = 'stream_finish' AND state = 'pending'
+      AND (stream_page_index = ? OR (stream_page_index IS NULL AND CASE
+        WHEN json_valid(payload) THEN json_extract(payload, '$.pageIndex') IS NULL OR json_extract(payload, '$.pageIndex') = ?
+        ELSE 1
+      END))
+    LIMIT 1
+  `,
+  pendingContinuation: `
+    SELECT 1 FROM outbound_replies INDEXED BY outbound_replies_prompt_kind_state_updated
+    WHERE prompt_id = ? AND card_role = 'answer' AND kind = 'stream_card_create' AND state = 'pending'
+      AND (stream_page_index = ? OR (stream_page_index IS NULL AND json_valid(payload) AND json_extract(payload, '$.stream.pageIndex') = ?))
+    LIMIT 1
+  `,
+  finalUpdate: `
+    SELECT state FROM outbound_replies INDEXED BY outbound_replies_prompt_kind_state_updated
+    WHERE prompt_id = ? AND card_role = 'answer' AND kind = 'card_update'
+      AND state IN ('pending','delivered','dead_letter','dismissed')
+      AND (idempotency_key = ? OR substr(idempotency_key, 1, length(?)) = ?)
+    ORDER BY delivery_order DESC LIMIT 1
+  `
+} as const;
+
 export class SqliteProjectionStore {
   constructor(
     private readonly context: SqliteContext,
@@ -218,19 +255,14 @@ export class SqliteProjectionStore {
   getAnswerPageDeliveryFacts(promptId: string, pageIndex: number): AnswerPageDeliveryFacts {
     const page = this.context.database.prepare("SELECT card_id, element_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(promptId, pageIndex) as { card_id: string | null; element_id: string } | undefined;
     if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
-    const rows = this.context.database.prepare("SELECT idempotency_key, kind, payload, state, view_version FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state IN ('pending','delivered','dead_letter','dismissed') ORDER BY delivery_order DESC").all(promptId) as Array<{ idempotency_key: string; kind: string; payload: string; state: OutboundReplyState; view_version: number | null }>;
-    let latestContent: AnswerPageDeliveryFacts["latestContent"] = null;
-    let finishPending = false;
-    let continuationPending = false;
-    let finalUpdateState: AnswerPageDeliveryFacts["finalUpdateState"] = null;
-    for (const row of rows) {
-      const payload = parseJsonRecord(row.payload);
-      if (row.kind === "stream_card_create" && row.state === "pending" && Number((payload.stream as Record<string, unknown> | undefined)?.pageIndex) === pageIndex + 1) continuationPending = true;
-      if (row.kind === "card_update" && (row.idempotency_key === `answer-final-fold:${promptId}:${pageIndex}:${page.card_id}` || row.idempotency_key.startsWith(`answer-final-fold:${promptId}:${pageIndex}:${page.card_id}:revision:`)) && finalUpdateState === null) finalUpdateState = row.state;
-      if (Number(payload.pageIndex ?? pageIndex) !== pageIndex) continue;
-      if (row.kind === "stream_finish" && row.state === "pending") finishPending = true;
-      if (row.kind === "stream_content" && latestContent === null && (payload.elementId === page.element_id || payload.pageIndex === pageIndex)) latestContent = { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? row.view_version ?? 0), state: row.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null };
-    }
+    const contentRow = this.context.database.prepare(answerPageDeliveryFactsSql.latestContent).get(promptId, pageIndex, page.element_id, pageIndex) as { payload: string; state: OutboundReplyState; view_version: number | null } | undefined;
+    const payload = contentRow ? parseJsonRecord(contentRow.payload) : null;
+    const latestContent = contentRow && payload ? { content: typeof payload.content === "string" ? payload.content : "", sequence: Number(payload.sequence ?? contentRow.view_version ?? 0), state: contentRow.state, sourceEnd: Number.isInteger(payload.sourceEnd) ? Number(payload.sourceEnd) : null } : null;
+    const finishPending = this.context.database.prepare(answerPageDeliveryFactsSql.pendingFinish).get(promptId, pageIndex, pageIndex) !== undefined;
+    const continuationPending = this.context.database.prepare(answerPageDeliveryFactsSql.pendingContinuation).get(promptId, pageIndex + 1, pageIndex + 1) !== undefined;
+    const finalPrefix = `answer-final-fold:${promptId}:${pageIndex}:${page.card_id}`;
+    const finalRow = this.context.database.prepare(answerPageDeliveryFactsSql.finalUpdate).get(promptId, finalPrefix, `${finalPrefix}:revision:`, `${finalPrefix}:revision:`) as { state: OutboundReplyState } | undefined;
+    const finalUpdateState = finalRow?.state ?? null;
     return { latestContent, finishPending, continuationPending, finalUpdateState };
   }
 

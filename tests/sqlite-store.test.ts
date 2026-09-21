@@ -15,6 +15,7 @@ import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker
 import { outboundLaneHeadSelectionSql } from "../src/store/sqlite/outbox-queue-store.js";
 import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
 import { materializeOutboundReply } from "../src/events/outbound-intent-materializer.js";
+import { answerPageDeliveryFactsSql } from "../src/store/sqlite/projection-store.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
@@ -3957,6 +3958,92 @@ describe("SQLite store", () => {
       expect.objectContaining({ pageIndex: 1, state: "creating", sequence: 0 })
     ]);
     expect(store.listPendingOutboundReplies().map((reply) => reply.kind)).toEqual(["stream_finish", "card_update", "stream_card_create"]);
+  });
+
+  it("uses structural stream metadata when reading Answer delivery facts", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.enqueueOutboundReply({
+      id: "page-1-content", idempotencyKey: "page-1-content", bindingId: "b1", promptId: "p1", viewVersion: 9, cardRole: "answer",
+      rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 1, elementId: "answer_content_p1_1", content: "wrong page", sequence: 9 })
+    });
+    store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE id = 'page-1-content'").run(JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "payload disagrees", sequence: 9 }));
+
+    expect(store.getAnswerPageDeliveryFacts("p1", 0).latestContent).toBeNull();
+  });
+
+  it("falls back to legacy Answer payload metadata only when structural metadata is absent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.enqueueOutboundReply({ id: "legacy-content", idempotencyKey: "legacy-content", bindingId: "b1", promptId: "p1", viewVersion: 7, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ elementId: answerElementId("p1", 0), content: "legacy", sequence: 7, sourceEnd: 8 }) });
+    store.enqueueOutboundReply({ id: "legacy-finish", idempotencyKey: "legacy-finish", bindingId: "b1", promptId: "p1", viewVersion: 8, cardRole: "answer", rootMessageId: "card-1", kind: "stream_finish", payload: JSON.stringify({ summary: "done", sequence: 8 }) });
+    store.database.prepare("UPDATE outbound_replies SET stream_page_index = NULL, stream_element_id = NULL WHERE id IN ('legacy-content', 'legacy-finish')").run();
+
+    expect(store.getAnswerPageDeliveryFacts("p1", 0)).toMatchObject({
+      latestContent: { content: "legacy", sequence: 7, state: "pending", sourceEnd: 8 },
+      finishPending: true
+    });
+    store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE id = 'legacy-finish'").run(JSON.stringify({ pageIndex: null }));
+    expect(store.getAnswerPageDeliveryFacts("p1", 0).finishPending).toBe(true);
+    store.database.prepare("UPDATE outbound_replies SET payload = 'not-json' WHERE id = 'legacy-finish'").run();
+    expect(store.getAnswerPageDeliveryFacts("p1", 0).finishPending).toBe(true);
+  });
+
+  it("reads Answer delivery facts without mixing unrelated retained history", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+
+    store.enqueueOutboundReply({ id: "content-old", idempotencyKey: "content-old", bindingId: "b1", promptId: "p1", viewVersion: 10, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "old", sequence: 10, sourceEnd: 21 }) });
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered' WHERE id = 'content-old'").run();
+    store.enqueueOutboundReply({ id: "content-current", idempotencyKey: "content-current", bindingId: "b1", promptId: "p1", viewVersion: 11, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "current", sequence: 11, sourceEnd: 42 }) });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dismissed' WHERE id = 'content-current'").run();
+    store.enqueueOutboundReply({ id: "finish-current", idempotencyKey: "finish-current", bindingId: "b1", promptId: "p1", viewVersion: 12, cardRole: "answer", rootMessageId: "card-1", kind: "stream_finish", payload: JSON.stringify({ pageIndex: 0, summary: "done", sequence: 12 }) });
+    store.enqueueOutboundReply({ id: "continuation-current", idempotencyKey: "continuation-current", bindingId: "b1", promptId: "p1", viewVersion: 13, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ stream: { pageIndex: 1, pageStart: 9_000, elementId: answerElementId("p1", 1) }, card: {} }) });
+    store.enqueueOutboundReply({ id: "final-exact", idempotencyKey: "answer-final-fold:p1:0:card-1", bindingId: "b1", promptId: "p1", viewVersion: 12, cardRole: "answer", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter' WHERE id = 'final-exact'").run();
+    store.enqueueOutboundReply({ id: "final-current", idempotencyKey: "answer-final-fold:p1:0:card-1:revision:13", bindingId: "b1", promptId: "p1", viewVersion: 13, cardRole: "answer", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered' WHERE id = 'final-current'").run();
+
+    for (let index = 0; index < 200; index += 1) {
+      const kind = index % 3 === 0 ? "card_update" : index % 3 === 1 ? "stream_finish" : "stream_content";
+      store.enqueueOutboundReply({
+        id: `history-${index}`, idempotencyKey: `history-${index}`, bindingId: "b1", promptId: index % 2 === 0 ? "other-prompt" : "p1", viewVersion: 100 + index, cardRole: "answer", rootMessageId: "other-card", kind,
+        payload: JSON.stringify({ pageIndex: 99, elementId: "other-element", content: `history-${index}`, sequence: 100 + index })
+      });
+      store.database.prepare("UPDATE outbound_replies SET state = ? WHERE id = ?").run((["pending", "delivered", "dead_letter", "dismissed"] as const)[index % 4], `history-${index}`);
+    }
+
+    expect(store.getAnswerPageDeliveryFacts("p1", 0)).toEqual({
+      latestContent: { content: "current", sequence: 11, state: "dismissed", sourceEnd: 42 },
+      finishPending: true,
+      continuationPending: true,
+      finalUpdateState: "delivered"
+    });
+  });
+
+  it("uses the prompt-kind-state index for targeted Answer delivery facts queries", () => {
+    store = new SqliteBindingStore(":memory:");
+    const queries: Array<{ sql: string; parameters: Array<string | number> }> = [
+      { sql: answerPageDeliveryFactsSql.latestContent, parameters: ["p1", 0, answerElementId("p1", 0), 0] },
+      { sql: answerPageDeliveryFactsSql.pendingFinish, parameters: ["p1", 0, 0] },
+      { sql: answerPageDeliveryFactsSql.pendingContinuation, parameters: ["p1", 1, 1] },
+      { sql: answerPageDeliveryFactsSql.finalUpdate, parameters: ["p1", "answer-final-fold:p1:0:card-1", "answer-final-fold:p1:0:card-1:revision:", "answer-final-fold:p1:0:card-1:revision:"] }
+    ];
+
+    for (const query of queries) {
+      const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(...query.parameters) as Array<{ detail: string }>;
+      expect(plan.some(({ detail }) => detail.includes("outbound_replies_prompt_kind_state_updated"))).toBe(true);
+      expect(plan.some(({ detail }) => detail.startsWith("SCAN outbound_replies"))).toBe(false);
+    }
   });
 
   it("rolls back an Answer reservation when its outbox insert fails", () => {

@@ -374,6 +374,12 @@ models. They are not domain entities alongside `Binding` and `Prompt`, nor are
 they execution concepts like `Turn` or exact-turn control. Their renderers and reducers
 belong to the presentation and projection side of the application, while
 durable storage for them remains an infrastructure concern.
+Answer-page delivery convergence reads the newest content, pending finish,
+next-page continuation, and final-fold state through separate bounded SQLite
+queries keyed by Prompt, kind, state, and structural stream metadata. Modern
+rows treat `stream_page_index` as authoritative; only legacy rows where that
+column is null consult their JSON payload. This keeps retained outbox history
+out of the JavaScript read path without changing delivery or replay semantics.
 Primary Main and Answer Worker summaries are dedicated set-based SQLite read
 models. Main summary loading uses a constant number of queries and window-ranked
 task state rather than repeatedly loading each full Worker Main projection;

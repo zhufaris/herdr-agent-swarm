@@ -2,9 +2,9 @@
 
 ## Objective
 
-Replace the Primary Answer delivery-facts full-history scan with bounded,
-structurally filtered SQLite lookups while preserving every observable delivery
-fact and all persistence semantics.
+Replace the Primary Answer delivery-facts full-history materialization with
+targeted, structurally filtered SQLite lookups while preserving every observable
+delivery fact and all persistence semantics.
 
 ## Work packages
 

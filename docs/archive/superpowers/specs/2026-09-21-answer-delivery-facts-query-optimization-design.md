@@ -2,8 +2,8 @@
 
 ## Goal
 
-Make Primary Answer convergence cost independent of retained outbox history while
-preserving the existing delivery, retry, frozen-page, and no-replay behavior.
+Remove Primary Answer convergence's full-history materialization and JSON parsing
+while preserving the existing delivery, retry, frozen-page, and no-replay behavior.
 
 ## Current problem
 
@@ -35,9 +35,11 @@ Answer rows created before stream metadata existed may have null
 `stream_page_index` or `stream_element_id`; only this null-metadata subset receives
 a compatibility fallback that parses candidate payloads. The normal path never
 loads or parses unrelated pages or kinds. No schema migration or new index is
-required for this slice because existing Prompt/kind/state and Prompt/role/state
-indexes bound candidate selection. An index may be considered later only if query
-plans on production-sized data justify it.
+required for this slice because existing Prompt/kind/state indexes narrow
+candidate selection. Those indexes do not make the underlying SQLite work
+strictly independent of same-Prompt/kind/state history; an Answer-specific
+covering index may be considered later if production-sized plans or timings
+justify the migration.
 
 ## Compatibility requirements
 
