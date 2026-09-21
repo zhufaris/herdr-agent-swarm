@@ -90,15 +90,22 @@ side. Process-local events and wake-ups reduce latency; durable scans and fresh
 Herdr observations provide convergence when a hint is lost.
 
 Explicit bot mentions in the configured group have one additional bounded
-interpretation path. A deterministic parser handles common exact phrases first.
-Only unresolved phrases enter a durable FIFO owned by the service-managed
-`herdr-swarm-controller` Agent in a dedicated background tab. That Agent runs
+interpretation path behind the `NaturalLanguageCommandRuntime` deep module. Its
+small `start`, `stop`, and `interpret` interface hides deterministic selection,
+Controller lifecycle, durable job execution, and the private tool endpoint from
+Ingress and bridge lifecycle. A deterministic parser applies explicit ordered
+rule groups for unsupported controls, exact queries, ambiguity, project and
+Primary commands, Worker commands, current-session mutations, and task
+classification. Only unresolved phrases enter a durable FIFO owned by the
+service-managed `herdr-swarm-controller` Agent in a dedicated background tab. That Agent runs
 read-only, receives only three request-scoped MCP tools, and can submit a typed
 proposal but cannot execute Swarm, Herdr, terminal, or approval actions. Queries
 reuse the existing gateways; mutations first create a durable confirmation card.
 Possible Controller prompt delivery is never replayed after restart: the job is
 marked uncertain and only a late, generation-fenced structured result may settle
 it. The Controller pane is not a Primary or Worker and consumes no project slot.
+When Controller startup is unavailable, the module remains active in
+deterministic-only degraded mode.
 
 Delivery intent schema version 2 stores only the typed intent kind; the
 canonical materialized body remains in the row's immutable `payload` column.

@@ -10,6 +10,7 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     store: { activateWriteFence() { mark("fence:start"); }, deactivateWriteFence() { mark("fence:stop"); }, close() { mark("store:close"); } },
     lease: { acquire() { mark("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; }, start(callback) { mark("lease:start"); onLeaseLost = callback; }, release() { mark("lease:release"); } },
     primaryToolGateway: { async start() { mark("primary-tools:start"); }, async stop() { mark("primary-tools:stop"); } },
+    naturalLanguageCommands: { async start() { mark("natural-language:start"); }, async stop() { mark("natural-language:stop"); }, async interpret() { return { outcome: "unresolved" as const }; } },
     sqliteIntegrity: { start() { mark("integrity:start"); }, async run() { mark("integrity:run"); }, async stop() { mark("integrity:stop"); } },
     instanceRuntime: { async reconcile() { mark("instance-runtime:reconcile"); }, start() { mark("instance-runtime:start"); }, async stop() { mark("instance-runtime:stop"); } },
     instanceTurns: { prepareRecovery() { mark("instance-turns:prepare"); }, async reconcile() { mark("instance-turns:reconcile"); }, start() { mark("instance-turns:start"); }, async stop() { mark("instance-turns:stop"); } },
@@ -41,7 +42,7 @@ describe("ManagedBridgeRuntime", () => {
 
     expect(calls).toEqual([
       "lease:acquire", "fence:start", "lease:start",
-      "instance-turns:prepare", "primary-tools:start", "integrity:start", "integrity:run",
+      "instance-turns:prepare", "primary-tools:start", "natural-language:start", "integrity:start", "integrity:run",
       "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
       "coordinator:prepare-delivery",
       "publisher:start", "outbox-retention:start", "projector:start", "card-context:start",
@@ -106,7 +107,7 @@ describe("ManagedBridgeRuntime", () => {
     expect(duplicate).toBe(signalStop);
     await expect(signalStop).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
     expect(calls).toEqual([
-      "socket:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
+      "socket:stop", "natural-language:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
       "instance-turns:stop", "instance-runtime:stop", "instance-work:stop", "coordinator:stop",
       "integrity:stop", "queue-feedback:stop", "card-context:stop", "projector:stop",
       "outbox-retention:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
@@ -121,6 +122,7 @@ describe("ManagedBridgeRuntime", () => {
       ...base.runtimeDependencies,
       createHealthServer: async () => { calls.push("health:start"); throw new Error("bind failed"); },
       primaryToolGateway: { async start() { calls.push("primary-tools:start"); }, async stop() { calls.push("primary-tools:stop"); } },
+      naturalLanguageCommands: { async start() { calls.push("natural-language:start"); }, async stop() { calls.push("natural-language:stop"); }, async interpret() { return { outcome: "unresolved" as const }; } },
       sqliteIntegrity: { start() { calls.push("integrity:start"); }, async run() { calls.push("integrity:run"); }, async stop() { calls.push("integrity:stop"); } },
       instanceRuntime: { async reconcile() { calls.push("instance-runtime:reconcile"); }, start() { calls.push("instance-runtime:start"); }, async stop() { calls.push("instance-runtime:stop"); } },
       instanceTurns: { prepareRecovery() { calls.push("instance-turns:prepare"); }, async reconcile() { calls.push("instance-turns:reconcile"); }, start() { calls.push("instance-turns:start"); }, async stop() { calls.push("instance-turns:stop"); } },
@@ -132,9 +134,9 @@ describe("ManagedBridgeRuntime", () => {
 
     expect(calls).toEqual([
       "lease:acquire", "fence:start", "lease:start", "instance-turns:prepare",
-      "primary-tools:start", "integrity:start", "integrity:run",
+      "primary-tools:start", "natural-language:start", "integrity:start", "integrity:run",
       "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
-      "primary-tools:stop", "integrity:stop", "fence:stop", "lease:release", "store:close"
+      "natural-language:stop", "primary-tools:stop", "integrity:stop", "fence:stop", "lease:release", "store:close"
     ]);
   });
 

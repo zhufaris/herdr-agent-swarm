@@ -17,7 +17,7 @@ import type { createOutboundRuntime } from "./create-outbound-runtime.js";
 import type { createPrimaryRuntime } from "./create-primary-runtime.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 import { createCompatibilityGatewayIngressSink } from "../gateways/compatibility-ingress.js";
-import { DeterministicNaturalLanguageCommandInterpreter, type NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
+import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
 import { NaturalLanguageCommandWorkflow } from "../coordinator/natural-language-command-workflow.js";
 
 export type IngressRecoveryStores = Pick<SqliteStoreBundle, "inboundDispatch" | "promptAcceptance" | "inboundRouting" | "startupRecovery" | "startupViews" | "answerPages" | "mainCards" | "naturalLanguageCommandConfirmations">;
@@ -27,7 +27,7 @@ export function createIngressRecoveryRuntime(options: {
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>; primary: ReturnType<typeof createPrimaryRuntime>;
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; commandControl: ReturnType<typeof createCommandControlRuntime>;
   presentation: { application: ApplicationPresentation; primary: PrimaryPresentation };
-  controllerInterpreter?: NaturalLanguageCommandInterpreter;
+  naturalLanguageCommands: NaturalLanguageCommandInterpreter;
 }) {
   const { config, stores, logger, bus, scheduler, inboundWork, infrastructure, delivery, primary, bindingSession, commandControl, presentation } = options;
   const { herdr, gateway } = infrastructure; const { outbound, outboundWork } = delivery; const { promptRun } = primary;
@@ -39,9 +39,9 @@ export function createIngressRecoveryRuntime(options: {
     outbound, outboundWork, presentation: presentation.primary, logger
   });
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, inboundWork, logger });
-  const naturalLanguageCommands = new NaturalLanguageCommandWorkflow({ store: stores.naturalLanguageCommandConfirmations, outbound, outboundWork, presentation: presentation.application, swarmCommands, instanceInteractions });
-  const messageRouting = new InboundMessageRoutingWorkflow({ config, stores: { routing: stores.inboundRouting, promptAcceptance: stores.promptAcceptance }, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions, workerSessionThreads, naturalLanguage: { interpreter: options.controllerInterpreter ?? new DeterministicNaturalLanguageCommandInterpreter(config.projects), workflow: naturalLanguageCommands } });
-  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery: bindingSession.deliveryRecovery, instanceInteractions, naturalLanguageCommands, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
+  const naturalLanguageWorkflow = new NaturalLanguageCommandWorkflow({ store: stores.naturalLanguageCommandConfirmations, outbound, outboundWork, presentation: presentation.application, swarmCommands, instanceInteractions });
+  const messageRouting = new InboundMessageRoutingWorkflow({ config, stores: { routing: stores.inboundRouting, promptAcceptance: stores.promptAcceptance }, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, promptRun, provisioning, swarmCommands, instanceInteractions, workerSessionThreads, naturalLanguage: { interpreter: options.naturalLanguageCommands, workflow: naturalLanguageWorkflow } });
+  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery: bindingSession.deliveryRecovery, instanceInteractions, naturalLanguageCommands: naturalLanguageWorkflow, logger, enqueueInitialPrompt: (binding, selection) => messageRouting.enqueueInitialProjectPrompt(binding, selection) });
   const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundDispatcher.receiveMessage(message), handleAction: (action) => cardActionRouter.handle(action) });
   const startupRecovery = new StartupRecoveryWorkflow({ config, store: stores.startupRecovery, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
   const coordinator = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });

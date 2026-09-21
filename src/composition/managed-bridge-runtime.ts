@@ -10,6 +10,7 @@ import { RuntimeLifecycleLedger, type LifecycleCleanupEntry } from "../runtime/l
 import { BridgeRuntimeShutdown, closeHealthServer, type BridgeRuntimeShutdownOutcome } from "../runtime/shutdown.js";
 import { openSqliteLeaseBootstrap } from "../store/sqlite-lease-bootstrap.js";
 import { createBridgeRuntime } from "./create-bridge-runtime.js";
+import type { NaturalLanguageCommandRuntime } from "../runtime/natural-language-command-runtime.js";
 
 export type RuntimeStopReason = "SIGINT" | "SIGTERM" | "lease-lost" | "startup-failure";
 
@@ -25,8 +26,7 @@ export interface ManagedBridgeRuntimeDependencies {
   store: { activateWriteFence(ownerId: string, fencingToken: number): void; deactivateWriteFence(): void; close(): void };
   lease: { acquire(): void; writeFence(): { ownerId: string; fencingToken: number }; start(onLost: () => void | Promise<void>): void; release(): void };
   primaryToolGateway: { start(): Promise<void>; stop(): Promise<void> };
-  controllerToolGateway?: { start(): Promise<void>; stop(): Promise<void> } | null;
-  controllerManager?: { start(): Promise<void>; stop(): Promise<void> } | null;
+  naturalLanguageCommands: NaturalLanguageCommandRuntime;
   sqliteIntegrity: { start(): void; run(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   instanceRuntime: { reconcile(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   instanceTurns: { prepareRecovery(): void; reconcile(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
@@ -75,12 +75,12 @@ export async function createManagedBridgeRuntime(options: {
     stores = completedStores;
     if (!lease.renewNow()) throw new Error("Bridge database lease expired during schema migration");
     const runtime = createBridgeRuntime(config, completedStores, logger, { codex, claude, pi });
-    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, controllerToolGateway, controllerManager, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, bus, sessionOperations, reconciler, promptRun } = runtime;
+    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, naturalLanguageCommands, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, bus, sessionOperations, reconciler, promptRun } = runtime;
     return new ManagedBridgeRuntime({
       reconcileIntervalMs: config.reconcileIntervalMs,
       store: completedStores.lifecycle,
       lease,
-      primaryToolGateway, controllerToolGateway, controllerManager,
+      primaryToolGateway, naturalLanguageCommands,
       sqliteIntegrity,
       instanceRuntime,
       instanceTurns,
@@ -153,8 +153,8 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       d.instanceTurns.prepareRecovery();
       this.registerCleanup("primaryToolGateway", "ingress", "writer", () => d.primaryToolGateway.stop());
       await d.primaryToolGateway.start();
-      if (d.controllerToolGateway) { this.registerCleanup("controllerToolGateway", "ingress", "writer", () => d.controllerToolGateway!.stop()); await d.controllerToolGateway.start(); }
-      if (d.controllerManager) { this.registerCleanup("controllerManager", "ingress", "writer", () => d.controllerManager!.stop()); await d.controllerManager.start(); }
+      this.registerCleanup("naturalLanguageCommands", "ingress", "writer", () => d.naturalLanguageCommands.stop());
+      await d.naturalLanguageCommands.start();
       this.assertStarting();
       this.registerCleanup("integrityAuditor", "workers", "non-writer", (context) => d.sqliteIntegrity.stop(context));
       d.sqliteIntegrity.start();

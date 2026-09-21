@@ -15,9 +15,7 @@ import { createPrimaryRuntime } from "./create-primary-runtime.js";
 import { createApplicationRuntime } from "./create-application-runtime.js";
 import type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
 import { createFeishuGatewayApplicationPresentation, feishuGatewayPanePresentation } from "../gateways/feishu/presentation.js";
-import { ControllerToolGateway } from "../runtime/controller-tool-gateway.js";
-import { ControllerAgentManager } from "../runtime/controller-agent-manager.js";
-import { DeterministicNaturalLanguageCommandInterpreter, FallbackNaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
+import { createNaturalLanguageCommandRuntime } from "../runtime/natural-language-command-runtime.js";
 
 export type { AgentRuntimeAvailability } from "./create-infrastructure-runtime.js";
 export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBundle, logger: Logger, availability: AgentRuntimeAvailability) {
@@ -37,15 +35,21 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   channelPublisher.connectPromptScheduler(scheduler);
   const primary = createPrimaryRuntime({ config, stores, logger, herdr, traexControl, agentDrivers, bus, scheduler, outboundWork, transcriptReader, mainCards, presentation: applicationPresentation });
   const { externalTurns, promptRun } = primary;
-  const controllerToolGateway = config.controller.enabled ? new ControllerToolGateway(join(dirname(config.databasePath), "controller-tools.sock"), stores.controllerInterpretations, config.projects, logger, { findBindingByLarkScope: (topicId, rootMessageId) => stores.inboundRouting.findBindingByLarkScope(topicId, rootMessageId), listAgentInstances: (projectId) => stores.instance.listAgentInstances(projectId) }) : null;
   const defaultProject = config.projects.find((project) => project.id === config.defaultProjectId)!;
-  const controllerManager = config.controller.enabled ? new ControllerAgentManager({ store: stores.controllerInterpretations, herdr, project: defaultProject, traexExecutable: config.traex.executable, mcpCommand: process.execPath, mcpArgs: [fileURLToPath(new URL("../cli/controller-tools-mcp.js", import.meta.url)), "--socket", join(dirname(config.databasePath), "controller-tools.sock")], turnTimeoutMs: config.controller.timeoutMs, model: config.controller.model, logger }) : null;
-  const deterministicInterpreter = new DeterministicNaturalLanguageCommandInterpreter(config.projects);
-  const controllerInterpreter = controllerManager ? new FallbackNaturalLanguageCommandInterpreter(deterministicInterpreter, controllerManager) : deterministicInterpreter;
-  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter, swarmCommands } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation, controllerInterpreter });
+  const socketPath = join(dirname(config.databasePath), "controller-tools.sock");
+  const naturalLanguageCommands = createNaturalLanguageCommandRuntime({
+    projects: config.projects,
+    ...(config.controller.enabled ? { controller: {
+      store: stores.controllerInterpretations, herdr, project: defaultProject, socketPath, traexExecutable: config.traex.executable,
+      mcpCommand: process.execPath, mcpArgs: [fileURLToPath(new URL("../cli/controller-tools-mcp.js", import.meta.url)), "--socket", socketPath],
+      turnTimeoutMs: config.controller.timeoutMs, model: config.controller.model, logger,
+      context: { findBindingByLarkScope: (topicId, rootMessageId) => stores.inboundRouting.findBindingByLarkScope(topicId, rootMessageId), listAgentInstances: (projectId) => stores.instance.listAgentInstances(projectId) }
+    } } : {})
+  });
+  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter, swarmCommands } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation, naturalLanguageCommands });
   primaryToolGateway.setWorkerCreation(swarmCommands);
   events.connectHerdrHints(herdrEventRouter);
   events.seal();
   const instanceWorker = { snapshot() { const dispatch = instanceWork.snapshot(); const observe = instanceTurns.snapshot(); return { state: dispatch.state, activeDispatchWorkers: dispatch.activeDispatchWorkers, activeObservers: observe.activeObservers, queuedTurns: observe.queuedTurns, activeTurns: observe.activeTurns, uncertainTurns: observe.uncertainTurns, lastScanAt: observe.lastScanAt, lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt, lastFailure: dispatch.lastFailure ?? observe.lastFailure }; } };
-  return { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, controllerToolGateway, controllerManager, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, gateway: infrastructure.gateway, bus, sessionOperations, reconciler, promptRun };
+  return { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, naturalLanguageCommands, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, gateway: infrastructure.gateway, bus, sessionOperations, reconciler, promptRun };
 }
