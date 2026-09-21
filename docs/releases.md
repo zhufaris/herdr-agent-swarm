@@ -19,7 +19,7 @@ restarts a service.
    ```
 
 The `Release` workflow rejects a tag that does not exactly match the committed
-package version. It repeats the locked install, tests, typecheck, build,
+package version. It repeats the locked install, strict production build, tests,
 production dependency audit, and credential scan before constructing assets.
 
 ## Published assets
