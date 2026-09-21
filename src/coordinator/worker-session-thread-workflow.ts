@@ -1,4 +1,4 @@
-import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../adapters/lark-ingress.js";
+import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../domain/inbound.js";
 import type { GatewayEffectPort } from "../gateways/effect-client.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";

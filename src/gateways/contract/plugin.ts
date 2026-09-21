@@ -65,7 +65,7 @@ export type GatewayInboundEvent =
   | {
       schemaVersion: 1; kind: "message.received"; eventKey: string; occurredAt: string; address: GatewayConversationAddress;
       message: GatewayExternalRef<"message">; parentMessage: GatewayExternalRef<"message"> | null; actor: GatewayExternalRef<"actor">;
-      text: string; mentionsAgent: boolean; isRoot: boolean; hasUnsupportedContent: boolean;
+      text: string; mentionsAgent: boolean; isRoot: boolean; hasUnsupportedContent: boolean; inputTooLarge?: boolean;
     }
   | {
       schemaVersion: 1; kind: "interaction.invoked"; eventKey: string; occurredAt: string; address: GatewayConversationAddress;

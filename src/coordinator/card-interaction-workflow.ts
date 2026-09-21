@@ -7,6 +7,7 @@ import type { IncomingLarkCardAction, LarkCardActionResult } from "../domain/typ
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { SessionCardActionCommand } from "./card-action-command.js";
+import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../domain/prompt-input-policy.js";
 export type { SessionCardActionCommand } from "./card-action-command.js";
 
 interface Options {
@@ -83,7 +84,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (command.requestedBy !== action.operatorOpenId) return this.options.presentation.interactionToast("error", "只有发起此操作的用户可以提交。");
     const text = action.formValues?.continuation_text?.trim() ?? "";
     if (!text) return this.options.presentation.interactionToast("warning", "请说明从哪里继续，以及不要重复哪些内容。");
-    if (text.length > 12_000) return this.options.presentation.interactionToast("warning", "续做说明过长，请控制在 12000 个字符以内。");
+    if (isPromptInputTooLarge(text)) return this.options.presentation.interactionToast("warning", `续做说明过长，请控制在 ${MAX_PROMPT_INPUT_CHARS} 个字符和 32 KiB 以内。`);
     const binding = this.freshBinding(action, command, true);
     if (!binding) return this.options.presentation.interactionToast("warning", "会话状态已变化，未创建续做任务。");
     const id = randomUUID();

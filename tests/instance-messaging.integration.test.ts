@@ -38,6 +38,20 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
 }
 
 describe("instance messaging", () => {
+  it("rejects oversized task and steering input at the messaging boundary", async () => {
+    const { create, workflow, wake, turnControl } = setup();
+    const worker = create("worker");
+    const actor = { kind: "human" as const, userId: "u1" };
+    const text = "x".repeat(12_001);
+
+    await expect(workflow.submit({ idempotencyKey: "too-large", actor, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text } })).rejects.toThrow("Prompt input exceeds");
+    await expect(workflow.steer({ idempotencyKey: "steer-too-large", actor, targetInstanceId: worker.id, text })).rejects.toThrow("Prompt input exceeds");
+
+    expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
+    expect(wake).not.toHaveBeenCalled();
+    expect(turnControl.steer).not.toHaveBeenCalled();
+  });
+
   it("atomically accepts each Feishu Worker turn without creating per-turn cards", async () => {
     const { create, workflow, wake, wakeOutbound } = setup();
     const worker = create("worker");

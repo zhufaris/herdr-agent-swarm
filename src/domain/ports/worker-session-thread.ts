@@ -1,4 +1,4 @@
-import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../../adapters/lark-ingress.js";
+import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../inbound.js";
 import type { WorkerMainView } from "../worker-main-view.js";
 
 export interface WorkerThreadScope { chatId: string; topicId: string | null; rootMessageId: string | null }

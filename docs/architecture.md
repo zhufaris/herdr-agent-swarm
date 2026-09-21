@@ -778,6 +778,13 @@ change during the target decomposition without changing these steps.
    the WebSocket callback returns after the configured-chat and bridge-message
    checks plus a successful SQLite inbound insert; it does not wait for Herdr or
    command handling.
+   Serialized message content is rejected before JSON parsing above 64 KiB;
+   normalized prompt-bearing text is bounded to 12,000 characters and 32 KiB
+   of UTF-8.
+   Oversized messages are reduced to a compact durable rejection marker before
+   SQLite persistence, then terminally acknowledged only after the rejection card
+   is reserved. Worker and continuation forms apply the same policy before they
+   can create or steer work; input is rejected rather than silently truncated.
 2. A coalescing single-flight dispatcher claims persisted messages in FIFO order,
    marks each accepted only after business handling completes, and releases a
    failed item back to `received`. Failures retry automatically with bounded

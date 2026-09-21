@@ -7,6 +7,7 @@ import { createQueuedWorkerTurnCard, type WorkerTurnCardView } from "../domain/w
 import type { InstanceMessagingStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TurnControlWorkflow } from "./turn-control-workflow.js";
+import { assertPromptInputSize } from "../domain/prompt-input-policy.js";
 
 interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
 export interface InstanceConversationView { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] }
@@ -16,6 +17,7 @@ export class InstanceMessagingWorkflow {
   constructor(private readonly options: Options) {}
 
   async submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string }; source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null } }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView | null; inserted: boolean }> {
+    assertPromptInputSize(input.content.text);
     const target = this.authorize(input.actor, input.projectId, input.targetInstanceId);
     if (!target.runtimeRef || target.desiredState !== "running") throw new InstanceTargetError("instance_not_running");
     const id = this.options.idFactory();
@@ -32,6 +34,7 @@ export class InstanceMessagingWorkflow {
   }
 
   async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; text: string; resultTargetMessageId?: string }): Promise<SteerReceipt & { durableResult?: boolean }> {
+    assertPromptInputSize(input.text);
     const target = this.authorize(input.actor, undefined, input.targetInstanceId);
     if (input.targetTurnId) {
       const turn = this.options.store.getInstanceTurn(input.targetTurnId);

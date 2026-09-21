@@ -6,6 +6,7 @@ import { CoalescingDrain } from "../runtime/coalescing-drain.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { isPermanentInboundMessageRejection } from "../domain/permanent-inbound-message-rejection.js";
 import { inboundMessageScopeKey } from "../domain/inbound-message-scope.js";
+import { compactPromptInput } from "../domain/prompt-input-policy.js";
 
 const INBOUND_RETRY_INITIAL_MS = 250;
 const INBOUND_RETRY_MAX_MS = 30_000;
@@ -88,7 +89,9 @@ export class InboundMessageDispatcher implements InboundMessageDispatcherPort {
     if (message.chatId !== chatId) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "chat_not_allowed" }, "ignored Lark message"); return false; }
     if (!(this.options.allowedOpenIds ?? []).includes(message.actorOpenId)) { logger.warn({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, actorOpenId: message.actorOpenId, reason: "actor_not_allowed" }, "ignored unauthorized Lark message"); return false; }
     if (store.isBridgeMessage(message.messageId)) { logger.debug({ event: "lark-message-ignored", eventId: message.eventId, messageId: message.messageId, reason: "bridge_message" }, "ignored Lark message"); return false; }
-    if (!store.recordInboundMessage(message)) { logger.debug({ event: "lark-message-duplicate", eventId: message.eventId, messageId: message.messageId, outcome: "ignored" }, "ignored duplicate Lark message"); return false; }
+    const bounded = compactPromptInput(message.text);
+    const durableMessage = bounded.inputTooLarge ? { ...message, text: bounded.text, inputTooLarge: true } : message;
+    if (!store.recordInboundMessage(durableMessage)) { logger.debug({ event: "lark-message-duplicate", eventId: message.eventId, messageId: message.messageId, outcome: "ignored" }, "ignored duplicate Lark message"); return false; }
     return true;
   }
 

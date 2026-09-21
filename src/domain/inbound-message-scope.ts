@@ -1,4 +1,4 @@
-import type { IncomingLarkMessage } from "../adapters/lark-ingress.js";
+import type { IncomingLarkMessage } from "./inbound.js";
 
 /**
  * Durable inbound work is FIFO within the Lark conversation where it was sent.

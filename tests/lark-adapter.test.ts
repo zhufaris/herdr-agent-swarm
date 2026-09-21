@@ -315,6 +315,18 @@ describe("Lark message normalization", () => {
     expect(normalizeMessage(base, "someone-else")).toMatchObject({ mentionsBot: false, text: "@_user_1 fix this" });
   });
 
+  it("compacts oversized text before it reaches durable inbound storage", () => {
+    const oversized = { ...base, message: { ...base.message, content: JSON.stringify({ text: "x".repeat(12_001) }), mentions: [] } };
+
+    expect(normalizeMessage(oversized, "bot")).toMatchObject({ text: "", inputTooLarge: true });
+  });
+
+  it("rejects an oversized serialized message body without parsing it", () => {
+    const oversized = { ...base, message: { ...base.message, content: "{".repeat(65_537), mentions: [] } };
+
+    expect(normalizeMessage(oversized, "bot")).toMatchObject({ text: "", inputTooLarge: true });
+  });
+
   it("maps a thread reply to its root binding without requiring a bot mention", () => {
     const reply = {
       ...base,

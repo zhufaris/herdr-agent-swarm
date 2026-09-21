@@ -437,7 +437,7 @@ describe("application composition boundaries", () => {
     expect(types).toContain('from "./runtime-observation.js"');
     expect(types).toContain('from "./project-selection.js"');
     expect(types).toContain('from "../runtime/diagnostics.js"');
-    expect(types).toContain('from "../adapters/lark-ingress.js"');
+    expect(types).toContain('from "./inbound.js"');
     expect(types).not.toMatch(/export interface (?:Binding|PromptJob|OutboundReply|AnswerPage|ProjectSelection|HerdrPane|RuntimeObservation|IncomingLarkMessage|IncomingLarkCardAction|OutboxDispatcherDiagnostics|PromptWorkerDiagnostics)\b/);
   });
 

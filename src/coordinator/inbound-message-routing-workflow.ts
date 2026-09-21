@@ -25,6 +25,7 @@ import { executePromptAcceptanceEffects } from "./prompt-acceptance-effects.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
 import type { NaturalLanguageCommandWorkflow } from "./natural-language-command-workflow.js";
+import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../domain/prompt-input-policy.js";
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
@@ -51,6 +52,11 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   }
 
   async handle(message: IncomingLarkMessage): Promise<void> {
+    if (message.inputTooLarge || isPromptInputTooLarge(message.text)) {
+      const rejection = `消息过长，请控制在 ${MAX_PROMPT_INPUT_CHARS} 个字符和 32 KiB 以内。`;
+      await this.reject(message, rejection);
+      throw new PermanentInboundMessageRejection(rejection);
+    }
     if (this.options.workerSessionThreads) {
       try {
         const workerRoute = await this.options.workerSessionThreads.handleMessage(message);

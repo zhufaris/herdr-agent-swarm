@@ -9,6 +9,7 @@ import type { InstanceMessagingWorkflow } from "../instance-messaging-workflow.j
 import type { BindingCardContext, InstanceCardActionCommand } from "../card-action-command.js";
 import { InstanceConversationContext } from "./conversation-context.js";
 import { InstanceViewQuery } from "./instance-view-query.js";
+import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../../domain/prompt-input-policy.js";
 
 export interface WorkerCreationGateway { createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: { kind: "worker_create"; name: string; agentKind: AgentKind; model: string | null; start: boolean }): Promise<CreateWorkerResult> }
 type WorkerCardOnlyAction = { action: "worker_new_task_form" | "worker_new_task_submit" | "worker_task_instruction_form" | "worker_task_instruction_submit" | "worker_task_interrupt" };
@@ -109,6 +110,7 @@ export class WorkerLifecycleActions {
       if (command.requestedBy !== action.operatorOpenId) return forbidden();
       const text = action.formValues?.steer_text?.trim() ?? "";
       if (!text) return { toast: { type: "error", content: "Steer 内容不能为空。" } };
+      if (isPromptInputTooLarge(text)) return { toast: { type: "error", content: `Steer 内容过长，请控制在 ${MAX_PROMPT_INPUT_CHARS} 个字符和 32 KiB 以内。` } };
       try {
         const result = await this.options.messaging.steer({ idempotencyKey: `card:${action.messageId}:steer:${instance.generation}`, actor, targetInstanceId: instance.id, text, resultTargetMessageId: action.messageId });
         return { toast: { type: result.status === "delivered" ? "success" : "warning", content: `Steer: ${result.status}` } };

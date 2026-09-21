@@ -7,6 +7,7 @@ import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../../domain/
 import { safeLogError } from "../../runtime/safe-error.js";
 import type { InstanceMessagingWorkflow } from "../instance-messaging-workflow.js";
 import type { InstanceCardActionCommand } from "../card-action-command.js";
+import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../../domain/prompt-input-policy.js";
 
 type WorkerTaskCommand = Extract<InstanceCardActionCommand, { action: "worker_task_instruction_form" | "worker_task_instruction_submit" | "worker_task_interrupt" }>;
 type WorkerNewTaskCommand = Extract<InstanceCardActionCommand, { action: "worker_new_task_form" | "worker_new_task_submit" }>;
@@ -32,6 +33,7 @@ export class WorkerCardActions {
     if (command.intent !== intent) return warning("任务状态已变化，请重新打开 Task Card 后再操作。");
     const text = action.formValues?.instruction_text?.trim() ?? "";
     if (!text) return { toast: { type: "error", content: "任务要求不能为空。" } };
+    if (isPromptInputTooLarge(text)) return tooLong("任务要求");
     try {
       if (intent === "steer") {
         const result = await this.options.messaging.steer({ idempotencyKey: `card:${command.interactionId}:task-steer:${turn.id}`, actor: actor(action), targetInstanceId: instance.id, targetTurnId: turn.id, text, resultTargetMessageId: action.messageId });
@@ -50,6 +52,7 @@ export class WorkerCardActions {
     if (command.requestedBy !== action.operatorOpenId) return forbidden();
     const text = action.formValues?.task_text?.trim() ?? "";
     if (!text) return { toast: { type: "error", content: "新任务内容不能为空。" } };
+    if (isPromptInputTooLarge(text)) return tooLong("新任务内容");
     try {
       const submitted = await this.options.messaging.submit({ idempotencyKey: `card:${command.interactionId}:worker-new-task:${instance.id}`, actor: actor(action), projectId: instance.projectId, targetInstanceId: instance.id, content: { kind: "turn", text }, source: { messageId: action.messageId, rootMessageId: view.messageId! } });
       return { toast: { type: "success", content: `已向 ${instance.name} 发起新任务，当前排队位置 ${submitted.card?.queuePosition ?? 1}。` } };
@@ -93,3 +96,4 @@ function actor(action: IncomingLarkCardAction) { return { kind: "human" as const
 function forbidden(): LarkCardActionResult { return { toast: { type: "error", content: "只有发起此操作的用户可以提交。" } }; }
 function warning(content: string): LarkCardActionResult { return { toast: { type: "warning", content } }; }
 function failed(error: unknown): LarkCardActionResult { return { toast: { type: "error", content: safeLogError(error).message } }; }
+function tooLong(subject: string): LarkCardActionResult { return { toast: { type: "error", content: `${subject}过长，请控制在 ${MAX_PROMPT_INPUT_CHARS} 个字符和 32 KiB 以内。` } }; }

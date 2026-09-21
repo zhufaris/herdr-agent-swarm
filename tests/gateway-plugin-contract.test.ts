@@ -32,7 +32,7 @@ describe.each([["Feishu", feishuHarness], ["memory", memoryHarness]] as const)("
     const session = harness.plugin.create(harness.config, { logger: pino({ enabled: false }) });
     const accept = vi.fn(async () => undefined);
     await session.ingress.start({ accept });
-    const event: GatewayInboundEvent = { schemaVersion: 1, kind: "message.received", eventKey: "event-1", occurredAt: "2026-09-12T00:00:00.000Z", address: { gatewayId: session.gatewayId, conversation: { gatewayId: session.gatewayId, kind: "conversation", opaqueId: "chat" }, thread: null, rootMessage: { gatewayId: session.gatewayId, kind: "message", opaqueId: "root" } }, message: { gatewayId: session.gatewayId, kind: "message", opaqueId: "message" }, parentMessage: null, actor: { gatewayId: session.gatewayId, kind: "actor", opaqueId: "actor" }, text: "hello", mentionsAgent: true, isRoot: false, hasUnsupportedContent: false };
+    const event: GatewayInboundEvent = { schemaVersion: 1, kind: "message.received", eventKey: "event-1", occurredAt: "2026-09-12T00:00:00.000Z", address: { gatewayId: session.gatewayId, conversation: { gatewayId: session.gatewayId, kind: "conversation", opaqueId: "chat" }, thread: null, rootMessage: { gatewayId: session.gatewayId, kind: "message", opaqueId: "root" } }, message: { gatewayId: session.gatewayId, kind: "message", opaqueId: "message" }, parentMessage: null, actor: { gatewayId: session.gatewayId, kind: "actor", opaqueId: "actor" }, text: "hello", mentionsAgent: true, isRoot: false, hasUnsupportedContent: false, inputTooLarge: false };
 
     await harness.emit(event);
 

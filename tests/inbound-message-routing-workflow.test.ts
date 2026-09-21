@@ -7,6 +7,24 @@ import { InstanceTargetError } from "../src/domain/instance-target-error.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
+  it("durably rejects oversized input before routing or prompt acceptance", async () => {
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const workerSessionThreads = { handleMessage: vi.fn() };
+    const store = { findBindingByLarkScope: vi.fn(), isBindingThreadAlias: vi.fn(), acceptPromptWithEffects: vi.fn() };
+    const workflow = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } }, stores: inboundStores(store), outbound, workerSessionThreads,
+      presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "oversized-event", messageId: "oversized-message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "", mentionsBot: true, isRootMessage: false, inputTooLarge: true };
+
+    await expect(workflow.handle(message)).rejects.toEqual(expect.objectContaining({ name: PermanentInboundMessageRejection.name }));
+
+    expect(outbound.enqueueCard).toHaveBeenCalledWith("root", "rejected:oversized-message", expect.any(Object));
+    expect(workerSessionThreads.handleMessage).not.toHaveBeenCalled();
+    expect(store.findBindingByLarkScope).not.toHaveBeenCalled();
+    expect(store.acceptPromptWithEffects).not.toHaveBeenCalled();
+  });
+
   it("emits one accepted log with route and durable Prompt identity", async () => {
     const info = vi.fn();
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };

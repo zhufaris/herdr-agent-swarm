@@ -25,6 +25,15 @@ function harness(allowedOpenIds = ["ou_member"]) {
 }
 
 describe("InboundMessageDispatcher authorization", () => {
+  it("persists only a compact marker for oversized input", async () => {
+    const h = harness();
+    const oversized = { ...authorizationMessage, text: "x".repeat(12_001) };
+
+    await h.dispatcher.handleMessage(oversized);
+
+    expect(h.store.recordInboundMessage).toHaveBeenCalledWith({ ...oversized, text: "", inputTooLarge: true });
+  });
+
   it("does not persist a message from an unapproved group member", async () => {
     const h = harness(["ou_allowed"]);
 
@@ -45,6 +54,32 @@ describe("InboundMessageDispatcher authorization", () => {
 });
 
 describe("InboundMessageDispatcher durable FIFO", () => {
+  it("stores an oversized message as a compact terminal rejection", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    const inboundWork = new InProcessInboundWorkNotifier();
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const routing = new InboundMessageRoutingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } }, stores: { routing: store, promptAcceptance: store }, outbound,
+      presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    inboundWork.subscribe(({ payload }) => routing.handle(payload));
+    const dispatcher = new InboundMessageDispatcher({ chatId: "chat", allowedOpenIds: ["operator"], store, inboundWork, logger: pino({ enabled: false }) });
+
+    try {
+      dispatcher.start();
+      await dispatcher.handleMessage(message("oversized", "x".repeat(12_001)));
+
+      const row = store.database.prepare("SELECT payload_json, state FROM inbound_messages WHERE event_id = ?").get("oversized") as { payload_json: string; state: string };
+      expect(JSON.parse(row.payload_json)).toMatchObject({ text: "", inputTooLarge: true });
+      expect(row.state).toBe("accepted");
+      expect(outbound.enqueueCard).toHaveBeenCalledWith("oversized-message", "rejected:oversized-message", expect.any(Object));
+      expect(dispatcher.snapshot()).toMatchObject({ state: "idle", retryAttempt: 0 });
+    } finally {
+      await dispatcher.stop();
+      store.close();
+    }
+  });
+
   it("continues an independent inbound scope when an earlier scope is retryable", async () => {
     const store = new SqliteBindingStore(":memory:");
     const inboundWork = new InProcessInboundWorkNotifier();

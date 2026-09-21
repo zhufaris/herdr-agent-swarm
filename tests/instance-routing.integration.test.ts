@@ -321,6 +321,20 @@ describe("instance routing", () => {
     expect(messaging.submit).not.toHaveBeenCalled();
   });
 
+  it("rejects oversized Worker task forms before messaging", async () => {
+    const { create, workflow, messaging } = setup();
+    const worker = create("reviewer", "worker");
+    const task = taskCard(worker.id, "completed", "oversized-form");
+    const open = callbackValue(renderedTaskCard(task.turnId), "worker_task_instruction_form");
+    const form = await handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: open });
+    const submit = callbackValue(form, "worker_task_instruction_submit");
+
+    await expect(handleCardAction(workflow, { messageId: task.cardMessageId, chatId: "chat", operatorOpenId: "u1", value: submit, formValues: { instruction_text: "x".repeat(12_001) } })).resolves.toEqual({ toast: { type: "error", content: "任务要求过长，请控制在 12000 个字符和 32 KiB 以内。" } });
+
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(messaging.steer).not.toHaveBeenCalled();
+  });
+
   it("does not route an unmapped direct reply through the selected Worker", async () => {
     const { create, workflow, messaging } = setup();
     const worker = create("reviewer", "worker");

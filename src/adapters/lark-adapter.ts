@@ -7,8 +7,10 @@ import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult 
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { LruMap } from "../runtime/lru-map.js";
+import { compactPromptInput } from "../domain/prompt-input-policy.js";
 
 const CARD_ID_CACHE_CAPACITY = 512;
+const MAX_LARK_MESSAGE_CONTENT_BYTES = 64 * 1_024;
 
 interface LarkAdapterOptions {
   appId: string;
@@ -260,7 +262,8 @@ type MessageEvent = Parameters<NonNullable<lark.EventHandles["im.message.receive
 
 export function normalizeMessage(data: MessageEvent, botOpenId: string): IncomingLarkMessage | null {
   if (data.sender.sender_type !== "user") return null;
-  const normalized = normalizeMessageText(data.message.message_type, data.message.content);
+  const rawInputTooLarge = Buffer.byteLength(data.message.content, "utf8") > MAX_LARK_MESSAGE_CONTENT_BYTES;
+  const normalized = rawInputTooLarge ? { text: "", hasUnsupportedContent: false } : normalizeMessageText(data.message.message_type, data.message.content);
   if (normalized === null) return null;
   let { text } = normalized;
 
@@ -268,7 +271,9 @@ export function normalizeMessage(data: MessageEvent, botOpenId: string): Incomin
   const mentionsBot = botMentions.length > 0;
   for (const mention of botMentions) text = text.replaceAll(mention.key, "");
   const normalizedText = text.trim();
-  if (!normalizedText) return null;
+  if (!normalizedText && !rawInputTooLarge) return null;
+  const bounded = compactPromptInput(normalizedText);
+  const inputTooLarge = rawInputTooLarge || bounded.inputTooLarge;
 
   const messageId = data.message.message_id;
   const rootMessageId = data.message.root_id ?? null;
@@ -279,8 +284,8 @@ export function normalizeMessage(data: MessageEvent, botOpenId: string): Incomin
     topicId: data.message.thread_id ?? rootMessageId ?? messageId,
     rootMessageId: rootMessageId ?? messageId,
     actorOpenId: data.sender.sender_id?.open_id ?? "unknown",
-    text: normalizedText, mentionsBot, isRootMessage: rootMessageId === null,
-    hasUnsupportedContent: normalized.hasUnsupportedContent
+    text: inputTooLarge ? "" : bounded.text, mentionsBot, isRootMessage: rootMessageId === null,
+    hasUnsupportedContent: normalized.hasUnsupportedContent, inputTooLarge
   };
 }
 
