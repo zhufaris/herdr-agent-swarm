@@ -1407,6 +1407,60 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
+  it("fills a delivery batch with one lane-head query per work class", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const store = new SqliteBindingStore(":memory:");
+    const listLaneHeads = vi.spyOn(store, "listOutboundLaneHeads");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ async updateCard() { await gate; } }), pino({ enabled: false }));
+    for (let index = 0; index < 4; index += 1) {
+      store.enqueueOutboundReply({ id: `live-${index}`, idempotencyKey: `live-${index}`, rootMessageId: `card-${index}`, kind: "card_update", payload: "{}" });
+    }
+
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(publisher.snapshot().activeDeliveries).toBe(4));
+      expect(listLaneHeads).toHaveBeenCalledTimes(2);
+      expect(listLaneHeads.mock.calls.map(([limit, , , workClass]) => [limit, workClass])).toEqual([[4, "live"], [4, "history"]]);
+    } finally {
+      release();
+      await draining;
+      await publisher.stop();
+      store.close();
+    }
+  });
+
+  it("refills one free delivery slot with one preferred-class query", async () => {
+    const releases = new Map<string, () => void>();
+    const started: string[] = [];
+    const store = new SqliteBindingStore(":memory:");
+    const listLaneHeads = vi.spyOn(store, "listOutboundLaneHeads");
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({
+      async updateCard(messageId) {
+        started.push(messageId);
+        await new Promise<void>((resolve) => releases.set(messageId, resolve));
+      }
+    }), pino({ enabled: false }));
+    for (let index = 0; index < 4; index += 1) {
+      store.enqueueOutboundReply({ id: `active-${index}`, idempotencyKey: `active-${index}`, rootMessageId: `active-${index}`, kind: "card_update", payload: "{}" });
+    }
+
+    const draining = publisher.requestScan();
+    try {
+      await vi.waitFor(() => expect(started).toHaveLength(4));
+      store.enqueueOutboundReply({ id: "late-live", idempotencyKey: "late-live", rootMessageId: "late-live", kind: "card_update", payload: "{}" });
+      listLaneHeads.mockClear();
+      releases.get("active-0")!();
+      await vi.waitFor(() => expect(started).toContain("late-live"));
+      expect(listLaneHeads.mock.calls.map(([limit, , , workClass]) => [limit, workClass])).toEqual([[1, "live"]]);
+    } finally {
+      for (const releasePending of releases.values()) releasePending();
+      await draining;
+      await publisher.stop();
+      store.close();
+    }
+  });
+
   it("automatically wakes a backed-off delivery when it becomes due", async () => {
     vi.useFakeTimers();
     let attempt = 0;

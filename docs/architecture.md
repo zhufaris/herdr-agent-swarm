@@ -1361,8 +1361,11 @@ active-lane, wake-up, and concurrency-slot state. Its work-conserving pump fills
 a slot as soon as one delivery settles or a wake-up announces new durable work;
 it does not wait for a fixed batch to finish. When both classes are due, dispatch
 selection follows a fixed three-live-to-one-history cycle. If one class is empty,
-the other borrows every available slot. This bounds history starvation without
-cancelling work already in flight. The class is part of a claimed revision's
+the other borrows every available slot. Multi-slot fill passes read one bounded
+set of lane heads per work class and apply that cycle in memory, instead of
+repeating the same SQLite head query for every open slot. Single-slot refill
+keeps the cheaper preferred-class query with fallback. This bounds history
+starvation without cancelling work already in flight. The class is part of a claimed revision's
 immutable identity and is reconstructed from SQLite after restart.
 
 The pump stops claiming new rows during shutdown and waits for already started

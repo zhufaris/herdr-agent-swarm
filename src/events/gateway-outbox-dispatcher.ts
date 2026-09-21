@@ -176,15 +176,26 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
       );
       if (available > 0) {
         const dueAt = force ? null : new Date().toISOString();
+        const excluded = [...blockedTargets, ...active.keys()];
         const selected: OutboundReply[] = [];
-        for (let slot = 0; slot < available; slot += 1) {
-          const excluded = [...blockedTargets, ...active.keys(), ...selected.map((reply) => reply.laneKey)];
+        if (available === 1) {
           const preferred = dispatchOrdinal % 4 === 3 ? "history" : "live";
           const reply = this.store.listOutboundLaneHeads(1, dueAt, excluded, preferred)[0]
             ?? this.store.listOutboundLaneHeads(1, dueAt, excluded, preferred === "live" ? "history" : "live")[0];
-          if (!reply) break;
-          selected.push(reply);
-          dispatchOrdinal += 1;
+          if (reply) { selected.push(reply); dispatchOrdinal += 1; }
+        } else {
+          const candidates = {
+            live: this.store.listOutboundLaneHeads(available, dueAt, excluded, "live"),
+            history: this.store.listOutboundLaneHeads(available, dueAt, excluded, "history")
+          };
+          for (let slot = 0; slot < available; slot += 1) {
+            const preferred = dispatchOrdinal % 4 === 3 ? "history" : "live";
+            const fallback = preferred === "live" ? "history" : "live";
+            const reply = candidates[preferred].shift() ?? candidates[fallback].shift();
+            if (!reply) break;
+            selected.push(reply);
+            dispatchOrdinal += 1;
+          }
         }
         for (const reply of selected) {
           if (attemptedReplyIds.has(reply.id)) { blockedTargets.add(reply.laneKey); continue; }
