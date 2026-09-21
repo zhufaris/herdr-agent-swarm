@@ -226,3 +226,20 @@ lowercase `id`, display name, description, Herdr `workspaceId`, and an absolute
 `cwd`; no two projects may use the same workspace/cwd route. Validate edited
 files before service changes with `npm run config:validate -- <env-file>
 <projects-file>`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five canonical labels without aliases. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a multi-context domain layout rooted at
+`CONTEXT-MAP.md`. See `docs/agents/domain.md`.
