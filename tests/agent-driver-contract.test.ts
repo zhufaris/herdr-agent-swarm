@@ -6,7 +6,7 @@ import { CodexDriver } from "../src/runtime/agents/codex-driver.js";
 import { ClaudeCodeDriver } from "../src/runtime/agents/claude-code-driver.js";
 import { PiDriver } from "../src/runtime/agents/pi-driver.js";
 import type { HerdrPort } from "../src/domain/ports.js";
-import { detectAgentRuntimeAvailability, discoverExecutable } from "../src/runtime/agents/agent-availability.js";
+import { detectAgentRuntimeAvailabilities, discoverExecutable } from "../src/runtime/agents/agent-availability.js";
 
 const runtime = { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: null, generation: 1 };
 
@@ -154,12 +154,27 @@ describe("agent driver contract", () => {
     await expect(driver.steer(runtime, "change course")).resolves.toEqual({ status: "unsupported" });
   });
 
-  it("requires both an executable and Herdr agent-kind support for availability", async () => {
-    expect(discoverExecutable("codex", "/missing")).toBeNull();
-    const runner = { run: vi.fn(async () => ({ stdout: "[possible values: pi, claude, codex, traex]", stderr: "" })) };
-    await expect(detectAgentRuntimeAvailability({ runner, herdrExecutable: "herdr", agentExecutable: process.execPath, herdrKind: "codex", pathValue: "" })).resolves.toBe(true);
-    await expect(detectAgentRuntimeAvailability({ runner, herdrExecutable: "herdr", agentExecutable: "missing", herdrKind: "codex", pathValue: "/missing" })).resolves.toBe(false);
-    expect(runner.run).toHaveBeenCalledTimes(1);
+  it("detects all configured Agent runtimes with one Herdr capability probe", async () => {
+    const runner = { run: vi.fn(async () => ({ stdout: "[possible values: pi, codex, traex]\n", stderr: "" })) };
+
+    await expect(detectAgentRuntimeAvailabilities({
+      runner, herdrExecutable: "herdr",
+      agents: { codex: process.execPath, claude: process.execPath, pi: "missing" },
+      pathValue: ""
+    })).resolves.toEqual({ codex: true, claude: false, pi: false });
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(runner.run).toHaveBeenCalledWith("herdr", ["agent", "start", "--help"]);
+  });
+
+  it("skips the Herdr capability probe when no configured Agent executable exists", async () => {
+    const runner = { run: vi.fn() };
+
+    await expect(detectAgentRuntimeAvailabilities({
+      runner, herdrExecutable: "herdr",
+      agents: { codex: "missing-codex", claude: "missing-claude", pi: "missing-pi" },
+      pathValue: "/missing"
+    })).resolves.toEqual({ codex: false, claude: false, pi: false });
+    expect(runner.run).not.toHaveBeenCalled();
   });
 
   it.each(["codex", "claude-code", "pi"])("keeps a bounded non-secret lifecycle fixture for %s", (kind) => {

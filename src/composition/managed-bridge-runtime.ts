@@ -3,7 +3,7 @@ import type { BridgeConfig } from "../config.js";
 import { startHealthServer } from "../health/server.js";
 import { ExecFileCommandRunner } from "../infra/command-runner.js";
 import type { BuildIdentity } from "../runtime/build-identity.js";
-import { detectAgentRuntimeAvailability } from "../runtime/agents/agent-availability.js";
+import { detectAgentRuntimeAvailabilities } from "../runtime/agents/agent-availability.js";
 import { InstanceLeaseController } from "../runtime/instance-lease.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import { RuntimeLifecycleLedger, type LifecycleCleanupEntry } from "../runtime/lifecycle-ledger.js";
@@ -59,11 +59,10 @@ export async function createManagedBridgeRuntime(options: {
 }): Promise<ManagedBridgeRuntimePort> {
   const { config, buildIdentity, logger, onFatalStop } = options;
   const availabilityRunner = new ExecFileCommandRunner(config.commandTimeoutMs);
-  const [codex, claude, pi] = await Promise.all([
-    detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.codex, herdrKind: "codex" }),
-    detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.claudeCode, herdrKind: "claude" }),
-    detectAgentRuntimeAvailability({ runner: availabilityRunner, herdrExecutable: config.herdr.executable, agentExecutable: config.agents.pi, herdrKind: "pi" })
-  ]);
+  const { codex, claude, pi } = await detectAgentRuntimeAvailabilities({
+    runner: availabilityRunner, herdrExecutable: config.herdr.executable,
+    agents: { codex: config.agents.codex, claude: config.agents.claudeCode, pi: config.agents.pi }
+  });
   const bootstrap = openSqliteLeaseBootstrap(config.databasePath);
   const lease = new InstanceLeaseController(bootstrap.lease, config.instanceLease, logger);
   let stores: ReturnType<typeof bootstrap.complete> | null = null;
