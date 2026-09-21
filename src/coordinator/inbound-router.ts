@@ -12,6 +12,7 @@ import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 export interface InboundRouterPort {
   prepareDelivery(): Promise<void>;
+  recoverRuntime(): Promise<void>;
   start(): Promise<void>;
   stop(context?: ShutdownContext): Promise<void>;
   handleMessage(message: IncomingLarkMessage): Promise<void>;
@@ -28,6 +29,7 @@ export class InboundRouter implements InboundRouterPort {
   constructor(private readonly options: InboundRouterOptions) {}
 
   prepareDelivery(): Promise<void> { return this.options.startupRecovery.prepareDelivery(); }
+  recoverRuntime(): Promise<void> { return this.options.startupRecovery.recoverRuntime(); }
 
   async start(): Promise<void> {
     await this.options.startupRecovery.start();

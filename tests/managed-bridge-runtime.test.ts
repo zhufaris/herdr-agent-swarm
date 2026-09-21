@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { validateEnvironmentAndRegistry } from "../src/config.js";
 import { AGENT_SWARM_SERVICE_ID } from "../src/runtime/build-identity.js";
 import { createManagedBridgeRuntime, ManagedBridgeRuntime, type ManagedBridgeRuntimeDependencies } from "../src/composition/managed-bridge-runtime.js";
+import type { HerdrPort } from "../src/domain/ports.js";
+import { WorkspaceSnapshotCache } from "../src/runtime/workspace-snapshot-cache.js";
 import { openSqliteLeaseBootstrap } from "../src/store/sqlite-lease-bootstrap.js";
 
 function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
@@ -22,6 +24,7 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     sqliteIntegrity: { start() { mark("integrity:start"); }, async run() { mark("integrity:run"); }, async stop() { mark("integrity:stop"); } },
     instanceRuntime: { async reconcile() { mark("instance-runtime:reconcile"); }, start() { mark("instance-runtime:start"); }, async stop() { mark("instance-runtime:stop"); } },
     instanceTurns: { prepareRecovery() { mark("instance-turns:prepare"); }, async reconcile() { mark("instance-turns:reconcile"); }, start() { mark("instance-turns:start"); }, async stop() { mark("instance-turns:stop"); } },
+    herdrSnapshotCache: { async withStartupSnapshotReuse(operation) { mark("snapshot-reuse:start"); try { return await operation(); } finally { mark("snapshot-reuse:stop"); } } },
     instanceWork: { async stop() { mark("instance-work:stop"); } },
     createHealthServer: async () => { mark("health:start"); return { close(callback) { mark("health:stop"); callback(); } }; },
     channelPublisher: { start() { mark("publisher:start"); }, async stop() { mark("publisher:stop"); } },
@@ -30,7 +33,7 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     cardContextRebuilder: { start() { mark("card-context:start"); }, async stop() { mark("card-context:stop"); } },
     queueFeedbackProjector: { start() { mark("queue-feedback:start"); }, async converge() { mark("queue-feedback:converge"); }, async stop() { mark("queue-feedback:stop"); } },
     bus: {},
-    coordinator: { async prepareDelivery() { mark("coordinator:prepare-delivery"); }, async start() { mark("coordinator:start"); }, async stop() { mark("coordinator:stop"); } },
+    coordinator: { async prepareDelivery() { mark("coordinator:prepare-delivery"); }, async recoverRuntime() { mark("coordinator:recover-runtime"); }, async start() { mark("coordinator:start"); }, async stop() { mark("coordinator:stop"); } },
     paneRetention: { async scan() { mark("pane-retention:scan"); }, start() { mark("pane-retention:start"); }, async stop() { mark("pane-retention:stop"); } },
     externalTurns: { start() { mark("external-turns:start"); }, async stop() { mark("external-turns:stop"); } },
     herdrSocketSubscriber: { startEvents() { mark("socket:start"); }, async stop() { mark("socket:stop"); } },
@@ -129,13 +132,31 @@ describe("ManagedBridgeRuntime", () => {
     expect(calls).toEqual([
       "lease:acquire", "fence:start", "lease:start",
       "instance-turns:prepare", "primary-tools:start", "natural-language:start", "integrity:start", "integrity:run",
-      "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
-      "coordinator:prepare-delivery",
+      "coordinator:prepare-delivery", "snapshot-reuse:start", "instance-runtime:reconcile", "instance-turns:reconcile", "coordinator:recover-runtime", "snapshot-reuse:stop", "health:start",
       "publisher:start", "outbox-retention:start", "projector:start", "card-context:start",
       "queue-feedback:start", "queue-feedback:converge", "coordinator:start",
       "pane-retention:scan", "pane-retention:start", "external-turns:start",
       "instance-runtime:start", "instance-turns:start", "socket:start"
     ]);
+  });
+
+  it("shares one fresh Herdr snapshot across slow startup recovery and refreshes retention", async () => {
+    let now = 0;
+    const listAllPanes = vi.fn(async () => [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "Primary", agentState: "idle" as const, foregroundExecutables: ["traex"] }]);
+    const herdrSnapshotCache = new WorkspaceSnapshotCache({ listAllPanes } as unknown as HerdrPort, 2_000, undefined, () => now);
+    const observe = async () => { await herdrSnapshotCache.listAllPanes(); now += 3_000; };
+    const { runtime } = fixture({
+      herdrSnapshotCache,
+      instanceRuntime: { async reconcile() { await observe(); }, start() {}, async stop() {} },
+      instanceTurns: { prepareRecovery() {}, async reconcile() { await observe(); }, start() {}, async stop() {} },
+      coordinator: { async prepareDelivery() {}, async recoverRuntime() { await observe(); }, async start() {}, async stop() {} },
+      paneRetention: { async scan() { await herdrSnapshotCache.listAllPanes({ forceRefresh: true }); }, start() {}, async stop() {} }
+    });
+
+    await runtime.start();
+
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+    await runtime.stop("SIGTERM");
   });
 
   it("starts independent local ingress runtimes concurrently", async () => {
@@ -213,6 +234,7 @@ describe("ManagedBridgeRuntime", () => {
     const { runtime, calls } = fixture({
       coordinator: {
         async prepareDelivery() { calls.push("coordinator:prepare-delivery"); await repair; },
+        async recoverRuntime() { calls.push("coordinator:recover-runtime"); },
         async start() { calls.push("coordinator:start"); },
         async stop() { calls.push("coordinator:stop"); }
       }
@@ -359,7 +381,7 @@ describe("ManagedBridgeRuntime", () => {
 
   it("stops a coordinator whose asynchronous start partially fails", async () => {
     const stop = vi.fn(async () => {});
-    const { runtime } = fixture({ coordinator: { async prepareDelivery() {}, async start() { throw new Error("coordinator failed"); }, stop } });
+    const { runtime } = fixture({ coordinator: { async prepareDelivery() {}, async recoverRuntime() {}, async start() { throw new Error("coordinator failed"); }, stop } });
 
     await expect(runtime.start()).rejects.toThrow("coordinator failed");
 

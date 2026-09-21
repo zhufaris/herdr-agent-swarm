@@ -22,6 +22,7 @@ import { StartupViewRecovery } from "./startup-view-recovery.js";
 
 export interface StartupRecoveryWorkflowPort {
   prepareDelivery(): Promise<void>;
+  recoverRuntime(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
   snapshot(): StartupRecoveryDiagnostics;
@@ -37,6 +38,8 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
   private prepareDeliveryPromise: Promise<void> | null = null;
+  private runtimeRecoveryPromise: Promise<void> | null = null;
+  private runtimeRecoveryPrepared = false;
   private readonly startupViewRecovery: StartupViewRecovery;
   private diagnostics: StartupRecoveryDiagnostics = { state: "idle", startedAt: null, completedAt: null, stages: [] };
 
@@ -52,9 +55,30 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     return this.prepareDeliveryPromise;
   }
 
+  recoverRuntime(): Promise<void> {
+    this.runtimeRecoveryPromise ??= this.performRuntimeRecovery().then(
+      () => { this.runtimeRecoveryPrepared = true; },
+      (error: unknown) => { this.runtimeRecoveryPromise = null; throw error; }
+    );
+    return this.runtimeRecoveryPromise;
+  }
+
   async start(): Promise<void> {
-    const { config, herdr, gatewayIngress, gatewaySink, logger, promptRun, reconciler, paneControl, provisioning, retiredPaneCleanup, inboundWork, inboundDispatcher } = this.options;
+    const { config, gatewayIngress, gatewaySink, promptRun, reconciler, provisioning, retiredPaneCleanup, inboundWork, inboundDispatcher } = this.options;
     await this.prepareDelivery();
+    if (this.runtimeRecoveryPrepared) this.runtimeRecoveryPrepared = false;
+    else { this.runtimeRecoveryPromise = null; await this.recoverRuntime(); this.runtimeRecoveryPrepared = false; }
+    promptRun.start(); this.options.sessionOperations.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);
+    this.stopInboundSubscription = inboundWork.subscribe((event) => this.options.messageRouting.handle(event.payload));
+    await gatewayIngress.start(gatewaySink);
+    await this.runStage("provisioning", () => provisioning.recover());
+    await this.runStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
+    inboundDispatcher.start(); await inboundDispatcher.drain();
+    this.diagnostics = { ...this.diagnostics, state: this.diagnostics.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
+  }
+
+  private async performRuntimeRecovery(): Promise<void> {
+    const { config, herdr, logger, reconciler, paneControl, retiredPaneCleanup, inboundDispatcher } = this.options;
     this.startupViewRecovery.start();
     const recoveredInbound = inboundDispatcher.recoverProcessingMessages();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
@@ -74,13 +98,6 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     await this.runStage("swarm-commands", () => this.options.swarmCommands.recover());
     await this.runStage("retired-pane-cleanup", () => retiredPaneCleanup.recover());
     await this.runStage("runtime-reconciliation", () => reconciler.reconcile());
-    promptRun.start(); this.options.sessionOperations.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);
-    this.stopInboundSubscription = inboundWork.subscribe((event) => this.options.messageRouting.handle(event.payload));
-    await gatewayIngress.start(gatewaySink);
-    await this.runStage("provisioning", () => provisioning.recover());
-    await this.runStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
-    inboundDispatcher.start(); await inboundDispatcher.drain();
-    this.diagnostics = { ...this.diagnostics, state: this.diagnostics.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
   }
 
   async stop(): Promise<void> {

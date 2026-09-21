@@ -255,6 +255,13 @@ Within one Worker instance reconciliation execution, projects that share a Herdr
 workspace also share one pane snapshot and pane-ID map. Project iteration and
 project-scoped instance queries remain independent; the snapshot is not retained
 across executions, so periodic and retry passes still obtain fresh Herdr state.
+During the ordered startup recovery window, the shared Herdr snapshot cache may
+retain an observation beyond its normal TTL so instance recovery, turn recovery,
+and binding baselines do not repeat the same CLI snapshot. Pane mutations and
+explicit forced reads still invalidate or refresh that observation. Because the
+socket subscriber starts only after recovery, startup reuse has its own bounded
+maximum age; socket topology hints resume normal invalidation afterward. Retention
+scanning remains outside the window and always forces a fresh snapshot.
 
 ### Recovery converges from canonical state
 
@@ -1544,9 +1551,10 @@ unit's `WorkingDirectory`. This protects a still-running old process when multip
 candidates are installed before the normal safety-gated restart.
 
 Inside the process, `ManagedBridgeRuntime` starts components in explicit phases:
-ownership and fencing; recovery preparation and integrity checks; the health
-surface; durable delivery and projection; ingress and startup convergence; then
-periodic and external observation. The lease heartbeat begins before the long
+ownership and fencing; recovery preparation and integrity checks; instance, turn,
+and binding runtime recovery; the health surface; durable delivery and projection;
+external ingress and remaining startup convergence; then periodic and external
+observation. The lease heartbeat begins before the long
 integrity audit and initial reconciliations. Each possibly started component is
 recorded before an asynchronous start that may partially succeed, so a startup
 failure reuses the same shutdown policy instead of a separate cleanup path.

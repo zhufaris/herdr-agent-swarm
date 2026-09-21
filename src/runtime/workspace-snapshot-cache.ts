@@ -23,17 +23,19 @@ export class WorkspaceSnapshotCache implements HerdrPort {
   private misses = 0;
   private coalescedRefreshes = 0;
   private refreshFailures = 0;
+  private startupReuseScopes = 0;
 
   constructor(
     private readonly delegate: HerdrPort,
     private readonly ttlMs = 2_000,
     private readonly logger?: Pick<Logger, "debug" | "warn">,
-    private readonly clock: () => number = Date.now
+    private readonly clock: () => number = Date.now,
+    private readonly startupReuseMaxAgeMs = 10_000
   ) {}
 
   async listPanes(workspaceId: string, options: { forceRefresh?: boolean } = {}): Promise<HerdrPane[]> {
     const snapshot = this.snapshots.get(workspaceId);
-    if (!options.forceRefresh && snapshot && this.clock() - snapshot.capturedAt < this.ttlMs) {
+    if (!options.forceRefresh && snapshot && this.isReusable(snapshot)) {
       this.hits += 1;
       return clonePanes(snapshot.panes);
     }
@@ -55,7 +57,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     if (!this.delegate.listAllPanes) {
       throw new Error("Herdr adapter does not support an all-workspace snapshot");
     }
-    if (!options.forceRefresh && this.allSnapshot && this.clock() - this.allSnapshot.capturedAt < this.ttlMs) {
+    if (!options.forceRefresh && this.allSnapshot && this.isReusable(this.allSnapshot)) {
       this.hits += 1;
       return clonePanes(this.allSnapshot.panes);
     }
@@ -118,6 +120,18 @@ export class WorkspaceSnapshotCache implements HerdrPort {
       coalescedRefreshes: this.coalescedRefreshes, refreshFailures: this.refreshFailures,
       oldestSnapshotAgeMs: ages.length > 0 ? Math.max(...ages) : null
     };
+  }
+
+  async withStartupSnapshotReuse<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.startupReuseScopes === 0) this.invalidateAll();
+    this.startupReuseScopes += 1;
+    try { return await operation(); }
+    finally { this.startupReuseScopes -= 1; }
+  }
+
+  private isReusable(snapshot: Snapshot): boolean {
+    const maximumAge = this.startupReuseScopes > 0 ? this.startupReuseMaxAgeMs : this.ttlMs;
+    return this.clock() - snapshot.capturedAt < maximumAge;
   }
 
   async assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> {

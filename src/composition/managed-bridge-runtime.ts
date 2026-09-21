@@ -30,6 +30,7 @@ export interface ManagedBridgeRuntimeDependencies {
   sqliteIntegrity: { start(): void; run(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   instanceRuntime: { reconcile(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   instanceTurns: { prepareRecovery(): void; reconcile(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
+  herdrSnapshotCache: { withStartupSnapshotReuse<T>(operation: () => Promise<T>): Promise<T> };
   instanceWork: { stop(context?: ShutdownContext): Promise<void> };
   createHealthServer(): Promise<HealthServer>;
   channelPublisher: { start(): void; stop(context?: ShutdownContext): Promise<void> };
@@ -38,7 +39,7 @@ export interface ManagedBridgeRuntimeDependencies {
   cardContextRebuilder: { start(intervalMs: number): void; stop(context?: ShutdownContext): Promise<void> };
   queueFeedbackProjector: { start(bus: unknown): void; converge(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   bus: unknown;
-  coordinator: { prepareDelivery(): Promise<void>; start(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
+  coordinator: { prepareDelivery(): Promise<void>; recoverRuntime(): Promise<void>; start(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   paneRetention: { scan(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   externalTurns: { start(): void; stop(): Promise<void> };
   herdrSocketSubscriber?: { startEvents(): void; stop(): Promise<void> };
@@ -90,6 +91,7 @@ export async function createManagedBridgeRuntime(options: {
       sqliteIntegrity,
       instanceRuntime,
       instanceTurns,
+      herdrSnapshotCache: herdr,
       instanceWork,
       createHealthServer: () => startHealthServer({
         ...config.http, store: completedStores.health, herdr, gateway: runtime.gateway, projects: config.projects, lease,
@@ -172,16 +174,20 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       d.sqliteIntegrity.start();
       await d.sqliteIntegrity.run();
       this.assertStarting();
-      await d.instanceRuntime.reconcile();
-      this.assertStarting();
-      await d.instanceTurns.reconcile();
-      this.assertStarting();
-      const healthServer = await d.createHealthServer();
-      this.registerCleanup("healthServer", "health", "non-writer", () => closeHealthServer(healthServer));
-      this.assertStarting();
       this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
       this.registerCleanup("instanceWork", "workers", "writer", (context) => d.instanceWork.stop(context));
       await d.coordinator.prepareDelivery();
+      this.assertStarting();
+      await d.herdrSnapshotCache.withStartupSnapshotReuse(async () => {
+        await d.instanceRuntime.reconcile();
+        this.assertStarting();
+        await d.instanceTurns.reconcile();
+        this.assertStarting();
+        await d.coordinator.recoverRuntime();
+      });
+      this.assertStarting();
+      const healthServer = await d.createHealthServer();
+      this.registerCleanup("healthServer", "health", "non-writer", () => closeHealthServer(healthServer));
       this.assertStarting();
       this.registerCleanup("publisher", "projections", "writer", (context) => d.channelPublisher.stop(context));
       d.channelPublisher.start();

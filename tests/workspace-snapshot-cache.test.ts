@@ -18,6 +18,52 @@ describe("workspace snapshot cache", () => {
     expect(cache.status()).toMatchObject({ hits: 1, misses: 3, entries: 1, refreshFailures: 0 });
   });
 
+  it("reuses a snapshot beyond its TTL inside an explicit startup scope", async () => {
+    let now = 0;
+    let version = 0;
+    const listPanes = vi.fn(async (workspaceId: string) => [pane(workspaceId, ++version)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listPanes }), 2_000, undefined, () => now);
+
+    expect((await cache.listPanes("w1"))[0]?.label).toBe("v1");
+    await cache.withStartupSnapshotReuse(async () => {
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v2");
+      now = 9_999;
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v2");
+    });
+    expect((await cache.listPanes("w1"))[0]?.label).toBe("v3");
+    expect(listPanes).toHaveBeenCalledTimes(3);
+  });
+
+  it("honors mutation invalidation and forced reads inside an extended reuse scope", async () => {
+    let version = 0;
+    const listPanes = vi.fn(async (workspaceId: string) => [pane(workspaceId, ++version)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listPanes }), 2_000);
+
+    await cache.withStartupSnapshotReuse(async () => {
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v1");
+      await cache.renamePane("w1:p1", "renamed");
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v2");
+      expect((await cache.listPanes("w1", { forceRefresh: true }))[0]?.label).toBe("v3");
+    });
+    expect(listPanes).toHaveBeenCalledTimes(3);
+  });
+
+  it("bounds startup reuse when topology events are not subscribed yet", async () => {
+    let now = 0;
+    let version = 0;
+    const listPanes = vi.fn(async (workspaceId: string) => [pane(workspaceId, ++version)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listPanes }), 60_000, undefined, () => now);
+
+    await cache.withStartupSnapshotReuse(async () => {
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v1");
+      now = 9_999;
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v1");
+      now = 10_000;
+      expect((await cache.listPanes("w1"))[0]?.label).toBe("v2");
+    });
+    expect(listPanes).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces concurrent refreshes and returns defensive copies", async () => {
     let release!: (value: ReturnType<typeof pane>[]) => void;
     const listPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { release = resolve; }));
