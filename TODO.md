@@ -4,6 +4,7 @@
 
 - [x] Bump `herdr-agent-swarm` to `0.3.0` and synchronize package lock and generated build metadata.
 - [x] Bump `herdr-agent-swarm` to `0.4.0` and synchronize package lock, MCP server metadata, release docs, and generated build metadata.
+- [ ] Bump `herdr-agent-swarm` to `0.5.0` and synchronize package lock, MCP server metadata, release docs, and generated build metadata.
 
 ## Architecture
 
