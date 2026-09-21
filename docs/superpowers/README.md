@@ -1,7 +1,9 @@
 # Active Engineering Records
 
 This directory contains only engineering work that is still being designed or
-implemented. There are currently no active records.
+implemented. Current records:
+
+- [Natural-language command runtime deep-module design](specs/2026-09-21-natural-language-command-runtime-deep-module-design.md)
 
 The service's current maintainer, user, and operator documentation starts at the
 [maintainer documentation map](../README.md). Completed or superseded designs,
