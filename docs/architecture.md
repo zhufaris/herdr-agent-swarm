@@ -228,6 +228,10 @@ outbox provides idempotency, strict ordering within a lane, compare-and-swap
 delivery checkpoints, bounded retry, dead-letter handling, and recovery. A Lark
 retry can repeat only the delivery effect, never the corresponding TraeX prompt.
 Frozen Answer pages are immutable; continuation proceeds on a new card.
+Successful inbound routing emits one structured completion record containing
+the route decision and disposition; Primary prompt acceptance also includes the
+durable `promptId`, preserving direct `eventId` to Prompt/turn correlation
+without duplicating steady-state info logs.
 
 ### Events have four different reliability contracts
 

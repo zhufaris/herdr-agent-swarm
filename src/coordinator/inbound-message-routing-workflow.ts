@@ -28,7 +28,7 @@ import type { NaturalLanguageCommandWorkflow } from "./natural-language-command-
 
 export interface InboundMessageRoutingWorkflowPort {
   handle(message: IncomingLarkMessage): Promise<void>;
-  enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void>;
+  enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<{ promptId: string } | null>;
 }
 
 interface Options {
@@ -45,9 +45,9 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     this.projectRoutes = new ProjectCatalog(options.config.projects);
   }
 
-  async enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<void> {
-    if (!selection.initialPromptText) return;
-    await this.enqueue(binding, { eventId: `project-selection:${selection.id}`, messageId: selection.commandMessageId, parentMessageId: null, chatId: selection.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: selection.actorOpenId, text: selection.initialPromptText, mentionsBot: true, isRootMessage: false });
+  async enqueueInitialProjectPrompt(binding: Binding, selection: ProjectSelection): Promise<{ promptId: string } | null> {
+    if (!selection.initialPromptText) return null;
+    return this.enqueue(binding, { eventId: `project-selection:${selection.id}`, messageId: selection.commandMessageId, parentMessageId: null, chatId: selection.chatId, topicId: binding.topicId, rootMessageId: binding.rootMessageId, actorOpenId: selection.actorOpenId, text: selection.initialPromptText, mentionsBot: true, isRootMessage: false });
   }
 
   async handle(message: IncomingLarkMessage): Promise<void> {
@@ -55,8 +55,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       try {
         const workerRoute = await this.options.workerSessionThreads.handleMessage(message);
         if (workerRoute.handled) {
-          this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, decision: "worker-session-thread", outcome: "accepted" }, "routed persisted Lark message");
-          this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
+          this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, decision: "worker-session-thread", disposition: workerRoute.disposition, outcome: "accepted" }, "completed durable inbound handling");
           return;
         }
       } catch (error) {
@@ -74,6 +73,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
     const command = parseCommand(message.text); const binding = this.options.stores.routing.findBindingByLarkScope(message.topicId, message.rootMessageId); const alias = this.options.stores.routing.isBindingThreadAlias(message.topicId, message.rootMessageId);
     let decision = "unresolved";
     let disposition: "prompt_queued" | "command_completed" | "user_feedback" | "rejected" = "command_completed";
+    let promptId: string | undefined;
     try {
       if (instanceCommand && alias) { decision = `alias-instance-command-rejected:${instanceCommand.kind}`; await this.reject(message, "这个入口话题固定连接当前 Pane 的 Primary Agent；请回到原始 Main Card 话题管理项目或 Worker。"); disposition = "rejected"; }
       else if (instanceCommand) { decision = `instance-command:${instanceCommand.kind}`; if (this.options.instanceInteractions) await this.options.instanceInteractions.handleCommand(message, instanceCommand); }
@@ -83,18 +83,18 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
         const interpreted = await this.options.naturalLanguage.interpreter.interpret(message.text, message);
         if (interpreted.outcome === "unresolved") { decision = "natural-language:unresolved"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `natural-language-unavailable:${message.messageId}`, this.options.presentation.requestRejected("暂时无法理解这条控制请求，请使用更明确的表达或 /swarm help。")); disposition = "user_feedback"; }
         else if (interpreted.outcome !== "task") { decision = `natural-language:${interpreted.outcome === "command" ? `${interpreted.family}:${interpreted.command.kind}` : interpreted.outcome}`; await this.options.naturalLanguage.workflow.handle(message, interpreted); }
-        else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
+        else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; const accepted = await this.enqueue(binding, message); disposition = accepted ? "prompt_queued" : "rejected"; promptId = accepted?.promptId; }
         else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
-        else if (message.isRootMessage && this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) { decision = "create_binding"; const provisioned = await this.options.provisioning.provisionDefaultProject(message, deriveTopicTitle(message.text), message.text); if (provisioned) { await this.enqueueInitialProjectPrompt(provisioned.binding, provisioned.selection); disposition = "prompt_queued"; } else disposition = "rejected"; }
+        else if (message.isRootMessage && this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) { decision = "create_binding"; const provisioned = await this.options.provisioning.provisionDefaultProject(message, deriveTopicTitle(message.text), message.text); if (provisioned) { const accepted = await this.enqueueInitialProjectPrompt(provisioned.binding, provisioned.selection); promptId = accepted?.promptId; disposition = accepted ? "prompt_queued" : "rejected"; } else disposition = "rejected"; }
         else if (message.isRootMessage) { decision = "create_binding_rejected"; await this.reject(message, "你没有 Agent 管理权限。"); disposition = "rejected"; }
         else { decision = binding?.state === "archived" ? "archived_feedback" : "unbound_feedback"; await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `disconnected-topic:${message.messageId}`, this.options.presentation.disconnectedTopic(binding?.state === "archived" ? "archived" : "unbound")); disposition = "user_feedback"; }
       }
-      else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; disposition = await this.enqueue(binding, message) ? "prompt_queued" : "rejected"; }
+      else if (binding?.state === "active" && binding.lifecycle === "active") { decision = "prompt"; const accepted = await this.enqueue(binding, message); disposition = accepted ? "prompt_queued" : "rejected"; promptId = accepted?.promptId; }
       else if (this.options.instanceInteractions && await this.options.instanceInteractions.handleOrdinaryMessage(message)) { decision = "instance-prompt"; disposition = "prompt_queued"; }
       else if (message.isRootMessage && message.mentionsBot && this.options.config.lark.adminOpenIds.includes(message.actorOpenId)) {
         decision = "create_binding";
         const provisioned = await this.options.provisioning.provisionDefaultProject(message, deriveTopicTitle(message.text), message.text);
-        if (provisioned) { await this.enqueueInitialProjectPrompt(provisioned.binding, provisioned.selection); disposition = "prompt_queued"; }
+        if (provisioned) { const accepted = await this.enqueueInitialProjectPrompt(provisioned.binding, provisioned.selection); promptId = accepted?.promptId; disposition = accepted ? "prompt_queued" : "rejected"; }
         else disposition = "rejected";
       }
       else if (message.isRootMessage && message.mentionsBot) { decision = "create_binding_rejected"; await this.reject(message, "你没有 Agent 管理权限。"); disposition = "rejected"; }
@@ -109,11 +109,10 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       this.options.logger.error({ event: "lark-message-handling-failed", err: safeLogError(error), eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, outcome: "failed" }, "Lark message handling failed");
       throw error;
     }
-    this.options.logger.info({ event: "lark-message-routed", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, decision, outcome: "accepted" }, "routed persisted Lark message");
-    this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, disposition, outcome: "accepted" }, "completed durable inbound handling");
+    this.options.logger.info({ event: "lark-message-accepted", eventId: message.eventId, messageId: message.messageId, bindingId: binding?.id, workspaceId: binding?.workspaceId, paneId: binding?.paneId, promptId, decision, disposition, outcome: "accepted" }, "completed durable inbound handling");
   }
 
-  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<boolean> {
+  private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<{ promptId: string } | null> {
     const answerRootMessageId = this.options.stores.routing.isBindingThreadAlias(message.topicId, message.rootMessageId) ? message.rootMessageId : binding.rootMessageId;
     if (!answerRootMessageId) throw new Error("This binding has no Lark root message");
     const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
@@ -123,13 +122,13 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
       const view = createQueuedRunCard({ ...common, conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.stores.promptAcceptance.countPendingPrompts(binding.id) + 1 });
       receipt = this.options.stores.promptAcceptance.acceptPromptWithEffects({ prompt: { id: promptId, bindingId: binding.id, larkMessageId: message.messageId, actorOpenId: message.actorOpenId, body }, view, rootMessageId: answerRootMessageId, answerCard: this.options.presentation.answerCard(view), maxQueueDepth: this.options.config.maxQueueDepth, expectedBindingGeneration: binding.generation });
     } catch (error) {
-      if (error instanceof Error && error.message === "This topic's prompt queue is full") { await this.reject(message, error.message); return false; }
+      if (error instanceof Error && error.message === "This topic's prompt queue is full") { await this.reject(message, error.message); return null; }
       throw error;
     }
-    if (!receipt.result.inserted) return true;
+    if (!receipt.result.inserted) return { promptId: receipt.result.prompt.id };
     await executePromptAcceptanceEffects(receipt, this.options);
     this.options.stores.promptAcceptance.audit({ actorOpenId: message.actorOpenId, action: "prompt.queue", target: binding.id, outcome: "success" });
-    return true;
+    return { promptId: receipt.result.prompt.id };
   }
 
   private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }
