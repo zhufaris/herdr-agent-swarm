@@ -3,8 +3,6 @@
 This directory contains only engineering work that is still being designed or
 implemented. Current records:
 
-- [SQLite outbox generation and retention design](specs/2026-09-22-sqlite-outbox-generation-retention-design.md)
-- [SQLite outbox generation and retention plan](plans/2026-09-22-sqlite-outbox-generation-retention-plan.md)
 - [Natural-language command runtime deep-module design](specs/2026-09-21-natural-language-command-runtime-deep-module-design.md)
 - [Natural-language command runtime deep-module plan](plans/2026-09-21-natural-language-command-runtime-deep-module-plan.md)
 

@@ -379,7 +379,7 @@ export class SqliteProjectionStore {
         )
     `).run(key);
     const id = randomUUID();
-    this.dependencies.enqueueOutboundReply({ id, idempotencyKey: revision === 1 ? key : `${key}:revision:${revision}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", ...outboundWorkClass(workClass), rootMessageId: messageId, kind: "card_update", payload, projectionKey: key, snapshotRevision: revision });
+    this.dependencies.enqueueOutboundReply({ id, idempotencyKey: revision === 1 ? key : `${key}:revision:${revision}`, bindingId: view.bindingId, promptId: view.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardRole: "answer", ...outboundWorkClass(workClass), rootMessageId: messageId, kind: "card_update", payload, projectionKey: key, snapshotRevision: revision });
     return "reserved";
   }
 

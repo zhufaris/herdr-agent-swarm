@@ -15,7 +15,7 @@ type SnapshotIdentity =
   | { projectionKey?: never; snapshotRevision?: never };
 
 export type EnqueueOutboundReplyInput = Parameters<OutboxStore["enqueueOutboundReply"]>[0] &
-  { laneKeyOverride?: string } & SnapshotIdentity;
+  { laneKeyOverride?: string; bindingGeneration?: number | null } & SnapshotIdentity;
 
 export class SqliteOutboxQueueStore {
   constructor(
@@ -30,7 +30,9 @@ export class SqliteOutboxQueueStore {
 
   enqueue(input: EnqueueOutboundReplyInput): OutboundReply {
     const timestamp = now();
-    const bindingGeneration = input.promptId ? this.dependencies.loadRunCard(input.promptId)?.bindingGeneration ?? null : input.bindingId ? this.dependencies.getBinding(input.bindingId)?.generation ?? null : null;
+    const bindingGeneration = input.bindingGeneration ?? (input.promptId
+      ? (this.context.database.prepare("SELECT binding_generation FROM run_cards WHERE prompt_id = ?").get(input.promptId) as { binding_generation: number } | undefined)?.binding_generation ?? null
+      : input.bindingId ? this.dependencies.getBinding(input.bindingId)?.generation ?? null : null);
     const logicalLaneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
     const streamMetadata = outboundStreamMetadata(input.kind, input.payload);
     const encoded = encodeDeliveryIntent(input.kind, input.payload);

@@ -410,6 +410,12 @@ in-flight revision therefore stays ahead of the one newest desired revision.
 Existing foreign-key cascades remove coverage and candidate evidence belonging
 only to a deleted untouched row, while outbox delete/insert triggers recompute
 the durable lane head in the same transaction.
+Outbound lane construction accepts a SQLite-internal binding-generation hint
+from projection paths that already hold an authoritative Run Card. Other prompt
+paths read only `run_cards.binding_generation`; they do not materialize the
+JSON-heavy `run_cards_view` merely to derive a lane key. Retention keeps active
+delivery-recovery endpoints through separate failed-reply and replacement-reply
+anti-joins, preserving the same deletion boundary without an unindexed `OR`.
 Primary Main and Answer Worker summaries are dedicated set-based SQLite read
 models. Main summary loading uses a constant number of queries and window-ranked
 task state rather than repeatedly loading each full Worker Main projection;
