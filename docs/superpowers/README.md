@@ -3,8 +3,6 @@
 This directory contains only engineering work that is still being designed or
 implemented. Current records:
 
-- [Source-aware Markdown pagination optimization](specs/2026-09-22-source-aware-markdown-pagination-design.md)
-- [Source-aware Markdown pagination plan](plans/2026-09-22-source-aware-markdown-pagination-plan.md)
 - [Natural-language command runtime deep-module design](specs/2026-09-21-natural-language-command-runtime-deep-module-design.md)
 - [Natural-language command runtime deep-module plan](plans/2026-09-21-natural-language-command-runtime-deep-module-plan.md)
 

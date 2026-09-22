@@ -14,6 +14,16 @@ export interface RenderedLarkMarkdownPage {
   nextPageStart: number | null;
 }
 
+interface LarkMarkdownPageDiagnostics {
+  sourceCharactersIndexed: number;
+  sourceCharactersRendered: number;
+  rangeRenderCount: number;
+}
+
+interface LarkMarkdownPageOptions {
+  onDiagnostics?: (diagnostics: LarkMarkdownPageDiagnostics) => void;
+}
+
 interface MarkdownBlock {
   kind: "prose" | "code" | "table" | "diff";
   start: number;
@@ -21,6 +31,21 @@ interface MarkdownBlock {
   opening?: string;
   marker?: string;
   closed?: boolean;
+  requiresPrefixNormalization?: boolean;
+}
+
+interface MarkdownPageIndex {
+  lines: Array<{ start: number; end: number; text: string }>;
+  blocks: MarkdownBlock[];
+  toolActivities: ToolActivityRange[];
+}
+
+interface ToolActivityRange {
+  start: number;
+  contentEnd: number;
+  boundaryEnd: number;
+  renderedLength: number;
+  boundaryRenderedLength: number;
 }
 
 /** Produces the conservative Markdown subset accepted by Lark CardKit. */
@@ -64,6 +89,14 @@ export function renderLarkMarkdownPageWithSuffix(source: string, pageStart: numb
   return renderLarkMarkdownPageMode(source, pageStart, limit, true, suffix);
 }
 
+/** @internal Test-only work characterization; production render APIs stay pure. */
+export function renderLarkMarkdownPageForTest(source: string, pageStart: number, limit: number): { result: RenderedLarkMarkdownPage; diagnostics: LarkMarkdownPageDiagnostics } {
+  let diagnostics: LarkMarkdownPageDiagnostics | null = null;
+  const result = renderLarkMarkdownPageMode(source, pageStart, limit, true, "", { onDiagnostics: (value) => { diagnostics = value; } });
+  if (!diagnostics) throw new Error("Markdown renderer did not report diagnostics");
+  return { result, diagnostics };
+}
+
 /** Renders one proven canonical range with safe Markdown normalization and command detail. */
 export function renderDetailedLarkMarkdownRange(source: string, pageStart: number, pageEnd: number): string {
   const start = Math.max(0, Math.min(pageStart, source.length));
@@ -71,45 +104,26 @@ export function renderDetailedLarkMarkdownRange(source: string, pageStart: numbe
   return renderDetailedMarkdownRange(source, start, end);
 }
 
-function renderLarkMarkdownPageMode(source: string, pageStart: number, limit: number, compactTools: boolean, continuationSuffix = ""): RenderedLarkMarkdownPage {
+function renderLarkMarkdownPageMode(source: string, pageStart: number, limit: number, compactTools: boolean, continuationSuffix = "", options: LarkMarkdownPageOptions = {}): RenderedLarkMarkdownPage {
   const start = Math.max(0, Math.min(pageStart, source.length));
   const boundedLimit = Math.max(0, limit);
-  const blocks = markdownBlocks(source);
-  const complete = renderDetailedMarkdownRange(source, start, source.length, blocks);
-  if (complete.length <= boundedLimit) return { page: compactTools ? compactAnswerToolActivity(complete) : complete, nextPageStart: null };
+  const index = markdownPageIndex(source);
+  const blocks = index.blocks;
   const suffix = boundedLimit > continuationSuffix.length ? continuationSuffix : "";
   const pageLimit = boundedLimit - suffix.length;
+  const selected = selectIndexedPageEnd(source, start, pageLimit, boundedLimit, index);
+  if (!selected.overflow) return renderIndexedPage(source, start, source.length, null, blocks, compactTools, options);
+  if (selected.end !== null) return renderIndexedPage(source, start, selected.end, selected.end, blocks, compactTools, options, suffix);
+  const hardEnd = hardProgressEnd(source, start, pageLimit, blocks);
+  const page = renderPageRange(source, start, hardEnd, blocks, compactTools).slice(0, pageLimit);
+  options.onDiagnostics?.({ sourceCharactersIndexed: source.length, sourceCharactersRendered: hardEnd - start, rangeRenderCount: 1 });
+  return { page: `${page}${suffix}`, nextPageStart: hardEnd < source.length ? hardEnd : null };
+}
 
-  const lineEnds: number[] = [];
-  for (let index = source.indexOf("\n", start); index >= 0; index = source.indexOf("\n", index + 1)) {
-    const end = index + 1;
-    if (end < source.length) lineEnds.push(end);
-  }
-  const protectedRanges = atomicToolActivityRanges(source, pageLimit);
-  const candidates: number[] = [];
-  let rangeIndex = 0;
-  for (const end of lineEnds) {
-    while (rangeIndex < protectedRanges.length && protectedRanges[rangeIndex]!.end <= end) rangeIndex += 1;
-    const range = protectedRanges[rangeIndex];
-    if (!range || end <= range.start || end >= range.end) candidates.push(end);
-  }
-  const lineEnd = latestFittingEnd(source, start, pageLimit, candidates, blocks);
-  if (lineEnd !== null) return { page: `${renderPageRange(source, start, lineEnd, blocks, compactTools)}${suffix}`, nextPageStart: lineEnd };
-
-  let low = start + 1;
-  let high = source.length - 1;
-  let hardEnd: number | null = null;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    if (renderDetailedMarkdownRange(source, start, middle, blocks).length <= pageLimit) {
-      hardEnd = middle;
-      low = middle + 1;
-    } else high = middle - 1;
-  }
-  if (hardEnd !== null) return { page: `${renderPageRange(source, start, hardEnd, blocks, compactTools)}${suffix}`, nextPageStart: hardEnd };
-
-  const forcedEnd = Math.min(source.length, start + Math.max(1, pageLimit));
-  return { page: `${source.slice(start, forcedEnd).slice(0, pageLimit)}${suffix}`, nextPageStart: forcedEnd < source.length ? forcedEnd : null };
+function renderIndexedPage(source: string, start: number, end: number, nextPageStart: number | null, blocks: readonly MarkdownBlock[], compactTools: boolean, options: LarkMarkdownPageOptions, suffix = ""): RenderedLarkMarkdownPage {
+  const page = renderPageRange(source, start, end, blocks, compactTools);
+  options.onDiagnostics?.({ sourceCharactersIndexed: source.length, sourceCharactersRendered: end - start, rangeRenderCount: 1 });
+  return { page: `${page}${suffix}`, nextPageStart };
 }
 
 function renderPageRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[], compactTools: boolean): string {
@@ -117,33 +131,37 @@ function renderPageRange(source: string, start: number, end: number, blocks: rea
   return compactTools ? compactAnswerToolActivity(detailed) : detailed;
 }
 
-function atomicToolActivityRanges(source: string, limit: number): Array<{ start: number; end: number }> {
-  const ranges: Array<{ start: number; end: number }> = [];
-  const lines = sourceLines(source);
-  for (let index = 0; index < lines.length;) {
-    if (!/^◆ \*\*Ran\*\*(?: · .+)?$/.test(lines[index]!.text)) { index += 1; continue; }
-    const startIndex = index;
-    index += 1;
-    while (index < lines.length && lines[index]!.text === "") index += 1;
-    if (lines[index]?.text !== "```bash") { index = startIndex + 1; continue; }
-    index += 1;
-    while (index < lines.length && lines[index]!.text !== "```") index += 1;
-    if (index >= lines.length) break;
-    let endIndex = index++;
-    const afterBash = index;
-    while (index < lines.length && lines[index]!.text === "") index += 1;
-    if (lines[index]?.text === "```text") {
-      index += 1;
-      while (index < lines.length && lines[index]!.text !== "```") index += 1;
-      if (index < lines.length) endIndex = index++;
-      else index = afterBash;
-    } else index = afterBash;
-    const start = lines[startIndex]!.start;
-    const endLine = lines[endIndex]!;
-    const end = endLine.end - (source[endLine.end - 1] === "\n" ? 1 : 0) - (source[endLine.end - 2] === "\r" ? 1 : 0);
-    if (renderToolActivityResults(source.slice(start, end)).length <= limit) ranges.push({ start, end });
+function hardProgressEnd(source: string, start: number, pageLimit: number, blocks: readonly MarkdownBlock[]): number {
+  const block = blocks[firstOverlappingBlock(blocks, start)];
+  if (block?.requiresPrefixNormalization) {
+    const hidden = htmlHiddenRange(source, block.start, block.end);
+    if (hidden) {
+      if (start < hidden.start) return Math.min(hidden.start, start + Math.max(1, pageLimit));
+      if (start < hidden.end) return hidden.end;
+    }
   }
-  return ranges;
+  let overhead = 0;
+  if (block?.kind === "table") overhead = 12;
+  else if (block?.kind === "diff") overhead = 12;
+  else if (block?.kind === "code") {
+    overhead = (start > block.start ? (block.opening?.length ?? 0) + 1 : 0) + 1 + (block.marker?.length ?? 0);
+  }
+  return Math.min(source.length, block?.end ?? source.length, start + Math.max(1, pageLimit - overhead));
+}
+
+function htmlHiddenRange(source: string, start: number, end: number): { start: number; end: number } | null {
+  const slice = source.slice(start, end);
+  const opening = /<!--|<(script|style)\b[^>]*>/i.exec(slice);
+  if (!opening) return null;
+  const hiddenStart = start + opening.index;
+  if (opening[0] === "<!--") {
+    const closing = source.indexOf("-->", hiddenStart + opening[0].length);
+    return { start: hiddenStart, end: closing < 0 || closing >= end ? end : closing + 3 };
+  }
+  const closingPattern = new RegExp(`</${opening[1]!}\\s*>`, "ig");
+  closingPattern.lastIndex = hiddenStart + opening[0].length;
+  const closing = closingPattern.exec(source);
+  return { start: hiddenStart, end: !closing || closing.index >= end ? end : closing.index + closing[0].length };
 }
 
 /** Normalizes first, then applies a bounded render-only copy. */
@@ -327,21 +345,6 @@ function protectInlineCode(source: string, protect: (match: string) => string): 
   return output;
 }
 
-function latestFittingEnd(source: string, start: number, limit: number, candidates: readonly number[], blocks: readonly MarkdownBlock[]): number | null {
-  let low = 0;
-  let high = candidates.length - 1;
-  let result: number | null = null;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    const end = candidates[middle]!;
-    if (renderDetailedMarkdownRange(source, start, end, blocks).length <= limit) {
-      result = end;
-      low = middle + 1;
-    } else high = middle - 1;
-  }
-  return result;
-}
-
 function renderDetailedMarkdownRange(source: string, start: number, end: number, blocks: readonly MarkdownBlock[] = markdownBlocks(source)): string {
   return renderToolActivityResults(renderMarkdownRange(source, start, end, blocks));
 }
@@ -415,7 +418,10 @@ function firstOverlappingBlock(blocks: readonly MarkdownBlock[], start: number):
 }
 
 function markdownBlocks(source: string): MarkdownBlock[] {
-  const lines = sourceLines(source);
+  return markdownBlocksFromLines(sourceLines(source));
+}
+
+function markdownBlocksFromLines(lines: Array<{ start: number; end: number; text: string }>): MarkdownBlock[] {
   const lineTexts = lines.map(({ text }) => text);
   const blocks: MarkdownBlock[] = [];
   let index = 0;
@@ -444,17 +450,171 @@ function markdownBlocks(source: string): MarkdownBlock[] {
       index = diffEnd;
       continue;
     }
+    const htmlEnd = htmlSensitiveEnd(lines, index);
+    if (htmlEnd !== null) {
+      blocks.push({ kind: "prose", start: line.start, end: lines[htmlEnd - 1]!.end, requiresPrefixNormalization: true });
+      index = htmlEnd;
+      continue;
+    }
     let cursor = index + 1;
     while (cursor < lines.length) {
       if (FENCE.test(lines[cursor]!.text)) break;
       if (cursor + 1 < lines.length && isTableRow(lines[cursor]!.text) && TABLE_DELIMITER.test(lines[cursor + 1]!.text)) break;
       if (traexDiffEnd(lineTexts, cursor) !== null) break;
+      if (htmlSensitiveEnd(lines, cursor) !== null) break;
       cursor += 1;
     }
-    blocks.push({ kind: "prose", start: line.start, end: lines[cursor - 1]!.end });
+    const start = line.start;
+    const end = lines[cursor - 1]!.end;
+    blocks.push({ kind: "prose", start, end });
     index = cursor;
   }
   return blocks;
+}
+
+function markdownPageIndex(source: string): MarkdownPageIndex {
+  const lines = sourceLines(source);
+  const blocks = markdownBlocksFromLines(lines);
+  const toolActivities = parseToolActivityRanges(source, lines);
+  return { lines, blocks, toolActivities };
+}
+
+function selectIndexedPageEnd(source: string, start: number, pageLimit: number, fullLimit: number, index: MarkdownPageIndex): { end: number | null; overflow: boolean } {
+  let consumed = 0;
+  let selectedEnd: number | null = null;
+  let lineIndex = firstLineEndingAfter(index.lines, start);
+  let toolIndex = firstToolActivityEndingAfter(index.toolActivities, start);
+  for (let blockIndex = firstOverlappingBlock(index.blocks, start); blockIndex < index.blocks.length; blockIndex += 1) {
+    const block = index.blocks[blockIndex]!;
+    const from = Math.max(start, block.start);
+    if (block.requiresPrefixNormalization) {
+      const length = consumed + normalizeProse(source.slice(from, block.end).replace(/\r\n?/g, "\n")).length;
+      if (length > fullLimit) return { end: selectedEnd, overflow: true };
+      consumed = length;
+      if (length <= pageLimit && block.end < source.length) selectedEnd = block.end;
+      lineIndex = firstLineEndingAfter(index.lines, block.end);
+      continue;
+    }
+    let blockLength = 0;
+    while (lineIndex < index.lines.length && index.lines[lineIndex]!.end <= from) lineIndex += 1;
+    for (; lineIndex < index.lines.length && index.lines[lineIndex]!.start < block.end; lineIndex += 1) {
+      const line = index.lines[lineIndex]!;
+      const lineStart = Math.max(from, line.start);
+      const end = Math.min(line.end, block.end);
+      while (toolIndex < index.toolActivities.length && index.toolActivities[toolIndex]!.boundaryEnd <= lineStart) toolIndex += 1;
+      const tool = index.toolActivities[toolIndex];
+      let candidateEnd = end;
+      if (tool && tool.start === lineStart && tool.renderedLength <= pageLimit) {
+        blockLength += tool.boundaryRenderedLength;
+        candidateEnd = tool.boundaryEnd;
+        lineIndex = firstLineEndingAfter(index.lines, tool.boundaryEnd) - 1;
+        toolIndex += 1;
+      } else {
+        blockLength += blockLineRenderedLength(source, block, lineStart, end, lineStart === from, end === block.end);
+      }
+      const length = consumed + blockLength + candidateClosureLength(source, block, candidateEnd);
+      if (length > fullLimit) return { end: selectedEnd, overflow: true };
+      if (length <= pageLimit && candidateEnd < source.length) selectedEnd = candidateEnd;
+    }
+    consumed += blockLength;
+  }
+  return { end: selectedEnd, overflow: false };
+}
+
+function firstLineEndingAfter(lines: MarkdownPageIndex["lines"], offset: number): number {
+  let low = 0;
+  let high = lines.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (lines[middle]!.end <= offset) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function firstToolActivityEndingAfter(activities: MarkdownPageIndex["toolActivities"], offset: number): number {
+  let low = 0;
+  let high = activities.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (activities[middle]!.boundaryEnd <= offset) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function parseToolActivityRanges(source: string, lines: MarkdownPageIndex["lines"]): ToolActivityRange[] {
+  const activities: ToolActivityRange[] = [];
+  for (let index = 0; index < lines.length;) {
+    const heading = /^◆ \*\*Ran\*\*(?: · (.+))?$/.exec(lines[index]!.text);
+    if (!heading) { index += 1; continue; }
+    const startIndex = index;
+    index += 1;
+    while (index < lines.length && lines[index]!.text === "") index += 1;
+    if (lines[index]?.text !== "```bash") { index = startIndex + 1; continue; }
+    index += 1;
+    const commandIndex = index;
+    while (index < lines.length && lines[index]!.text !== "```") index += 1;
+    if (index >= lines.length) break;
+    if (index !== commandIndex + 1 || !lines[commandIndex]!.text) { index = startIndex + 1; continue; }
+    let endIndex = index++;
+    const afterBash = index;
+    let outputStart: number | null = null;
+    let outputEnd: number | null = null;
+    while (index < lines.length && lines[index]!.text === "") index += 1;
+    if (lines[index]?.text === "```text") {
+      outputStart = ++index;
+      while (index < lines.length && lines[index]!.text !== "```") index += 1;
+      if (index < lines.length) { outputEnd = index; endIndex = index++; }
+      else index = afterBash;
+    } else index = afterBash;
+    const start = lines[startIndex]!.start;
+    const endLine = lines[endIndex]!;
+    const contentEnd = endLine.end - (source[endLine.end - 1] === "\n" ? 1 : 0) - (source[endLine.end - 2] === "\r" ? 1 : 0);
+    const boundaryEnd = endLine.end;
+    const renderedLength = toolActivityRenderedLength(lines, startIndex, endIndex, outputStart, outputEnd);
+    const boundaryRenderedLength = renderedLength + (boundaryEnd - contentEnd);
+    activities.push({ start, contentEnd, boundaryEnd, renderedLength, boundaryRenderedLength });
+  }
+  return activities;
+}
+
+function toolActivityRenderedLength(lines: MarkdownPageIndex["lines"], startIndex: number, endIndex: number, outputStart: number | null, outputEnd: number | null): number {
+  const rendered = lines.slice(startIndex, endIndex + 1).map(({ text }) => text);
+  rendered[0] = normalizeProse(rendered[0]!);
+  if (outputStart !== null && outputEnd !== null && outputEnd - outputStart > TOOL_RESULT_LINE_LIMIT) {
+    const relativeStart = outputStart - startIndex;
+    const detail = rendered.slice(relativeStart, outputEnd - startIndex);
+    rendered.splice(relativeStart, detail.length,
+      ...detail.slice(0, TOOL_RESULT_HEAD_LINES),
+      `… 已省略中间 ${detail.length - TOOL_RESULT_HEAD_LINES - TOOL_RESULT_TAIL_LINES} 行 …`,
+      ...detail.slice(-TOOL_RESULT_TAIL_LINES));
+  }
+  return rendered.reduce((length, line, index) => length + line.length + (index < rendered.length - 1 ? 1 : 0), 0);
+}
+
+function blockLineRenderedLength(source: string, block: MarkdownBlock, from: number, to: number, firstSlice: boolean, finalSlice: boolean): number {
+  const raw = source.slice(from, to).replace(/\r\n?/g, "\n");
+  const rawLength = block.kind === "prose" ? normalizeProse(raw).length : raw.length;
+  if (block.kind === "prose") return rawLength;
+  const trailingNewline = source[to - 1] === "\n";
+  if (block.kind === "table" || block.kind === "diff") {
+    const language = block.kind === "diff" ? "diff" : "text";
+    const prefixLength = firstSlice ? language.length + 4 : 0;
+    const suffixLength = finalSlice ? 4 + (trailingNewline ? 1 : 0) : 0;
+    return prefixLength + rawLength - (finalSlice && trailingNewline ? 1 : 0) + suffixLength;
+  }
+  const prefixLength = firstSlice && from > block.start ? (block.opening?.length ?? 0) + 1 : 0;
+  const needsClosure = finalSlice && (to < block.end || block.closed !== true);
+  const suffixLength = needsClosure ? (trailingNewline ? 0 : 1) + (block.marker?.length ?? 0) : 0;
+  return prefixLength + rawLength + suffixLength;
+}
+
+function candidateClosureLength(source: string, block: MarkdownBlock, end: number): number {
+  if (end >= block.end) return 0;
+  if (block.kind === "table" || block.kind === "diff") return 4;
+  if (block.kind !== "code") return 0;
+  return (source[end - 1] === "\n" ? 0 : 1) + (block.marker?.length ?? 0);
 }
 
 function sourceLines(source: string): Array<{ start: number; end: number; text: string }> {
@@ -468,6 +628,18 @@ function sourceLines(source: string): Array<{ start: number; end: number; text: 
     start = end;
   }
   return lines;
+}
+
+function htmlSensitiveEnd(lines: MarkdownPageIndex["lines"], start: number): number | null {
+  const opening = /<!--|<(script|style)\b/i.exec(lines[start]?.text ?? "");
+  if (!opening) return null;
+  const kind = opening[0] === "<!--" ? "comment" : opening[1]!.toLowerCase();
+  const closing = kind === "comment" ? "-->" : `</${kind}`;
+  for (let index = start; index < lines.length; index += 1) {
+    const searchStart = index === start ? opening.index + opening[0].length : 0;
+    if (lines[index]!.text.toLowerCase().indexOf(closing, searchStart) >= 0) return index + 1;
+  }
+  return lines.length;
 }
 
 function normalizeLinks(line: string): string {

@@ -1228,6 +1228,11 @@ source offsets. Synthetic table, diff, and continuation fences count
 toward the 9,000-character rendered limit, while `source_start` always remains an
 offset into the unmodified canonical Answer. This keeps live delivery and restart
 recovery deterministic even when normalization changes the displayed length.
+For each page request, the renderer builds one ephemeral source index for Markdown
+blocks, line boundaries, and atomic tool activities. It advances through indexed
+boundaries once, accounts for render-only wrappers while selecting the page, and
+renders only the selected canonical range. The index is not persisted or cached
+across revisions, so it cannot become workflow authority or retain large answers.
 When a live page has canonical continuation content, its render copy reserves
 space for a short next-card notice. The notice is not persisted as answer text,
 and continuation advances from the source offset returned by the same bounded

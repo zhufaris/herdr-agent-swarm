@@ -6,6 +6,7 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
 import { createQueuedWorkerTurnCard, reduceWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { workerPresentation } from "./helpers/presentation.js";
 
 const instance = { id: "i1", projectId: "p1", name: "reviewer", role: "worker" as const, agentKind: "claude-code" as const, model: "sonnet", desiredState: "running" as const, observedState: "idle" as const, workspaceLeaseId: "ws1", generation: 2, runtimeRef: { herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1", generation: 2 }, pendingRuntimeRef: null, provisioningCheckpoint: "verified" as const, lastError: null };
 const workspace = { id: "ws1", projectId: "p1", instanceId: "i1", kind: "git-worktree" as const, cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "abc123", state: "ready" as const, generation: 1 };
@@ -13,6 +14,21 @@ const capabilities = { available: true, structuredEvents: true, nativeResume: tr
 const primary = { bindingId: "binding-1", generation: 3, paneId: "w1:p0", state: "active" as const };
 
 describe("instance cards", () => {
+  it("uses source-aware pagination for long redacted Worker output", () => {
+    const answer = "safe output\n".repeat(50_000) + "Bearer live-secret";
+    const view = { ...createQueuedWorkerTurnCard({ turnId: "turn-long", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" }), answer };
+
+    const first = workerPresentation.workerTurnPage(view, 0, 9_000);
+    const second = workerPresentation.workerTurnPage(view, first.nextPageStart!, 9_000);
+
+    expect(first.page.length).toBeLessThanOrEqual(9_000);
+    expect(first.nextPageStart).toBeGreaterThan(0);
+    expect(second.nextPageStart).toBeGreaterThan(first.nextPageStart!);
+    expect(first.page).not.toContain("live-secret");
+    expect(second.page).not.toContain("live-secret");
+    expect(first.sourceLength).toBe(second.sourceLength);
+  });
+
   it("mentions the Primary creator in a bounded local-only Worker review notification", () => {
     const card = renderWorkerHumanReviewNotification({
       workerId: "i1",

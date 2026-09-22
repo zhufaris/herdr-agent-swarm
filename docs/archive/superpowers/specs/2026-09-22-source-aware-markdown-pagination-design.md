@@ -74,6 +74,11 @@ change at early, middle, and late page starts. The target is at least a 50%
 reduction for early and middle pages on this host; benchmark timing is evidence,
 not a brittle CI pass/fail threshold.
 
+The final local measurement used the baseline fixture above and averaged 20 warm
+renders per position. Early, middle, and late pages improved from 43.9/23.9/10.0
+ms to 8.1/7.1/7.0 ms. A 512 KiB tool-activity-heavy fixture rendered in
+12.8/13.5/11.9 ms across the same positions.
+
 Before handoff, run the focused Markdown, Answer stream, Worker Card, and affected
 integration suites, followed by `npm test`, `npm run typecheck`, `npm run build`,
 `npm run architecture:check`, `npm run docs:audit`, and `npm run public:audit`.
