@@ -471,6 +471,33 @@ describe("AnswerPageWorkflow", () => {
     store.close();
   });
 
+  it("finalizes a continuation page with an expandable command without changing its source start", async () => {
+    const store = readyStore();
+    const command = [
+      "◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text",
+      "output line\n".repeat(400).trimEnd(), "```"
+    ].join("\n");
+    const answer = `${"first page\n".repeat(900)}PAGE_TWO\n${"p".repeat(8_000)}\n\n${command}`;
+    const completed = store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
+    const source = answerStreamContent(completed);
+    const sourceStart = source.indexOf("PAGE_TWO");
+    store.database.prepare("UPDATE answer_pages SET page_index = 1, source_start = ?, state = 'finished', delivery_mode = 'streaming' WHERE prompt_id = 'p1'").run(sourceStart);
+    store.database.prepare("UPDATE run_cards SET answer_page_index = 1, answer_page_start = ? WHERE prompt_id = 'p1'").run(sourceStart);
+
+    await new AnswerPageWorkflow(store, vi.fn(), primaryPresentation).converge("p1");
+
+    const pending = store.listPendingOutboundReplies();
+    expect(pending).toHaveLength(1);
+    const [update] = pending;
+    const payload = JSON.parse(update!.payload) as { body: { elements: Array<{ tag: string; elements?: Array<{ content: string }> }> } };
+    expect(update).toMatchObject({ kind: "card_update", cardRole: "answer", rootMessageId: "answer-1" });
+    const panel = payload.body.elements.find((element) => element.tag === "collapsible_panel");
+    expect(panel?.elements?.[0]!.content).toContain("```bash\nnpm test\n```");
+    expect(panel?.elements?.[0]!.content).toContain("… 已省略中间 381 行 …");
+    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 1, sourceStart, state: "finished" })]);
+    store.close();
+  });
+
   it("preserves the last delivered continuation when the completed answer shrinks below its page start", async () => {
     const store = readyStore();
     const visibleContinuation = "the last visible continuation";

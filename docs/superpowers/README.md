@@ -3,8 +3,6 @@
 This directory contains only engineering work that is still being designed or
 implemented. Current records:
 
-- [Answer command panel payload budgeting](specs/2026-09-22-answer-command-panel-budget-design.md)
-- [Answer command panel payload budgeting plan](plans/2026-09-22-answer-command-panel-budget-plan.md)
 - [Natural-language command runtime deep-module design](specs/2026-09-21-natural-language-command-runtime-deep-module-design.md)
 - [Natural-language command runtime deep-module plan](plans/2026-09-21-natural-language-command-runtime-deep-module-plan.md)
 

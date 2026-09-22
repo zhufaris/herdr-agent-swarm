@@ -1233,6 +1233,11 @@ blocks, line boundaries, and atomic tool activities. It advances through indexed
 boundaries once, accounts for render-only wrappers while selecting the page, and
 renders only the selected canonical range. The index is not persisted or cached
 across revisions, so it cannot become workflow authority or retain large answers.
+When a completed page is converted from streaming Markdown to a static CardKit
+card, recognized command activities remain collapsed detail panels. If the full
+bounded command output would exceed the remaining card payload budget, only the
+displayed output is shortened and marked as truncated; canonical page content and
+source offsets are unchanged.
 When a live page has canonical continuation content, its render copy reserves
 space for a short next-card notice. The notice is not persisted as answer text,
 and continuation advances from the source offset returned by the same bounded
