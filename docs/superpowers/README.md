@@ -4,6 +4,7 @@ This directory contains only engineering work that is still being designed or
 implemented. Current records:
 
 - [Answer snapshot outbox coalescing design](specs/2026-09-21-answer-snapshot-outbox-coalescing-design.md)
+- [Answer snapshot outbox coalescing plan](plans/2026-09-22-answer-snapshot-outbox-coalescing-plan.md)
 - [Natural-language command runtime deep-module design](specs/2026-09-21-natural-language-command-runtime-deep-module-design.md)
 - [Natural-language command runtime deep-module plan](plans/2026-09-21-natural-language-command-runtime-deep-module-plan.md)
 
