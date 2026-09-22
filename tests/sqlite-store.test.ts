@@ -4866,11 +4866,7 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({
       state: "released", action: "startup_superseded_answer"
     });
-    expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all("answer-static:p1:1:answer-new")).toEqual([
-      { snapshot_revision: 1, state: "dismissed" },
-      { snapshot_revision: 2, state: "dismissed" },
-      { snapshot_revision: 3, state: "pending" }
-    ]);
+    expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all("answer-static:p1:1:answer-new")).toEqual([{ snapshot_revision: 3, state: "pending" }]);
     expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([
       expect.objectContaining({ idempotencyKey: "answer-static:p1:1:answer-new:revision:3", rootMessageId: "answer-new" })
     ]);
@@ -4884,7 +4880,7 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
-    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all("answer-static:p1:1:answer-new")).toEqual([{ state: "pending", count: 3 }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all("answer-static:p1:1:answer-new")).toEqual([{ state: "pending", count: 1 }]);
   });
 
   it("keeps a superseded Answer quarantine blocked when a pending snapshot was claimed", () => {
@@ -4895,7 +4891,7 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
-    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all(projectionKey)).toEqual([{ state: "pending", count: 3 }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all(projectionKey)).toEqual([{ state: "pending", count: 1 }]);
   });
 
   it("releases an uncertain Worker Main update only to its newest unclaimed authoritative snapshot", () => {

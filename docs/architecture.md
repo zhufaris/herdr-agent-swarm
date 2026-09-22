@@ -400,6 +400,16 @@ queries keyed by Prompt, kind, state, and structural stream metadata. Modern
 rows treat `stream_page_index` as authoritative; only legacy rows where that
 column is null consult their JSON payload. This keeps retained outbox history
 out of the JavaScript read path without changing delivery or replay semantics.
+Revisioned static and final Answer snapshots are coalesced inside their existing
+projection transaction. Before reserving a changed snapshot, the store removes
+only older pending rows for the exact `projection_key` that have never been
+claimed, attempted, checkpointed, or retained as an active recovery replacement.
+The next revision is derived before deletion, so revision identity stays strictly
+monotonic. Claimed or otherwise delivery-relevant rows remain immutable; an
+in-flight revision therefore stays ahead of the one newest desired revision.
+Existing foreign-key cascades remove coverage and candidate evidence belonging
+only to a deleted untouched row, while outbox delete/insert triggers recompute
+the durable lane head in the same transaction.
 Primary Main and Answer Worker summaries are dedicated set-based SQLite read
 models. Main summary loading uses a constant number of queries and window-ranked
 task state rather than repeatedly loading each full Worker Main projection;

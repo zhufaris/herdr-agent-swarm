@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, MainCardReservationOutcome, OutboundReplyState, OutboundWorkClass } from "../../domain/types.js";
 import type { MainCardLiveStatus, RunCardView } from "../../domain/run-card-view.js";
 import { initialTopicView, type TopicViewState } from "../../domain/topic-view.js";
@@ -7,6 +6,7 @@ import type { ModelPreference } from "../../domain/model-selection.js";
 import { mapAnswerPage, mapBinding, type AnswerPageRow, type BindingRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import { linkAnswerRecovery, recordAnswerCoverage } from "./delivery-recovery-evidence.js";
+import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
 
 export const answerPageDeliveryFactsSql = {
   latestContent: `
@@ -49,7 +49,7 @@ export class SqliteProjectionStore {
   constructor(
     private readonly context: SqliteContext,
     private readonly dependencies: {
-      enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
+      enqueueOutboundReply(input: EnqueueOutboundReplyInput): unknown;
       hasPendingAnswerContinuation(promptId: string, pageIndex: number): boolean;
       getBinding(id: string): Binding | null;
       getModelPreference(bindingId: string): ModelPreference | null;
@@ -363,13 +363,23 @@ export class SqliteProjectionStore {
     const payload = JSON.stringify(card);
     const expired = this.context.database.prepare(`SELECT 1 FROM delivery_recoveries recovery JOIN outbound_replies failed ON failed.id = recovery.failed_reply_id WHERE failed.projection_key = ? AND recovery.action = 'expired_view_target' AND recovery.state = 'dismissed' LIMIT 1`).get(key);
     if (expired) return "waiting";
+    this.context.database.prepare("UPDATE outbound_replies SET projection_key = ? WHERE idempotency_key = ? AND projection_key IS NULL").run(key, key);
     const existing = this.context.database.prepare("SELECT id, payload, snapshot_revision FROM outbound_replies WHERE projection_key = ? OR idempotency_key = ? ORDER BY snapshot_revision DESC LIMIT 1").get(key, key) as { id: string; payload: string; snapshot_revision: number } | undefined;
     if (existing?.payload === payload) return "waiting";
-    if (existing) this.context.database.prepare("UPDATE outbound_replies SET projection_key = ? WHERE id = ?").run(key, existing.id);
     const revision = (existing?.snapshot_revision ?? 0) + 1;
+    this.context.database.prepare(`
+      DELETE FROM outbound_replies
+      WHERE projection_key = ? AND state = 'pending'
+        AND claim_attempt_id IS NULL AND first_claimed_at IS NULL
+        AND attempt_count = 0 AND card_id_checkpoint IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_recoveries recovery
+          WHERE recovery.replacement_reply_id = outbound_replies.id
+            AND recovery.state IN ('unresolved', 'replacement_pending')
+        )
+    `).run(key);
     const id = randomUUID();
-    this.dependencies.enqueueOutboundReply({ id, idempotencyKey: revision === 1 ? key : `${key}:revision:${revision}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", ...outboundWorkClass(workClass), rootMessageId: messageId, kind: "card_update", payload });
-    this.context.database.prepare("UPDATE outbound_replies SET projection_key = ?, snapshot_revision = ? WHERE id = ?").run(key, revision, id);
+    this.dependencies.enqueueOutboundReply({ id, idempotencyKey: revision === 1 ? key : `${key}:revision:${revision}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", ...outboundWorkClass(workClass), rootMessageId: messageId, kind: "card_update", payload, projectionKey: key, snapshotRevision: revision });
     return "reserved";
   }
 
