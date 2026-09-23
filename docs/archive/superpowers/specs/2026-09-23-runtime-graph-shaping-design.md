@@ -1,5 +1,7 @@
 # Runtime Graph Shaping
 
+Status: completed and archived.
+
 ## Goal
 
 Reduce the amount of internal topology that crosses the `createBridgeRuntime()`

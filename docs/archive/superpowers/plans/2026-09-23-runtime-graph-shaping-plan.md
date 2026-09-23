@@ -1,5 +1,7 @@
 # Runtime Graph Shaping Implementation Plan
 
+Status: completed and archived.
+
 ## Objective
 
 Replace the flat bridge-runtime result with lifecycle, health, and operations

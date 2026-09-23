@@ -82,29 +82,15 @@ export async function createManagedBridgeRuntime(options: {
     if (!lease.renewNow()) throw new Error("Bridge database lease expired during Agent capability detection");
     const { codex, claude, pi } = availabilityResult.availability;
     const runtime = createBridgeRuntime(config, completedStores, logger, { codex, claude, pi });
-    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, naturalLanguageCommands, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, bus, sessionOperations, reconciler, promptRun } = runtime;
     return new ManagedBridgeRuntime({
       reconcileIntervalMs: config.reconcileIntervalMs,
       store: completedStores.lifecycle,
       lease,
-      primaryToolGateway, naturalLanguageCommands,
-      sqliteIntegrity,
-      instanceRuntime,
-      instanceTurns,
-      herdrSnapshotCache: herdr,
-      instanceWork,
+      ...runtime.lifecycle,
       createHealthServer: () => startHealthServer({
-        ...config.http, store: completedStores.health, herdr, gateway: runtime.gateway, projects: config.projects, lease,
-        workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator,
-        inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() },
-        sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime,
-        instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector,
-        outboxDispatcher: channelPublisher, promptWorker: promptRun,
-        ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity
+        ...config.http, store: completedStores.health, gateway: runtime.operations.gateway,
+        projects: config.projects, lease, buildIdentity, ...runtime.health
       }),
-      channelPublisher, outboxRetention, projector, cardContextRebuilder, queueFeedbackProjector, bus,
-      coordinator, paneRetention, externalTurns,
-      ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}),
       ...(onFatalStop ? { onFatalStop } : {}), logger
     }, { leaseAlreadyAcquired: true });
   } catch (error) {

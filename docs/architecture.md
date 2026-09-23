@@ -149,6 +149,14 @@ Each child factory receives only a typed selection of the capabilities it can
 compose. Only the parent composition sees the complete SQLite bundle. This makes
 an accidental cross-context dependency a compile-time error and keeps the
 workflow interface visible at its construction site.
+`createBridgeRuntime()` exports the completed graph in three responsibility-shaped
+groups instead of leaking every internal module as a flat result: `lifecycle`
+contains capabilities ordered by `ManagedBridgeRuntime`, `health` contains
+runtime-owned diagnostic providers, and `operations` contains the remaining
+externally consumed transport capability. Worker diagnostics are assembled inside
+the Worker factory beside their dispatch and observation sources. Host-owned HTTP
+configuration, stores, lease, projects, build identity, and lifecycle policy stay
+in managed process composition.
 
 The composition root may:
 

@@ -43,5 +43,22 @@ export function createWorkerRuntime(options: {
   const workerCardDisplay = new WorkerCardDisplayWorkflow(stores.workerCardDisplay, () => outboundWork.wake(), applicationPresentation);
   const primaryToolGateway = new PrimaryToolGateway(join(dirname(config.databasePath), "primary-tools.sock"), process.execPath, [fileURLToPath(new URL("../cli/primary-tools-mcp.js", import.meta.url))], stores.instance, instanceMessaging, logger, [], {}, workerCardDisplay);
   const instanceControl = new InstanceControlWorkflow({ projects: config.projects, store: stores.instance, paneHost, drivers: agentDrivers, worktrees, idFactory: randomUUID });
-  return { workerTurns, instanceWork, instanceTurns, instanceRuntime, instanceMessaging, primaryToolGateway, instanceControl };
+  const instanceWorker = {
+    snapshot() {
+      const dispatch = instanceWork.snapshot();
+      const observe = instanceTurns.snapshot();
+      return {
+        state: dispatch.state,
+        activeDispatchWorkers: dispatch.activeDispatchWorkers,
+        activeObservers: observe.activeObservers,
+        queuedTurns: observe.queuedTurns,
+        activeTurns: observe.activeTurns,
+        uncertainTurns: observe.uncertainTurns,
+        lastScanAt: observe.lastScanAt,
+        lastFailureAt: dispatch.lastFailureAt ?? observe.lastFailureAt,
+        lastFailure: dispatch.lastFailure ?? observe.lastFailure
+      };
+    }
+  };
+  return { workerTurns, instanceWork, instanceTurns, instanceRuntime, instanceMessaging, primaryToolGateway, instanceControl, instanceWorker };
 }

@@ -66,6 +66,7 @@ describe("application composition boundaries", () => {
     const commandControl = readFileSync(new URL("../src/composition/create-command-control-runtime.ts", import.meta.url), "utf8");
     const ingressRecovery = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
     const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
+    const workerFactory = readFileSync(new URL("../src/composition/create-worker-runtime.ts", import.meta.url), "utf8");
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
     const kernel = readFileSync(new URL("./helpers/sqlite-store-kernel.ts", import.meta.url), "utf8");
     const composition = `${factory}\n${application}\n${bindingSession}\n${commandControl}\n${ingressRecovery}\n${primary}`;
@@ -87,6 +88,12 @@ describe("application composition boundaries", () => {
     expect(lifecycle.indexOf("lease.acquire()")).toBeLessThan(lifecycle.indexOf("bootstrap.complete(lease.writeFence())"));
     expect(lifecycle).not.toContain("createSqliteStoreBundle(config.databasePath)");
     expect(lifecycle).toContain("createBridgeRuntime(config, completedStores, logger, { codex, claude, pi })");
+    expect(factory).toContain("return { lifecycle, health, operations");
+    expect(lifecycle).toContain("...runtime.lifecycle");
+    expect(lifecycle).toContain("...runtime.health");
+    expect(lifecycle).not.toContain("const { herdr, herdrCircuitBreaker, herdrSocketSubscriber");
+    expect(workerFactory).toContain("instanceWorker");
+    expect(factory).not.toContain("const instanceWorker =");
     expect(main).not.toContain("new SqliteBindingStore");
     expect(storeBundle).toContain("createSqliteStoreBundleFromGraph(new SqliteCapabilityGraph(path))");
     expect(storeBundle).not.toContain("SqliteStoreKernel");
