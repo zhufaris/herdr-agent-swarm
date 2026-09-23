@@ -35,7 +35,7 @@ export interface LarkPort {
 export interface HerdrPort {
   assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void>;
   listAllPanes?(options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
-  listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]>;
+  listPanes(workspaceId: string, options?: { forceRefresh?: boolean; skipAllWorkspaceSnapshot?: boolean }): Promise<HerdrPane[]>;
   getPane(paneId: string): Promise<HerdrPane | null>;
   observeRuntime(paneId: string): Promise<RuntimeObservation>;
   observeRuntimes?(paneIds: readonly string[]): Promise<ReadonlyMap<string, RuntimeObservation>>;

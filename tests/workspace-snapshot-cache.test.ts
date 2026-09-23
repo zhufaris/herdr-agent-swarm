@@ -133,6 +133,17 @@ describe("workspace snapshot cache", () => {
     expect(listPanes).not.toHaveBeenCalled();
   });
 
+  it("preserves direct-workspace fallback through the cache", async () => {
+    const listAllPanes = vi.fn(async () => [pane("w1", 1)]);
+    const listPanes = vi.fn(async (workspaceId: string) => [pane(workspaceId, 2)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }));
+
+    expect((await cache.listPanes("w1", { skipAllWorkspaceSnapshot: true }))[0]?.label).toBe("v2");
+
+    expect(listAllPanes).not.toHaveBeenCalled();
+    expect(listPanes).toHaveBeenCalledWith("w1", { forceRefresh: true, skipAllWorkspaceSnapshot: true });
+  });
+
   it("does not extend a snapshot after refresh failure and invalidates after create and rename", async () => {
     let calls = 0;
     const listPanes = vi.fn(async () => { if (++calls === 2) throw new Error("offline"); return [pane("w1", calls)]; });

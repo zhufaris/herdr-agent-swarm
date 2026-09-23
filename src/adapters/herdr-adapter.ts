@@ -71,14 +71,14 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  async listPanes(workspaceId: string): Promise<HerdrPane[]> {
-    try {
-      return (await this.listAllPanes()).filter((pane) => pane.workspaceId === workspaceId);
-    } catch {
-      const result = await this.json(["pane", "list", "--workspace", workspaceId]);
-      const panes = z.object({ panes: z.array(paneSchema) }).parse(result).panes;
-      return mapWithConcurrency(panes, PROCESS_INFO_CONCURRENCY, (pane) => this.enrichPane(pane));
+  async listPanes(workspaceId: string, options: { skipAllWorkspaceSnapshot?: boolean } = {}): Promise<HerdrPane[]> {
+    if (!options.skipAllWorkspaceSnapshot) {
+      try { return (await this.listAllPanes()).filter((pane) => pane.workspaceId === workspaceId); }
+      catch { /* Compatibility fallback for unavailable all-workspace snapshots. */ }
     }
+    const result = await this.json(["pane", "list", "--workspace", workspaceId]);
+    const panes = z.object({ panes: z.array(paneSchema) }).parse(result).panes;
+    return mapWithConcurrency(panes, PROCESS_INFO_CONCURRENCY, (pane) => this.enrichPane(pane));
   }
 
   async listAllPanes(): Promise<HerdrPane[]> {

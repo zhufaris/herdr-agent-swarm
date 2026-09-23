@@ -4,6 +4,24 @@ import { HerdrSnapshotCollector } from "../src/coordinator/herdr-snapshot-collec
 import type { HerdrPort } from "../src/domain/ports/external.js";
 
 describe("HerdrSnapshotCollector", () => {
+  it("skips repeated all-workspace attempts during one fallback collection", async () => {
+    const listAllPanes = vi.fn()
+      .mockRejectedValueOnce(new Error("snapshot unavailable"))
+      .mockResolvedValueOnce([]);
+    const listPanes = vi.fn(async (_workspaceId: string, options?: { skipAllWorkspaceSnapshot?: boolean }) => {
+      expect(options?.skipAllWorkspaceSnapshot).toBe(true);
+      return [];
+    });
+    const collector = new HerdrSnapshotCollector({ listAllPanes, listPanes } as HerdrPort, pino({ enabled: false }));
+
+    await expect(collector.collect(["w1", "w2", "w3"])).resolves.toMatchObject({ failures: [] });
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledTimes(3);
+
+    await expect(collector.collect(["w1"])).resolves.toMatchObject({ failures: [] });
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+  });
+
   it("bounds workspace discovery fallback concurrency", async () => {
     let active = 0;
     let maximumActive = 0;

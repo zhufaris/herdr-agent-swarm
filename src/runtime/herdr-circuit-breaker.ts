@@ -50,7 +50,7 @@ export class HerdrCircuitBreaker implements HerdrPort {
     if (!this.delegate.listAllPanes) throw new Error("Herdr adapter does not support an all-workspace snapshot");
     return this.call("probe", () => this.delegate.listAllPanes!());
   }
-  async listPanes(workspaceId: string, options?: { forceRefresh?: boolean }): Promise<HerdrPane[]> { return this.call("probe", () => this.delegate.listPanes(workspaceId, options)); }
+  async listPanes(workspaceId: string, options?: { forceRefresh?: boolean; skipAllWorkspaceSnapshot?: boolean }): Promise<HerdrPane[]> { return this.call("probe", () => this.delegate.listPanes(workspaceId, options)); }
   async getPane(paneId: string): Promise<HerdrPane | null> { return this.call("probe", () => this.delegate.getPane(paneId)); }
   async observeRuntime(paneId: string): Promise<RuntimeObservation> { return this.call("probe", () => this.delegate.observeRuntime(paneId)); }
   async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {

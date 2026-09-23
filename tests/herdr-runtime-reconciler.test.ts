@@ -322,7 +322,7 @@ describe("HerdrRuntimeReconciler", () => {
     await reconciler.requestReconciliation(["w2"]);
 
     expect(listPanes).toHaveBeenCalledTimes(1);
-    expect(listPanes).toHaveBeenCalledWith("w2");
+    expect(listPanes).toHaveBeenCalledWith("w2", { skipAllWorkspaceSnapshot: true });
     store.close();
   });
 
@@ -457,7 +457,7 @@ describe("HerdrRuntimeReconciler", () => {
     });
 
     const first = reconciler.requestReconciliation(["w1"]);
-    await vi.waitFor(() => expect(listPanes).toHaveBeenCalledWith("w1"));
+    await vi.waitFor(() => expect(listPanes).toHaveBeenCalledWith("w1", { skipAllWorkspaceSnapshot: true }));
     const second = reconciler.requestReconciliation(["w2"]);
     release();
     await Promise.all([first, second]);
@@ -651,8 +651,8 @@ describe("HerdrRuntimeReconciler", () => {
 
     await expect(reconciler.reconcile()).resolves.toBeUndefined();
 
-    expect(listPanes).toHaveBeenCalledWith("w1");
-    expect(listPanes).toHaveBeenCalledWith("w2");
+    expect(listPanes).toHaveBeenCalledWith("w1", { skipAllWorkspaceSnapshot: true });
+    expect(listPanes).toHaveBeenCalledWith("w2", { skipAllWorkspaceSnapshot: true });
     expect(reconciler.snapshot()).toMatchObject({ successCount: 0, failureCount: 1, lastOutcome: "failed", lastFailures: [{ workspaceId: "w1", message: "workspace one offline" }] });
     store.close();
   });
@@ -997,7 +997,7 @@ describe("HerdrRuntimeReconciler", () => {
     await reconciler.reconcile();
 
     expect(listPanes).toHaveBeenCalledOnce();
-    expect(listPanes).toHaveBeenCalledWith("w1");
+    expect(listPanes).toHaveBeenCalledWith("w1", { skipAllWorkspaceSnapshot: true });
     expect(store.getBinding(binding.id)).toMatchObject({ attachment: "attached", degradationCount: 0 });
     store.close();
   });

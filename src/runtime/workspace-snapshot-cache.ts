@@ -33,7 +33,7 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     private readonly startupReuseMaxAgeMs = 10_000
   ) {}
 
-  async listPanes(workspaceId: string, options: { forceRefresh?: boolean } = {}): Promise<HerdrPane[]> {
+  async listPanes(workspaceId: string, options: { forceRefresh?: boolean; skipAllWorkspaceSnapshot?: boolean } = {}): Promise<HerdrPane[]> {
     const snapshot = this.snapshots.get(workspaceId);
     if (!options.forceRefresh && snapshot && this.isReusable(snapshot)) {
       this.hits += 1;
@@ -233,16 +233,21 @@ export class WorkspaceSnapshotCache implements HerdrPort {
     this.paneWorkspaceIds.delete(paneId);
   }
 
-  private async refresh(workspaceId: string, options: { forceRefresh?: boolean }, generation: number, resetGeneration: number): Promise<HerdrPane[]> {
+  private async refresh(
+    workspaceId: string,
+    options: { forceRefresh?: boolean; skipAllWorkspaceSnapshot?: boolean },
+    generation: number,
+    resetGeneration: number,
+  ): Promise<HerdrPane[]> {
     try {
-      if (this.delegate.listAllPanes) {
+      if (this.delegate.listAllPanes && !options.skipAllWorkspaceSnapshot) {
         try {
           return (await this.listAllPanes(options)).filter((pane) => pane.workspaceId === workspaceId);
         } catch (error) {
           this.logger?.debug({ event: "workspace-snapshot-fallback", workspaceId, err: safeLogError(error), outcome: "fallback" }, "all-workspace snapshot unavailable; falling back to workspace snapshot");
         }
       }
-      const panes = await this.delegate.listPanes(workspaceId, { forceRefresh: true });
+      const panes = await this.delegate.listPanes(workspaceId, { forceRefresh: true, ...(options.skipAllWorkspaceSnapshot ? { skipAllWorkspaceSnapshot: true } : {}) });
       if (generation !== this.workspaceGeneration(workspaceId) || resetGeneration !== this.resetGeneration) return panes;
       const capturedAt = this.clock();
       this.rememberWorkspaceSnapshot(workspaceId, panes);

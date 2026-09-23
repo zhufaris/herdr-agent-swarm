@@ -37,7 +37,7 @@ export class HerdrSnapshotCollector {
     const failures: ReconciliationFailure[] = [];
     await mapWithConcurrency(workspaceIds, WORKSPACE_DISCOVERY_CONCURRENCY, async (workspaceId) => {
       try {
-        result.set(workspaceId, await this.herdr.listPanes(workspaceId));
+        result.set(workspaceId, await this.herdr.listPanes(workspaceId, { skipAllWorkspaceSnapshot: true }));
         const recovery = this.workspaceFailureLogs.recover(workspaceId);
         if (recovery) this.logger.info({ event: "workspace-reconciliation-recovered", workspaceId, ...recovery, outcome: "recovered" }, "workspace reconciliation recovered");
       } catch (error) {

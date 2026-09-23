@@ -245,6 +245,18 @@ describe("Herdr adapter structured control", () => {
     expect(native.request).toHaveBeenCalledTimes(3);
   });
 
+  it("uses the direct workspace query when global snapshot fallback is already decided", async () => {
+    const native = { request: vi.fn(async () => { throw new Error("global snapshot must be skipped"); }) };
+    const runner: CommandRunner = { async run(_executable, args) {
+      expect(args).toEqual(["pane", "list", "--workspace", "w1"]);
+      return json({ panes: [] });
+    } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).listPanes("w1", { skipAllWorkspaceSnapshot: true })).resolves.toEqual([]);
+
+    expect(native.request).not.toHaveBeenCalled();
+  });
+
   it("closes the native transport circuit after a successful recovery probe", async () => {
     let now = 0; let fail = true;
     const native = { request: vi.fn(async () => { if (fail) throw new Error("native unavailable"); return { snapshot: { panes: [], agents: [] } }; }) };
