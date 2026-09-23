@@ -6,7 +6,7 @@ describe("RuntimeEventIntegration", () => {
   it("names distinct reliability classes without exposing a generic publisher", () => {
     const events = new RuntimeEventIntegration(pino({ enabled: false }));
     events.registerInstanceWakeup(() => {});
-    events.connectHerdrHints({ async handle() {} });
+    events.connectHerdrHints(async () => {});
     events.seal();
 
     expect(events.snapshot()).toEqual({
@@ -31,7 +31,7 @@ describe("RuntimeEventIntegration", () => {
     events.wakeInstance("instance-1");
     events.wakeInstance("instance-1");
     events.registerInstanceWakeup((instanceId) => { instances.push(instanceId); });
-    events.connectHerdrHints({ async handle() {} });
+    events.connectHerdrHints(async () => {});
 
     events.seal();
     await new Promise((resolve) => queueMicrotask(resolve));
@@ -43,32 +43,19 @@ describe("RuntimeEventIntegration", () => {
   it("fails fast when required work or Herdr hint wiring is incomplete", async () => {
     const events = new RuntimeEventIntegration(pino({ enabled: false }));
     expect(() => events.seal()).toThrow("Missing wake-up channel registration: instance");
-    expect(() => events.handleHerdrHint({ kind: "unknown", scope: "all", workspaceIds: [], paneIds: [] })).toThrow("Runtime link is not connected: Herdr event router");
+    expect(() => events.herdrHintConsumer({ kind: "unknown", scope: "all", workspaceIds: [], paneIds: [] }, new AbortController().signal)).toThrow("Runtime link is not connected: Herdr event router");
   });
 
   it("routes bounded Herdr hints only through the connected reconciliation consumer", async () => {
     const handle = vi.fn(async () => {});
     const events = new RuntimeEventIntegration(pino({ enabled: false }));
     events.registerInstanceWakeup(() => {});
-    events.connectHerdrHints({ handle });
+    events.connectHerdrHints(handle);
     events.seal();
     const hint = { kind: "agent-status" as const, scope: "panes" as const, workspaceIds: ["w1"], paneIds: ["p1"] };
 
-    await events.handleHerdrHint(hint);
-
-    expect(handle).toHaveBeenCalledWith(hint);
-  });
-
-  it("forwards event cancellation to the connected reconciliation consumer", async () => {
-    const handle = vi.fn(async () => {});
-    const events = new RuntimeEventIntegration(pino({ enabled: false }));
-    events.registerInstanceWakeup(() => {});
-    events.connectHerdrHints({ handle });
-    events.seal();
     const signal = new AbortController().signal;
-    const hint = { kind: "agent-status" as const, scope: "panes" as const, workspaceIds: ["w1"], paneIds: ["p1"] };
-
-    await events.handleHerdrHint(hint, signal);
+    await events.herdrHintConsumer(hint, signal);
 
     expect(handle).toHaveBeenCalledWith(hint, signal);
   });

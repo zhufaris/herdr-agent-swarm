@@ -76,7 +76,7 @@ export class HerdrSocketSubscriber {
   constructor(
     private readonly socketPath: string,
     private readonly paneIds: () => Promise<readonly string[]>,
-    private readonly onEvent: (hint: HerdrNativeEventHint, signal?: AbortSignal) => void | Promise<void>,
+    private readonly onEvent: (hint: HerdrNativeEventHint, signal: AbortSignal) => void | Promise<void>,
     private readonly logger: Pick<Logger, "info" | "warn" | "debug">,
     private readonly reconnectBaseMs = 250,
     private readonly reconnectMaxMs = 10_000,

@@ -22,6 +22,9 @@ export interface HerdrEventRouterDiagnostics {
   handlerFailures: number;
 }
 
+type ReconciliationScope = { paneIds?: readonly string[]; workspaceIds?: readonly string[] };
+type PrimaryObservation = (() => Promise<void>) | null;
+
 export class HerdrEventRouter {
   private paneHints = 0;
   private workspaceHints = 0;
@@ -61,7 +64,7 @@ export class HerdrEventRouter {
       this.paneHints += 1;
       this.options.invalidatePanes(hint.paneIds);
       await this.run(hint, [
-        this.options.reconcileBindings({ paneIds: hint.paneIds }).then(() => signal?.aborted ? undefined : this.options.observePrimaryTurns(hint.paneIds)),
+        this.reconcilePrimary({ paneIds: hint.paneIds }, () => this.options.observePrimaryTurns(hint.paneIds), signal),
         this.options.reconcileInstances({ paneIds: hint.paneIds }),
         this.options.observeInstanceTurns(hint.paneIds),
         this.options.retryRetiredPanes(hint.paneIds)
@@ -71,8 +74,11 @@ export class HerdrEventRouter {
     if (hint.scope === "workspaces") {
       this.workspaceHints += 1;
       for (const workspaceId of hint.workspaceIds) this.options.invalidateWorkspace(workspaceId);
-      const primary = this.options.reconcileBindings({ workspaceIds: hint.workspaceIds })
-        .then(() => !signal?.aborted && hint.paneIds.length > 0 ? this.options.observePrimaryTurns(hint.paneIds) : undefined);
+      const primary = this.reconcilePrimary(
+        { workspaceIds: hint.workspaceIds },
+        hint.paneIds.length > 0 ? () => this.options.observePrimaryTurns(hint.paneIds) : null,
+        signal
+      );
       const work: Promise<void>[] = [
         primary,
         this.options.reconcileInstances({ workspaceIds: hint.workspaceIds })
@@ -89,11 +95,17 @@ export class HerdrEventRouter {
     this.fullHints += 1;
     this.options.invalidateAll();
     await this.run(hint, [
-      this.options.reconcileBindings().then(() => signal?.aborted ? undefined : this.options.observePrimaryTurns()),
+      this.reconcilePrimary(undefined, () => this.options.observePrimaryTurns(), signal),
       this.options.reconcileInstances(),
       this.options.observeInstanceTurns(),
       this.options.retryRetiredPanes()
     ]);
+  }
+
+  private async reconcilePrimary(scope: ReconciliationScope | undefined, observe: PrimaryObservation, signal?: AbortSignal): Promise<void> {
+    if (scope) await this.options.reconcileBindings(scope);
+    else await this.options.reconcileBindings();
+    if (!signal?.aborted && observe) await observe();
   }
 
   snapshot(): HerdrEventRouterDiagnostics {

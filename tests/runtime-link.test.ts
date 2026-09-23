@@ -9,4 +9,14 @@ describe("RuntimeLink", () => {
     expect(link.get().read()).toBe("ready");
     expect(() => link.connect({ read: () => "replacement" })).toThrow(/already connected/);
   });
+
+  it("provides a stable deferred callable for a composition-time cycle", () => {
+    const link = new RuntimeLink<(value: string) => string>("event consumer");
+    const consume = link.callable();
+
+    expect(() => consume("before")).toThrow("Runtime link is not connected: event consumer");
+    link.connect((value) => `handled:${value}`);
+
+    expect(consume("after")).toBe("handled:after");
+  });
 });

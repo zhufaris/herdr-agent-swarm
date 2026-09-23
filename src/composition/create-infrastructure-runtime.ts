@@ -28,7 +28,7 @@ export function createInfrastructureRuntime(
   config: BridgeConfig,
   logger: Logger,
   availability: AgentRuntimeAvailability,
-  onHerdrEvent: (hint: HerdrRuntimeHint, signal?: AbortSignal) => void | Promise<void>
+  onHerdrEvent: (hint: HerdrRuntimeHint, signal: AbortSignal) => void | Promise<void>
 ) {
   const runner = new ExecFileCommandRunner(config.commandTimeoutMs);
   const worktreeNameResolver = new WorktreeNameResolver(runner, config.commandTimeoutMs);

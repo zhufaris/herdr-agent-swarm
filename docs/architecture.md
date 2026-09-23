@@ -606,6 +606,10 @@ state plus process-local fan-out, best-effort work wake-ups, and bounded Herdr
 socket hints. It deliberately has no generic `publish(any)` interface. SQLite
 and fresh Herdr observation remain authoritative. The two process-local roles
 below remain separate contracts and are not sources of persistent state.
+The Herdr hint path uses one deferred function link because infrastructure owns
+the socket subscriber while application composition constructs its router later.
+The link hides that construction cycle: callers receive a stable hint consumer,
+and `RuntimeEventIntegration` does not proxy individual event calls.
 
 | Role | Meaning | Consumer behavior | Reliability boundary |
 | --- | --- | --- | --- |
