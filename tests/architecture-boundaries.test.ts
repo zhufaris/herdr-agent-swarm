@@ -728,9 +728,21 @@ describe("application composition boundaries", () => {
 
   it("puts the integrity auditor inside the shared runtime shutdown boundary", () => {
     const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
-    expect(lifecycle).toContain('this.registerCleanup("integrityAuditor", "workers", "non-writer"');
+    expect(lifecycle).toContain('this.lifecycle.start(\n        { name: "integrityAuditor", stage: "workers", kind: "non-writer"');
     expect(lifecycle).toContain("cleanupEntries: this.lifecycle.shutdownPlan()");
     expect(lifecycle).not.toContain("await d.sqliteIntegrity.stop(); return shutdown.shutdown(signal)");
+  });
+
+  it("pairs ordinary runtime startup and cleanup through the lifecycle ledger", () => {
+    const lifecycle = readFileSync(new URL("../src/composition/managed-bridge-runtime.ts", import.meta.url), "utf8");
+    expect(lifecycle).toContain("this.lifecycle.startResource({");
+    expect(lifecycle.match(/this\.lifecycle\.start\(/g)?.length).toBeGreaterThanOrEqual(9);
+    for (const ordinaryResource of ["integrityAuditor", "healthServer", "publisher", "outboxRetention", "projector", "cardContextRebuilder", "queueFeedbackProjector", "paneRetention", "externalTurns", "instanceRuntime", "instanceTurns"]) {
+      expect(lifecycle).not.toContain(`this.registerCleanup("${ordinaryResource}"`);
+    }
+    for (const specialResource of ["primaryToolGateway", "naturalLanguageCommands", "coordinator", "instanceWork", "herdrSocketEventDrain", "herdrSocketIngress"]) {
+      expect(lifecycle).toContain(`this.registerCleanup("${specialResource}"`);
+    }
   });
 
   it("keeps process entrypoint lifecycle-free beyond start and stop", () => {

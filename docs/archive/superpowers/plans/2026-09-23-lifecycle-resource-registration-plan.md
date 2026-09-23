@@ -1,5 +1,7 @@
 # Lifecycle Resource Registration Implementation Plan
 
+Status: completed and archived.
+
 ## Objective
 
 Move repeated cleanup-before-start mechanics behind the
@@ -55,4 +57,4 @@ Tests do not inspect private ledger state or private startup methods.
   and diff check serially where build output could race tests.
 - Review against repository standards and this design.
 - Archive the completed design and plan, update the active-record index, and
-  commit the implementation without an injected `Co-authored-by: TRAE CLI` trailer.
+  commit the implementation without an automatically injected co-author trailer.

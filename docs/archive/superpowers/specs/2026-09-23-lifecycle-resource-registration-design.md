@@ -1,5 +1,7 @@
 # Lifecycle Resource Registration
 
+Status: completed and archived.
+
 ## Goal
 
 Deepen `RuntimeLifecycleLedger` so managed startup can express the common
