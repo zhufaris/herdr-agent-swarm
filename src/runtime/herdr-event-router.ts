@@ -33,32 +33,35 @@ export class HerdrEventRouter {
 
   constructor(private readonly options: HerdrEventRouterOptions) {}
 
-  async handle(hint: HerdrRuntimeHint): Promise<void> {
+  async handle(hint: HerdrRuntimeHint, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
     this.pendingHint = mergeHerdrRuntimeHints(this.pendingHint, hint);
     if (this.running) {
       this.coalescedHints += 1;
       return this.running;
     }
-    const run = this.drain();
+    const run = this.drain(signal);
     this.running = run;
     try { await run; }
     finally { if (this.running === run) this.running = null; }
   }
 
-  private async drain(): Promise<void> {
+  private async drain(signal?: AbortSignal): Promise<void> {
     while (this.pendingHint) {
+      if (signal?.aborted) { this.pendingHint = null; break; }
       const hint = this.pendingHint;
       this.pendingHint = null;
-      await this.route(hint);
+      await this.route(hint, signal);
     }
   }
 
-  private async route(hint: HerdrRuntimeHint): Promise<void> {
+  private async route(hint: HerdrRuntimeHint, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
     if (hint.scope === "panes") {
       this.paneHints += 1;
       this.options.invalidatePanes(hint.paneIds);
       await this.run(hint, [
-        this.options.reconcileBindings({ paneIds: hint.paneIds }).then(() => this.options.observePrimaryTurns(hint.paneIds)),
+        this.options.reconcileBindings({ paneIds: hint.paneIds }).then(() => signal?.aborted ? undefined : this.options.observePrimaryTurns(hint.paneIds)),
         this.options.reconcileInstances({ paneIds: hint.paneIds }),
         this.options.observeInstanceTurns(hint.paneIds),
         this.options.retryRetiredPanes(hint.paneIds)
@@ -69,7 +72,7 @@ export class HerdrEventRouter {
       this.workspaceHints += 1;
       for (const workspaceId of hint.workspaceIds) this.options.invalidateWorkspace(workspaceId);
       const primary = this.options.reconcileBindings({ workspaceIds: hint.workspaceIds })
-        .then(() => hint.paneIds.length > 0 ? this.options.observePrimaryTurns(hint.paneIds) : undefined);
+        .then(() => !signal?.aborted && hint.paneIds.length > 0 ? this.options.observePrimaryTurns(hint.paneIds) : undefined);
       const work: Promise<void>[] = [
         primary,
         this.options.reconcileInstances({ workspaceIds: hint.workspaceIds })
@@ -86,7 +89,7 @@ export class HerdrEventRouter {
     this.fullHints += 1;
     this.options.invalidateAll();
     await this.run(hint, [
-      this.options.reconcileBindings().then(() => this.options.observePrimaryTurns()),
+      this.options.reconcileBindings().then(() => signal?.aborted ? undefined : this.options.observePrimaryTurns()),
       this.options.reconcileInstances(),
       this.options.observeInstanceTurns(),
       this.options.retryRetiredPanes()

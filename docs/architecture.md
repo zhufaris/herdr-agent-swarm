@@ -1632,6 +1632,12 @@ before stopping that callback's observer and reconciliation dependencies. The
 drain is part of the writer gate because its callback can still reconcile
 durable SQLite state. A failed or unsettled drain therefore retains ownership
 under the same policy as other writers.
+The drain also forwards the shared shutdown deadline through an event-scoped
+abort signal. Subscriber and router checkpoints discard queued hints and skip
+dependent work that has not started after that signal fires. Cancellation is
+cooperative: already-started Herdr calls and durable transitions still settle
+normally, and the writer drain does not report completion until the real event
+callback returns.
 
 ### First-run setup boundary
 

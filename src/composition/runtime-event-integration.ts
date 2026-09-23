@@ -8,7 +8,7 @@ import { RuntimeLink } from "./runtime-link.js";
 import { WorkWakeupHub } from "./work-wakeup-hub.js";
 
 type RuntimeWakeups = { outbound: undefined; primary: string; instance: string };
-interface HerdrHintConsumer { handle(hint: HerdrRuntimeHint): Promise<void>; }
+interface HerdrHintConsumer { handle(hint: HerdrRuntimeHint, signal?: AbortSignal): Promise<void>; }
 
 export interface RuntimeEventIntegrationSnapshot {
   reliability: {
@@ -47,7 +47,9 @@ export class RuntimeEventIntegration {
   }
 
   connectHerdrHints(consumer: HerdrHintConsumer): void { this.herdrHints.connect(consumer); }
-  handleHerdrHint(hint: HerdrRuntimeHint): Promise<void> { return this.herdrHints.get().handle(hint); }
+  handleHerdrHint(hint: HerdrRuntimeHint, signal?: AbortSignal): Promise<void> {
+    return signal ? this.herdrHints.get().handle(hint, signal) : this.herdrHints.get().handle(hint);
+  }
   seal(): void { this.wakeups.seal(); }
 
   snapshot(): RuntimeEventIntegrationSnapshot {

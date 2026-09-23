@@ -429,11 +429,12 @@ describe("ManagedBridgeRuntime", () => {
   it("reports an unsettled Herdr socket event drain without releasing ownership", async () => {
     vi.useFakeTimers();
     let settleDrain!: () => void;
+    let drainSignal: AbortSignal | undefined;
     const drain = new Promise<void>((resolve) => { settleDrain = resolve; });
     const base = fixture();
     const runtime = new ManagedBridgeRuntime({
       ...base.runtimeDependencies,
-      herdrSocketSubscriber: { startEvents() { base.calls.push("socket:start"); }, stopIngress() { base.calls.push("socket-ingress:stop"); }, async drainEvents() { base.calls.push("socket-drain:start"); await drain; } }
+      herdrSocketSubscriber: { startEvents() { base.calls.push("socket:start"); }, stopIngress() { base.calls.push("socket-ingress:stop"); }, async drainEvents(context) { drainSignal = context?.signal; base.calls.push("socket-drain:start"); await drain; } }
     });
 
     await runtime.start();
@@ -441,6 +442,7 @@ describe("ManagedBridgeRuntime", () => {
     const stopping = runtime.stop("SIGTERM");
     await vi.advanceTimersByTimeAsync(31_100);
 
+    expect(drainSignal?.aborted).toBe(true);
     await expect(stopping).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketEventDrain"] });
     expect(base.calls.slice(0, 2)).toEqual(["socket-ingress:stop", "socket-drain:start"]);
     expect(base.calls).not.toContain("fence:stop");

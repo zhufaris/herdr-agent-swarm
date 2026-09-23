@@ -118,4 +118,53 @@ describe("HerdrEventRouter", () => {
     expect(calls.reconcileBindings).toHaveBeenCalledTimes(2);
     expect(calls.reconcileBindings).toHaveBeenLastCalledWith({ paneIds: ["w1:p2", "w1:p3"] });
   });
+
+  it("does not start route work when event cancellation already fired", async () => {
+    const { calls, router } = setup();
+    const controller = new AbortController();
+    controller.abort(new Error("shutdown deadline"));
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] }, controller.signal);
+
+    expect(calls.invalidatePanes).not.toHaveBeenCalled();
+    expect(calls.reconcileBindings).not.toHaveBeenCalled();
+    expect(calls.reconcileInstances).not.toHaveBeenCalled();
+  });
+
+  it("skips Primary observation when cancellation fires after binding reconciliation", async () => {
+    const { calls, router } = setup();
+    const controller = new AbortController();
+    calls.reconcileBindings.mockImplementation(async () => { controller.abort(new Error("shutdown deadline")); });
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] }, controller.signal);
+
+    expect(calls.reconcileBindings).toHaveBeenCalledOnce();
+    expect(calls.observePrimaryTurns).not.toHaveBeenCalled();
+    expect(calls.reconcileInstances).toHaveBeenCalledOnce();
+    expect(calls.observeInstanceTurns).toHaveBeenCalledOnce();
+    expect(calls.retryRetiredPanes).toHaveBeenCalledOnce();
+  });
+
+  it("discards a coalesced follow-up when the event lifecycle is cancelled", async () => {
+    const { calls, router } = setup();
+    const controller = new AbortController();
+    let release!: () => void;
+    calls.reconcileBindings.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+
+    const first = router.handle(
+      { kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] },
+      controller.signal
+    );
+    const second = router.handle(
+      { kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p2"] },
+      controller.signal
+    );
+    controller.abort(new Error("shutdown deadline"));
+    release();
+    await Promise.all([first, second]);
+
+    expect(calls.reconcileBindings).toHaveBeenCalledTimes(1);
+    expect(calls.reconcileInstances).toHaveBeenCalledTimes(1);
+    expect(calls.observePrimaryTurns).not.toHaveBeenCalled();
+  });
 });

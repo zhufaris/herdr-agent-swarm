@@ -22,7 +22,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const applicationPresentation = createFeishuGatewayApplicationPresentation(config.runtimeTuning.cards, config.projects);
   const presentation = { application: applicationPresentation, primary: applicationPresentation, pane: feishuGatewayPanePresentation };
   const events = new RuntimeEventIntegration(logger);
-  const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint) => events.handleHerdrHint(hint));
+  const infrastructure = createInfrastructureRuntime(config, logger, availability, (hint, signal) => events.handleHerdrHint(hint, signal));
   const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, transcriptReader } = infrastructure;
   const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), wakePrimary: (bindingId) => events.wakePrimary(bindingId), wakeInstance: (instanceId) => events.wakeInstance(instanceId), maxQueueDepth: config.maxQueueDepth });
   const bus = events.lifecycle; const scheduler = events.promptWork; const inboundWork = events.inboundWork;

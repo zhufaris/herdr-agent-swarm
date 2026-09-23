@@ -58,4 +58,18 @@ describe("RuntimeEventIntegration", () => {
 
     expect(handle).toHaveBeenCalledWith(hint);
   });
+
+  it("forwards event cancellation to the connected reconciliation consumer", async () => {
+    const handle = vi.fn(async () => {});
+    const events = new RuntimeEventIntegration(pino({ enabled: false }));
+    events.registerInstanceWakeup(() => {});
+    events.connectHerdrHints({ handle });
+    events.seal();
+    const signal = new AbortController().signal;
+    const hint = { kind: "agent-status" as const, scope: "panes" as const, workspaceIds: ["w1"], paneIds: ["p1"] };
+
+    await events.handleHerdrHint(hint, signal);
+
+    expect(handle).toHaveBeenCalledWith(hint, signal);
+  });
 });
