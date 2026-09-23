@@ -22,7 +22,7 @@ function shutdownFixture(options: ShutdownFixtureOptions): BridgeRuntimeShutdown
     if (value) entries.push({ name, stage, kind, stop: (context) => value.stop(context) });
   };
   add("primaryToolGateway", "ingress", "writer", options.primaryToolGateway);
-  add("herdrSocketSubscriber", "ingress", "non-writer", options.herdrSocketSubscriber);
+  add("herdrSocketSubscriber", "ingress", "writer", options.herdrSocketSubscriber);
   add("paneRetention", "observers", "writer", options.paneRetention);
   add("externalTurns", "observers", "writer", options.externalTurns);
   add("instanceRuntime", "workers", "writer", options.instanceRuntime);
@@ -114,7 +114,7 @@ describe("bridge runtime shutdown", () => {
     expect(errors).toEqual(["coordinator"]);
   });
 
-  it("continues releasing SQLite ownership when only a non-writer stop fails", async () => {
+  it("retains SQLite ownership when the Herdr socket event drain fails", async () => {
     const calls: string[] = [];
     const errors: string[] = [];
     const runtime = shutdownFixture({
@@ -123,12 +123,38 @@ describe("bridge runtime shutdown", () => {
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
       store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
-      logger: { info() {}, error(value) { errors.push(String(value.component)); } }
+      logger: { info() {}, error(value) { if ("component" in value) errors.push(String(value.component)); } }
     });
 
-    await expect(runtime.shutdown("SIGTERM")).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
-    expect(calls).toEqual(["subscriber", "coordinator", "health", "fence", "lease", "store"]);
+    await expect(runtime.shutdown("SIGTERM")).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketSubscriber"] });
+    expect(calls).toEqual(["subscriber", "coordinator", "health"]);
     expect(errors).toEqual(["herdrSocketSubscriber"]);
+  });
+
+  it("retains SQLite ownership when the Herdr socket event drain does not settle", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let settleSubscriber!: () => void;
+    const subscriber = new Promise<void>((resolve) => { settleSubscriber = resolve; });
+    const runtime = shutdownFixture({
+      herdrSocketSubscriber: { async stop() { calls.push("subscriber:start"); await subscriber; calls.push("subscriber:end"); } },
+      coordinator: { async stop() { calls.push("coordinator"); } },
+      healthServer: { close(callback) { calls.push("health"); callback(); } },
+      lease: { release() { calls.push("lease"); } },
+      store: { deactivateWriteFence() { calls.push("fence"); }, close() { calls.push("store"); } },
+      logger: { info() {}, warn() {}, error() {} }, shutdownGraceMs: 50, abortSettlementMs: 10
+    });
+
+    const shutdown = runtime.shutdown("SIGTERM");
+    await vi.advanceTimersByTimeAsync(70);
+
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketSubscriber"] });
+    expect(calls).toEqual(["subscriber:start", "coordinator", "health"]);
+    expect(calls).not.toContain("fence");
+    expect(calls).not.toContain("lease");
+    expect(calls).not.toContain("store");
+    settleSubscriber();
+    await Promise.resolve();
   });
 
   it("still closes later resources after the coordinator performs bounded cancellation", async () => {

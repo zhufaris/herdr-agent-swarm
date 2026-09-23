@@ -1,5 +1,7 @@
 # Herdr Socket Shutdown Writer Fencing
 
+Status: implemented and verified on 2026-09-23.
+
 ## Goal
 
 Prevent shutdown from releasing the SQLite write fence, instance lease, or

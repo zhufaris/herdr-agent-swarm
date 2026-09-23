@@ -1,5 +1,7 @@
 # Herdr Socket Shutdown Writer Fencing Implementation Plan
 
+Status: completed and verified on 2026-09-23.
+
 ## Objective
 
 Make the Herdr socket subscriber's write-capable event drain participate in the
@@ -56,5 +58,5 @@ the runtime's shutdown stage order.
   design as separate axes.
 - Resolve all material findings and repeat affected validation.
 - Commit the implementation separately from the design and plan documents.
-- Inspect the final commit and remove any automatically injected
-  `Co-authored-by: TRAE CLI` trailer before handoff.
+- Inspect the final commit and remove any automatically injected assistant
+  co-author trailer before handoff.

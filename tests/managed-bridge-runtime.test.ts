@@ -409,6 +409,23 @@ describe("ManagedBridgeRuntime", () => {
     expect(calls).not.toContain("store:close");
   });
 
+  it("retains ownership when Herdr socket event draining fails", async () => {
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      herdrSocketSubscriber: { startEvents() { base.calls.push("socket:start"); }, async stop() { base.calls.push("socket:stop"); throw new Error("socket drain failed"); } }
+    });
+
+    await runtime.start();
+    base.calls.length = 0;
+
+    await expect(runtime.stop("SIGTERM")).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketSubscriber"] });
+    expect(base.calls).toContain("socket:stop");
+    expect(base.calls).not.toContain("fence:stop");
+    expect(base.calls).not.toContain("lease:release");
+    expect(base.calls).not.toContain("store:close");
+  });
+
   it("releases ownership when closing the health server fails", async () => {
     const errors: string[] = [];
     const base = fixture();

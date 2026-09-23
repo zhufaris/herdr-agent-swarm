@@ -214,7 +214,7 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       this.registerCleanup("instanceTurns", "workers", "writer", () => d.instanceTurns.stop());
       d.instanceTurns.start(d.reconcileIntervalMs);
       if (d.herdrSocketSubscriber) {
-        this.registerCleanup("herdrSocketSubscriber", "ingress", "non-writer", () => d.herdrSocketSubscriber!.stop());
+        this.registerCleanup("herdrSocketSubscriber", "ingress", "writer", () => d.herdrSocketSubscriber!.stop());
         d.herdrSocketSubscriber.startEvents();
       }
     } catch (error) {

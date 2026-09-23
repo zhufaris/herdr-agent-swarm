@@ -1626,6 +1626,10 @@ and final settlement allowance, the result is `ownership_retained`: the fence,
 lease, and store deliberately remain held and the process receives a non-zero
 exit code. This conservative outcome prevents a replacement process from writing
 while an old task may still hold SQLite access.
+The Herdr socket subscriber is part of this writer gate even though it stops in
+the ingress phase: its stop promise drains the current event callback, and that
+callback can still reconcile durable SQLite state. A failed or unsettled socket
+drain therefore retains ownership under the same policy as other writers.
 
 ### First-run setup boundary
 
