@@ -205,6 +205,32 @@ describe("health server", () => {
     expect(assertWorkspace).toHaveBeenCalledOnce();
   });
 
+  it("bounds concurrent Herdr workspace readiness probes", async () => {
+    store = new SqliteBindingStore(":memory:");
+    let active = 0;
+    let maximumActive = 0;
+    const assertWorkspace = vi.fn(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+    });
+    const projects = Array.from({ length: 9 }, (_, index) => ({
+      id: `project-${index}`, displayName: `Project ${index}`, description: `Project ${index}`, workspaceId: `w${index}`, cwd: process.cwd()
+    }));
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects,
+      lark: { isReady: () => true } as never, herdr: { assertWorkspace } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/ready`);
+
+    expect(response.status).toBe(200);
+    expect(assertWorkspace).toHaveBeenCalledTimes(9);
+    expect(maximumActive).toBe(4);
+  });
+
   it("coalesces concurrent status collection and caches successful snapshots briefly", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);

@@ -8,6 +8,7 @@ import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
 import type { CardUpdateSchedulerDiagnostics } from "../events/card-update-scheduler.js";
 import type { HerdrSocketStatus } from "../runtime/herdr-socket-subscriber.js";
+import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 interface ComponentState { ok: boolean; error?: string }
@@ -25,6 +26,7 @@ interface Readiness {
 }
 type HealthServerOptions = Parameters<typeof startHealthServer>[0];
 type StatusSnapshot = { body: Record<string, unknown>; cacheable: boolean };
+const WORKSPACE_READINESS_CONCURRENCY = 4;
 
 export function startHealthServer(options: {
   host: string; port: number; store: HealthStore; herdr: HerdrPort; gateway?: Pick<GatewaySession, "snapshot">; /** @deprecated test compatibility */ lark?: { isReady(): boolean }; projects: readonly ProjectConfig[];
@@ -177,10 +179,10 @@ function inspectReadiness(options: { store: HealthStore; gateway?: Pick<GatewayS
 }
 
 async function inspectHerdrReadiness(herdr: HerdrPort, projects: readonly ProjectConfig[]): Promise<HerdrReadiness> {
-  const workspaces = await Promise.all([...new Set(projects.map((project) => project.workspaceId))].map(async (workspaceId) => {
+  const workspaces = await mapWithConcurrency([...new Set(projects.map((project) => project.workspaceId))], WORKSPACE_READINESS_CONCURRENCY, async (workspaceId) => {
     try { await herdr.assertWorkspace(workspaceId); return { workspaceId, ok: true }; }
     catch (error) { return { workspaceId, ok: false, error: boundedError(error) }; }
-  }));
+  });
   const failedWorkspace = workspaces.find((workspace) => !workspace.ok);
   return failedWorkspace ? { ok: false, error: "One or more Herdr workspaces are unavailable", workspaces } : { ok: true, workspaces };
 }
