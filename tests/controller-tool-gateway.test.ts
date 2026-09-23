@@ -38,7 +38,28 @@ describe("ControllerToolGateway", () => {
     await expect(call(fixture.socketPath, { ...request, tool: "getInterpretationContext", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
   });
 
-  async function setup() {
+  it("closes clients that remain idle before sending a request", async () => {
+    const fixture = await setup({ idleTimeoutMs: 25 });
+    const idle = await connect(fixture.socketPath);
+
+    await expect(closesWithin(idle, 150)).resolves.toBe(true);
+  });
+
+  it("rejects clients beyond the connection limit and releases capacity on close", async () => {
+    const fixture = await setup({ idleTimeoutMs: 1_000, maxConnections: 1 });
+    const occupying = await connect(fixture.socketPath);
+    const rejected = await connect(fixture.socketPath);
+
+    await expect(closesWithin(rejected, 150)).resolves.toBe(true);
+    occupying.destroy();
+    await closesWithin(occupying, 150);
+
+    await vi.waitFor(async () => {
+      await expect(call(fixture.socketPath, { jobId: "job-1", capability: fixture.capability, tool: "getInterpretationContext", arguments: {} })).resolves.toMatchObject({ ok: true });
+    });
+  });
+
+  async function setup(options: { idleTimeoutMs?: number; maxConnections?: number } = {}) {
     directory = await mkdtemp(join(tmpdir(), "controller-tools-"));
     const socketPath = join(directory, "controller.sock");
     const capability = "a".repeat(64);
@@ -48,7 +69,7 @@ describe("ControllerToolGateway", () => {
     store.acceptControllerInterpretation({ id: "job-1", message, controllerGeneration: 1, capabilityHash: hash(capability), acceptedAt: new Date().toISOString() });
     store.claimNextControllerInterpretation(1, hash(capability), new Date().toISOString());
     store.markControllerInterpretationDispatched("job-1", 1, "turn-1", new Date().toISOString());
-    gateway = new ControllerToolGateway(socketPath, store, [{ id: "default", displayName: "Default", description: "Default project", workspaceId: "w1", cwd: "/repo" }], pino({ enabled: false }));
+    gateway = new ControllerToolGateway(socketPath, store, [{ id: "default", displayName: "Default", description: "Default project", workspaceId: "w1", cwd: "/repo" }], pino({ enabled: false }), undefined, options);
     await gateway.start();
     return { socketPath, capability };
   }
@@ -81,6 +102,22 @@ function call(socketPath: string, payload: object): Promise<{ ok: boolean; resul
     socket.on("data", (chunk) => { output += chunk; });
     socket.once("end", () => resolve(JSON.parse(output)));
     socket.once("error", reject);
+  });
+}
+
+function connect(socketPath: string) {
+  return new Promise<ReturnType<typeof createConnection>>((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+async function closesWithin(socket: ReturnType<typeof createConnection>, timeoutMs: number): Promise<boolean> {
+  if (socket.destroyed) return true;
+  return new Promise<boolean>((resolve) => {
+    const timeout = setTimeout(() => resolve(false), timeoutMs);
+    socket.once("close", () => { clearTimeout(timeout); resolve(true); });
   });
 }
 
