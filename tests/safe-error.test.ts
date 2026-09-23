@@ -28,6 +28,17 @@ describe("safeLogError", () => {
     expect(safe.message).toBe("failed Bearer [REDACTED] at /x?access_token=[REDACTED]&next=1");
   });
 
+  it("preserves the diagnostic tail of a long redacted command failure", () => {
+    const prefix = `Command failed: herdr agent start ${"--safe-option value ".repeat(40)}`;
+    const safe = safeLogError(new Error(`${prefix}: agent name already exists; password=tail-secret`));
+
+    expect(safe.message.startsWith("Command failed: herdr agent start")).toBe(true);
+    expect(safe.message).toContain(" ... [truncated] ... ");
+    expect(safe.message.endsWith(": agent name already exists; password=[REDACTED]")).toBe(true);
+    expect(safe.message).not.toContain("tail-secret");
+    expect(safe.message).toHaveLength(500);
+  });
+
   it.each([
     ["Authorization Basic", "Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"],
     ["assignment API key", "API_KEY=super-secret", "API_KEY=[REDACTED]"],

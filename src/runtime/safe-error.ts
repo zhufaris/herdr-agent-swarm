@@ -1,6 +1,8 @@
 import { redactSecrets } from "./redact-secrets.js";
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
+const ERROR_TRUNCATION_MARKER = " ... [truncated] ... ";
+const ERROR_MESSAGE_HEAD_LENGTH = 180;
 
 interface SafeLogError {
   name: string;
@@ -51,5 +53,11 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function sanitizeMessage(message: string): string {
-  return redactSecrets(message).slice(0, MAX_ERROR_MESSAGE_LENGTH);
+  return truncateDiagnosticMessage(redactSecrets(message));
+}
+
+function truncateDiagnosticMessage(message: string): string {
+  if (message.length <= MAX_ERROR_MESSAGE_LENGTH) return message;
+  const tailLength = MAX_ERROR_MESSAGE_LENGTH - ERROR_MESSAGE_HEAD_LENGTH - ERROR_TRUNCATION_MARKER.length;
+  return `${message.slice(0, ERROR_MESSAGE_HEAD_LENGTH)}${ERROR_TRUNCATION_MARKER}${message.slice(-tailLength)}`;
 }
