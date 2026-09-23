@@ -1,5 +1,7 @@
 # Herdr Socket Split Shutdown Implementation Plan
 
+Status: completed and verified on 2026-09-23.
+
 ## Objective
 
 Expose an explicit socket ingress gate and event-drain barrier, wire both into

@@ -1,5 +1,7 @@
 # Herdr Socket Split Shutdown Lifecycle
 
+Status: implemented and verified on 2026-09-23.
+
 ## Goal
 
 Separate Herdr socket ingress closure from write-capable event draining so the

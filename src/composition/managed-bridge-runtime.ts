@@ -42,7 +42,7 @@ export interface ManagedBridgeRuntimeDependencies {
   coordinator: { prepareDelivery(): Promise<void>; recoverRuntime(): Promise<void>; start(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   paneRetention: { scan(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   externalTurns: { start(): void; stop(): Promise<void> };
-  herdrSocketSubscriber?: { startEvents(): void; stop(): Promise<void> };
+  herdrSocketSubscriber?: { startEvents(): void; stopIngress(): void; drainEvents(): Promise<void> };
   logger: LifecycleLogger;
   onFatalStop?(reason: "lease-lost", result: BridgeRuntimeShutdownOutcome): void | Promise<void>;
 }
@@ -214,7 +214,9 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       this.registerCleanup("instanceTurns", "workers", "writer", () => d.instanceTurns.stop());
       d.instanceTurns.start(d.reconcileIntervalMs);
       if (d.herdrSocketSubscriber) {
-        this.registerCleanup("herdrSocketSubscriber", "ingress", "writer", () => d.herdrSocketSubscriber!.stop());
+        // Ingress-stage cleanup runs in reverse registration order: close admission before awaiting its writer drain.
+        this.registerCleanup("herdrSocketEventDrain", "ingress", "writer", () => d.herdrSocketSubscriber!.drainEvents());
+        this.registerCleanup("herdrSocketIngress", "ingress", "non-writer", async () => d.herdrSocketSubscriber!.stopIngress());
         d.herdrSocketSubscriber.startEvents();
       }
     } catch (error) {

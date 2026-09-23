@@ -52,6 +52,7 @@ export class HerdrSocketSubscriber {
   private buffer = "";
   private dispatching = false;
   private hintDrain: Promise<void> | null = null;
+  private ingressClose: Promise<void> | null = null;
   private pendingHint: HerdrNativeEventHint | null = null;
   private stableTimer: NodeJS.Timeout | null = null;
   private subscriptionAckTimer: NodeJS.Timeout | null = null;
@@ -90,6 +91,13 @@ export class HerdrSocketSubscriber {
   }
 
   async stop(): Promise<void> {
+    this.stopIngress();
+    await this.ingressClose;
+    await this.drainEvents();
+  }
+
+  stopIngress(): void {
+    if (this.stopped) return;
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.stableTimer) clearTimeout(this.stableTimer);
@@ -109,7 +117,12 @@ export class HerdrSocketSubscriber {
     const socket = this.socket;
     this.socket = null;
     for (const pending of this.pendingRequests.values()) pending.socket.destroy();
-    if (socket && !socket.destroyed) await new Promise<void>((resolve) => { socket.once("close", resolve); socket.destroy(); });
+    if (socket && !socket.destroyed) {
+      this.ingressClose = new Promise<void>((resolve) => { socket.once("close", resolve); socket.destroy(); });
+    }
+  }
+
+  async drainEvents(): Promise<void> {
     await this.hintDrain;
   }
 

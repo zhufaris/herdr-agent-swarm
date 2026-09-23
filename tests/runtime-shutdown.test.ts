@@ -6,7 +6,7 @@ import type { LifecycleCleanupEntry } from "../src/runtime/lifecycle-ledger.js";
 
 type Stoppable = { stop(context?: ShutdownContext): Promise<void> };
 type ShutdownFixtureOptions = {
-  primaryToolGateway?: Stoppable; herdrSocketSubscriber?: Stoppable; paneRetention?: Stoppable;
+  primaryToolGateway?: Stoppable; herdrSocketIngress?: Stoppable; herdrSocketEventDrain?: Stoppable; paneRetention?: Stoppable;
   externalTurns?: Stoppable; instanceRuntime?: Stoppable; instanceWorker?: Stoppable;
   integrityAuditor?: Stoppable; coordinator?: Stoppable; outboxRetention?: Stoppable;
   queueFeedbackProjector?: Stoppable; cardContextRebuilder?: Stoppable; projector?: Stoppable; publisher?: Stoppable;
@@ -22,7 +22,8 @@ function shutdownFixture(options: ShutdownFixtureOptions): BridgeRuntimeShutdown
     if (value) entries.push({ name, stage, kind, stop: (context) => value.stop(context) });
   };
   add("primaryToolGateway", "ingress", "writer", options.primaryToolGateway);
-  add("herdrSocketSubscriber", "ingress", "writer", options.herdrSocketSubscriber);
+  add("herdrSocketIngress", "ingress", "non-writer", options.herdrSocketIngress);
+  add("herdrSocketEventDrain", "ingress", "writer", options.herdrSocketEventDrain);
   add("paneRetention", "observers", "writer", options.paneRetention);
   add("externalTurns", "observers", "writer", options.externalTurns);
   add("instanceRuntime", "workers", "writer", options.instanceRuntime);
@@ -46,7 +47,8 @@ describe("bridge runtime shutdown", () => {
     let releaseProjector!: () => void;
     const projectorBlocked = new Promise<void>((resolve) => { releaseProjector = resolve; });
     const runtime = shutdownFixture({
-      herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
+      herdrSocketEventDrain: { async stop() { calls.push("subscriber-drain"); } },
+      herdrSocketIngress: { async stop() { calls.push("subscriber-ingress"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       queueFeedbackProjector: { async stop() { calls.push("queue-feedback"); } },
       projector: { async stop() { calls.push("projector:start"); await projectorBlocked; calls.push("projector:end"); } },
@@ -60,18 +62,19 @@ describe("bridge runtime shutdown", () => {
     const first = runtime.shutdown("SIGTERM");
     const second = runtime.shutdown("SIGINT");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(calls).toEqual(["subscriber", "coordinator", "queue-feedback", "projector:start"]);
+    expect(calls).toEqual(["subscriber-ingress", "subscriber-drain", "coordinator", "queue-feedback", "projector:start"]);
 
     releaseProjector();
     await Promise.all([first, second]);
 
-    expect(calls).toEqual(["subscriber", "coordinator", "queue-feedback", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
+    expect(calls).toEqual(["subscriber-ingress", "subscriber-drain", "coordinator", "queue-feedback", "projector:start", "projector:end", "publisher", "health", "fence", "lease", "store"]);
   });
 
   it("stops periodic and external writers before releasing SQLite ownership", async () => {
     const calls: string[] = [];
     const runtime = shutdownFixture({
-      herdrSocketSubscriber: { async stop() { calls.push("subscriber"); } },
+      herdrSocketEventDrain: { async stop() { calls.push("subscriber-drain"); } },
+      herdrSocketIngress: { async stop() { calls.push("subscriber-ingress"); } },
       paneRetention: { async stop() { calls.push("pane-retention"); } },
       externalTurns: { async stop() { calls.push("external-turns"); } },
       outboxRetention: { async stop() { calls.push("outbox-retention"); } },
@@ -87,7 +90,7 @@ describe("bridge runtime shutdown", () => {
     await runtime.shutdown("lease-lost");
 
     expect(calls).toEqual([
-      "subscriber", "pane-retention", "external-turns", "coordinator",
+      "subscriber-ingress", "subscriber-drain", "pane-retention", "external-turns", "coordinator",
       "outbox-retention", "projector", "publisher", "health", "fence", "lease", "store"
     ]);
   });
@@ -118,7 +121,8 @@ describe("bridge runtime shutdown", () => {
     const calls: string[] = [];
     const errors: string[] = [];
     const runtime = shutdownFixture({
-      herdrSocketSubscriber: { async stop() { calls.push("subscriber"); throw new Error("subscriber failed"); } },
+      herdrSocketEventDrain: { async stop() { calls.push("subscriber-drain"); throw new Error("subscriber drain failed"); } },
+      herdrSocketIngress: { async stop() { calls.push("subscriber-ingress"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
@@ -126,9 +130,9 @@ describe("bridge runtime shutdown", () => {
       logger: { info() {}, error(value) { if ("component" in value) errors.push(String(value.component)); } }
     });
 
-    await expect(runtime.shutdown("SIGTERM")).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketSubscriber"] });
-    expect(calls).toEqual(["subscriber", "coordinator", "health"]);
-    expect(errors).toEqual(["herdrSocketSubscriber"]);
+    await expect(runtime.shutdown("SIGTERM")).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketEventDrain"] });
+    expect(calls).toEqual(["subscriber-ingress", "subscriber-drain", "coordinator", "health"]);
+    expect(errors).toEqual(["herdrSocketEventDrain"]);
   });
 
   it("retains SQLite ownership when the Herdr socket event drain does not settle", async () => {
@@ -137,7 +141,8 @@ describe("bridge runtime shutdown", () => {
     let settleSubscriber!: () => void;
     const subscriber = new Promise<void>((resolve) => { settleSubscriber = resolve; });
     const runtime = shutdownFixture({
-      herdrSocketSubscriber: { async stop() { calls.push("subscriber:start"); await subscriber; calls.push("subscriber:end"); } },
+      herdrSocketEventDrain: { async stop() { calls.push("subscriber-drain:start"); await subscriber; calls.push("subscriber-drain:end"); } },
+      herdrSocketIngress: { async stop() { calls.push("subscriber-ingress"); } },
       coordinator: { async stop() { calls.push("coordinator"); } },
       healthServer: { close(callback) { calls.push("health"); callback(); } },
       lease: { release() { calls.push("lease"); } },
@@ -148,8 +153,8 @@ describe("bridge runtime shutdown", () => {
     const shutdown = runtime.shutdown("SIGTERM");
     await vi.advanceTimersByTimeAsync(70);
 
-    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketSubscriber"] });
-    expect(calls).toEqual(["subscriber:start", "coordinator", "health"]);
+    await expect(shutdown).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketEventDrain"] });
+    expect(calls).toEqual(["subscriber-ingress", "subscriber-drain:start", "coordinator", "health"]);
     expect(calls).not.toContain("fence");
     expect(calls).not.toContain("lease");
     expect(calls).not.toContain("store");
