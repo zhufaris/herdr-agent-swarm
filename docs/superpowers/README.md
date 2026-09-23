@@ -5,6 +5,7 @@ implemented. Current records:
 
 - [Natural-language command runtime deep-module design](specs/2026-09-21-natural-language-command-runtime-deep-module-design.md)
 - [Natural-language command runtime deep-module plan](plans/2026-09-21-natural-language-command-runtime-deep-module-plan.md)
+- [Runtime graph shaping design](specs/2026-09-23-runtime-graph-shaping-design.md)
 
 The service's current maintainer, user, and operator documentation starts at the
 [maintainer documentation map](../README.md). Completed or superseded designs,
