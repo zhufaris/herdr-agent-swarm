@@ -20,6 +20,35 @@ describe("worktree name resolver", () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
+  it("coalesces concurrent lookups for the same working directory", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const run = vi.fn(async () => { await pending; return { stdout: "/repo/shared-worktree\n", stderr: "" }; });
+    const resolver = new WorktreeNameResolver({ run } as CommandRunner, 1_000);
+
+    const first = resolver.resolve("/repo/shared-worktree/src");
+    const second = resolver.resolve("/repo/shared-worktree/src");
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual(["shared-worktree", "shared-worktree"]);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("keeps lookups for different working directories concurrent", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const run = vi.fn(async (_command: string, args: string[]) => { await pending; return { stdout: `/repo/${args[1]}\n`, stderr: "" }; });
+    const resolver = new WorktreeNameResolver({ run } as CommandRunner, 1_000);
+
+    const first = resolver.resolve("first");
+    const second = resolver.resolve("second");
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
+  });
+
   it("evicts the least recently used entry when the cache reaches its bound", async () => {
     const run = vi.fn(async (_command: string, args: string[]) => ({ stdout: `/repo/${args[1]}\n`, stderr: "" }));
     const resolver = new WorktreeNameResolver({ run } as CommandRunner, 1_000, 30_000, () => 0, 2);

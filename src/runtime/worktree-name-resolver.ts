@@ -5,6 +5,7 @@ interface CacheEntry { value: string | null; expiresAt: number }
 
 export class WorktreeNameResolver {
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly inFlight = new Map<string, Promise<string | null>>();
 
   constructor(
     private readonly runner: CommandRunner,
@@ -26,6 +27,15 @@ export class WorktreeNameResolver {
     for (const [key, entry] of this.cache) {
       if (entry.expiresAt <= timestamp) this.cache.delete(key);
     }
+    const active = this.inFlight.get(cwd);
+    if (active) return active;
+    const lookup = this.lookup(cwd);
+    this.inFlight.set(cwd, lookup);
+    try { return await lookup; }
+    finally { if (this.inFlight.get(cwd) === lookup) this.inFlight.delete(cwd); }
+  }
+
+  private async lookup(cwd: string): Promise<string | null> {
     let value: string | null = null;
     try {
       const { stdout } = await this.runner.run("git", ["-C", cwd, "rev-parse", "--show-toplevel"], this.timeoutMs);
