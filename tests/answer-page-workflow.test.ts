@@ -108,7 +108,106 @@ describe("AnswerPageWorkflow", () => {
     });
   });
 
-  it("preserves an in-flight static snapshot and reserves A-B-A as distinct revisions", () => {
+  it("coalesces an untouched A-B-A burst to the newest monotonic revision", () => {
+    const store = readyStore();
+    try {
+      store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
+      const input = { promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "A" } };
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
+      expect(store.reserveStaticAnswerCardUpdate({ ...input, card: { content: "B" } })).toBe("reserved");
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
+
+      const pending = store.listPendingOutboundReplies();
+      expect(pending.map((row) => JSON.parse(row.payload).content)).toEqual(["A"]);
+      expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE projection_key IS NOT NULL ORDER BY snapshot_revision").all()).toEqual([{ snapshot_revision: 3 }]);
+      expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ id: pending[0]!.id })]);
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("waiting");
+    } finally { store.close(); }
+  });
+
+  it("normalizes an unchanged legacy first revision before returning waiting", () => {
+    const store = readyStore();
+    try {
+      store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
+      const input = { promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "A" } };
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
+      store.database.prepare("UPDATE outbound_replies SET projection_key = NULL WHERE idempotency_key = 'answer-static:p1:0:answer-1'").run();
+
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("waiting");
+      expect(store.database.prepare("SELECT projection_key FROM outbound_replies WHERE idempotency_key = 'answer-static:p1:0:answer-1'").get()).toEqual({ projection_key: "answer-static:p1:0:answer-1" });
+    } finally { store.close(); }
+  });
+
+  it.each(["delivered", "dismissed"] as const)("preserves a %s snapshot when reserving changed content", (state) => {
+    const store = readyStore();
+    try {
+      store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
+      const input = { promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "A" } };
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
+      const first = store.listPendingOutboundReplies()[0]!;
+      if (state === "delivered") store.markOutboundReplyDelivered(first.id, "answer-1");
+      else store.database.prepare("UPDATE outbound_replies SET state = 'dismissed' WHERE id = ?").run(first.id);
+
+      expect(store.reserveStaticAnswerCardUpdate({ ...input, card: { content: "B" } })).toBe("reserved");
+      expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key IS NOT NULL ORDER BY snapshot_revision").all()).toEqual([
+        { snapshot_revision: 1, state },
+        { snapshot_revision: 2, state: "pending" }
+      ]);
+    } finally { store.close(); }
+  });
+
+  it.each([
+    ["attempted", "attempt_count = 1"],
+    ["checkpointed", "card_id_checkpoint = 'card-checkpoint'"]
+  ])("preserves an untouched-looking snapshot once it was %s", (_state, mutation) => {
+    const store = readyStore();
+    try {
+      store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
+      const input = { promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "A" } };
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
+      const first = store.listPendingOutboundReplies()[0]!;
+      store.database.prepare(`UPDATE outbound_replies SET ${mutation} WHERE id = ?`).run(first.id);
+
+      expect(store.reserveStaticAnswerCardUpdate({ ...input, card: { content: "B" } })).toBe("reserved");
+      expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE projection_key IS NOT NULL ORDER BY snapshot_revision").all()).toEqual([{ snapshot_revision: 1 }, { snapshot_revision: 2 }]);
+    } finally { store.close(); }
+  });
+
+  it("cascades evidence for a coalesced snapshot and retains the newest evidence", () => {
+    const store = readyStore();
+    try {
+      store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
+      const base = { promptId: "p1", pageIndex: 0, messageId: "answer-1" };
+      expect(store.reserveStaticAnswerCardUpdate({ ...base, card: { content: "A" }, source: "source A" })).toBe("reserved");
+      const first = store.listPendingOutboundReplies()[0]!;
+      store.database.prepare("INSERT INTO delivery_recoveries(failed_reply_id, snapshot_revision, state, failure_class, reason, action, created_at, updated_at) VALUES ('failed-source', 1, 'replacement_pending', 'permanent', 'test', 'rebuild_answer', 'now', 'now')").run();
+      store.database.prepare("INSERT INTO answer_recovery_links(failed_reply_id, prompt_id, binding_generation, source_page_index, replacement_page_index, source_start, source_end, source_hash) VALUES ('failed-source', 'p1', 1, 0, 0, 0, 8, 'hash')").run();
+      store.database.prepare("INSERT INTO answer_recovery_candidates(failed_reply_id, reply_id) VALUES ('failed-source', ?)").run(first.id);
+
+      expect(store.reserveStaticAnswerCardUpdate({ ...base, card: { content: "B" }, source: "source B" })).toBe("reserved");
+      const second = store.listPendingOutboundReplies()[0]!;
+      expect(store.getOutboundReply(first.id)).toBeNull();
+      expect(store.database.prepare("SELECT 1 FROM answer_delivery_coverage WHERE reply_id = ?").get(first.id)).toBeUndefined();
+      expect(store.database.prepare("SELECT 1 FROM answer_recovery_candidates WHERE reply_id = ?").get(first.id)).toBeUndefined();
+      expect(store.database.prepare("SELECT source_hash FROM answer_delivery_coverage WHERE reply_id = ?").get(second.id)).toEqual({ source_hash: expect.any(String) });
+    } finally { store.close(); }
+  });
+
+  it("preserves a pending snapshot referenced by an active recovery", () => {
+    const store = readyStore();
+    try {
+      store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
+      const input = { promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "A" } };
+      expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
+      const first = store.listPendingOutboundReplies()[0]!;
+      store.database.prepare("INSERT INTO delivery_recoveries(failed_reply_id, snapshot_revision, state, failure_class, reason, action, replacement_reply_id, created_at, updated_at) VALUES ('failed-target', 1, 'replacement_pending', 'permanent', 'test', 'rebuild_answer', ?, 'now', 'now')").run(first.id);
+
+      expect(store.reserveStaticAnswerCardUpdate({ ...input, card: { content: "B" } })).toBe("reserved");
+      expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE projection_key IS NOT NULL ORDER BY snapshot_revision").all()).toEqual([{ snapshot_revision: 1 }, { snapshot_revision: 2 }]);
+    } finally { store.close(); }
+  });
+
+  it("preserves an in-flight static snapshot while coalescing its untouched successors", () => {
     const store = readyStore();
     try {
       store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1'").run();
@@ -118,10 +217,10 @@ describe("AnswerPageWorkflow", () => {
       const claim = store.claimOutboundReply(first.id, null)!;
       expect(store.reserveStaticAnswerCardUpdate({ ...input, card: { content: "B" } })).toBe("reserved");
       expect(store.reserveStaticAnswerCardUpdate(input)).toBe("reserved");
-      expect(store.listPendingOutboundReplies().map((row) => JSON.parse(row.payload).content)).toEqual(["A", "B", "A"]);
-      expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE projection_key IS NOT NULL ORDER BY snapshot_revision").all()).toEqual([{ snapshot_revision: 1 }, { snapshot_revision: 2 }, { snapshot_revision: 3 }]);
+      expect(store.listPendingOutboundReplies().map((row) => JSON.parse(row.payload).content)).toEqual(["A", "A"]);
+      expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE projection_key IS NOT NULL ORDER BY snapshot_revision").all()).toEqual([{ snapshot_revision: 1 }, { snapshot_revision: 3 }]);
       expect(store.markOutboundReplyDelivered(claim, "answer-1")).toBe(true);
-      expect(store.listPendingOutboundReplies().map((row) => JSON.parse(row.payload).content)).toEqual(["B", "A"]);
+      expect(store.listPendingOutboundReplies().map((row) => JSON.parse(row.payload).content)).toEqual(["A"]);
       expect(store.reserveStaticAnswerCardUpdate(input)).toBe("waiting");
       store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
       expect(store.getOutboundReply(first.id)).toBeNull();
@@ -369,6 +468,33 @@ describe("AnswerPageWorkflow", () => {
     await workflow.converge("p1");
     expect(store.listPendingOutboundReplies()).toHaveLength(0);
     expect(store.listAnswerPages("p1")[0]).toMatchObject({ state: "finished", sequence: 2 });
+    store.close();
+  });
+
+  it("finalizes a continuation page with an expandable command without changing its source start", async () => {
+    const store = readyStore();
+    const command = [
+      "◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text",
+      "output line\n".repeat(400).trimEnd(), "```"
+    ].join("\n");
+    const answer = `${"first page\n".repeat(900)}PAGE_TWO\n${"p".repeat(8_000)}\n\n${command}`;
+    const completed = store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
+    const source = answerStreamContent(completed);
+    const sourceStart = source.indexOf("PAGE_TWO");
+    store.database.prepare("UPDATE answer_pages SET page_index = 1, source_start = ?, state = 'finished', delivery_mode = 'streaming' WHERE prompt_id = 'p1'").run(sourceStart);
+    store.database.prepare("UPDATE run_cards SET answer_page_index = 1, answer_page_start = ? WHERE prompt_id = 'p1'").run(sourceStart);
+
+    await new AnswerPageWorkflow(store, vi.fn(), primaryPresentation).converge("p1");
+
+    const pending = store.listPendingOutboundReplies();
+    expect(pending).toHaveLength(1);
+    const [update] = pending;
+    const payload = JSON.parse(update!.payload) as { body: { elements: Array<{ tag: string; elements?: Array<{ content: string }> }> } };
+    expect(update).toMatchObject({ kind: "card_update", cardRole: "answer", rootMessageId: "answer-1" });
+    const panel = payload.body.elements.find((element) => element.tag === "collapsible_panel");
+    expect(panel?.elements?.[0]!.content).toContain("```bash\nnpm test\n```");
+    expect(panel?.elements?.[0]!.content).toContain("… 已省略中间 381 行 …");
+    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 1, sourceStart, state: "finished" })]);
     store.close();
   });
 

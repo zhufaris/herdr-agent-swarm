@@ -36,7 +36,7 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     coordinator: { async prepareDelivery() { mark("coordinator:prepare-delivery"); }, async recoverRuntime() { mark("coordinator:recover-runtime"); }, async start() { mark("coordinator:start"); }, async stop() { mark("coordinator:stop"); } },
     paneRetention: { async scan() { mark("pane-retention:scan"); }, start() { mark("pane-retention:start"); }, async stop() { mark("pane-retention:stop"); } },
     externalTurns: { start() { mark("external-turns:start"); }, async stop() { mark("external-turns:stop"); } },
-    herdrSocketSubscriber: { startEvents() { mark("socket:start"); }, async stop() { mark("socket:stop"); } },
+    herdrSocketSubscriber: { startEvents() { mark("socket:start"); }, stopIngress() { mark("socket-ingress:stop"); }, async drainEvents() { mark("socket-drain:stop"); } },
     logger: { info() {}, warn() {}, error() {} },
     ...overrides
   };
@@ -284,7 +284,7 @@ describe("ManagedBridgeRuntime", () => {
     expect(duplicate).toBe(signalStop);
     await expect(signalStop).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
     expect(calls).toEqual([
-      "socket:stop", "natural-language:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
+      "socket-ingress:stop", "socket-drain:stop", "natural-language:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
       "instance-turns:stop", "instance-runtime:stop", "instance-work:stop", "coordinator:stop",
       "integrity:stop", "queue-feedback:stop", "card-context:stop", "projector:stop",
       "outbox-retention:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
@@ -407,6 +407,49 @@ describe("ManagedBridgeRuntime", () => {
     expect(calls).not.toContain("fence:stop");
     expect(calls).not.toContain("lease:release");
     expect(calls).not.toContain("store:close");
+  });
+
+  it("retains ownership when Herdr socket event draining fails", async () => {
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      herdrSocketSubscriber: { startEvents() { base.calls.push("socket:start"); }, stopIngress() { base.calls.push("socket-ingress:stop"); }, async drainEvents() { base.calls.push("socket-drain:stop"); throw new Error("socket drain failed"); } }
+    });
+
+    await runtime.start();
+    base.calls.length = 0;
+
+    await expect(runtime.stop("SIGTERM")).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketEventDrain"] });
+    expect(base.calls.slice(0, 2)).toEqual(["socket-ingress:stop", "socket-drain:stop"]);
+    expect(base.calls).not.toContain("fence:stop");
+    expect(base.calls).not.toContain("lease:release");
+    expect(base.calls).not.toContain("store:close");
+  });
+
+  it("reports an unsettled Herdr socket event drain without releasing ownership", async () => {
+    vi.useFakeTimers();
+    let settleDrain!: () => void;
+    let drainSignal: AbortSignal | undefined;
+    const drain = new Promise<void>((resolve) => { settleDrain = resolve; });
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      herdrSocketSubscriber: { startEvents() { base.calls.push("socket:start"); }, stopIngress() { base.calls.push("socket-ingress:stop"); }, async drainEvents(context) { drainSignal = context?.signal; base.calls.push("socket-drain:start"); await drain; } }
+    });
+
+    await runtime.start();
+    base.calls.length = 0;
+    const stopping = runtime.stop("SIGTERM");
+    await vi.advanceTimersByTimeAsync(31_100);
+
+    expect(drainSignal?.aborted).toBe(true);
+    await expect(stopping).resolves.toEqual({ outcome: "ownership_retained", unsettledWriters: ["herdrSocketEventDrain"] });
+    expect(base.calls.slice(0, 2)).toEqual(["socket-ingress:stop", "socket-drain:start"]);
+    expect(base.calls).not.toContain("fence:stop");
+    expect(base.calls).not.toContain("lease:release");
+    expect(base.calls).not.toContain("store:close");
+    settleDrain();
+    await Promise.resolve();
   });
 
   it("releases ownership when closing the health server fails", async () => {

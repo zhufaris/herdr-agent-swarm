@@ -27,6 +27,10 @@
   Main, and Worker Task cards.
 - [x] Apply the approved hierarchy without changing callback identity, delivery,
   pagination, or recovery semantics.
+- [x] Fix tool commands that appear on later Answer Card pages but cannot be
+  expanded. Verify page-boundary command-block recognition and generation of
+  the corresponding CardKit collapsible panel without changing canonical source
+  offsets or frozen-page behavior.
 
 ## Herdr-originated messages
 

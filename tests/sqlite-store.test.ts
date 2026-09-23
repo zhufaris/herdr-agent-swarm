@@ -13,6 +13,7 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
 import { outboundLaneHeadSelectionSql } from "../src/store/sqlite/outbox-queue-store.js";
+import { outboundRetentionCandidateSelectionSql } from "../src/store/sqlite/outbox-retention-store.js";
 import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
 import { materializeOutboundReply } from "../src/events/outbound-intent-materializer.js";
 import { answerPageDeliveryFactsSql } from "../src/store/sqlite/projection-store.js";
@@ -3761,6 +3762,21 @@ describe("SQLite store", () => {
     ]);
   });
 
+  it("constructs prompt lanes from scalar generation state without the Run Card JSON view", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
+    store.database.exec("DROP VIEW run_cards_view");
+
+    const fallback = store.enqueueOutboundReply({ id: "fallback", idempotencyKey: "fallback", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "answer-1", kind: "card_update", payload: "{}" });
+    const hinted = store.enqueueOutboundReply({ id: "hinted", idempotencyKey: "hinted", bindingId: "b1", promptId: "p1", bindingGeneration: view.bindingGeneration, viewVersion: 3, cardRole: "answer", rootMessageId: "answer-2", kind: "card_update", payload: "{}" });
+
+    expect(fallback.laneKey).toBe("gateway:feishu:primary:primary-answer:p1:1");
+    expect(hinted.laneKey).toBe(fallback.laneKey);
+  });
+
   it("skips stale queued card projections while committing valid siblings", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
@@ -4866,11 +4882,7 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({
       state: "released", action: "startup_superseded_answer"
     });
-    expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all("answer-static:p1:1:answer-new")).toEqual([
-      { snapshot_revision: 1, state: "dismissed" },
-      { snapshot_revision: 2, state: "dismissed" },
-      { snapshot_revision: 3, state: "pending" }
-    ]);
+    expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all("answer-static:p1:1:answer-new")).toEqual([{ snapshot_revision: 3, state: "pending" }]);
     expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([
       expect.objectContaining({ idempotencyKey: "answer-static:p1:1:answer-new:revision:3", rootMessageId: "answer-new" })
     ]);
@@ -4884,7 +4896,7 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
-    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all("answer-static:p1:1:answer-new")).toEqual([{ state: "pending", count: 3 }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all("answer-static:p1:1:answer-new")).toEqual([{ state: "pending", count: 1 }]);
   });
 
   it("keeps a superseded Answer quarantine blocked when a pending snapshot was claimed", () => {
@@ -4895,7 +4907,7 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
-    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all(projectionKey)).toEqual([{ state: "pending", count: 3 }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all(projectionKey)).toEqual([{ state: "pending", count: 1 }]);
   });
 
   it("releases an uncertain Worker Main update only to its newest unclaimed authoritative snapshot", () => {
@@ -5621,6 +5633,38 @@ describe("SQLite store", () => {
       { id: 'delivered-new', state: 'delivered' },
       { id: 'pending-old', state: 'pending' }
     ]);
+  });
+
+  it("keeps both sides of active delivery recovery out of retention", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["failed-pending", "replacement-pending", "failed-unresolved", "replacement-unresolved", "prunable"]) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: id, kind: "card_update", payload: "{}" });
+    }
+    store.database.exec(`
+      UPDATE outbound_replies SET state = 'dismissed', updated_at = '2026-08-01T00:00:00.000Z';
+      INSERT INTO delivery_recoveries(failed_reply_id, snapshot_revision, state, failure_class, reason, action, replacement_reply_id, created_at, updated_at)
+      VALUES
+        ('failed-pending', 1, 'replacement_pending', 'permanent', 'test', 'rebuild_answer', 'replacement-pending', 'now', 'now'),
+        ('failed-unresolved', 1, 'unresolved', 'permanent', 'test', 'rebuild_answer', 'replacement-unresolved', 'now', 'now');
+    `);
+
+    expect(store.pruneDeliveredOutboundReplies("2026-08-12T00:00:00.000Z", 10)).toBe(1);
+    expect(store.database.prepare("SELECT id FROM outbound_replies ORDER BY id").all()).toEqual([
+      { id: "failed-pending" },
+      { id: "failed-unresolved" },
+      { id: "replacement-pending" },
+      { id: "replacement-unresolved" }
+    ]);
+    const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${outboundRetentionCandidateSelectionSql}`).all("2026-08-12T00:00:00.000Z", 10) as Array<{ id: number; parent: number; detail: string }>;
+    const correlatedSubqueries = plan.filter(({ detail }) => detail.includes("CORRELATED SCALAR SUBQUERY"));
+    expect(correlatedSubqueries).toHaveLength(3);
+    const failedRecoveryLookup = plan.find(({ detail }) => detail.includes("sqlite_autoindex_delivery_recoveries_1"));
+    const replacementRecoveryLookup = plan.find(({ detail }) => detail.includes("delivery_recoveries_state"));
+    expect(failedRecoveryLookup).toBeDefined();
+    expect(replacementRecoveryLookup).toBeDefined();
+    expect(correlatedSubqueries.some(({ id }) => id === failedRecoveryLookup?.parent)).toBe(true);
+    expect(correlatedSubqueries.some(({ id }) => id === replacementRecoveryLookup?.parent)).toBe(true);
+    expect(failedRecoveryLookup?.parent).not.toBe(replacementRecoveryLookup?.parent);
   });
 
   it("prunes only old accepted inbound history in a bounded batch", () => {

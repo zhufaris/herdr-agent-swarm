@@ -5,6 +5,7 @@ import { extractHerdrEventIds } from "./herdr-event-ids.js";
 import { mergeHerdrRuntimeHints, normalizeHerdrEvent, type HerdrRuntimeHint } from "./herdr-event-hint.js";
 import { safeLogError } from "./safe-error.js";
 import { FailureLogGate } from "./failure-log-gate.js";
+import type { ShutdownContext } from "./shutdown-context.js";
 
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_FRAMES_PER_TICK = 256;
@@ -52,6 +53,8 @@ export class HerdrSocketSubscriber {
   private buffer = "";
   private dispatching = false;
   private hintDrain: Promise<void> | null = null;
+  private ingressClose: Promise<void> | null = null;
+  private readonly eventAbort = new AbortController();
   private pendingHint: HerdrNativeEventHint | null = null;
   private stableTimer: NodeJS.Timeout | null = null;
   private subscriptionAckTimer: NodeJS.Timeout | null = null;
@@ -73,7 +76,7 @@ export class HerdrSocketSubscriber {
   constructor(
     private readonly socketPath: string,
     private readonly paneIds: () => Promise<readonly string[]>,
-    private readonly onEvent: (hint: HerdrNativeEventHint) => void | Promise<void>,
+    private readonly onEvent: (hint: HerdrNativeEventHint, signal: AbortSignal) => void | Promise<void>,
     private readonly logger: Pick<Logger, "info" | "warn" | "debug">,
     private readonly reconnectBaseMs = 250,
     private readonly reconnectMaxMs = 10_000,
@@ -90,6 +93,13 @@ export class HerdrSocketSubscriber {
   }
 
   async stop(): Promise<void> {
+    this.stopIngress();
+    await this.ingressClose;
+    await this.drainEvents();
+  }
+
+  stopIngress(): void {
+    if (this.stopped) return;
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.stableTimer) clearTimeout(this.stableTimer);
@@ -109,8 +119,17 @@ export class HerdrSocketSubscriber {
     const socket = this.socket;
     this.socket = null;
     for (const pending of this.pendingRequests.values()) pending.socket.destroy();
-    if (socket && !socket.destroyed) await new Promise<void>((resolve) => { socket.once("close", resolve); socket.destroy(); });
-    await this.hintDrain;
+    if (socket && !socket.destroyed) {
+      this.ingressClose = new Promise<void>((resolve) => { socket.once("close", resolve); socket.destroy(); });
+    }
+  }
+
+  async drainEvents(context?: ShutdownContext): Promise<void> {
+    const abortEvents = () => this.eventAbort.abort(context?.signal.reason);
+    if (context?.signal.aborted) abortEvents();
+    else context?.signal.addEventListener("abort", abortEvents, { once: true });
+    try { await this.hintDrain; }
+    finally { context?.signal.removeEventListener("abort", abortEvents); }
   }
 
   request(method: string, params: object, timeoutMs: number): Promise<unknown> {
@@ -316,9 +335,10 @@ export class HerdrSocketSubscriber {
   private async drainHints(): Promise<void> {
     try {
       while (this.pendingHint) {
+        if (this.eventAbort.signal.aborted) { this.pendingHint = null; break; }
         const hint = this.pendingHint;
         this.pendingHint = null;
-        try { await this.onEvent(hint); }
+        try { await this.onEvent(hint, this.eventAbort.signal); }
         catch (error) { this.logger.warn({ event: "herdr-socket-event-handler-failed", err: safeLogError(error), sourceEvent: hint.kind, outcome: "periodic_reconciliation_fallback" }, "Herdr native event handler failed"); }
       }
     } finally {

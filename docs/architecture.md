@@ -149,6 +149,14 @@ Each child factory receives only a typed selection of the capabilities it can
 compose. Only the parent composition sees the complete SQLite bundle. This makes
 an accidental cross-context dependency a compile-time error and keeps the
 workflow interface visible at its construction site.
+`createBridgeRuntime()` exports the completed graph in three responsibility-shaped
+groups instead of leaking every internal module as a flat result: `lifecycle`
+contains capabilities ordered by `ManagedBridgeRuntime`, `health` contains
+runtime-owned diagnostic providers, and `operations` contains the remaining
+externally consumed transport capability. Worker diagnostics are assembled inside
+the Worker factory beside their dispatch and observation sources. Host-owned HTTP
+configuration, stores, lease, projects, build identity, and lifecycle policy stay
+in managed process composition.
 
 The composition root may:
 
@@ -400,6 +408,22 @@ queries keyed by Prompt, kind, state, and structural stream metadata. Modern
 rows treat `stream_page_index` as authoritative; only legacy rows where that
 column is null consult their JSON payload. This keeps retained outbox history
 out of the JavaScript read path without changing delivery or replay semantics.
+Revisioned static and final Answer snapshots are coalesced inside their existing
+projection transaction. Before reserving a changed snapshot, the store removes
+only older pending rows for the exact `projection_key` that have never been
+claimed, attempted, checkpointed, or retained as an active recovery replacement.
+The next revision is derived before deletion, so revision identity stays strictly
+monotonic. Claimed or otherwise delivery-relevant rows remain immutable; an
+in-flight revision therefore stays ahead of the one newest desired revision.
+Existing foreign-key cascades remove coverage and candidate evidence belonging
+only to a deleted untouched row, while outbox delete/insert triggers recompute
+the durable lane head in the same transaction.
+Outbound lane construction accepts a SQLite-internal binding-generation hint
+from projection paths that already hold an authoritative Run Card. Other prompt
+paths read only `run_cards.binding_generation`; they do not materialize the
+JSON-heavy `run_cards_view` merely to derive a lane key. Retention keeps active
+delivery-recovery endpoints through separate failed-reply and replacement-reply
+anti-joins, preserving the same deletion boundary without an unindexed `OR`.
 Primary Main and Answer Worker summaries are dedicated set-based SQLite read
 models. Main summary loading uses a constant number of queries and window-ranked
 task state rather than repeatedly loading each full Worker Main projection;
@@ -590,6 +614,10 @@ state plus process-local fan-out, best-effort work wake-ups, and bounded Herdr
 socket hints. It deliberately has no generic `publish(any)` interface. SQLite
 and fresh Herdr observation remain authoritative. The two process-local roles
 below remain separate contracts and are not sources of persistent state.
+The Herdr hint path uses one deferred function link because infrastructure owns
+the socket subscriber while application composition constructs its router later.
+The link hides that construction cycle: callers receive a stable hint consumer,
+and `RuntimeEventIntegration` does not proxy individual event calls.
 
 | Role | Meaning | Consumer behavior | Reliability boundary |
 | --- | --- | --- | --- |
@@ -1212,6 +1240,16 @@ source offsets. Synthetic table, diff, and continuation fences count
 toward the 9,000-character rendered limit, while `source_start` always remains an
 offset into the unmodified canonical Answer. This keeps live delivery and restart
 recovery deterministic even when normalization changes the displayed length.
+For each page request, the renderer builds one ephemeral source index for Markdown
+blocks, line boundaries, and atomic tool activities. It advances through indexed
+boundaries once, accounts for render-only wrappers while selecting the page, and
+renders only the selected canonical range. The index is not persisted or cached
+across revisions, so it cannot become workflow authority or retain large answers.
+When a completed page is converted from streaming Markdown to a static CardKit
+card, recognized command activities remain collapsed detail panels. If the full
+bounded command output would exceed the remaining card payload budget, only the
+displayed output is shortened and marked as truncated; canonical page content and
+source offsets are unchanged.
 When a live page has canonical continuation content, its render copy reserves
 space for a short next-card notice. The notice is not persisted as answer text,
 and continuation advances from the source offset returned by the same bounded
@@ -1589,6 +1627,12 @@ observation. The lease heartbeat begins before the long
 integrity audit and initial reconciliations. Each possibly started component is
 recorded before an asynchronous start that may partially succeed, so a startup
 failure reuses the same shutdown policy instead of a separate cleanup path.
+`RuntimeLifecycleLedger` owns this cleanup-before-start mechanic for ordinary
+runtime modules through their structural `start` and `stop` interface, including
+start-argument and shutdown-context forwarding. It retains asynchronously created
+resource handles for their cleanup. The managed runtime keeps recovery, convergence,
+concurrent ingress startup, and the two-step socket shutdown explicit because those
+operations encode lifecycle policy.
 
 SIGINT, SIGTERM, lease loss, and startup failure converge on one cached stop
 promise. Shutdown stops new prompt/tool and socket ingress first, then periodic
@@ -1600,6 +1644,18 @@ and final settlement allowance, the result is `ownership_retained`: the fence,
 lease, and store deliberately remain held and the process receives a non-zero
 exit code. This conservative outcome prevents a replacement process from writing
 while an old task may still hold SQLite access.
+Herdr socket shutdown has two explicit ingress-phase steps. It first closes the
+socket admission gate without waiting, then waits for the current event drain
+before stopping that callback's observer and reconciliation dependencies. The
+drain is part of the writer gate because its callback can still reconcile
+durable SQLite state. A failed or unsettled drain therefore retains ownership
+under the same policy as other writers.
+The drain also forwards the shared shutdown deadline through an event-scoped
+abort signal. Subscriber and router checkpoints discard queued hints and skip
+dependent work that has not started after that signal fires. Cancellation is
+cooperative: already-started Herdr calls and durable transitions still settle
+normally, and the writer drain does not report completion until the real event
+callback returns.
 
 ### First-run setup boundary
 

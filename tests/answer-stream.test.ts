@@ -37,6 +37,18 @@ describe("Answer stream pagination", () => {
     expect(renderAnswerStreamPage("Working\nDone", 0, 80).page).not.toContain("本页接近显示上限");
   });
 
+  it("keeps command activities as Markdown during streaming with canonical continuation offsets", () => {
+    const command = ["◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text", "passed", "```"].join("\n");
+    const content = `${"before\n".repeat(20)}${command}\nafter`;
+    const first = renderAnswerStreamPage(content, 0, 180);
+    const rendered = renderAnswerStreamPage(content, first.nextPageStart!, 180);
+
+    expect(rendered.page).toContain("⚙️ **Ran** · `npm test` · ✓ command 7");
+    expect(rendered.page).not.toContain("collapsible_panel");
+    expect(first.nextPageStart).not.toBeNull();
+    expect(content.slice(first.nextPageStart!)).toContain("◆ **Ran**");
+  });
+
   it("splits at the latest newline before the CardKit limit without losing text", () => {
     const content = `${"a".repeat(20_000)}\n${"b".repeat(12_000)}`;
     const result = splitAnswerStreamPage(content, 28_000);

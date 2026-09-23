@@ -622,6 +622,23 @@ describe("run card", () => {
     expect(JSON.stringify(card)).not.toContain("older page");
   });
 
+  it("keeps a command expandable on a payload-constrained continuation page", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Continue command", workspaceId: "w1", paneId: "w1:p9", requestText: "Run", queuePosition: 0, occurredAt: "now" });
+    const content = [
+      "p".repeat(900),
+      "", "◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text",
+      "output line\n".repeat(400).trimEnd(),
+      "```"
+    ].join("\n");
+
+    const card = renderFinalAnswerCard({ ...view, phase: "completed" }, { pageNumber: 2, initialContent: content }, 2_400) as { config: { streaming_mode: boolean }; body: { elements: Array<{ tag: string; elements?: Array<{ content: string }> }> } };
+    const panel = card.body.elements.find((element) => element.tag === "collapsible_panel");
+
+    expect(card.config.streaming_mode).toBe(false);
+    expect(panel?.elements?.[0]!.content).toContain("…（命令输出已截断）");
+    expect(JSON.stringify(card).length).toBeLessThanOrEqual(2_400);
+  });
+
   it("keeps Answer continuation pages focused on metadata and page content", () => {
     const view = { ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "start" }), phase: "running" as const, progressEvents: [{ key: "step", kind: "step" as const, label: "Do work", state: "active" as const, occurredAt: "now" }], workerActivity: [{ instanceId: "i1", name: "reviewer", latestTurnId: "turn", latestTaskTitle: "Review", latestPhase: "running" as const, taskCount: 1, latestTaskCard: { aggregateKind: "worker-turn" as const, aggregateId: "turn", generation: 1, messageId: "worker-message" } }] };
     const card = renderRequestAnswerCard(view, { pageNumber: 2, initialContent: "continued answer" });

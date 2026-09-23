@@ -55,6 +55,34 @@ describe("final answer content", () => {
     expect(foldFinalAnswerContent(command, 100)).toEqual([{ tag: "markdown", content: "⚙️ **Ran** · `npm test` · ✓ 完成" }]);
   });
 
+  it("keeps a command expandable by truncating output to the remaining payload budget", () => {
+    const source = [
+      "p".repeat(900),
+      "", "◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text",
+      "output line\n".repeat(400).trimEnd(),
+      "```"
+    ].join("\n");
+
+    const elements = foldFinalAnswerContent(source, 2_400);
+    const panel = elements.find((element) => element.tag === "collapsible_panel") as { elements: Array<{ content: string }> } | undefined;
+
+    expect(panel).toBeDefined();
+    expect(panel?.elements[0]!.content).toContain("```bash\nnpm test\n```");
+    expect(panel?.elements[0]!.content).toContain("…（命令输出已截断）");
+    expect(JSON.stringify(elements).length + 800).toBeLessThanOrEqual(2_400);
+  });
+
+  it("does not describe an empty command output as truncated", () => {
+    const command = ["◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "```"].join("\n");
+    const elements = foldFinalAnswerContent(command, 1_200);
+
+    expect(elements).toEqual([{
+      tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
+      header: { title: { tag: "plain_text", content: "⚙️ Ran · npm test · ✓ 完成" } },
+      elements: [{ tag: "markdown", content: "```bash\nnpm test\n```\n\n命令已完成，无可展示输出。" }]
+    }]);
+  });
+
   it("preserves command lookalike prose", () => {
     const lookalike = ["◆ **Ran**", "not a bridge command block"].join("\n");
     expect(compactAnswerToolActivity(lookalike)).toBe(lookalike);

@@ -6,6 +6,7 @@ const CODE_FOLD_LINE_LIMIT = 80;
 const CODE_FOLD_CHARACTER_LIMIT = 6_000;
 const COMMAND_TARGET_LIMIT = 160;
 const COMMAND_OUTPUT_LIMIT = 4_000;
+const COMMAND_OUTPUT_TRUNCATION_MARKER = "…（命令输出已截断）";
 const COMMAND_HEADING = /^◆ \*\*Ran\*\*(?: · (.+))?$/;
 const ACTIVITY_EMOJI = { Skill: "🧩", Read: "📖", Search: "🔍", Edit: "✏️", Wait: "⏳", Agent: "🤖", Tool: "🛠️" } as const;
 
@@ -41,24 +42,33 @@ export function foldFinalAnswerContent(content: string, payloadLimit = 12_000): 
   const elements: FinalAnswerElement[] = [];
   for (const block of splitFinalAnswerBlocks(content)) {
     const additions = renderBlock(block);
-    if (block.kind === "command" && !appendWithinCardLimit(elements, additions, 800, payloadLimit)) elements.push({ tag: "markdown", content: block.compact });
-    else elements.push(...additions);
+    if (block.kind !== "command" || appendWithinCardLimit(elements, additions, 800, payloadLimit)) { elements.push(...additions); continue; }
+    const fitted = fitCommandPanel(elements, block, payloadLimit);
+    elements.push(...(fitted ?? [{ tag: "markdown", content: block.compact }]));
   }
   return elements;
+}
+
+function fitCommandPanel(elements: readonly object[], block: Extract<AnswerContentBlock, { kind: "command" }>, payloadLimit: number): FinalAnswerElement[] | null {
+  if (!block.terminal || !block.output) return null;
+  let low = 0;
+  let high = block.output.length;
+  let result: FinalAnswerElement[] | null = null;
+  while (low <= high) {
+    const length = Math.floor((low + high) / 2);
+    const output = `${block.output.slice(0, length)}${length > 0 ? "\n" : ""}${COMMAND_OUTPUT_TRUNCATION_MARKER}`;
+    const candidate = renderCommandBlock(block, output);
+    if (appendWithinCardLimit(elements, candidate, 800, payloadLimit)) { result = candidate; low = length + 1; }
+    else high = length - 1;
+  }
+  return result;
 }
 
 function renderBlock(block: AnswerContentBlock): FinalAnswerElement[] {
   if (block.kind === "markdown") return [{ tag: "markdown", content: compactAnswerToolActivity(block.content) }];
   if (block.kind === "command") {
     if (!block.terminal) return [{ tag: "markdown", content: block.compact }];
-    const detail = block.output
-      ? ["```bash", block.command, "```", "", "```text", block.output, "```"].join("\n")
-      : ["```bash", block.command, "```", "", "命令已完成，无可展示输出。"].join("\n");
-    return [{
-      tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: block.title } },
-      elements: [{ tag: "markdown", content: detail }]
-    }];
+    return renderCommandBlock(block, block.output);
   }
   const lineCount = block.code.length === 0 ? 0 : block.code.split("\n").length;
   if (lineCount <= CODE_FOLD_LINE_LIMIT && block.code.length <= CODE_FOLD_CHARACTER_LIMIT) return [{ tag: "markdown", content: block.source }];
@@ -66,6 +76,17 @@ function renderBlock(block: AnswerContentBlock): FinalAnswerElement[] {
     tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: foldedCodeTitle(block.language, lineCount, block.code.length) } },
     elements: [{ tag: "markdown", content: block.source }]
+  }];
+}
+
+function renderCommandBlock(block: Extract<AnswerContentBlock, { kind: "command" }>, output: string | null): FinalAnswerElement[] {
+  const detail = output
+    ? ["```bash", block.command, "```", "", "```text", output, "```"].join("\n")
+    : ["```bash", block.command, "```", "", "命令已完成，无可展示输出。"].join("\n");
+  return [{
+    tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
+    header: { title: { tag: "plain_text", content: block.title } },
+    elements: [{ tag: "markdown", content: detail }]
   }];
 }
 

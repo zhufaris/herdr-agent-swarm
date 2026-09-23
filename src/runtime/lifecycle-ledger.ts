@@ -35,6 +35,30 @@ export class RuntimeLifecycleLedger {
     this.entries.push(entry);
   }
 
+  startRuntime<Args extends unknown[], Result>(
+    identity: Omit<LifecycleCleanupEntry, "stop">,
+    runtime: { start(...args: Args): Result; stop(context: ShutdownContext): Promise<void> },
+    ...args: Args
+  ): Result {
+    this.register({ ...identity, stop: (context) => runtime.stop(context) });
+    return runtime.start(...args);
+  }
+
+  async startResource<T>(resource: Omit<LifecycleCleanupEntry, "stop"> & {
+    start: () => T | PromiseLike<T>;
+    stop: (value: T, context: ShutdownContext) => Promise<void>;
+  }): Promise<T> {
+    let started = false;
+    let value: T;
+    this.register({
+      name: resource.name, stage: resource.stage, kind: resource.kind,
+      stop: (context) => started ? resource.stop(value, context) : Promise.resolve()
+    });
+    value = await resource.start();
+    started = true;
+    return value;
+  }
+
   shutdownPlan(): readonly LifecycleCleanupEntry[] {
     const registrationOrder = new Map(this.entries.map((entry, index) => [entry.name, index]));
     return shutdownStages.flatMap((stage) => this.entries

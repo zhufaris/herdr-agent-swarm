@@ -42,7 +42,7 @@ export interface ManagedBridgeRuntimeDependencies {
   coordinator: { prepareDelivery(): Promise<void>; recoverRuntime(): Promise<void>; start(): Promise<void>; stop(context?: ShutdownContext): Promise<void> };
   paneRetention: { scan(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   externalTurns: { start(): void; stop(): Promise<void> };
-  herdrSocketSubscriber?: { startEvents(): void; stop(): Promise<void> };
+  herdrSocketSubscriber?: { startEvents(): void; stopIngress(): void; drainEvents(context?: ShutdownContext): Promise<void> };
   logger: LifecycleLogger;
   onFatalStop?(reason: "lease-lost", result: BridgeRuntimeShutdownOutcome): void | Promise<void>;
 }
@@ -82,29 +82,15 @@ export async function createManagedBridgeRuntime(options: {
     if (!lease.renewNow()) throw new Error("Bridge database lease expired during Agent capability detection");
     const { codex, claude, pi } = availabilityResult.availability;
     const runtime = createBridgeRuntime(config, completedStores, logger, { codex, claude, pi });
-    const { herdr, herdrCircuitBreaker, herdrSocketSubscriber, instanceRuntime, instanceTurns, instanceWork, primaryToolGateway, naturalLanguageCommands, sqliteIntegrity, coordinator, queueFeedbackProjector, cardContextRebuilder, projector, channelPublisher, outboxRetention, paneRetention, externalTurns, instanceWorker, bus, sessionOperations, reconciler, promptRun } = runtime;
     return new ManagedBridgeRuntime({
       reconcileIntervalMs: config.reconcileIntervalMs,
       store: completedStores.lifecycle,
       lease,
-      primaryToolGateway, naturalLanguageCommands,
-      sqliteIntegrity,
-      instanceRuntime,
-      instanceTurns,
-      herdrSnapshotCache: herdr,
-      instanceWork,
+      ...runtime.lifecycle,
       createHealthServer: () => startHealthServer({
-        ...config.http, store: completedStores.health, herdr, gateway: runtime.gateway, projects: config.projects, lease,
-        workspaceCache: herdr, herdrCircuitBreaker, startupRecovery: coordinator,
-        inboundDispatcher: { snapshot: () => coordinator.inboundSnapshot() },
-        sessionOperationDispatcher: sessionOperations, bindingRuntime: reconciler, instanceRuntime,
-        instanceWorker, sqliteIntegrity, lifecycleEvents: bus, cardConvergence: projector,
-        outboxDispatcher: channelPublisher, promptWorker: promptRun,
-        ...(herdrSocketSubscriber ? { herdrSocket: herdrSocketSubscriber } : {}), buildIdentity
+        ...config.http, store: completedStores.health, gateway: runtime.operations.gateway,
+        projects: config.projects, lease, buildIdentity, ...runtime.health
       }),
-      channelPublisher, outboxRetention, projector, cardContextRebuilder, queueFeedbackProjector, bus,
-      coordinator, paneRetention, externalTurns,
-      ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {}),
       ...(onFatalStop ? { onFatalStop } : {}), logger
     }, { leaseAlreadyAcquired: true });
   } catch (error) {
@@ -170,8 +156,7 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       const ingressFailure = ingressResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (ingressFailure) throw ingressFailure.reason;
       this.assertStarting();
-      this.registerCleanup("integrityAuditor", "workers", "non-writer", (context) => d.sqliteIntegrity.stop(context));
-      d.sqliteIntegrity.start();
+      this.lifecycle.startRuntime({ name: "integrityAuditor", stage: "workers", kind: "non-writer" }, d.sqliteIntegrity);
       await d.sqliteIntegrity.run();
       this.assertStarting();
       this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
@@ -186,35 +171,30 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
         await d.coordinator.recoverRuntime();
       });
       this.assertStarting();
-      const healthServer = await d.createHealthServer();
-      this.registerCleanup("healthServer", "health", "non-writer", () => closeHealthServer(healthServer));
+      await this.lifecycle.startResource({
+        name: "healthServer", stage: "health", kind: "non-writer",
+        start: () => d.createHealthServer(), stop: (server) => closeHealthServer(server)
+      });
       this.assertStarting();
-      this.registerCleanup("publisher", "projections", "writer", (context) => d.channelPublisher.stop(context));
-      d.channelPublisher.start();
-      this.registerCleanup("outboxRetention", "projections", "writer", () => d.outboxRetention.stop());
-      d.outboxRetention.start();
-      this.registerCleanup("projector", "projections", "writer", (context) => d.projector.stop(context));
-      d.projector.start();
-      this.registerCleanup("cardContextRebuilder", "projections", "writer", (context) => d.cardContextRebuilder.stop(context));
-      d.cardContextRebuilder.start(d.reconcileIntervalMs);
-      this.registerCleanup("queueFeedbackProjector", "projections", "writer", (context) => d.queueFeedbackProjector.stop(context));
-      d.queueFeedbackProjector.start(d.bus);
+      this.lifecycle.startRuntime({ name: "publisher", stage: "projections", kind: "writer" }, d.channelPublisher);
+      this.lifecycle.startRuntime({ name: "outboxRetention", stage: "projections", kind: "writer" }, d.outboxRetention);
+      this.lifecycle.startRuntime({ name: "projector", stage: "projections", kind: "writer" }, d.projector);
+      this.lifecycle.startRuntime({ name: "cardContextRebuilder", stage: "projections", kind: "writer" }, d.cardContextRebuilder, d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "queueFeedbackProjector", stage: "projections", kind: "writer" }, d.queueFeedbackProjector, d.bus);
       await d.queueFeedbackProjector.converge();
       this.assertStarting();
       await d.coordinator.start();
       this.assertStarting();
       await d.paneRetention.scan();
       this.assertStarting();
-      this.registerCleanup("paneRetention", "observers", "writer", () => d.paneRetention.stop());
-      d.paneRetention.start(d.reconcileIntervalMs);
-      this.registerCleanup("externalTurns", "observers", "writer", () => d.externalTurns.stop());
-      d.externalTurns.start();
-      this.registerCleanup("instanceRuntime", "workers", "writer", () => d.instanceRuntime.stop());
-      d.instanceRuntime.start(d.reconcileIntervalMs);
-      this.registerCleanup("instanceTurns", "workers", "writer", () => d.instanceTurns.stop());
-      d.instanceTurns.start(d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "paneRetention", stage: "observers", kind: "writer" }, d.paneRetention, d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "externalTurns", stage: "observers", kind: "writer" }, d.externalTurns);
+      this.lifecycle.startRuntime({ name: "instanceRuntime", stage: "workers", kind: "writer" }, d.instanceRuntime, d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "instanceTurns", stage: "workers", kind: "writer" }, d.instanceTurns, d.reconcileIntervalMs);
       if (d.herdrSocketSubscriber) {
-        this.registerCleanup("herdrSocketSubscriber", "ingress", "non-writer", () => d.herdrSocketSubscriber!.stop());
+        // Ingress-stage cleanup runs in reverse registration order: close admission before awaiting its writer drain.
+        this.registerCleanup("herdrSocketEventDrain", "ingress", "writer", (context) => d.herdrSocketSubscriber!.drainEvents(context));
+        this.registerCleanup("herdrSocketIngress", "ingress", "non-writer", async () => d.herdrSocketSubscriber!.stopIngress());
         d.herdrSocketSubscriber.startEvents();
       }
     } catch (error) {
