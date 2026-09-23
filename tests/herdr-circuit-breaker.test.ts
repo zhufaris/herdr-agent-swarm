@@ -62,6 +62,17 @@ describe("HerdrCircuitBreaker", () => {
     expect(breaker.status()).toMatchObject({ state: "open", totalTransportFailures: 1 });
   });
 
+  it("redacts credentials from the retained transport failure", async () => {
+    const breaker = new HerdrCircuitBreaker(adapter({
+      async assertWorkspace() { throw new Error("connect ECONNREFUSED Bearer circuit-secret"); }
+    }), { failureThreshold: 1, openMs: 500 });
+
+    await expect(breaker.assertWorkspace("w1")).rejects.toThrow("ECONNREFUSED");
+
+    expect(breaker.status().lastFailure).toBe("connect ECONNREFUSED Bearer [REDACTED]");
+    expect(JSON.stringify(breaker.status())).not.toContain("circuit-secret");
+  });
+
   it("does not count domain errors as transport failures", async () => {
     const getPane = vi.fn(async () => { throw new Error("pane w1:p1 not found"); });
     const breaker = new HerdrCircuitBreaker(adapter({ getPane }), { failureThreshold: 1, openMs: 500 });

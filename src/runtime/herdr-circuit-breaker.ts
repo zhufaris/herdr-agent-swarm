@@ -111,7 +111,7 @@ export class HerdrCircuitBreaker implements HerdrPort {
     const now = this.clock();
     this.totalTransportFailures += 1;
     this.lastFailureAt = now;
-    this.lastFailure = boundedError(error);
+    this.lastFailure = safeLogError(error).message;
     if (admission === "half_open") { this.reopen(error); return; }
     if (this.state !== "closed") return;
     this.consecutiveFailures += 1;
@@ -142,5 +142,4 @@ export function isHerdrTransportFailure(error: unknown): boolean {
   return /ECONNREFUSED|ECONNRESET|EPIPE|ENOENT|ETIMEDOUT|socket(?:_| )(?:closed|stopped|unavailable|disconnected|request_timeout)|connection (?:closed|lost|refused|reset)|could not reach Herdr|failed to connect|transport (?:closed|unavailable)/i.test(message);
 }
 
-function boundedError(error: unknown): string { return (error instanceof Error ? error.message : String(error)).slice(0, 500); }
 function iso(value: number | null): string | null { return value === null ? null : new Date(value).toISOString(); }

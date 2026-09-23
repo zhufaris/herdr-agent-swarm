@@ -29,6 +29,25 @@ describe("health server", () => {
     expect(await ready.json()).toMatchObject({ components: { gateway: { ok: true }, lark: { ok: true } } });
   });
 
+  it("redacts credentials from readiness and status collection failures", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never,
+      herdr: { async assertWorkspace() { throw new Error("workspace failed Bearer health-secret"); } } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    const ready = await (await fetch(`http://127.0.0.1:${port}/ready`)).json();
+    const status = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+
+    expect(ready).toMatchObject({ components: { herdr: { workspaces: [{ error: "workspace failed Bearer [REDACTED]" }] } } });
+    expect(status).toMatchObject({ readiness: { components: { herdr: { workspaces: [{ error: "workspace failed Bearer [REDACTED]" }] } } } });
+    expect(JSON.stringify({ ready, status })).not.toContain("health-secret");
+  });
+
   it("reports card convergence scheduler diagnostics without changing readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     const cardConvergence = { pending: 2, pendingByFamily: { answer: 1, main: 1, unknown: 0 }, inFlight: 1, coalesced: 7, failures: 1, oldestPendingAgeMs: 850, lastSuccessfulFlushAt: "2026-08-30T00:00:00.000Z" };

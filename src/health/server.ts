@@ -8,6 +8,7 @@ import type { BuildIdentity } from "../runtime/build-identity.js";
 import type { LifecycleEventDiagnostics } from "../events/bridge-event-bus.js";
 import type { CardUpdateSchedulerDiagnostics } from "../events/card-update-scheduler.js";
 import type { HerdrSocketStatus } from "../runtime/herdr-socket-subscriber.js";
+import { safeLogError } from "../runtime/safe-error.js";
 
 interface ComponentState { ok: boolean; error?: string }
 const diagnosticFailure = Symbol("diagnosticFailure");
@@ -190,7 +191,7 @@ function check(operation: () => void): ComponentState {
 }
 
 function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  return safeLogError(error).message;
 }
 
 function collectDiagnostic<T>(read: () => T): T | DiagnosticFailure;
