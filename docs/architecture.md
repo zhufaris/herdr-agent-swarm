@@ -1628,9 +1628,11 @@ integrity audit and initial reconciliations. Each possibly started component is
 recorded before an asynchronous start that may partially succeed, so a startup
 failure reuses the same shutdown policy instead of a separate cleanup path.
 `RuntimeLifecycleLedger` owns this cleanup-before-start mechanic for ordinary
-resource pairs and retains asynchronous resource handles for their cleanup. The
-managed runtime keeps recovery, convergence, concurrent ingress startup, and the
-two-step socket shutdown explicit because those operations encode lifecycle policy.
+runtime modules through their structural `start` and `stop` interface, including
+start-argument and shutdown-context forwarding. It retains asynchronously created
+resource handles for their cleanup. The managed runtime keeps recovery, convergence,
+concurrent ingress startup, and the two-step socket shutdown explicit because those
+operations encode lifecycle policy.
 
 SIGINT, SIGTERM, lease loss, and startup failure converge on one cached stop
 promise. Shutdown stops new prompt/tool and socket ingress first, then periodic

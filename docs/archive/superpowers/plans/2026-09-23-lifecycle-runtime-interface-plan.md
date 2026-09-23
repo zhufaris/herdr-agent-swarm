@@ -1,5 +1,7 @@
 # Lifecycle Runtime Interface Implementation Plan
 
+Status: completed and archived.
+
 ## Objective
 
 Replace callback-oriented ordinary lifecycle startup with a structural runtime

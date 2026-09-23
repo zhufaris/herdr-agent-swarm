@@ -35,9 +35,13 @@ export class RuntimeLifecycleLedger {
     this.entries.push(entry);
   }
 
-  start<T>(entry: LifecycleCleanupEntry, start: () => T): T {
-    this.register(entry);
-    return start();
+  startRuntime<Args extends unknown[], Result>(
+    identity: Omit<LifecycleCleanupEntry, "stop">,
+    runtime: { start(...args: Args): Result; stop(context: ShutdownContext): Promise<void> },
+    ...args: Args
+  ): Result {
+    this.register({ ...identity, stop: (context) => runtime.stop(context) });
+    return runtime.start(...args);
   }
 
   async startResource<T>(resource: Omit<LifecycleCleanupEntry, "stop"> & {

@@ -24,35 +24,39 @@ describe("RuntimeLifecycleLedger", () => {
     expect(() => ledger.register(entry)).toThrow("Lifecycle cleanup already registered: publisher");
   });
 
-  it("registers cleanup before startup and retains it when startup fails", async () => {
+  it("registers cleanup before runtime startup and retains it when startup fails", async () => {
     const ledger = new RuntimeLifecycleLedger();
     const calls: string[] = [];
-    const entry = {
-      name: "publisher",
-      stage: "projections" as const,
-      kind: "writer" as const,
-      stop: async () => { calls.push("stop"); }
+    const runtime = {
+      start() {
+        calls.push(ledger.shutdownPlan().some(({ name }) => name === "publisher") ? "registered" : "missing");
+        throw new Error("startup failed");
+      },
+      async stop() { calls.push("stop"); }
     };
 
-    await expect(ledger.start(entry, async () => {
-      calls.push(ledger.shutdownPlan().some(({ name }) => name === "publisher") ? "registered" : "missing");
-      throw new Error("startup failed");
-    })).rejects.toThrow("startup failed");
+    expect(() => ledger.startRuntime(
+      { name: "publisher", stage: "projections", kind: "writer" }, runtime
+    )).toThrow("startup failed");
 
     expect(calls).toEqual(["registered"]);
-    expect(ledger.shutdownPlan()).toEqual([entry]);
+    expect(ledger.shutdownPlan().map(({ name }) => name)).toEqual(["publisher"]);
   });
 
-  it("returns the resource created during startup", async () => {
+  it("starts and stops one runtime with its receiver, arguments, and shutdown context", async () => {
     const ledger = new RuntimeLifecycleLedger();
-    const resource = { close: async () => {} };
+    const calls: string[] = [];
+    const runtime = {
+      label: "projector",
+      start(intervalMs: number) { calls.push(`start:${this.label}:${intervalMs}`); return "started"; },
+      async stop(context: { remainingMs(): number }) { calls.push(`stop:${this.label}:${context.remainingMs()}`); }
+    };
+    const context = { signal: new AbortController().signal, deadlineAt: Date.now() + 50, remainingMs: () => 50 };
 
-    expect(ledger.start({
-      name: "health",
-      stage: "health",
-      kind: "non-writer",
-      stop: async () => {}
-    }, () => resource)).toBe(resource);
+    expect(ledger.startRuntime({ name: "projector", stage: "projections", kind: "writer" }, runtime, 250)).toBe("started");
+    await ledger.shutdownPlan()[0]!.stop(context);
+
+    expect(calls).toEqual(["start:projector:250", "stop:projector:50"]);
   });
 
   it("keeps an asynchronous resource handle inside its registered cleanup", async () => {

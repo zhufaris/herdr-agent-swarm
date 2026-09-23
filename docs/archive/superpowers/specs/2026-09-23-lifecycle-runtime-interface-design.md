@@ -1,5 +1,7 @@
 # Lifecycle Runtime Interface
 
+Status: completed and archived.
+
 ## Goal
 
 Increase the leverage of `RuntimeLifecycleLedger` by letting it manage ordinary

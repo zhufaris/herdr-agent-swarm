@@ -156,10 +156,7 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       const ingressFailure = ingressResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (ingressFailure) throw ingressFailure.reason;
       this.assertStarting();
-      this.lifecycle.start(
-        { name: "integrityAuditor", stage: "workers", kind: "non-writer", stop: (context) => d.sqliteIntegrity.stop(context) },
-        () => d.sqliteIntegrity.start()
-      );
+      this.lifecycle.startRuntime({ name: "integrityAuditor", stage: "workers", kind: "non-writer" }, d.sqliteIntegrity);
       await d.sqliteIntegrity.run();
       this.assertStarting();
       this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
@@ -179,48 +176,21 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
         start: () => d.createHealthServer(), stop: (server) => closeHealthServer(server)
       });
       this.assertStarting();
-      this.lifecycle.start(
-        { name: "publisher", stage: "projections", kind: "writer", stop: (context) => d.channelPublisher.stop(context) },
-        () => d.channelPublisher.start()
-      );
-      this.lifecycle.start(
-        { name: "outboxRetention", stage: "projections", kind: "writer", stop: () => d.outboxRetention.stop() },
-        () => d.outboxRetention.start()
-      );
-      this.lifecycle.start(
-        { name: "projector", stage: "projections", kind: "writer", stop: (context) => d.projector.stop(context) },
-        () => d.projector.start()
-      );
-      this.lifecycle.start(
-        { name: "cardContextRebuilder", stage: "projections", kind: "writer", stop: (context) => d.cardContextRebuilder.stop(context) },
-        () => d.cardContextRebuilder.start(d.reconcileIntervalMs)
-      );
-      this.lifecycle.start(
-        { name: "queueFeedbackProjector", stage: "projections", kind: "writer", stop: (context) => d.queueFeedbackProjector.stop(context) },
-        () => d.queueFeedbackProjector.start(d.bus)
-      );
+      this.lifecycle.startRuntime({ name: "publisher", stage: "projections", kind: "writer" }, d.channelPublisher);
+      this.lifecycle.startRuntime({ name: "outboxRetention", stage: "projections", kind: "writer" }, d.outboxRetention);
+      this.lifecycle.startRuntime({ name: "projector", stage: "projections", kind: "writer" }, d.projector);
+      this.lifecycle.startRuntime({ name: "cardContextRebuilder", stage: "projections", kind: "writer" }, d.cardContextRebuilder, d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "queueFeedbackProjector", stage: "projections", kind: "writer" }, d.queueFeedbackProjector, d.bus);
       await d.queueFeedbackProjector.converge();
       this.assertStarting();
       await d.coordinator.start();
       this.assertStarting();
       await d.paneRetention.scan();
       this.assertStarting();
-      this.lifecycle.start(
-        { name: "paneRetention", stage: "observers", kind: "writer", stop: () => d.paneRetention.stop() },
-        () => d.paneRetention.start(d.reconcileIntervalMs)
-      );
-      this.lifecycle.start(
-        { name: "externalTurns", stage: "observers", kind: "writer", stop: () => d.externalTurns.stop() },
-        () => d.externalTurns.start()
-      );
-      this.lifecycle.start(
-        { name: "instanceRuntime", stage: "workers", kind: "writer", stop: () => d.instanceRuntime.stop() },
-        () => d.instanceRuntime.start(d.reconcileIntervalMs)
-      );
-      this.lifecycle.start(
-        { name: "instanceTurns", stage: "workers", kind: "writer", stop: () => d.instanceTurns.stop() },
-        () => d.instanceTurns.start(d.reconcileIntervalMs)
-      );
+      this.lifecycle.startRuntime({ name: "paneRetention", stage: "observers", kind: "writer" }, d.paneRetention, d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "externalTurns", stage: "observers", kind: "writer" }, d.externalTurns);
+      this.lifecycle.startRuntime({ name: "instanceRuntime", stage: "workers", kind: "writer" }, d.instanceRuntime, d.reconcileIntervalMs);
+      this.lifecycle.startRuntime({ name: "instanceTurns", stage: "workers", kind: "writer" }, d.instanceTurns, d.reconcileIntervalMs);
       if (d.herdrSocketSubscriber) {
         // Ingress-stage cleanup runs in reverse registration order: close admission before awaiting its writer drain.
         this.registerCleanup("herdrSocketEventDrain", "ingress", "writer", (context) => d.herdrSocketSubscriber!.drainEvents(context));
