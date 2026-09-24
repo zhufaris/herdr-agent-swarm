@@ -4,6 +4,7 @@ import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../d
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
+import type { WorkerTurnObservationPort, WorkerTurnWatch } from "../domain/ports/worker-turn-observation.js";
 
 interface Options {
   store: WorkerTurnObservationStore;
@@ -13,11 +14,10 @@ interface Options {
   presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification" | "safeWorkerOutput">;
   pollIntervalMs?: number;
 }
-export interface WorkerTurnWatch { flush(): Promise<void>; stop(): Promise<void>; detach(): Promise<void> }
 const FINAL_DRAIN_LIMIT = 8;
 const RECOVERY_DRAIN_LIMIT = 64;
 
-export class WorkerTurnObserver {
+export class WorkerTurnObserver implements WorkerTurnObservationPort {
   private readonly headlessOutput = new Map<string, BoundedTurnOutput>();
   private readonly exactTurns: ExactTurnObserver;
   constructor(private readonly options: Options) { this.exactTurns = new ExactTurnObserver(options.transcriptReader); }

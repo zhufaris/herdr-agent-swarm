@@ -438,6 +438,19 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("keeps Worker turn observation consumers behind a domain port", () => {
+    const port = readFileSync(new URL("../src/domain/ports/worker-turn-observation.ts", import.meta.url), "utf8");
+    const observer = readFileSync(new URL("../src/coordinator/worker-turn-observer.ts", import.meta.url), "utf8");
+    const scheduler = readFileSync(new URL("../src/events/instance-work-scheduler.ts", import.meta.url), "utf8");
+    const supervisor = readFileSync(new URL("../src/coordinator/instance-turn-supervisor.ts", import.meta.url), "utf8");
+    expect(port).toContain("export interface WorkerTurnObservationPort");
+    expect(observer).toContain("implements WorkerTurnObservationPort");
+    expect(scheduler).toContain('Pick<WorkerTurnObservationPort, "watch">');
+    expect(scheduler).not.toContain("WorkerTurnObserver");
+    expect(supervisor).toContain('Pick<WorkerTurnObservationPort, "recover">');
+    expect(supervisor).not.toContain("WorkerTurnObserver");
+  });
+
   it("composes startup projection workflows through explicit consumer stores", () => {
     const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
     const composition = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");

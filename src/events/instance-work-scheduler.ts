@@ -5,7 +5,7 @@ import type { Logger } from "pino";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
-import type { WorkerTurnObserver, WorkerTurnWatch } from "../coordinator/worker-turn-observer.js";
+import type { WorkerTurnObservationPort, WorkerTurnWatch } from "../domain/ports/worker-turn-observation.js";
 
 export class InstanceWorkScheduler {
   private readonly active = new Set<string>();
@@ -16,7 +16,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverRegistry; observer?: WorkerTurnObserver; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverRegistry; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;

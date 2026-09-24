@@ -7,9 +7,9 @@ import { FailureLogGate } from "../runtime/failure-log-gate.js";
 import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
-import type { WorkerTurnObserver } from "./worker-turn-observer.js";
+import type { WorkerTurnObservationPort } from "../domain/ports/worker-turn-observation.js";
 
-interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: WorkerTurnObserver; wake(instanceId: string): void; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "info" | "warn"> }
+interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: Pick<WorkerTurnObservationPort, "recover">; wake(instanceId: string): void; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "info" | "warn"> }
 const OBSERVATION_CONCURRENCY = 4;
 
 export class InstanceTurnSupervisor {
