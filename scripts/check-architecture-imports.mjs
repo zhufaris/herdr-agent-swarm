@@ -24,8 +24,8 @@ for (const file of files) {
     if (!importer.startsWith("src/composition/") && importer !== "src/main.ts" && target.startsWith("src/composition/")) {
       violations.push(`${importer} may not depend on the composition layer ${target}`);
     }
-    if (importer.startsWith("src/domain/") && target.startsWith("src/runtime/")) {
-      violations.push(`${importer} may not depend on the runtime layer ${target}`);
+    if (importer.startsWith("src/domain/") && /^(src\/(?:adapters|cards|composition|coordinator|events|gateways|infra|runtime|store)\/|src\/main\.ts$)/.test(target)) {
+      violations.push(`${importer} may not depend outward on ${target}`);
     }
     if (importer.startsWith("src/events/") && target.startsWith("src/coordinator/")) {
       violations.push(`${importer} may not depend on the coordinator layer ${target}`);

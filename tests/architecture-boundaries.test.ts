@@ -556,13 +556,17 @@ describe("application composition boundaries", () => {
     expect(types).not.toMatch(/export interface (?:Binding|PromptJob|OutboundReply|AnswerPage|ProjectSelection|HerdrPane|RuntimeObservation|IncomingLarkMessage|IncomingLarkCardAction|OutboxDispatcherDiagnostics|PromptWorkerDiagnostics)\b/);
   });
 
-  it("keeps domain contracts independent from runtime implementations", () => {
+  it("keeps domain modules independent from every outer application layer", () => {
     const domainDir = fileURLToPath(new URL("../src/domain", import.meta.url));
     for (const entry of readdirSync(domainDir, { recursive: true, withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
       const source = readFileSync(join(entry.parentPath, entry.name), "utf8");
-      expect(source, relative(domainDir, join(entry.parentPath, entry.name))).not.toMatch(/from "(?:\.\.\/)+runtime\//);
+      expect(source, relative(domainDir, join(entry.parentPath, entry.name))).not.toMatch(
+        /from "(?:\.\.\/)+(?:adapters|cards|composition|coordinator|events|gateways|infra|runtime|store)\//
+      );
     }
+    expect(readFileSync(new URL("../scripts/check-architecture-imports.mjs", import.meta.url), "utf8"))
+      .toContain("adapters|cards|composition|coordinator|events|gateways|infra|runtime|store");
   });
 
   it("keeps production composition off the broad SQLite compatibility facade", () => {
