@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand, splitMessage } from "../src/domain/commands.js";
-import { SWARM_COMMAND_POLICIES, swarmCommandPolicy } from "../src/domain/swarm-command.js";
+import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_POLICIES, swarmCommandDefinition, swarmCommandPolicy, swarmCommandSourceDecision } from "../src/domain/swarm-command.js";
 
 describe("commands", () => {
   it("parses supported commands", () => {
@@ -69,6 +69,31 @@ describe("commands", () => {
     expect(swarmCommandPolicy({ kind: "skip" })).toEqual({ mode: "mutation", scope: "active-turn", authorization: "creator", replay: "reconcilable", handler: "prompt-recovery" });
     expect(swarmCommandPolicy({ kind: "model", name: null })).toMatchObject({ mode: "query", replay: "none" });
     expect(swarmCommandPolicy({ kind: "model", name: "GPT-5" })).toMatchObject({ mode: "mutation", replay: "non-replayable" });
+  });
+
+  it("defines operator metadata and risk for every Swarm command", () => {
+    expect(Object.keys(SWARM_COMMAND_DEFINITIONS).sort()).toEqual(Object.keys(SWARM_COMMAND_POLICIES).sort());
+    for (const definition of Object.values(SWARM_COMMAND_DEFINITIONS)) {
+      expect(definition.syntax).toMatch(/^\/swarm/);
+      expect(definition.summary.length).toBeGreaterThan(0);
+      expect(definition.examples.length).toBeGreaterThan(0);
+      expect(definition.examples.every((example) => example.startsWith("/swarm"))).toBe(true);
+    }
+    expect(swarmCommandDefinition({ kind: "stop" }).risk).toBe("destructive-mutation");
+    expect(swarmCommandDefinition({ kind: "skip" }).risk).toBe("destructive-mutation");
+    expect(swarmCommandDefinition({ kind: "pane_close_confirm", code: "ABC" }).risk).toBe("destructive-mutation");
+    expect(swarmCommandDefinition({ kind: "reset", title: null }).risk).toBe("recoverable-mutation");
+    expect(swarmCommandDefinition({ kind: "model", name: null })).toMatchObject({ mode: "query", replay: "none", risk: "read-only" });
+    expect(swarmCommandDefinition({ kind: "model", name: "GPT-5" })).toMatchObject({ mode: "mutation", replay: "non-replayable", risk: "recoverable-mutation" });
+  });
+
+  it("derives source-specific command risk decisions without changing literal semantics", () => {
+    expect(swarmCommandSourceDecision({ kind: "status" }, "literal")).toBe("execute-query");
+    expect(swarmCommandSourceDecision({ kind: "rename", title: "next" }, "natural-language")).toBe("admit");
+    expect(swarmCommandSourceDecision({ kind: "stop" }, "natural-language")).toBe("confirm");
+    expect(swarmCommandSourceDecision({ kind: "stop" }, "literal")).toBe("admit");
+    expect(swarmCommandSourceDecision({ kind: "stop" }, "card")).toBe("admit");
+    expect(swarmCommandSourceDecision({ kind: "stop" }, "primary-tool")).toBe("unsupported");
   });
 
   it("derives bounded titles and splits at line boundaries", () => {
