@@ -371,7 +371,7 @@ The production implementation uses the following modules and seams.
 | --- | --- | --- |
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
-| `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
+| `SwarmCommandGateway` / `CommandIntentDispatcher` | Unified command ingress/admission and durable mutation execution, including CardKit and Primary-tool Worker creation | The facade owns resolution, queries, admission, and result adaptation; the dispatcher hides lane FIFO claims, frozen-context revalidation, external-effect uncertainty, accepted-only recovery, and shutdown |
 | `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted transcript turn |
 | `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
 | `InstanceMessagingWorkflow` / `WorkerTurnDispatcher` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Messaging persists through its focused store; dispatch uses `WorkerTurnDispatchStore`, Agent driver hooks, and exact observation watches |
@@ -573,11 +573,15 @@ Lark text ───────────────┐
 CardKit Worker create ──┘      |
                                +─ query -> handler + audit
                                |           (no CommandIntent)
-                               +─ mutation -> accept -> lane claim -> revalidate
+                               +─ mutation -> accept -> CommandIntentDispatcher
+                                                        -> lane claim -> revalidate
                                                         -> owning aggregate
 ```
 
-Mutation lanes serialize commands for the same chat, project, or Primary while
+The gateway owns only ingress context resolution, query routing, durable mutation
+admission, and Worker-result adaptation. `CommandIntentDispatcher` owns claim,
+execution, settlement, recovery, and shutdown. Mutation lanes serialize commands
+for the same chat, project, or Primary while
 allowing unrelated Primary sessions to proceed independently. `CommandIntent`
 records orchestration and references only; Binding, Prompt, Worker, pane-control,
 session-administration, provisioning, and delivery aggregates keep ownership of

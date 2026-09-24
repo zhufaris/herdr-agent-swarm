@@ -917,6 +917,7 @@ describe("application composition boundaries", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const commands = readFileSync(new URL("../src/coordinator/swarm-command-gateway.ts", import.meta.url), "utf8");
+    const commandDispatcher = readFileSync(new URL("../src/coordinator/command-intent-dispatcher.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");
     expect(router).toContain("StartupRecoveryWorkflowPort");
     expect(router).not.toContain("operationsQuery.listSpaces");
@@ -930,13 +931,33 @@ describe("application composition boundaries", () => {
     expect(recovery).toContain("PromptAdmissionWorkflowPort");
     expect(recovery).not.toContain("InboundMessageRouterPort");
     expect(commands).toContain("operationsQuery.listSpaces");
-    expect(commands).toContain("sessionAdministration.rename");
-    expect(commands).toContain("paneClosure.requestPaneClose");
-    expect(commands).not.toContain("sessionAdministration.archive");
-    expect(commands).toContain("async stop(): Promise<void>");
+    expect(commandDispatcher).toContain("sessionAdministration.rename");
+    expect(commandDispatcher).toContain("paneClosure.requestPaneClose");
+    expect(commandDispatcher).not.toContain("sessionAdministration.archive");
+    expect(commands).toContain("stop(): Promise<void> { return this.dispatcher.stop(); }");
+    expect(commandDispatcher).toContain("async stop(): Promise<void>");
     expect(router).toContain("swarmCommands.stop()");
     expect(router).not.toContain("modelSelection");
     expect(readFileSync(new URL("../src/coordinator/model-selection-workflow.ts", import.meta.url), "utf8")).not.toContain("shutdown(): void");
+  });
+
+  it("separates command ingress and admission from durable mutation execution", () => {
+    const gateway = readFileSync(new URL("../src/coordinator/swarm-command-gateway.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/coordinator/command-intent-dispatcher.ts", import.meta.url), "utf8");
+    expect(gateway).toContain("new CommandIntentDispatcher(options)");
+    expect(gateway).toContain("acceptCommandIntent");
+    expect(gateway).toContain("resolver.resolve");
+    expect(gateway).toContain("executeQuery");
+    expect(gateway).not.toContain("claimNextCommandIntent");
+    expect(gateway).not.toContain("recoverExecutingCommandIntents");
+    expect(gateway).not.toContain("finishCommandIntent");
+    expect(gateway).not.toContain("effectMayHaveStarted");
+    expect(dispatcher).toContain("claimNextCommandIntent");
+    expect(dispatcher).toContain("recoverExecutingCommandIntents");
+    expect(dispatcher).toContain("finishCommandIntent");
+    expect(dispatcher).toContain("effectMayHaveStarted");
+    expect(dispatcher).not.toContain("acceptCommandIntent");
+    expect(dispatcher).not.toContain("executeQuery");
   });
 
   it("centralizes coordinator project lookup in ProjectCatalog", () => {
