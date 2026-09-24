@@ -39,7 +39,7 @@ Each seam must satisfy all of the following before it is marked complete:
 | 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` behind dispatch and observation ports | Complete | Durable FIFO execution now lives in coordinator rather than events and consumes `WorkerTurnDispatchStore`. Exact live/restart observation stays behind `WorkerTurnObservationPort`; process-local single flight and watches remain non-durable hints while uncertain delivery never replays. |
 | 6 | Card projection and convergence | Durable Run Card, Worker Turn Card, Main Card, page, and delivery-version state | Pure view reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` | Complete | Primary and Worker continuation share one handoff policy; frozen-page offsets, checkpoint-gated Main Card retargeting, direct-Herdr pagination, duplicate convergence, stale targets, and startup recovery are covered through domain, workflow, SQLite, renderer, and context-rebuild tests. |
 | 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` lifecycle facade over `OutboundLaneDrain`, `OutboundDeliveryExecutor`, and `GatewayDeliveryPort` | Complete | The facade owns notifier subscription, safety/retry timers, dead-letter recovery, diagnostics, and shutdown. The drain engine owns bounded 3:1 lane scheduling, per-scan exclusion, same-reply protection, and fatal checkpoint convergence through `OutboundScanStore`; the executor owns one frozen claim-to-checkpoint attempt through `OutboundDeliveryStore`. |
-| 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` and owner-specific convergence modules | Needs deepening | Reconciliation is authoritative and tested, but the coordinator still combines scope planning, observation, binding convergence, and downstream wake decisions. |
+| 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` lifecycle facade over `BindingReconciliationPass` and `BindingRuntimeConverger` | Complete | The facade owns cooldown, priority coalescing, periodic lifecycle, diagnostics, and shutdown. The pass owns targeted/full authoritative observation, classification, discovery, failure isolation, and pruning; the converger retains generation-fenced per-Binding transitions and downstream effects. |
 | 9 | Command and control | Durable command intent or owning aggregate, with immutable resolved context | `SwarmCommandGateway` and focused command workflows | Needs audit | Natural-language proposal, typed command, card action, and direct command paths converge on existing workflows. Verify that authorization and confirmation cannot be bypassed across entry paths. |
 | 10 | Runtime lifecycle, health, and operations | User systemd plus fenced SQLite lease; health is observation only | `ManagedBridgeRuntime`, health snapshot providers, and lifecycle ledger | Needs audit | Startup/shutdown ordering is explicit. Verify every writer is registered, diagnostic failure is content-safe, and readiness reflects all required dependencies without becoming workflow authority. |
 | 11 | SQLite capability graph and migrations | One fenced `SqliteContext` and ordered schema migration | Consumer-shaped store ports backed by `SqliteCapabilityGraph` | Substantially complete | Production no longer uses the broad compatibility kernel and architecture checks enforce inward imports. Remaining work is driven by individual seam audits, not repository/table splitting. |
@@ -48,9 +48,8 @@ Each seam must satisfy all of the following before it is marked complete:
 
 The next passes follow risk and dependency direction:
 
-1. Deepen Herdr reconciliation now that its producers and outbound consumers
-   expose stable interfaces.
-2. Finish with command/control and runtime lifecycle/health.
+1. Audit command/control authorization and confirmation convergence.
+2. Finish with runtime lifecycle, health, and operations.
 
 Each pass gets its own design record, implementation plan, focused verification,
 and completion audit. A pass must not opportunistically refactor the next seam.
@@ -162,3 +161,26 @@ Verification on 2026-09-24 covers independent-lane concurrency, current-scan
 failure isolation, 3:1 work-class fairness, claim and checkpoint fencing, retry
 and dead-letter behavior, shutdown settlement, composition, and architecture
 dependency direction.
+
+## Herdr runtime reconciliation completion evidence
+
+The reconciliation pass is complete because `HerdrRuntimeReconciler` is now a
+lifecycle facade rather than the owner of authoritative Pane classification and
+Binding traversal. It retains request cooldown, priority scope coalescing,
+periodic execution, last-reconciled timestamps, diagnostic snapshots, and
+shutdown. `BindingReconciliationPass` owns baseline capture, targeted and
+workspace/full observations, missing-Pane handling, bounded existing-Binding
+convergence, safe discovery, pass-local ownership, warning deduplication, and
+full-pass cache pruning behind `captureBaselines()` and `execute(scope)`.
+
+`BindingRuntimeConverger` remains the sole owner of generation/session-fenced
+per-Binding transitions, projection/event ordering, exact external-turn
+observation, and scheduler wake decisions. No durable fact moved into the facade,
+pass-local maps, warning signatures, or snapshot cache, and no reconciliation
+path can submit or replay an Agent prompt.
+
+Verification on 2026-09-24 covers combined existing/discovery classification,
+targeted observation batching, scope priority and cooldown, unavailable and
+mismatched workspaces, discovery ambiguity, interrupted provisioning, bounded
+concurrency, recovery, exact external-turn observation, cache pruning, shutdown,
+and architecture dependency direction.

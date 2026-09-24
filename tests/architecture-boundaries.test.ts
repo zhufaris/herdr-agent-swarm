@@ -18,9 +18,31 @@ describe("application composition boundaries", () => {
 
   it("keeps durable prompt safety scans out of Herdr reconciliation", () => {
     const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
+    const pass = readFileSync(new URL("../src/coordinator/binding-reconciliation-pass.ts", import.meta.url), "utf8");
     expect(reconciler).not.toContain("scanDurablePromptWork");
     expect(reconciler).not.toContain("listDetachedPrompts");
     expect(reconciler).not.toContain('scheduler.wake({ kind: "prompt-ready", bindingId: binding.id })');
+    expect(pass).not.toContain("scanDurablePromptWork");
+    expect(pass).not.toContain("listDetachedPrompts");
+  });
+
+  it("separates reconciliation lifecycle from authoritative Binding passes", () => {
+    const facade = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
+    const pass = readFileSync(new URL("../src/coordinator/binding-reconciliation-pass.ts", import.meta.url), "utf8");
+    expect(facade).toContain("new BindingReconciliationPass(options)");
+    expect(facade).toContain("PriorityReconciliationRunner");
+    expect(facade).toContain("EVENT_RECONCILIATION_COOLDOWN_MS");
+    expect(facade).not.toContain("HerdrSnapshotCollector");
+    expect(facade).not.toContain("listBindingsByState");
+    expect(facade).not.toContain("discoverPane(");
+    expect(facade).not.toContain("mapWithConcurrency");
+    expect(pass).toContain("HerdrSnapshotCollector");
+    expect(pass).toContain("BindingRuntimeConverger");
+    expect(pass).toContain("listBindingsByState");
+    expect(pass).toContain("this.options.discoverPane(");
+    expect(pass).not.toContain("PriorityReconciliationRunner");
+    expect(pass).not.toContain("EVENT_RECONCILIATION_COOLDOWN_MS");
+    expect(pass).not.toContain("start(intervalMs");
   });
 
   it("keeps latest SQLite schema bootstrap separate from compatibility migrations", () => {
@@ -773,12 +795,16 @@ describe("application composition boundaries", () => {
 
   it("routes every binding runtime transition through one converger", () => {
     const reconciler = readFileSync(new URL("../src/coordinator/herdr-runtime-reconciler.ts", import.meta.url), "utf8");
+    const pass = readFileSync(new URL("../src/coordinator/binding-reconciliation-pass.ts", import.meta.url), "utf8");
     const converger = readFileSync(new URL("../src/coordinator/binding-runtime-converger.ts", import.meta.url), "utf8");
-    expect(reconciler).toContain("BindingRuntimeConverger");
-    expect(reconciler).toContain("this.converger.converge");
-    expect(reconciler).toContain("this.converger.orphan");
+    expect(reconciler).toContain("BindingReconciliationPass");
+    expect(pass).toContain("BindingRuntimeConverger");
+    expect(pass).toContain("this.converger.converge");
+    expect(pass).toContain("this.converger.orphan");
     expect(reconciler).not.toContain("applyRuntimeObservation");
     expect(reconciler).not.toContain("orphanBindingWithProjection");
+    expect(pass).not.toContain("applyRuntimeObservation");
+    expect(pass).not.toContain("orphanBindingWithProjection");
     expect(converger).toContain("applyRuntimeObservation");
     expect(converger).toContain("orphanBindingWithProjection");
   });
