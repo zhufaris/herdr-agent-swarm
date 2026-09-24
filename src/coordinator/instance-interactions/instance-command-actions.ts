@@ -1,6 +1,6 @@
 import type { InstanceCommand, IncomingLarkMessage, ProjectConfig } from "../../domain/types.js";
 import type { InstanceStore } from "../../domain/ports/instance.js";
-import type { InstanceMessagingWorkflow } from "../instance-messaging-workflow.js";
+import type { InstanceMessagingPort } from "../../domain/ports/instance-workflows.js";
 import { InstanceConversationContext } from "./conversation-context.js";
 import { InstanceViewQuery } from "./instance-view-query.js";
 
@@ -12,7 +12,7 @@ export class InstanceCommandActions {
   constructor(private readonly options: {
     projects: readonly ProjectConfig[];
     store: InstanceStore;
-    messaging: InstanceMessagingWorkflow;
+    messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt">;
     context: InstanceConversationContext;
     views: InstanceViewQuery;
     presentation: InstanceCommandPresentation;

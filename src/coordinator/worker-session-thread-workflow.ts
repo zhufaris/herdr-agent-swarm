@@ -3,11 +3,11 @@ import type { GatewayEffectPort } from "../gateways/effect-client.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { WorkerSessionThreadApplicationStore, WorkerSessionThreadWorkflowPort, WorkerThreadPublicationTarget, WorkerThreadResolution } from "../domain/ports/worker-session-thread.js";
-import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js";
+import type { InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
 
 export class WorkerSessionThreadWorkflow implements WorkerSessionThreadWorkflowPort {
   constructor(private readonly options: {
-    adminOpenIds: readonly string[]; store: WorkerSessionThreadApplicationStore; messaging: InstanceMessagingWorkflow; outbound: OutboundIntentPort; wakeOutbound(): void;
+    adminOpenIds: readonly string[]; store: WorkerSessionThreadApplicationStore; messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt">; outbound: OutboundIntentPort; wakeOutbound(): void;
     gatewayEffects: Pick<GatewayEffectPort, "shareConversation">;
     presentation: Pick<ApplicationPresentation, "requestRejected" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted">;
   }) {}

@@ -9,13 +9,14 @@ import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { PaneHost } from "../domain/ports/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { WorktreePort } from "../domain/ports/worktree.js";
+import type { InstanceControlPort } from "../domain/ports/instance-workflows.js";
 import { preferredRuntimeSessionId, requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 
 interface Options {
   projects: readonly ProjectConfig[]; store: InstanceControlStore; paneHost: PaneHost; drivers: AgentDriverCatalog; worktrees: WorktreePort; idFactory: () => string;
 }
 
-export class InstanceControlWorkflow {
+export class InstanceControlWorkflow implements InstanceControlPort {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   constructor(private readonly options: Options) { this.projects = new Map(options.projects.map((project) => [project.id, project])); }
 

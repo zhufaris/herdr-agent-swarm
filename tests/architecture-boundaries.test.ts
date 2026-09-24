@@ -641,6 +641,23 @@ describe("application composition boundaries", () => {
     expect(facade).not.toContain("decideWorkerCardBindingOwnership");
   });
 
+  it("keeps instance control and messaging behind domain workflow ports", () => {
+    const ports = readFileSync(new URL("../src/domain/ports/instance-workflows.ts", import.meta.url), "utf8");
+    expect(ports).toContain("export interface InstanceControlPort");
+    expect(ports).toContain("export interface InstanceMessagingPort");
+    expect(readFileSync(new URL("../src/coordinator/instance-control-workflow.ts", import.meta.url), "utf8")).toContain("implements InstanceControlPort");
+    expect(readFileSync(new URL("../src/coordinator/instance-messaging-workflow.ts", import.meta.url), "utf8")).toContain("implements InstanceMessagingPort");
+    for (const path of [
+      "instance-interaction-workflow.ts", "worker-session-thread-workflow.ts", "swarm-command-gateway.ts",
+      "instance-interactions/conversation-context.ts", "instance-interactions/instance-command-actions.ts",
+      "instance-interactions/instance-view-query.ts", "instance-interactions/worker-card-actions.ts",
+      "instance-interactions/worker-lifecycle-actions.ts"
+    ]) {
+      const source = readFileSync(new URL(`../src/coordinator/${path}`, import.meta.url), "utf8");
+      expect(source).not.toMatch(/import type \{ Instance(?:Control|Messaging)Workflow \}/);
+    }
+  });
+
   it("keeps Worker Session Thread protocol behind its deep modules", () => {
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const instances = readFileSync(new URL("../src/coordinator/instance-interaction-workflow.ts", import.meta.url), "utf8");

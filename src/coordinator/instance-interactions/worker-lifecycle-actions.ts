@@ -4,8 +4,7 @@ import type { OutboundIntentPort } from "../../domain/ports/outbox.js";
 import type { IncomingLarkCardAction, LarkCardActionResult, ProjectConfig } from "../../domain/types.js";
 import { decideWorkerCardBindingOwnership } from "../../domain/worker-card-ownership.js";
 import { safeLogError } from "../../runtime/safe-error.js";
-import type { InstanceControlWorkflow } from "../instance-control-workflow.js";
-import type { InstanceMessagingWorkflow } from "../instance-messaging-workflow.js";
+import type { InstanceControlPort, InstanceMessagingPort } from "../../domain/ports/instance-workflows.js";
 import type { BindingCardContext, InstanceCardActionCommand } from "../card-action-command.js";
 import { InstanceConversationContext } from "./conversation-context.js";
 import { InstanceViewQuery } from "./instance-view-query.js";
@@ -27,7 +26,7 @@ interface WorkerLifecyclePresentation {
 export class WorkerLifecycleActions {
   private readonly projects: ReadonlySet<string>;
   constructor(private readonly options: {
-    projects: readonly ProjectConfig[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow;
+    projects: readonly ProjectConfig[]; store: InstanceStore; control: Pick<InstanceControlPort, "createWorker" | "start" | "stop" | "planRemoval" | "confirmRemoval">; messaging: Pick<InstanceMessagingPort, "steer" | "interrupt">;
     context: InstanceConversationContext; views: InstanceViewQuery; presentation: WorkerLifecyclePresentation; outbound: Pick<OutboundIntentPort, "enqueueCard">; workerCreation?: WorkerCreationGateway; wakeOutbound?: () => void;
   }) { this.projects = new Set(options.projects.map(({ id }) => id)); }
 

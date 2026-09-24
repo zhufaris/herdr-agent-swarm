@@ -8,12 +8,12 @@ import type { InstanceMessagingStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 import { assertPromptInputSize } from "../domain/prompt-input-policy.js";
+import type { InstanceConversationView, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
 
 interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
-export interface InstanceConversationView { instance: AgentInstance; turns: InstanceTurn[]; events: InstanceEvent[] }
 const INSTANCE_EVENT_POLL_INTERVAL_MS = 250;
 
-export class InstanceMessagingWorkflow {
+export class InstanceMessagingWorkflow implements InstanceMessagingPort {
   constructor(private readonly options: Options) {}
 
   async submit(input: { idempotencyKey: string; actor: ControlActor; projectId: string; targetInstanceId: string; content: { kind: "turn" | "followup"; text: string }; source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null } }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView | null; inserted: boolean }> {

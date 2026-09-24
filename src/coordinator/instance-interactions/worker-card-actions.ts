@@ -5,7 +5,7 @@ import type { IncomingLarkCardAction, LarkCardActionResult } from "../../domain/
 import { decideWorkerMainCardOwnership, decideWorkerTaskCardOwnership } from "../../domain/worker-card-ownership.js";
 import { workerTaskInteraction, type WorkerTaskReplyIntent } from "../../domain/worker-task-interaction.js";
 import { safeLogError } from "../../runtime/safe-error.js";
-import type { InstanceMessagingWorkflow } from "../instance-messaging-workflow.js";
+import type { InstanceMessagingPort } from "../../domain/ports/instance-workflows.js";
 import type { InstanceCardActionCommand } from "../card-action-command.js";
 import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../../domain/prompt-input-policy.js";
 
@@ -13,7 +13,7 @@ type WorkerTaskCommand = Extract<InstanceCardActionCommand, { action: "worker_ta
 type WorkerNewTaskCommand = Extract<InstanceCardActionCommand, { action: "worker_new_task_form" | "worker_new_task_submit" }>;
 
 export class WorkerCardActions {
-  constructor(private readonly options: { store: InstanceStore; messaging: InstanceMessagingWorkflow; presentation: Pick<ApplicationPresentation, "workerNewTask" | "workerTaskInstruction">; idFactory(): string }) {}
+  constructor(private readonly options: { store: InstanceStore; messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt">; presentation: Pick<ApplicationPresentation, "workerNewTask" | "workerTaskInstruction">; idFactory(): string }) {}
 
   async handleTask(action: IncomingLarkCardAction, command: WorkerTaskCommand): Promise<LarkCardActionResult> {
     const owned = this.resolveTask(action, command);

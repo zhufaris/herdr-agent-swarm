@@ -5,8 +5,7 @@ import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { InstanceCommand, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, ProjectConfig } from "../domain/types.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
-import type { InstanceControlWorkflow } from "./instance-control-workflow.js";
-import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js";
+import type { InstanceControlPort, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
 import { InstanceCommandActions } from "./instance-interactions/instance-command-actions.js";
 import { InstanceConversationContext } from "./instance-interactions/conversation-context.js";
 import { InstanceViewQuery } from "./instance-interactions/instance-view-query.js";
@@ -17,7 +16,9 @@ import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 export type { InstanceCardActionCommand } from "./card-action-command.js";
 
 interface Options {
-  projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverCatalog; outbound: OutboundIntentPort;
+  projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore;
+  control: Pick<InstanceControlPort, "createWorker" | "start" | "stop" | "planRemoval" | "confirmRemoval" | "inspect" | "listWorkersForParent">;
+  messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt">; drivers: AgentDriverCatalog; outbound: OutboundIntentPort;
   presentation: Pick<ApplicationPresentation, "answerCard" | "commandResult" | "projectDirectory" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">;
   workerCreation?: WorkerCreationGateway; idFactory?: () => string;
   wakeOutbound?: () => void;

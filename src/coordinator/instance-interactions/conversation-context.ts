@@ -1,12 +1,12 @@
 import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { InstanceStore } from "../../domain/ports/instance.js";
 import type { IncomingLarkMessage } from "../../domain/types.js";
-import type { InstanceControlWorkflow } from "../instance-control-workflow.js";
+import type { InstanceControlPort } from "../../domain/ports/instance-workflows.js";
 
 export interface ConversationContext { bindingPresent: boolean; boundProjectId: string | null; conversationKey: string }
 
 export class InstanceConversationContext {
-  constructor(private readonly store: InstanceStore, private readonly control: InstanceControlWorkflow) {}
+  constructor(private readonly store: InstanceStore, private readonly control: Pick<InstanceControlPort, "listWorkersForParent">) {}
 
   resolve(message: IncomingLarkMessage): ConversationContext {
     const binding = this.store.findBindingByLarkScope(message.topicId, message.rootMessageId);

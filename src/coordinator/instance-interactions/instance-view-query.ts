@@ -3,10 +3,10 @@ import type { InstanceStore } from "../../domain/ports/instance.js";
 import type { ApplicationPresentation } from "../../domain/ports/presentation.js";
 import type { ProjectConfig } from "../../domain/types.js";
 import type { AgentDriverCatalog } from "../../domain/agent-runtime.js";
-import type { InstanceControlWorkflow } from "../instance-control-workflow.js";
+import type { InstanceControlPort } from "../../domain/ports/instance-workflows.js";
 
 export class InstanceViewQuery {
-  constructor(private readonly options: { store: InstanceStore; control: InstanceControlWorkflow; drivers: AgentDriverCatalog; presentation: Pick<ApplicationPresentation, "instanceDetail" | "instanceDirectory"> }) {}
+  constructor(private readonly options: { store: InstanceStore; control: Pick<InstanceControlPort, "inspect" | "listWorkersForParent">; drivers: AgentDriverCatalog; presentation: Pick<ApplicationPresentation, "instanceDetail" | "instanceDirectory"> }) {}
 
   directory(project: ProjectConfig, conversationKey: string): object {
     const selected = this.options.store.getConversationTarget(conversationKey);

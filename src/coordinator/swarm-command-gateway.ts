@@ -10,7 +10,7 @@ import { swarmCommandPolicy } from "../domain/swarm-command.js";
 import type { BridgeCommand, Binding, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
-import type { InstanceControlWorkflow } from "./instance-control-workflow.js";
+import type { InstanceControlPort } from "../domain/ports/instance-workflows.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { OperationsQueryWorkflowPort } from "./operations-query-workflow.js";
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
@@ -24,7 +24,7 @@ interface Options {
   resolver: SwarmCommandContextResolver; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger;
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
-  promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlWorkflow, "createWorker" | "inspect">;
+  promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">;
   wakeCardContext(): void;
   presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult">;
 }
