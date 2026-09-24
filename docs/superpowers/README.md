@@ -9,6 +9,7 @@ implemented. Current records:
 - [Runtime Event Bus design](specs/2026-09-24-runtime-event-bus-design.md)
 - [Runtime Event Bus implementation plan](plans/2026-09-24-runtime-event-bus-plan.md)
 - [Inbound admission and routing design](specs/2026-09-24-inbound-admission-routing-design.md)
+- [Inbound admission and routing implementation plan](plans/2026-09-24-inbound-admission-routing-plan.md)
 
 The service's current maintainer, user, and operator documentation starts at the
 [maintainer documentation map](../README.md). Completed or superseded designs,
