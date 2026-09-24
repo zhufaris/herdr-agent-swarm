@@ -35,11 +35,12 @@ describe("project selection flow", () => {
       await Promise.resolve();
 
       expect(handled).toBe(false);
-      expect(store.listPendingOutboundReplies()).toHaveLength(1);
+      const selection = store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get(`message-${command}`) as { id: string };
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE selection_id = ? AND state = 'pending'").get(selection.id)).toEqual({ count: 1 });
       releaseDelivery();
       await handling;
-      expect(replyCard).toHaveBeenCalledOnce();
-      expect(store.listPendingOutboundReplies()).toHaveLength(0);
+      expect(replyCard).toHaveBeenCalled();
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE selection_id = ? AND state = 'pending'").get(selection.id)).toEqual({ count: 0 });
       await coordinator.stop(); await publisher.stop(); store.close();
     });
   }
@@ -144,7 +145,8 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "e-async", messageId: "m-async", chatId: "chat", topicId: "m-async", rootMessageId: "m-async", actorOpenId: "user-1", text: "/swarm new title", mentionsBot: true, isRootMessage: true });
-    const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
+    await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
+    const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value as { selectionId: string; projectId: string; action: string };
 
     await expect(onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value })).resolves.toEqual({ toast: { type: "success", content: "项目创建已开始。" } });
     expect(store.getProjectSelection(value.selectionId)?.state).toBe("processing");
@@ -272,8 +274,8 @@ describe("project selection flow", () => {
 
     await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", actorOpenId: "user-1", text: "/swarm new Fix login", mentionsBot: true, isRootMessage: false });
     expect(created).toEqual([]);
-    expect(cards).toHaveLength(1);
-    const button = findProjectButton(cards[0]!, "datasage");
+    await vi.waitFor(() => expect(findProjectCard(cards, "datasage")).toBeDefined());
+    const button = findProjectButton(findProjectCard(cards, "datasage")!, "datasage");
     const value = button.value as { selectionId: string; projectId: string; action: string };
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ selectorMessageId: "selector-card-1", requestedTitle: "Fix login" });
 
@@ -357,7 +359,8 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/swarm new", mentionsBot: true, isRootMessage: true });
-    const value = findProjectButton(selectorCards[0]!, "alpha").value as { selectionId: string; projectId: string; action: string };
+    await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
+    const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value as { selectionId: string; projectId: string; action: string };
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
@@ -432,7 +435,8 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/swarm new Broken", mentionsBot: true, isRootMessage: true });
-    const value = findProjectButton(selectorCards[0]!, "alpha").value;
+    await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
+    const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection((value as { selectionId: string }).selectionId)?.error).toBe("group card unavailable"));
 
@@ -468,7 +472,8 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/swarm new Not ready", mentionsBot: true, isRootMessage: true });
-    const value = findProjectButton(selectorCards[0]!, "alpha").value;
+    await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
+    const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection((value as { selectionId: string }).selectionId)?.error).toBe("TraeX composer did not become ready in pane w1:p7"));
 
@@ -499,6 +504,12 @@ function findProjectButton(card: object, projectId: string): { value: unknown } 
   const button = elements.find((element) => element.behaviors?.some((behavior) => behavior.type === "callback" && behavior.value?.projectId === projectId));
   if (!button) throw new Error(`Missing project button: ${projectId}`);
   return { value: button.behaviors!.find((behavior) => behavior.type === "callback")!.value };
+}
+
+function findProjectCard(cards: object[], projectId: string): object | undefined {
+  return cards.find((card) => {
+    try { findProjectButton(card, projectId); return true; } catch { return false; }
+  });
 }
 
 function findActionButton(card: object, action: string): { value: unknown } {

@@ -253,6 +253,7 @@ describe("Herdr discovery", () => {
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: `my-space / ${paneTitle}` });
 
     await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/swarm rename Better pane", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(renamed).toHaveLength(1));
     expect(renamed).toEqual([["w1:p2", "Better pane", { tabTitle: "Better pane" }]]);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Better pane" });
 

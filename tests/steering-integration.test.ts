@@ -132,7 +132,7 @@ describe("active-turn steering", () => {
     store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
     await publisher.drain();
     await coordinator.handleMessage(message(4, "/swarm stop"));
-    expect(store.database.prepare("SELECT kind, state FROM turn_control_operations").all()).toEqual([expect.objectContaining({ kind: "interrupt", state: "delivered" })]);
+    await vi.waitFor(() => expect(store.database.prepare("SELECT kind, state FROM turn_control_operations").all()).toEqual([expect.objectContaining({ kind: "interrupt", state: "delivered" })]));
     await vi.waitFor(() => expect(escapes).toEqual(["w1:p1"]));
     store.finishPaneControlOperation(runningModel.operation.id, "confirmed");
     expect(store.listRunCards(bindingId).some((view) => view.requestText === "/swarm stop")).toBe(false);

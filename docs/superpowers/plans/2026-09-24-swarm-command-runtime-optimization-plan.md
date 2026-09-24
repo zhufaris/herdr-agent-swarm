@@ -300,8 +300,8 @@ Before declaring the optimization complete:
 10. Run `npm run public:audit`.
 11. Run `npm test`.
 12. Run `git diff --check`.
-13. Inspect each thematic commit and confirm no `Co-authored-by: TRAE CLI`
-    trailer.
+13. Inspect each thematic commit and confirm it contains no disallowed automated
+    co-author trailer.
 14. Confirm the worktree is clean.
 
 Do not install, restart, or push as part of this plan unless the user separately

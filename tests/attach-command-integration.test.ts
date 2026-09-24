@@ -105,18 +105,21 @@ describe("attach existing pane command", () => {
     await coordinator.handleMessage(command(2));
     expect(createTopic).toHaveBeenCalledTimes(1);
     expect(store.listBindings()).toHaveLength(1);
-    expect(JSON.stringify(replyCards.at(-1))).toContain("已经连接");
-    expect(JSON.stringify(replyCards.at(-1))).toContain("w5:p3G");
-    expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
-    const response = JSON.stringify(replyCards.at(-1));
+    await vi.waitFor(() => expect(replyCards.some((card) => JSON.stringify(card).includes('\"action\":\"open_project_thread\"'))).toBe(true));
+    const attachedCard = replyCards.find((card) => JSON.stringify(card).includes('\"action\":\"open_project_thread\"'))!;
+    expect(JSON.stringify(attachedCard)).toContain("已连接");
+    expect(JSON.stringify(attachedCard)).toContain("w5:p3G");
+    expect(JSON.stringify(attachedCard)).toContain("发送话题入口");
+    const response = JSON.stringify(attachedCard);
     expect(response).toContain('\"action\":\"open_project_thread\"');
     expect(response).not.toContain("openMessageId");
     expect(response).not.toContain("client/chat/open");
     expect(store.findBindingByPane("w5:p3G")).toMatchObject({ statusMessageId: "root-attached" });
 
-    const button = findActionButton(replyCards.at(-1)!, "open_project_thread");
-    await onAction!({ messageId: "reply-2", chatId: "chat", operatorOpenId: "user-1", value: button.value });
-    expect(shareThread).toHaveBeenCalledWith("topic-attached", { messageId: "reply-2", chatId: "chat", sourceRootMessageId: "root-attached" });
+    const button = findActionButton(attachedCard, "open_project_thread");
+    const attachedMessageId = `reply-${replyCards.indexOf(attachedCard) + 1}`;
+    await onAction!({ messageId: attachedMessageId, chatId: "chat", operatorOpenId: "user-1", value: button.value });
+    expect(shareThread).toHaveBeenCalledWith("topic-attached", { messageId: attachedMessageId, chatId: "chat", sourceRootMessageId: "root-attached" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });

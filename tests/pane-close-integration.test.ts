@@ -23,6 +23,7 @@ describe("Lark pane close", () => {
 
     await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${confirmation![1]}`));
 
+    await vi.waitFor(() => expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed" }));
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     expect(fixture.closePane).toHaveBeenCalledWith("w1:p1");
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed", state: "archived", attachment: "unattached" });
@@ -38,6 +39,7 @@ describe("Lark pane close", () => {
 
     await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
+    await vi.waitFor(() => expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed" }));
     expect(fixture.closePane).toHaveBeenCalledWith("w1:p1");
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "closed", state: "archived" });
     await fixture.close();
@@ -60,6 +62,7 @@ describe("Lark pane close", () => {
     const code = closeConfirmationCode(fixture.cards.at(-1));
     await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
+    await vi.waitFor(() => expect(fixture.closePane).toHaveBeenCalledTimes(2));
     expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child", "w1:p1"]);
     expect(fixture.store.getAgentInstance(child.id)).toMatchObject({ workerSessionLifecycle: "terminated", runtimeRef: null });
     expect(fixture.store.getAgentInstance(sibling.id)).toMatchObject({ workerSessionLifecycle: "active", desiredState: "running" });
@@ -80,6 +83,7 @@ describe("Lark pane close", () => {
     const code = /\/swarm close confirm ([A-Z0-9]{6})/.exec(JSON.stringify(fixture.cards.at(-1)))![1]!;
     await fixture.coordinator.handleMessage(message(2, `/swarm close confirm ${code}`));
 
+    await vi.waitFor(() => expect(fixture.closePane).toHaveBeenCalledTimes(1));
     expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:p1"]);
     expect(fixture.store.getAgentInstance(child.id)).toMatchObject({ workerSessionLifecycle: "active", desiredState: "running", runtimeRef: { paneId: "w1:child-working" } });
     expect(fixture.store.database.prepare("SELECT state FROM worker_pane_close_steps WHERE worker_id = 'child-working'").get()).toEqual({ state: "retained" });
@@ -102,6 +106,7 @@ describe("Lark pane close", () => {
 
     await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
+    await vi.waitFor(() => expect(fixture.closePane).toHaveBeenCalledTimes(2));
     expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child-uncertain", "w1:p1"]);
     expect(fixture.store.database.prepare("SELECT state FROM worker_pane_close_steps WHERE worker_id = 'child-uncertain'").get()).toEqual({ state: "uncertain" });
     const result = JSON.stringify(fixture.cards.at(-1));
@@ -126,6 +131,7 @@ describe("Lark pane close", () => {
 
     await fixture.coordinator.handleMessage(message(2, `/swarm close confirm ${code}`));
 
+    await vi.waitFor(() => expect(fixture.closePane).toHaveBeenCalledTimes(2));
     expect(fixture.closePane.mock.calls.map(([paneId]) => paneId)).toEqual(["w1:child-before-primary-failure", "w1:p1"]);
     expect(fixture.store.getAgentInstance(child.id)).toMatchObject({ workerSessionLifecycle: "terminated" });
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "active" });
@@ -220,7 +226,7 @@ describe("Lark pane close", () => {
     await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
     expect(fixture.closePane).not.toHaveBeenCalled();
-    expect(JSON.stringify(fixture.cards.at(-1))).toContain("identity");
+    await vi.waitFor(() => expect(fixture.cards.some((card) => JSON.stringify(card).includes("identity"))).toBe(true));
     await fixture.close();
   });
 
@@ -234,7 +240,7 @@ describe("Lark pane close", () => {
 
     expect(fixture.closePane).not.toHaveBeenCalled();
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ attachment: "orphaned", state: "orphaned" });
-    expect(JSON.stringify(fixture.cards.at(-1))).toContain("已不存在");
+    await vi.waitFor(() => expect(fixture.cards.some((card) => JSON.stringify(card).includes("已不存在"))).toBe(true));
     await fixture.close();
   });
 
@@ -245,6 +251,7 @@ describe("Lark pane close", () => {
 
     await fixture.coordinator.handleMessage(message(2, `/swarm pane close confirm ${code}`));
 
+    await vi.waitFor(() => expect(fixture.store.database.prepare("SELECT state FROM pane_close_requests ORDER BY created_at DESC LIMIT 1").get()).toEqual({ state: "uncertain" }));
     expect(fixture.closePane).toHaveBeenCalledTimes(1);
     expect(fixture.store.getBinding(fixture.bindingId)).toMatchObject({ lifecycle: "active", state: "active" });
     expect(fixture.store.database.prepare("SELECT state FROM pane_close_requests ORDER BY created_at DESC LIMIT 1").get()).toEqual({ state: "uncertain" });
