@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contentIdempotencyKey } from "../src/runtime/idempotency-key.js";
+import { contentIdempotencyKey } from "../src/domain/content-idempotency-key.js";
 
 describe("content idempotency keys", () => {
   it("uses fixed-size deterministic material without embedding rendered content", () => {

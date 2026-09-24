@@ -13,7 +13,7 @@ import { InstanceViewQuery } from "./instance-interactions/instance-view-query.j
 import { WorkerCardActions } from "./instance-interactions/worker-card-actions.js";
 import { WorkerLifecycleActions, type WorkerCreationGateway } from "./instance-interactions/worker-lifecycle-actions.js";
 import type { InstanceCardActionCommand } from "./card-action-command.js";
-import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
+import { contentIdempotencyKey } from "../domain/content-idempotency-key.js";
 export type { InstanceCardActionCommand } from "./card-action-command.js";
 
 export interface InstanceInteractionWorkflowPort {

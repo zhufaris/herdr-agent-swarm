@@ -23,7 +23,7 @@ import { BindingStartupRecovery } from "./binding-provisioning/binding-startup-r
 import { ProjectCatalog } from "./project-catalog.js";
 import { agentKindFromHerdr, matchesAgentKind, type AgentKind } from "../domain/agent-instance.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
-import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
+import { contentIdempotencyKey } from "../domain/content-idempotency-key.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null, agentKind?: AgentKind): Promise<void>;

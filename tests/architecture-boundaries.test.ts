@@ -569,6 +569,15 @@ describe("application composition boundaries", () => {
       .toContain("adapters|cards|composition|coordinator|events|gateways|infra|runtime|store");
   });
 
+  it("keeps content-derived idempotency policy in the domain", () => {
+    expect(existsSync(new URL("../src/domain/content-idempotency-key.ts", import.meta.url))).toBe(true);
+    expect(existsSync(new URL("../src/runtime/idempotency-key.ts", import.meta.url))).toBe(false);
+    for (const path of ["binding-provisioning-workflow.ts", "instance-interaction-workflow.ts", "pane-closure-workflow.ts"]) {
+      const source = readFileSync(new URL(`../src/coordinator/${path}`, import.meta.url), "utf8");
+      expect(source).toContain("../domain/content-idempotency-key.js");
+    }
+  });
+
   it("keeps production composition off the broad SQLite compatibility facade", () => {
     const productionFiles = [
       "../src/main.ts",
