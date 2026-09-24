@@ -175,8 +175,8 @@ describe("application composition boundaries", () => {
     expect(composition).toContain("stores.promptSession");
     expect(composition).toContain("stores.instance");
     const worker = readFileSync(new URL("../src/composition/create-worker-runtime.ts", import.meta.url), "utf8");
-    expect(worker).toContain("stores.instanceLifecycle");
-    expect(worker).toContain("stores.instanceTurns");
+    expect(worker).toContain("instanceExecution: InstanceLifecycleStore & InstanceTurnStore");
+    expect(worker).not.toContain("as InstanceLifecycleStore & InstanceTurnStore");
     for (const component of ["WorkerTurnObserver", "InstanceWorkScheduler", "InstanceTurnSupervisor", "InstanceRuntimeReconciler"]) {
       expect(worker).toMatch(new RegExp(`new ${component}\\(\\{[^\\n]*store: executionStore`));
     }

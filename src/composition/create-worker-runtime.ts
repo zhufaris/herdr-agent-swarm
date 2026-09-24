@@ -24,7 +24,7 @@ import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 
 export interface WorkerRuntimeStores {
-  instance: InstanceStore; instanceLifecycle: InstanceLifecycleStore; instanceTurns: InstanceTurnStore; workerCardDisplay: WorkerCardDisplayStore;
+  instance: InstanceStore; instanceExecution: InstanceLifecycleStore & InstanceTurnStore; workerCardDisplay: WorkerCardDisplayStore;
 }
 
 export function createWorkerRuntime(options: {
@@ -34,8 +34,7 @@ export function createWorkerRuntime(options: {
 }) {
   const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, applicationPresentation } = options;
   const instanceWorkLink = new RuntimeLink<InstanceWorkScheduler>("instance work scheduler");
-  if (stores.instanceLifecycle !== stores.instanceTurns as unknown) throw new Error("Instance lifecycle and turn capabilities must share one SQLite transaction context");
-  const executionStore = stores.instanceLifecycle as InstanceLifecycleStore & InstanceTurnStore;
+  const executionStore = stores.instanceExecution;
   const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
   const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, logger });
   instanceWorkLink.connect(instanceWork);
