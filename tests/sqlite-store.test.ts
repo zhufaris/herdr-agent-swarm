@@ -6068,10 +6068,23 @@ describe("SQLite store", () => {
     const running = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", state: "running" }] });
     const done = reduceRunCard(running, { type: "output", occurredAt: "latest", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }] });
     store.saveRunCard(done);
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    expect(store.reserveAnswerTimelineCard({
+      promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { schema: "2.0" }, cursor: null, items: done.timelineItems
+    })).toBe("reserved");
+    const timelineReplyId = store.listPendingOutboundReplies()[0]!.id;
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.loadRunCard("p1")?.timelineItems).toEqual([{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }]);
+    expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ deliveredCursor: null, pending: true });
+    store.markOutboundReplyDelivered(timelineReplyId, "answer-1");
+    store.close(); store = new SqliteBindingStore(path);
+    expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({
+      deliveredCursor: null, pending: false, deliveredItems: [expect.objectContaining({ id: "tool:1" })]
+    });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 50").get()).toEqual({ version: 50 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 51").get()).toEqual({ version: 51 });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'answer_timeline_page_checkpoints'").get()).toEqual({ name: "answer_timeline_page_checkpoints" });
   });
 
   it("persists Worker answer timelines across reopen", () => {

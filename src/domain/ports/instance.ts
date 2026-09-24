@@ -3,6 +3,9 @@ import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheck
 import type { ControlActor } from "../commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "../instance-turn.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../types.js";
+import type { AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint } from "../delivery.js";
+import type { AnswerTimelineItem } from "../answer-timeline.js";
+import type { AnswerTimelineCursor } from "../delivery.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 import type { WorkerMainView } from "../worker-main-view.js";
 import type { CardContextInvalidation, CardContextTarget } from "../card-context-invalidation.js";
@@ -68,11 +71,14 @@ export interface InstanceStore {
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
   listActionableWorkerTurnCardIds(): string[];
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;
+  getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
+  listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number): AnswerTimelineFrozenItem[];
+  reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome;
-  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
+  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
   transitionInstanceTurnWithProjection(input: TransitionInstanceTurnWithProjectionInput): TransitionInstanceTurnWithProjectionResult | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
@@ -131,7 +137,7 @@ export type WorkerTurnDispatchStore = Pick<InstanceStore,
 >;
 
 export type WorkerTurnCardStore = Pick<InstanceStore,
-  "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" |
+  "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "reserveWorkerAnswerTimelineCard" |
   "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
   "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation"
 >;

@@ -5,6 +5,9 @@ import { answerElementId } from "../domain/run-card-view.js";
 import type { AnswerPageStore } from "../domain/ports/projection.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageConvergencePort } from "../domain/ports/card-convergence.js";
+import type { AnswerTimelineCursor } from "../domain/delivery.js";
+import { continuationSummary } from "../domain/card-page-handoff.js";
+import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
 
 export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   private readonly tails = new Map<string, Promise<void>>();
@@ -12,7 +15,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   constructor(
     private readonly store: AnswerPageStore,
     private readonly wakeOutbound: () => void,
-    private readonly presentation: Pick<PrimaryPresentation, "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
+    private readonly presentation: Pick<PrimaryPresentation, "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage" | "answerTimelinePage">,
     private readonly logger?: Logger,
     planning?: AnswerPagePlanningPort
   ) { this.planning = planning ?? { pageLimit: 9_000, answerStreamContent: presentation.answerStreamContent, renderAnswerStreamPage: presentation.answerStreamPage }; }
@@ -39,6 +42,10 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       return;
     }
     if (!page.cardId) { this.reserveClosedAnswerCard(view, workClass); return; }
+    if (view.timelineItems.length > 0 && page.messageId) {
+      this.convergeTimeline(view, page, workClass);
+      return;
+    }
     if (page.deliveryMode === "static") { this.reserveStaticAnswerCard(view, page, workClass); return; }
     const facts = this.store.getAnswerPageDeliveryFacts(promptId, page.pageIndex);
     if (facts.finalUpdateState === "pending") return;
@@ -74,6 +81,36 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     if (outcome === "reserved") this.wakeOutbound();
     this.reserveFinalFoldedCard(view, workClass);
     if (plan.type !== "wait") this.logger?.debug({ event: "answer-page-converged", promptId, bindingId: view.bindingId, pageIndex: page.pageIndex, action: plan.type, outcome }, "planned durable Answer page delivery");
+  }
+
+  private convergeTimeline(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>, workClass?: OutboundWorkClass): void {
+    const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
+    const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenAnswerTimelineItems(view.promptId, page.pageIndex), page.pageIndex);
+    const plan = this.presentation.answerTimelinePage(view.timelineItems, checkpoint.startCursor, this.planning.pageLimit, lateResults);
+    const card = this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, streaming: view.phase !== "completed", timelineItems: plan.items });
+    const outcome = this.store.reserveAnswerTimelineCard({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId!, card, cursor: plan.nextCursor, items: plan.items, ...(workClass ? { workClass } : {}) });
+    if (outcome === "reserved") { this.wakeOutbound(); return; }
+    const delivered = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
+    if (delivered.pending || !sameCursor(delivered.deliveredCursor, plan.nextCursor)) return;
+    if (plan.nextCursor) {
+      const binding = this.store.getBinding(view.bindingId);
+      if (!binding?.rootMessageId) return;
+      const nextPageIndex = page.pageIndex + 1;
+      const nextElementId = answerElementId(view.promptId, nextPageIndex);
+      const next = this.presentation.answerTimelinePage(view.timelineItems, plan.nextCursor, this.planning.pageLimit);
+      const continuation = this.store.reserveAnswerContinuation({
+        promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId!, messageId: page.messageId!, summary: continuationSummary(nextPageIndex),
+        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items })!,
+        nextPageIndex, nextPageStart: nextPageIndex, nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, timelineStartCursor: plan.nextCursor, timelineEndCursor: next.nextCursor, timelineItems: next.items,
+        card: this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, streaming: true, timelineItems: next.items }), workClass
+      });
+      if (continuation === "reserved") this.wakeOutbound();
+      return;
+    }
+    if (view.phase === "completed") {
+      const finalized = this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items });
+      if (finalized && this.store.reserveAnswerFinish({ promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId!, messageId: page.messageId!, summary: "Completed", finalizedCard: finalized, workClass }) === "reserved") this.wakeOutbound();
+    }
   }
 
   private reserveFinalFoldedCard(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, workClass?: OutboundWorkClass): void {
@@ -132,4 +169,8 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       : this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, initialContent: content, streaming: false });
     if (card && this.store.reserveStaticAnswerReplacement({ promptId: view.promptId, previousPageIndex: previous.pageIndex, nextPageIndex, sourceStart: previous.sourceStart, nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, card, workClass }) === "reserved") this.wakeOutbound();
   }
+}
+
+function sameCursor(left: AnswerTimelineCursor | null, right: AnswerTimelineCursor | null): boolean {
+  return left?.itemIndex === right?.itemIndex && left?.markdownOffset === right?.markdownOffset || left === null && right === null;
 }

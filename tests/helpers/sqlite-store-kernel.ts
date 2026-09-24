@@ -4,7 +4,9 @@ import type { AcceptInstanceTurnWithCardInput, TransitionInstanceTurnWithProject
 import type { AcceptPromptInput } from "../../src/domain/ports/prompt.js";
 import type { AdoptExternalTurnInput } from "../../src/domain/ports/workflow.js";
 import type { TurnControlStore } from "../../src/domain/ports/turn-control.js";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundTargetRole, OutboundWorkClass, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../src/domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelinePageCheckpoint, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundTargetRole, OutboundWorkClass, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../src/domain/types.js";
+import type { AnswerTimelineItem } from "../../src/domain/answer-timeline.js";
+import type { AnswerTimelineCursor } from "../../src/domain/delivery.js";
 import type { TopicViewState } from "../../src/domain/topic-view.js";
 import type { RunCardView } from "../../src/domain/run-card-view.js";
 import type { BridgeEvent } from "../../src/domain/events.js";
@@ -649,6 +651,10 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.projections.getAnswerPageDeliveryFacts(promptId, pageIndex);
   }
 
+  getAnswerTimelinePage(promptId: string, pageIndex: number): AnswerTimelinePageCheckpoint { return this.projections.getAnswerTimelinePage(promptId, pageIndex); }
+  listFrozenAnswerTimelineItems(promptId: string, beforePageIndex: number) { return this.projections.listFrozenAnswerTimelineItems(promptId, beforePageIndex); }
+  reserveAnswerTimelineCard(input: { promptId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome { return this.projections.reserveAnswerTimelineCard(input); }
+
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
     return this.projections.reserveAnswerContent(input);
   }
@@ -657,7 +663,7 @@ export class SqliteStoreKernel implements TurnControlStore {
     return this.projections.reserveAnswerFinish(input);
   }
 
-  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
+  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome {
     return this.projections.reserveAnswerContinuation(input);
   }
 

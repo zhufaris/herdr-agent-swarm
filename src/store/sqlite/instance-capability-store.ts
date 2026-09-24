@@ -53,6 +53,9 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   findWorkerTurnByCardMessage: InstanceStore["findWorkerTurnByCardMessage"] = (messageId) => this.turns.findWorkerTurnByCardMessage(messageId);
   listWorkerTurnCardPages: InstanceStore["listWorkerTurnCardPages"] = (turnId) => this.turns.listWorkerTurnCardPages(turnId);
   getWorkerTurnCardDeliveryFacts: InstanceStore["getWorkerTurnCardDeliveryFacts"] = (turnId, pageIndex) => this.turns.getWorkerTurnCardDeliveryFacts(turnId, pageIndex);
+  getWorkerAnswerTimelinePage: InstanceStore["getWorkerAnswerTimelinePage"] = (turnId, pageIndex) => this.turns.getWorkerAnswerTimelinePage(turnId, pageIndex);
+  listFrozenWorkerAnswerTimelineItems: InstanceStore["listFrozenWorkerAnswerTimelineItems"] = (turnId, beforePageIndex) => this.turns.listFrozenWorkerAnswerTimelineItems(turnId, beforePageIndex);
+  reserveWorkerAnswerTimelineCard: InstanceStore["reserveWorkerAnswerTimelineCard"] = (input) => this.turns.reserveWorkerAnswerTimelineCard(input);
   reserveWorkerTurnContent: InstanceStore["reserveWorkerTurnContent"] = (input) => this.turns.reserveWorkerTurnContent(input);
   listActionableWorkerTurnCardIds: InstanceStore["listActionableWorkerTurnCardIds"] = () => this.turns.listActionableWorkerTurnCardIds();
   reserveWorkerTurnProgress: InstanceStore["reserveWorkerTurnProgress"] = (input) => this.turns.reserveWorkerTurnProgress(input);

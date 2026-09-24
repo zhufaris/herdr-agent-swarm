@@ -1,6 +1,7 @@
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { answerStreamContent, renderAnswerStreamPage, renderFinalAnswerPage } from "../runtime/answer-stream.js";
 import { renderDisconnectedTopicCard, renderFinalAnswerCard, renderMessageRejectedCard, renderPaneThreadEntryCard, renderProjectEntryCard, renderRequestAnswerCard } from "./run-card.js";
+import { planAnswerTimelinePage } from "./answer-timeline-page.js";
 
 export interface CardKitPresentationLimits { payloadLimitChars: number; answerStreamLimitChars: number; }
 
@@ -14,7 +15,8 @@ export function createCardKitPrimaryPresentation(limits: CardKitPresentationLimi
     finalAnswer: (view, options) => renderFinalAnswerCard(view, options, limits.payloadLimitChars),
     answerStreamContent,
     answerStreamPage: (content, pageStart, limit = limits.answerStreamLimitChars) => renderAnswerStreamPage(content, pageStart, Math.min(limit, limits.answerStreamLimitChars)),
-    finalAnswerPage: (content, pageStart, pageEnd = content.length) => renderFinalAnswerPage(content, pageStart, Math.min(pageEnd, pageStart + limits.answerStreamLimitChars))
+    finalAnswerPage: (content, pageStart, pageEnd = content.length) => renderFinalAnswerPage(content, pageStart, Math.min(pageEnd, pageStart + limits.answerStreamLimitChars)),
+    answerTimelinePage: (items, cursor, limit, prefixItems) => planAnswerTimelinePage(items, cursor, limit, prefixItems)
   };
 }
 

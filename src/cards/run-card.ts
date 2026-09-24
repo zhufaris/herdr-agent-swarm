@@ -207,7 +207,7 @@ export function renderRequestRunCard(input: RunCardView): object {
   };
 }
 
-export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean } = {}): object {
+export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] } = {}): object {
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
   const streaming = options.streaming ?? input.phase !== "completed";
@@ -224,8 +224,9 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (firstPage && input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   if (firstPage) elements.push(...workerActivityElements(input));
   if (firstPage && isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
-  const answerElements = input.phase === "completed" && input.timelineItems.length > 0 && options.initialContent === undefined
-    ? renderAnswerTimeline(input.timelineItems)
+  const timelineItems = options.timelineItems ?? input.timelineItems;
+  const answerElements = timelineItems.length > 0 && (options.timelineItems !== undefined || (input.phase === "completed" && options.initialContent === undefined))
+    ? renderAnswerTimeline(timelineItems)
     : [{ tag: "markdown", content }];
   attachElementIdToFirstMarkdown(answerElements, input.answerElementId);
   elements.push({ tag: "hr" }, ...answerElements);
@@ -267,10 +268,11 @@ function effectiveProgressSummary(summary: RunProgressSummary, events: readonly 
   return summary.total === 0 && events.length > 0 ? summarizeProgress(events) : summary;
 }
 
-export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string }, payloadLimit = 12_000): object | null {
+export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] }, payloadLimit = 12_000): object | null {
   const pageNumber = options.pageNumber ?? 1;
-  const elements = input.timelineItems.length > 0 && pageNumber === 1 && input.answerPageIndex === 0
-    ? renderAnswerTimeline(input.timelineItems, payloadLimit)
+  const timelineItems = options.timelineItems ?? input.timelineItems;
+  const elements = timelineItems.length > 0 && (options.timelineItems !== undefined || (pageNumber === 1 && input.answerPageIndex === 0))
+    ? renderAnswerTimeline(timelineItems, payloadLimit)
     : foldFinalAnswerContent(options.initialContent, payloadLimit);
   if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const workerElements = pageNumber === 1 ? workerActivityElements(input) : [];

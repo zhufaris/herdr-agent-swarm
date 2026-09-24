@@ -6,12 +6,15 @@ import { InstanceTurnCapacityExceeded } from "../../domain/instance-turn-capacit
 import type { InstanceEvent, InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../../domain/instance-turn.js";
 import type { AcceptInstanceTurnWithCardInput, TransitionInstanceTurnWithProjectionInput, TransitionInstanceTurnWithProjectionResult } from "../../domain/ports.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome, OutboundReplyState } from "../../domain/types.js";
+import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelinePageCheckpoint, OutboundReply, OutboundReplyState } from "../../domain/types.js";
+import type { AnswerTimelineItem } from "../../domain/answer-timeline.js";
+import type { AnswerTimelineCursor } from "../../domain/delivery.js";
 import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { SqliteContext } from "./context.js";
 import { turnActorProvenance } from "./turn-actor-provenance.js";
 import { canMentionFeishuOpenId } from "../../domain/worker-human-review.js";
 import { SqliteAnswerTimelineStore } from "./answer-timeline-store.js";
+import { SqliteAnswerTimelinePageStore } from "./answer-timeline-page-store.js";
 
 export interface WorkerTurnStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
@@ -23,8 +26,10 @@ export interface WorkerTurnStoreDependencies {
 
 export class SqliteWorkerTurnStore {
   private readonly timelines: SqliteAnswerTimelineStore;
+  private readonly timelinePages: SqliteAnswerTimelinePageStore;
   constructor(private readonly context: SqliteContext, private readonly dependencies: WorkerTurnStoreDependencies) {
     this.timelines = new SqliteAnswerTimelineStore(context);
+    this.timelinePages = new SqliteAnswerTimelinePageStore(context);
   }
 
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean {
@@ -152,6 +157,22 @@ export class SqliteWorkerTurnStore {
     const continuationPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_card_create' AND stream_page_index = ? AND state = 'pending' LIMIT 1").get(turnId, pageIndex + 1) !== undefined;
     return { latestContent, finishPending, continuationPending, finalUpdateState: null };
   }
+  getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint {
+    return this.timelinePages.load("worker-turn", turnId, pageIndex);
+  }
+  listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number) { return this.timelinePages.frozenItems("worker-turn", turnId, beforePageIndex); }
+  reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome {
+    return this.context.transaction(() => {
+      const page = this.context.database.prepare("SELECT state, message_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(input.turnId, input.pageIndex) as { state: string; message_id: string | null } | undefined;
+      const view = this.loadWorkerTurnCard(input.turnId);
+      if (!page || !view || page.state !== "active" || page.message_id !== input.messageId) return "stale";
+      this.timelinePages.ensure("worker-turn", input.turnId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
+      if (this.timelinePages.load("worker-turn", input.turnId, input.pageIndex).pending || this.timelinePages.isDelivered("worker-turn", input.turnId, input.pageIndex, input.cursor, input.items)) return "waiting";
+      const reply = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:timeline:${input.turnId}:${input.pageIndex}:${view.viewVersion}`, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `worker-turn:${input.turnId}` }) as OutboundReply;
+      this.timelinePages.reserve("worker-turn", input.turnId, input.pageIndex, reply.id, input.cursor, input.items);
+      return "reserved";
+    });
+  }
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome {
     return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
       if (page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
@@ -206,7 +227,7 @@ export class SqliteWorkerTurnStore {
       return "reserved";
     });
   }
-  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome {
+  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome {
     return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
       if (page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.pageStart) return "stale";
       const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
@@ -215,7 +236,11 @@ export class SqliteWorkerTurnStore {
       this.context.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
       this.context.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
       this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:finish:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) });
+      const create = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) }) as OutboundReply;
+      if (input.timelineStartCursor) {
+        this.timelinePages.ensure("worker-turn", input.turnId, input.nextPageIndex, input.timelineStartCursor);
+        this.timelinePages.reserve("worker-turn", input.turnId, input.nextPageIndex, create.id, input.timelineEndCursor ?? null, input.timelineItems ?? []);
+      }
       return "reserved";
     });
   }

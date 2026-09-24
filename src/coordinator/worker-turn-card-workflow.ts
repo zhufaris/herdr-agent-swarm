@@ -4,8 +4,10 @@ import type { WorkerTurnCardConvergencePort } from "../domain/ports/card-converg
 import type { WorkerTurnCardStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import { workerTurnElementId, workerTurnProgressElementId } from "../domain/worker-turn-card-view.js";
+import type { AnswerTimelineCursor } from "../domain/delivery.js";
+import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
 
-type WorkerTurnCardPresentation = Pick<WorkerPresentation, "workerTurn" | "workerTurnPage" | "workerTurnProgress">;
+type WorkerTurnCardPresentation = Pick<WorkerPresentation, "workerTurn" | "workerTurnPage" | "workerTurnProgress" | "answerTimelinePage">;
 
 export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
   private readonly tails = new Map<string, Promise<void>>();
@@ -32,6 +34,10 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     const pages = this.store.listWorkerTurnCardPages(turnId);
     const page = pages.find(({ state }) => state === "active") ?? (view?.phase === "completed" ? pages.findLast(({ state }) => state === "finished") : undefined);
     if (!view || !page?.cardId || !page.messageId) return;
+    if (view.timelineItems.length > 0) {
+      this.convergeTimeline(view, page);
+      return;
+    }
 
     let reserved = false;
     const reserve = (outcome: "reserved" | "waiting" | "stale") => { reserved ||= outcome === "reserved"; return outcome; };
@@ -83,6 +89,30 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     this.log(turnId, page.pageIndex, "content", reserved ? "reserved" : "waiting");
   }
 
+  private convergeTimeline(view: NonNullable<ReturnType<WorkerTurnCardStore["loadWorkerTurnCard"]>>, page: ReturnType<WorkerTurnCardStore["listWorkerTurnCardPages"]>[number]): void {
+    const checkpoint = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
+    const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenWorkerAnswerTimelineItems(view.turnId, page.pageIndex), page.pageIndex);
+    const plan = this.presentation.answerTimelinePage(view.timelineItems, checkpoint.startCursor, this.pageLimit, lateResults);
+    const card = this.presentation.workerTurn(view, page, { timelineItems: plan.items });
+    const outcome = this.store.reserveWorkerAnswerTimelineCard({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId!, card, cursor: plan.nextCursor, items: plan.items });
+    if (outcome === "reserved") { this.wakeOutbound(); return; }
+    const delivered = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
+    if (delivered.pending || !sameCursor(delivered.deliveredCursor, plan.nextCursor)) return;
+    if (plan.nextCursor) {
+      const nextPageIndex = page.pageIndex + 1;
+      const nextElementId = workerTurnElementId(view.turnId, nextPageIndex);
+      const next = this.presentation.answerTimelinePage(view.timelineItems, plan.nextCursor, this.pageLimit);
+      const continuation = this.store.reserveWorkerTurnContinuation({
+        turnId: view.turnId, pageIndex: page.pageIndex, cardId: page.cardId!, summary: continuationSummary(nextPageIndex), nextPageIndex, nextPageStart: nextPageIndex, nextElementId,
+        rootMessageId: view.rootMessageId, viewVersion: view.viewVersion, timelineStartCursor: plan.nextCursor, timelineEndCursor: next.nextCursor, timelineItems: next.items,
+        card: this.presentation.workerTurn(view, { id: `${view.turnId}:${nextPageIndex}`, turnId: view.turnId, pageIndex: nextPageIndex, pageStart: nextPageIndex, elementId: nextElementId, messageId: null, cardId: null, state: "creating", sequence: 0, createdAt: view.updatedAt, updatedAt: view.updatedAt }, { timelineItems: next.items })
+      });
+      if (continuation === "reserved") this.wakeOutbound();
+      return;
+    }
+    if (view.phase === "completed" && this.store.reserveWorkerTurnFinish({ turnId: view.turnId, pageIndex: page.pageIndex, cardId: page.cardId!, summary: "Completed" }) === "reserved") this.wakeOutbound();
+  }
+
   private reserveContinuation(view: NonNullable<ReturnType<WorkerTurnCardStore["loadWorkerTurnCard"]>>, page: ReturnType<WorkerTurnCardStore["listWorkerTurnCardPages"]>[number], nextPageStart: number) {
     const nextPageIndex = page.pageIndex + 1;
     const nextElementId = workerTurnElementId(view.turnId, nextPageIndex);
@@ -99,6 +129,10 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
   private log(turnId: string, pageIndex: number, action: string, outcome: string): void {
     this.logger?.debug({ event: "worker-turn-card-converged", turnId, pageIndex, action, outcome }, "planned durable Worker Task Card delivery");
   }
+}
+
+function sameCursor(left: AnswerTimelineCursor | null, right: AnswerTimelineCursor | null): boolean {
+  return left?.itemIndex === right?.itemIndex && left?.markdownOffset === right?.markdownOffset || left === null && right === null;
 }
 
 function terminalSummary(phase: string): string {

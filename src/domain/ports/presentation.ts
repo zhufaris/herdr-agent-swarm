@@ -13,31 +13,34 @@ import type { AgentInstance, InstanceRemovalPlan, InstanceTarget, WorkspaceLease
 import type { AgentCapabilities } from "../agent-runtime.js";
 import type { ModelPreference, TraexModelSummary } from "../model-selection.js";
 import type { WorkerMainView } from "../worker-main-view.js";
-import type { Binding, FailureSummary, ProjectConfig, SessionPage } from "../types.js";
+import type { AnswerTimelineCursor, Binding, FailureSummary, ProjectConfig, SessionPage } from "../types.js";
 import type { InstanceTurnSummary } from "../instance-turn.js";
 import type { WorkerHumanReviewNotificationInput } from "../worker-human-review.js";
 import type { NaturalLanguageCommandConfirmation } from "../natural-language-command-confirmation.js";
 import type { CommandStatusView } from "../command-status-view.js";
+import type { AnswerTimelineItem } from "../answer-timeline.js";
 
 export interface PrimaryPresentation {
   mainCard(view: TopicViewState): object;
   paneEntryCard(view: TopicViewState): object;
-  answerCard(view: RunCardView, options?: { pageNumber?: number; initialContent?: string; streaming?: boolean }): object;
+  answerCard(view: RunCardView, options?: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly AnswerTimelineItem[] }): object;
   disconnectedTopic(reason: "archived" | "unbound"): object;
   requestRejected(message: string): object;
-  finalAnswer(view: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string }): object | null;
+  finalAnswer(view: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly AnswerTimelineItem[] }): object | null;
   answerStreamContent(view: RunCardView): string;
   answerStreamPage(content: string, pageStart: number, limit?: number): { page: string; nextPageStart: number | null };
   finalAnswerPage(content: string, pageStart: number, pageEnd?: number): { page: string; nextPageStart: number | null };
+  answerTimelinePage(items: readonly AnswerTimelineItem[], cursor: AnswerTimelineCursor | null, limit: number, prefixItems?: readonly AnswerTimelineItem[]): { items: AnswerTimelineItem[]; nextCursor: AnswerTimelineCursor | null };
 }
 
 export interface WorkerPresentation {
-  workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options?: { initialContent?: string }): object;
+  workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options?: { initialContent?: string; timelineItems?: readonly AnswerTimelineItem[] }): object;
   workerHumanReviewNotification(input: WorkerHumanReviewNotificationInput): object;
   workerTurnProgress(view: WorkerTurnCardView): string;
   turnControlResult(operation: TurnControlOperation): object;
   workerTurnPage(view: WorkerTurnCardView, pageStart: number, limit: number): { page: string; nextPageStart: number | null; sourceLength: number };
   safeWorkerOutput(value: string): string;
+  answerTimelinePage(items: readonly AnswerTimelineItem[], cursor: AnswerTimelineCursor | null, limit: number, prefixItems?: readonly AnswerTimelineItem[]): { items: AnswerTimelineItem[]; nextCursor: AnswerTimelineCursor | null };
 }
 
 export interface SpaceDirectoryPane {

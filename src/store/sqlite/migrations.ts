@@ -35,6 +35,7 @@ export class SqliteMigrations {
     this.runHistoricalAnswerConvergence();
     this.applyFinalDeliveryAndGatewayCompatibility();
     this.ensureAnswerTimelines();
+    this.ensureAnswerTimelinePageCheckpoints();
   }
 
   private prepareRunCardView(): boolean {
@@ -204,6 +205,26 @@ export class SqliteMigrations {
         DELETE FROM answer_timeline_items WHERE aggregate_kind = 'worker-turn' AND aggregate_id = OLD.id;
       END;
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (50);
+    `);
+  }
+
+  private ensureAnswerTimelinePageCheckpoints(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS answer_timeline_page_checkpoints(
+        aggregate_kind TEXT NOT NULL CHECK(aggregate_kind IN ('primary-run','worker-turn')), aggregate_id TEXT NOT NULL, page_index INTEGER NOT NULL,
+        start_cursor_json TEXT NOT NULL CHECK(json_valid(start_cursor_json)), delivered_cursor_json TEXT CHECK(delivered_cursor_json IS NULL OR json_valid(delivered_cursor_json)),
+        delivered_items_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(delivered_items_json)), pending_reply_id TEXT REFERENCES outbound_replies(id) ON DELETE SET NULL,
+        pending_cursor_json TEXT CHECK(pending_cursor_json IS NULL OR json_valid(pending_cursor_json)), pending_items_json TEXT CHECK(pending_items_json IS NULL OR json_valid(pending_items_json)),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(aggregate_kind, aggregate_id, page_index)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS answer_timeline_page_pending_reply ON answer_timeline_page_checkpoints(pending_reply_id) WHERE pending_reply_id IS NOT NULL;
+      CREATE TRIGGER IF NOT EXISTS answer_timeline_page_primary_delete AFTER DELETE ON run_cards BEGIN
+        DELETE FROM answer_timeline_page_checkpoints WHERE aggregate_kind = 'primary-run' AND aggregate_id = OLD.prompt_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS answer_timeline_page_worker_delete AFTER DELETE ON instance_turns BEGIN
+        DELETE FROM answer_timeline_page_checkpoints WHERE aggregate_kind = 'worker-turn' AND aggregate_id = OLD.id;
+      END;
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (51);
     `);
   }
 

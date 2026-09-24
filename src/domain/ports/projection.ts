@@ -1,4 +1,6 @@
-import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, MainCardReservationOutcome, OutboundWorkClass } from "../types.js";
+import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint, MainCardReservationOutcome, OutboundWorkClass } from "../types.js";
+import type { AnswerTimelineItem } from "../answer-timeline.js";
+import type { AnswerTimelineCursor } from "../delivery.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { ModelPreference } from "../model-selection.js";
@@ -9,8 +11,11 @@ export interface AnswerPageStore {
   getBinding(id: string): Binding | null;
   listAnswerPages(promptId: string): AnswerPage[];
   loadRunCard(promptId: string): RunCardView | null;
+  getAnswerTimelinePage(promptId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
+  listFrozenAnswerTimelineItems(promptId: string, beforePageIndex: number): AnswerTimelineFrozenItem[];
+  reserveAnswerTimelineCard(input: { promptId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome;
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
-  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
+  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
   reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
   reserveAnswerRebuild(input: { promptId: string; pageIndex: number; nextPageIndex: number; sourceStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
   reserveFinalAnswerCardUpdate(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;

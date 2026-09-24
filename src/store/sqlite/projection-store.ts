@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, Binding, MainCardReservationOutcome, OutboundReplyState, OutboundWorkClass } from "../../domain/types.js";
+import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelinePageCheckpoint, Binding, MainCardReservationOutcome, OutboundReply, OutboundReplyState, OutboundWorkClass } from "../../domain/types.js";
+import type { AnswerTimelineItem } from "../../domain/answer-timeline.js";
+import type { AnswerTimelineCursor } from "../../domain/delivery.js";
 import type { MainCardLiveStatus, RunCardView } from "../../domain/run-card-view.js";
 import { initialTopicView, type TopicViewState } from "../../domain/topic-view.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
@@ -8,6 +10,7 @@ import type { SqliteContext } from "./context.js";
 import { linkAnswerRecovery, recordAnswerCoverage } from "./delivery-recovery-evidence.js";
 import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
 import { SqliteAnswerTimelineStore } from "./answer-timeline-store.js";
+import { SqliteAnswerTimelinePageStore } from "./answer-timeline-page-store.js";
 
 export const answerPageDeliveryFactsSql = {
   latestContent: `
@@ -48,6 +51,7 @@ export const answerPageDeliveryFactsSql = {
 
 export class SqliteProjectionStore {
   private readonly timelines: SqliteAnswerTimelineStore;
+  private readonly timelinePages: SqliteAnswerTimelinePageStore;
   constructor(
     private readonly context: SqliteContext,
     private readonly dependencies: {
@@ -57,7 +61,7 @@ export class SqliteProjectionStore {
       getModelPreference(bindingId: string): ModelPreference | null;
       refreshOutboxLaneHead(laneKey: string): void;
     }
-  ) { this.timelines = new SqliteAnswerTimelineStore(context); }
+  ) { this.timelines = new SqliteAnswerTimelineStore(context); this.timelinePages = new SqliteAnswerTimelinePageStore(context); }
 
   getBinding(id: string): Binding | null { return this.dependencies.getBinding(id); }
   getModelPreference(bindingId: string): ModelPreference | null { return this.dependencies.getModelPreference(bindingId); }
@@ -269,6 +273,25 @@ export class SqliteProjectionStore {
     return { latestContent, finishPending, continuationPending, finalUpdateState };
   }
 
+  getAnswerTimelinePage(promptId: string, pageIndex: number): AnswerTimelinePageCheckpoint {
+    return this.timelinePages.load("primary-run", promptId, pageIndex);
+  }
+  listFrozenAnswerTimelineItems(promptId: string, beforePageIndex: number) { return this.timelinePages.frozenItems("primary-run", promptId, beforePageIndex); }
+
+  reserveAnswerTimelineCard(input: { promptId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome {
+    return this.context.transaction(() => {
+      const page = this.context.database.prepare("SELECT state, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; message_id: string | null } | undefined;
+      const view = this.loadRunCard(input.promptId);
+      if (!page || !view || page.state !== "active" || page.message_id !== input.messageId) return "stale";
+      this.timelinePages.ensure("primary-run", input.promptId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
+      if (this.timelinePages.load("primary-run", input.promptId, input.pageIndex).pending || this.timelinePages.isDelivered("primary-run", input.promptId, input.pageIndex, input.cursor, input.items)) return "waiting";
+      const id = randomUUID();
+      const reply = this.dependencies.enqueueOutboundReply({ id, idempotencyKey: `answer-timeline:${input.promptId}:${input.pageIndex}:${view.viewVersion}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `answer:${input.promptId}` }) as OutboundReply;
+      this.timelinePages.reserve("primary-run", input.promptId, input.pageIndex, reply.id, input.cursor, input.items);
+      return "reserved";
+    });
+  }
+
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
       if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
@@ -298,7 +321,7 @@ export class SqliteProjectionStore {
     });
   }
 
-  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome {
+  reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
       if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.messageId !== input.messageId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.sourceStart) return "stale";
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
@@ -308,7 +331,11 @@ export class SqliteProjectionStore {
       this.context.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?").run(sequence, now(), input.promptId, input.pageIndex);
       this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-finish:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", ...outboundWorkClass(input.workClass), rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
       this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-final-fold:${input.promptId}:${input.pageIndex}:${input.cardId}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: view.viewVersion, cardRole: "answer", ...outboundWorkClass(input.workClass), rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.finalizedCard), laneKeyOverride: `answer:${input.promptId}` });
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", ...outboundWorkClass(input.workClass), rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) });
+      const create = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", ...outboundWorkClass(input.workClass), rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) }) as OutboundReply;
+      if (input.timelineStartCursor) {
+        this.timelinePages.ensure("primary-run", input.promptId, input.nextPageIndex, input.timelineStartCursor);
+        this.timelinePages.reserve("primary-run", input.promptId, input.nextPageIndex, create.id, input.timelineEndCursor ?? null, input.timelineItems ?? []);
+      }
       return "reserved";
     });
   }

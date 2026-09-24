@@ -19,6 +19,97 @@ function readyStore(path = ":memory:"): SqliteBindingStore {
 }
 
 describe("AnswerPageWorkflow", () => {
+  it("checkpoints a timeline page only after its durable card update is delivered", async () => {
+    const store = readyStore();
+    try {
+      const view = store.loadRunCard("p1")!;
+      store.saveRunCard({ ...view, phase: "running", timelineItems: [
+        { kind: "agent_message", id: "message:one", sequence: 1, markdown: "Before tool" },
+        { kind: "tool", id: "tool:one", sequence: 2, category: "read", label: "src/store.ts", resultPreview: "found", state: "succeeded" }
+      ], viewVersion: view.viewVersion + 1 });
+      const wake = vi.fn();
+      const workflow = new AnswerPageWorkflow(store, wake, primaryPresentation);
+
+      await workflow.converge("p1");
+      const [update] = store.listPendingOutboundReplies();
+      expect(update).toMatchObject({ kind: "card_update", rootMessageId: "answer-1" });
+      expect(update!.payload).toContain("📖 Read · src/store.ts · ✓ 完成");
+      expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ deliveredCursor: null, pending: true });
+
+      await workflow.converge("p1");
+      expect(store.listPendingOutboundReplies()).toHaveLength(1);
+      store.markOutboundReplyDelivered(update!.id, "answer-1");
+      expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ deliveredCursor: null, pending: false, deliveredItems: expect.arrayContaining([expect.objectContaining({ id: "tool:one" })]) });
+      await workflow.converge("p1");
+      expect(store.listPendingOutboundReplies()).toEqual([]);
+    } finally { store.close(); }
+  });
+
+  it("continues a timeline at an item cursor without splitting its Tool panel", async () => {
+    const store = readyStore();
+    try {
+      const view = store.loadRunCard("p1")!;
+      store.saveRunCard({ ...view, phase: "running", timelineItems: [
+        { kind: "agent_message", id: "message:long", sequence: 1, markdown: "line\n".repeat(2_000) },
+        { kind: "tool", id: "tool:one", sequence: 2, category: "command", label: "npm test", command: "npm test", resultPreview: "passed", state: "succeeded" }
+      ], viewVersion: view.viewVersion + 1 });
+      const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
+
+      await workflow.converge("p1");
+      const firstUpdate = store.listPendingOutboundReplies()[0]!;
+      expect(firstUpdate.payload).not.toContain("npm test");
+      store.markOutboundReplyDelivered(firstUpdate.id, "answer-1");
+      await workflow.converge("p1");
+
+      const pending = store.listPendingOutboundReplies();
+      expect(pending.filter(({ kind }) => kind === "stream_card_create")).toHaveLength(1);
+      const continuation = pending.find(({ kind }) => kind === "stream_card_create")!;
+      expect(continuation.payload).toContain("npm test");
+      expect(store.getAnswerTimelinePage("p1", 1).startCursor).toMatchObject({ itemIndex: expect.any(Number), markdownOffset: expect.any(Number) });
+      await workflow.converge("p1");
+      expect(store.listPendingOutboundReplies().filter(({ kind }) => kind === "stream_card_create")).toHaveLength(1);
+    } finally { store.close(); }
+  });
+
+  it("projects a late Tool result onto the active page without patching its frozen source page", async () => {
+    const store = readyStore();
+    try {
+      const initial = store.loadRunCard("p1")!;
+      const runningTool = { kind: "tool" as const, id: "tool:late", sequence: 1, category: "command" as const, label: "npm test", command: "npm test", state: "running" as const };
+      store.saveRunCard({ ...initial, phase: "running", timelineItems: [
+        runningTool,
+        { kind: "agent_message", id: "message:long", sequence: 2, markdown: "line\n".repeat(2_000) }
+      ], viewVersion: initial.viewVersion + 1 });
+      const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
+
+      await workflow.converge("p1");
+      const first = store.listPendingOutboundReplies()[0]!;
+      store.markOutboundReplyDelivered(first.id, "answer-1");
+      await workflow.converge("p1");
+      const continuationBatch = store.listPendingOutboundReplies();
+      for (const reply of continuationBatch) {
+        if (reply.kind === "stream_card_create") store.markOutboundReplyDelivered(reply.id, "answer-2", "card-2");
+        else store.markOutboundReplyDelivered(reply.id, reply.rootMessageId ?? "answer-1");
+      }
+      expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "frozen" }), expect.objectContaining({ pageIndex: 1, state: "active" })]);
+
+      const current = store.loadRunCard("p1")!;
+      store.saveRunCard({ ...current, timelineItems: [{ ...runningTool, state: "succeeded", resultPreview: "all tests passed" }, current.timelineItems[1]!], viewVersion: current.viewVersion + 1 });
+      await workflow.converge("p1");
+
+      const [lateUpdate] = store.listPendingOutboundReplies();
+      expect(lateUpdate).toMatchObject({ kind: "card_update", rootMessageId: "answer-2" });
+      expect(lateUpdate!.payload).toContain("npm test（更新自第 1 页）");
+      expect(lateUpdate!.payload).toContain("all tests passed");
+      expect(lateUpdate!.payload).not.toContain('"rootMessageId":"answer-1"');
+      store.markOutboundReplyDelivered(lateUpdate!.id, "answer-2");
+      await workflow.converge("p1");
+      const later = store.listPendingOutboundReplies();
+      expect(later.some((reply) => reply.rootMessageId === "answer-1")).toBe(false);
+      expect(later.filter((reply) => reply.payload.includes("更新自第 1 页"))).toHaveLength(1);
+    } finally { store.close(); }
+  });
+
   describe("immutable Answer snapshots", () => {
     it("does not requeue an unchanged delivered static snapshot on convergence", async () => {
       const store = readyStore();

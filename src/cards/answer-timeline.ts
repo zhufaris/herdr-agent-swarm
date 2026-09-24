@@ -29,7 +29,7 @@ export function renderAnswerTimeline(items: readonly AnswerTimelineItem[], paylo
   const elements: FinalAnswerElement[] = [];
   const ordered = [...items].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
   for (const item of ordered) {
-    const rendered = renderTimelineItem(item);
+    const rendered = renderAnswerTimelineItem(item, payloadLimit);
     if (appendWithinCardLimit(elements, rendered, 800, payloadLimit)) {
       elements.push(...rendered);
       continue;
@@ -41,12 +41,13 @@ export function renderAnswerTimeline(items: readonly AnswerTimelineItem[], paylo
   return elements;
 }
 
-function renderTimelineItem(item: AnswerTimelineItem): FinalAnswerElement[] {
+/** Renders one indivisible timeline item for item-aware page planning. */
+export function renderAnswerTimelineItem(item: AnswerTimelineItem, payloadLimit = MAX_CARD_SERIALIZED_LENGTH): FinalAnswerElement[] {
   if (item.kind === "agent_message" || item.kind === "final_answer") {
-    const content = safeMarkdown(item.markdown, TOOL_DETAIL_LIMIT);
+    const content = safeMarkdown(item.markdown, Math.max(1, payloadLimit - 100));
     return content ? [{ tag: "markdown", content }] : [];
   }
-  if (item.kind === "tool") return [renderTool(item)];
+  if (item.kind === "tool") return [renderTool(item, payloadLimit)];
   const view = item.state === "blocked"
     ? { icon: "⚠️", label: "等待用户处理", color: "orange" }
     : item.state === "failed"
@@ -59,20 +60,31 @@ function renderTimelineItem(item: AnswerTimelineItem): FinalAnswerElement[] {
   }];
 }
 
-function renderTool(item: Extract<AnswerTimelineItem, { kind: "tool" }>): FinalAnswerElement {
+function renderTool(item: Extract<AnswerTimelineItem, { kind: "tool" }>, payloadLimit: number): FinalAnswerElement {
   const category = TOOL_CATEGORY[item.category] ?? TOOL_CATEGORY.step;
   const state = TOOL_STATE[item.state];
   const title = `${category.icon} ${category.label} · ${safeInline(item.label, TOOL_LABEL_LIMIT)} · ${state.label}`;
-  return {
+  const panel = (resultLimit: number): FinalAnswerElement => ({
     tag: "collapsible_panel", expanded: false, border: { color: state.border, corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: title } },
-    elements: [{ tag: "markdown", content: toolDetail(item, state.empty) }]
-  };
+    elements: [{ tag: "markdown", content: toolDetail(item, state.empty, resultLimit) }]
+  });
+  let rendered = panel(TOOL_DETAIL_LIMIT);
+  if (JSON.stringify(rendered).length <= payloadLimit) return rendered;
+  let low = 0;
+  let high = TOOL_DETAIL_LIMIT;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = panel(middle);
+    if (JSON.stringify(candidate).length <= payloadLimit) { rendered = candidate; low = middle + 1; }
+    else high = middle - 1;
+  }
+  return rendered;
 }
 
-function toolDetail(item: Extract<AnswerTimelineItem, { kind: "tool" }>, empty: string): string {
+function toolDetail(item: Extract<AnswerTimelineItem, { kind: "tool" }>, empty: string, resultLimit: number): string {
   const command = item.command ? safeFence(item.command, 1_000) : "";
-  const result = item.resultPreview ? safeFence(item.resultPreview, TOOL_DETAIL_LIMIT) : "";
+  const result = item.resultPreview ? safeFence(item.resultPreview, resultLimit) : "";
   const sections: string[] = [];
   if (command) sections.push(`\`\`\`bash\n${command}\n\`\`\``);
   if (result) sections.push(`\`\`\`text\n${result}\n\`\`\``);

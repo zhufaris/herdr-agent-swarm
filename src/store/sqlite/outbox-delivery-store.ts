@@ -10,6 +10,7 @@ import type { SqliteOutboxQueueStore } from "./outbox-queue-store.js";
 import { confirmAnswerRecoveries, confirmDeliveryRecoveries } from "./delivery-recovery-evidence.js";
 import type { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js";
 import type { SqliteLarkDeliveryCooldownStore } from "./lark-delivery-cooldown-store.js";
+import { settleAnswerTimelinePageCheckpoint } from "./answer-timeline-page-store.js";
 
 export class SqliteOutboxDeliveryStore {
   constructor(
@@ -141,6 +142,7 @@ export class SqliteOutboxDeliveryStore {
       }
       confirmDeliveryRecoveries(this.context, id);
       confirmAnswerRecoveries(this.context, id);
+      settleAnswerTimelinePageCheckpoint(this.context, id);
       return true;
     });
   }

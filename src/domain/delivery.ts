@@ -58,3 +58,11 @@ export interface StaleOutboxQuarantineRecovery {
 }
 export interface AnswerPage { promptId: string; pageIndex: number; messageId: string | null; cardId: string | null; elementId: string; sourceStart: number; sequence: number; state: AnswerPageState; deliveryMode: AnswerPageDeliveryMode; createdAt: string; updatedAt: string }
 export interface AnswerPageDeliveryFacts { latestContent: { content: string; sequence: number; state: OutboundReplyState; sourceEnd?: number | null } | null; finishPending: boolean; continuationPending: boolean; finalUpdateState: OutboundReplyState | null }
+export interface AnswerTimelineCursor { itemIndex: number; markdownOffset: number }
+export interface AnswerTimelinePageCheckpoint {
+  startCursor: AnswerTimelineCursor;
+  deliveredCursor: AnswerTimelineCursor | null;
+  deliveredItems: Array<{ id: string; fingerprint: string }>;
+  pending: boolean;
+}
+export interface AnswerTimelineFrozenItem { pageIndex: number; id: string; fingerprint: string }

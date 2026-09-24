@@ -275,6 +275,14 @@ export function createLatestSchema(context: SqliteContext): void {
     source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','static')),
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
   );
+  CREATE TABLE IF NOT EXISTS answer_timeline_page_checkpoints(
+    aggregate_kind TEXT NOT NULL CHECK(aggregate_kind IN ('primary-run','worker-turn')), aggregate_id TEXT NOT NULL, page_index INTEGER NOT NULL,
+    start_cursor_json TEXT NOT NULL CHECK(json_valid(start_cursor_json)), delivered_cursor_json TEXT CHECK(delivered_cursor_json IS NULL OR json_valid(delivered_cursor_json)),
+    delivered_items_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(delivered_items_json)), pending_reply_id TEXT REFERENCES outbound_replies(id) ON DELETE SET NULL,
+    pending_cursor_json TEXT CHECK(pending_cursor_json IS NULL OR json_valid(pending_cursor_json)), pending_items_json TEXT CHECK(pending_items_json IS NULL OR json_valid(pending_items_json)),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(aggregate_kind, aggregate_id, page_index)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS answer_timeline_page_pending_reply ON answer_timeline_page_checkpoints(pending_reply_id) WHERE pending_reply_id IS NOT NULL;
   CREATE UNIQUE INDEX IF NOT EXISTS answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
   INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 

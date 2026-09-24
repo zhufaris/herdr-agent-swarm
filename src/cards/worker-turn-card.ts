@@ -20,13 +20,13 @@ const STATE = {
 
 const REQUEST_PREVIEW_LIMIT = 2_000;
 
-export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string } = {}): object {
+export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] } = {}): object {
   const state = STATE[view.phase];
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
   const actionMessageId = page ? page.messageId : view.messageId;
   const firstPage = pageIndex === 0;
-  const showOutput = view.phase === "completed";
+  const showOutput = view.phase === "completed" || view.timelineItems.length > 0 || (options.timelineItems?.length ?? 0) > 0;
   const content = showOutput
     ? options.initialContent !== undefined
       ? options.initialContent
@@ -46,8 +46,9 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view, showOutput && Boolean(content)) });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   if (showOutput) {
-    const outputElements = view.timelineItems.length > 0 && options.initialContent === undefined
-      ? renderAnswerTimeline(view.timelineItems)
+    const timelineItems = options.timelineItems ?? view.timelineItems;
+    const outputElements = timelineItems.length > 0 && options.initialContent === undefined
+      ? renderAnswerTimeline(timelineItems)
       : [{ tag: "markdown", content }];
     attachElementId(outputElements, elementId);
     elements.push(...outputElements);
