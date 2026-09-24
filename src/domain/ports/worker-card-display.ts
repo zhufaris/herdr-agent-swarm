@@ -8,15 +8,22 @@ export interface WorkerCardDisplayReceipt {
   taskTurnId: string | null;
 }
 
+export interface WorkerCardDisplayInput {
+  bindingId: string;
+  bindingGeneration: number;
+  parentPromptId: string;
+  projectId: string;
+  workerName: string;
+  rootMessageId: string;
+  idempotencyKey: string;
+}
+
+export interface WorkerCardDisplayPort {
+  show(input: WorkerCardDisplayInput): WorkerCardDisplayReceipt;
+}
+
 export interface WorkerCardDisplayStore {
-  reserveWorkerCardDisplay(input: {
-    bindingId: string;
-    bindingGeneration: number;
-    parentPromptId: string;
-    projectId: string;
-    workerName: string;
-    rootMessageId: string;
-    idempotencyKey: string;
+  reserveWorkerCardDisplay(input: WorkerCardDisplayInput & {
     renderSnapshot(view: WorkerMainView, generatedAt: string): object;
   }): WorkerCardDisplayReceipt;
 }

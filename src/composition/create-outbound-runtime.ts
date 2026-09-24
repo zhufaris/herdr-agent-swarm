@@ -12,10 +12,16 @@ import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "../coordinator/main-card-workflow.js";
 import { feishuGatewayApplicationPresentation, feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import { OutboxRetentionMaintainer } from "../runtime/outbox-retention-maintainer.js";
-import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
+import type { OutboundIntentStore, OutboxStore } from "../domain/ports/outbox.js";
+import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore } from "../domain/ports/projection.js";
+import type { CardContextProjectionStore } from "../domain/ports/card-context.js";
+import type { RetentionStore } from "../domain/ports/retention.js";
 
-export type OutboundRuntimeStores = Pick<SqliteStoreBundle, "outboundIntent" | "outbox" | "answerPages" | "mainCards" | "projection" | "queueFeedback" | "cardContext" | "retention">;
+export interface OutboundRuntimeStores {
+  outboundIntent: OutboundIntentStore; outbox: OutboxStore; answerPages: AnswerPageStore; mainCards: MainCardStore;
+  projection: ProjectionStore; queueFeedback: QueueFeedbackStore; cardContext: CardContextProjectionStore; retention: RetentionStore;
+}
 
 export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, gateway: GatewaySession, bus: LifecycleEventPublisher & LifecycleEventSubscriber, outboundWork: OutboundWorkNotifier, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: feishuGatewayPrimaryPresentation, application: feishuGatewayApplicationPresentation }) {
   const outbound = new OutboundIntentWriter(stores.outboundIntent, outboundWork);

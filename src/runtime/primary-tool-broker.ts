@@ -1,6 +1,6 @@
 import type { ControlActor } from "../domain/commands.js";
 import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
-import type { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
+import type { WorkerCardDisplayPort } from "../domain/ports/worker-card-display.js";
 import type { AgentKind, CreateWorkerResult } from "../domain/agent-instance.js";
 
 export interface PrimaryIdentity { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }
@@ -11,7 +11,7 @@ export const MAX_PRIMARY_WAIT_MS = 29_000;
 
 export class PrimaryToolBroker {
   private readonly actor: Extract<ControlActor, { kind: "thread-primary" }>;
-  constructor(private readonly identity: PrimaryIdentity, private readonly messaging: PrimaryToolMessagingPort, private readonly workerCards?: Pick<WorkerCardDisplayWorkflow, "show">, private readonly workerCreation?: PrimaryWorkerCreationPort) { this.actor = { kind: "thread-primary", projectId: identity.projectId, bindingId: identity.bindingId, bindingGeneration: identity.bindingGeneration, parentPromptId: identity.parentPromptId }; }
+  constructor(private readonly identity: PrimaryIdentity, private readonly messaging: PrimaryToolMessagingPort, private readonly workerCards?: WorkerCardDisplayPort, private readonly workerCreation?: PrimaryWorkerCreationPort) { this.actor = { kind: "thread-primary", projectId: identity.projectId, bindingId: identity.bindingId, bindingGeneration: identity.bindingGeneration, parentPromptId: identity.parentPromptId }; }
   listInstances(input: { state?: string } = {}) { const all = this.messaging.list(this.actor, this.actor.projectId); return input.state ? all.filter(({ observedState }) => observedState === input.state) : all; }
   promptInstance(input: { instanceId: string; task: string; idempotencyKey: string }) { return this.messaging.submit({ idempotencyKey: input.idempotencyKey, actor: this.actor, projectId: this.actor.projectId, targetInstanceId: input.instanceId, content: { kind: "turn", text: input.task }, source: { messageId: this.identity.sourceMessageId, rootMessageId: this.identity.rootMessageId } }); }
   followUpInstance(input: { instanceId: string; parentTurnId: string; text: string; idempotencyKey: string }) { return this.messaging.submit({ idempotencyKey: input.idempotencyKey, actor: this.actor, projectId: this.actor.projectId, targetInstanceId: input.instanceId, content: { kind: "followup", text: input.text }, source: { messageId: this.identity.sourceMessageId, rootMessageId: this.identity.rootMessageId, parentTurnId: input.parentTurnId } }); }

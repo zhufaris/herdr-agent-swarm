@@ -5,24 +5,17 @@ import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.j
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
 import type { createOutboundRuntime } from "./create-outbound-runtime.js";
 import type { createPrimaryRuntime } from "./create-primary-runtime.js";
 import type { createWorkerRuntime } from "./create-worker-runtime.js";
 import type { ApplicationPresentation, PanePresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
-import { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
-import { createCommandControlRuntime } from "./create-command-control-runtime.js";
-import { createIngressRecoveryRuntime } from "./create-ingress-recovery-runtime.js";
+import { createBindingSessionRuntime, type BindingSessionStores } from "./create-binding-session-runtime.js";
+import { createCommandControlRuntime, type CommandControlStores } from "./create-command-control-runtime.js";
+import { createIngressRecoveryRuntime, type IngressRecoveryStores } from "./create-ingress-recovery-runtime.js";
 import type { NaturalLanguageCommandRuntime } from "../runtime/natural-language-command-runtime.js";
 
-export type ApplicationRuntimeStores = Pick<SqliteStoreBundle,
-  | "retiredPaneCleanup" | "bindingProvisioning" | "modelSelection" | "paneControl"
-  | "operationsQuery" | "sessionAdministration" | "deliveryRecovery" | "paneClose"
-  | "paneRetention" | "sessionOperations" | "cardInteraction" | "runtimeReconciliation"
-  | "inboundRouting" | "commandIntents" | "naturalLanguageCommandConfirmations" | "controllerInterpretations" | "instance" | "workerSessionThreads"
-  | "inboundDispatch" | "promptAcceptance" | "startupRecovery" | "startupViews"
-  | "answerPages" | "mainCards">;
+export interface ApplicationRuntimeStores extends BindingSessionStores, CommandControlStores, IngressRecoveryStores {}
 
 export function createApplicationRuntime(options: {
   config: BridgeConfig; stores: ApplicationRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;

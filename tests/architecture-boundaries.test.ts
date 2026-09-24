@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 describe("application composition boundaries", () => {
@@ -384,11 +386,32 @@ describe("application composition boundaries", () => {
     expect(context).toContain("receipt.markRolledBack()");
   });
 
-  it("gives child composition factories consumer-specific SQLite capabilities", () => {
+  it("gives child composition factories consumer-shaped domain capabilities", () => {
     for (const file of ["create-outbound-runtime.ts", "create-worker-runtime.ts", "create-primary-runtime.ts", "create-application-runtime.ts", "create-binding-session-runtime.ts", "create-command-control-runtime.ts", "create-ingress-recovery-runtime.ts"]) {
       const source = readFileSync(new URL(`../src/composition/${file}`, import.meta.url), "utf8");
-      expect(source).toMatch(/export type [A-Za-z]+Stores = Pick<SqliteStoreBundle,/);
+      expect(source).toMatch(/export interface [A-Za-z]+Stores/);
+      expect(source).not.toContain("SqliteStoreBundle");
+      expect(source).toMatch(/from \"\.\.\/domain\/ports\//);
       expect(source).not.toMatch(/stores:\s*SqliteStoreBundle/);
+    }
+  });
+
+  it("keeps Primary tool runtime dependencies behind domain ports", () => {
+    const port = readFileSync(new URL("../src/domain/ports/worker-card-display.ts", import.meta.url), "utf8");
+    expect(port).toContain("export interface WorkerCardDisplayPort");
+    for (const file of ["primary-tool-broker.ts", "primary-tool-gateway.ts"]) {
+      const source = readFileSync(new URL(`../src/runtime/${file}`, import.meta.url), "utf8");
+      expect(source).toContain("WorkerCardDisplayPort");
+      expect(source).not.toMatch(/from \"\.\.\/coordinator\//);
+    }
+  });
+
+  it("keeps runtime modules independent from coordinator implementations", () => {
+    const runtimeDir = fileURLToPath(new URL("../src/runtime", import.meta.url));
+    for (const entry of readdirSync(runtimeDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const source = readFileSync(join(entry.parentPath, entry.name), "utf8");
+      expect(source, relative(runtimeDir, join(entry.parentPath, entry.name))).not.toMatch(/from \"(?:\.\.\/)+coordinator\//);
     }
   });
 

@@ -9,7 +9,6 @@ import { StartupViewConverger } from "../coordinator/startup-view-converger.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
 import type { createCommandControlRuntime } from "./create-command-control-runtime.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
@@ -19,8 +18,16 @@ import type { ApplicationPresentation, PrimaryPresentation } from "../domain/por
 import { createCompatibilityGatewayIngressSink } from "../gateways/compatibility-ingress.js";
 import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
 import { NaturalLanguageCommandWorkflow } from "../coordinator/natural-language-command-workflow.js";
+import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
+import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
+import type { InboundMessageDispatchStore, InboundRoutingStore, StartupRecoveryStore, StartupViewStore } from "../domain/ports/workflow.js";
+import type { NaturalLanguageCommandConfirmationStore } from "../domain/ports/natural-language-command-confirmation.js";
 
-export type IngressRecoveryStores = Pick<SqliteStoreBundle, "inboundDispatch" | "promptAcceptance" | "inboundRouting" | "startupRecovery" | "startupViews" | "answerPages" | "mainCards" | "naturalLanguageCommandConfirmations">;
+export interface IngressRecoveryStores {
+  inboundDispatch: InboundMessageDispatchStore; promptAcceptance: PromptAcceptanceStore; inboundRouting: InboundRoutingStore;
+  startupRecovery: StartupRecoveryStore; startupViews: StartupViewStore; answerPages: AnswerPageStore; mainCards: MainCardStore;
+  naturalLanguageCommandConfirmations: NaturalLanguageCommandConfirmationStore;
+}
 
 export function createIngressRecoveryRuntime(options: {
   config: BridgeConfig; stores: IngressRecoveryStores; logger: Logger; bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;

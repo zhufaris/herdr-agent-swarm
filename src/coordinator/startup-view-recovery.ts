@@ -1,12 +1,4 @@
-export interface StartupViewRecoveryDiagnostics {
-  state: "idle" | "retry_wait" | "running" | "stopping";
-  pendingCount: number;
-  fullRescanPending: boolean;
-  retryCount: number;
-  recoveredCount: number;
-  lastFailureAt: string | null;
-  lastFailure: string | null;
-}
+import type { StartupViewRecoveryDiagnostics } from "../domain/ports/startup-view-recovery.js";
 
 export interface StartupViewRecoveryOptions {
   convergeAll(): Promise<readonly string[]>;

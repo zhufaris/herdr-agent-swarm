@@ -8,12 +8,17 @@ import { PromptRunWorkflow } from "../coordinator/prompt-run-workflow.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import { RuntimeLink } from "./runtime-link.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
+import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../domain/ports/prompt.js";
+import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
 
-export type PrimaryRuntimeStores = Pick<SqliteStoreBundle, "externalTurns" | "promptDispatch" | "promptRecovery" | "promptSession" | "runtimeReconciliation">;
+export interface PrimaryRuntimeStores {
+  externalTurns: ExternalTurnObservationStore; promptDispatch: PromptDispatchStore; promptRecovery: PromptRecoveryStore;
+  promptSession: PromptSessionStore; runtimeReconciliation: RuntimeReconciliationStore;
+}
 
 export function createPrimaryRuntime(options: {
   config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;

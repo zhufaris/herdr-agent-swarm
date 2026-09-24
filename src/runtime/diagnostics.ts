@@ -1,4 +1,4 @@
-import type { StartupViewRecoveryDiagnostics } from "../coordinator/startup-view-recovery.js";
+import type { StartupViewRecoveryDiagnostics } from "../domain/ports/startup-view-recovery.js";
 
 export interface StartupRecoveryDiagnostics { state: "idle" | "running" | "completed" | "degraded"; startedAt: string | null; completedAt: string | null; stages: Array<{ name: string; state: "completed" | "failed"; durationMs: number; error?: string }>; startupViews?: StartupViewRecoveryDiagnostics }
 export interface InboundDispatcherDiagnostics { state: "idle" | "running" | "retry_wait" | "stopping"; drainRequested: boolean; retryAttempt: number; nextRetryAt: string | null; lastAcceptedAt: string | null; lastFailureAt: string | null; lastFailure: string | null }

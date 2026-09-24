@@ -1,11 +1,5 @@
 import type { Logger } from "pino";
-
-interface OutboxRetentionStore {
-  compactDeliveryIntents?(limit: number): number;
-  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
-  pruneAcceptedInboundMessages(cutoff: string, limit: number): number;
-  pruneTerminalSessionOperations(cutoff: string, limit: number): number;
-}
+import type { RetentionStore } from "../domain/ports/retention.js";
 
 export class OutboxRetentionMaintainer {
   private timer: NodeJS.Timeout | null = null;
@@ -13,7 +7,7 @@ export class OutboxRetentionMaintainer {
   private stopping = false;
 
   constructor(
-    private readonly store: OutboxRetentionStore,
+    private readonly store: RetentionStore,
     private readonly options: { retentionDays: number; batchSize: number; maxBatches?: number; intervalMs?: number },
     private readonly logger: Pick<Logger, "info" | "error">
   ) {}

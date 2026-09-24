@@ -5,12 +5,13 @@ import type { CommandIntentStore } from "../../src/domain/ports/swarm-command.js
 import type { NaturalLanguageCommandConfirmationStore } from "../../src/domain/ports/natural-language-command-confirmation.js";
 import type { ControllerInterpretationStore } from "../../src/domain/ports/controller-interpretation.js";
 import type { SessionOperationStore } from "../../src/domain/ports/workflow.js";
-import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
+import type { SqliteStoreLifecycle } from "../../src/store/sqlite-store-bundle.js";
+import type { RetentionStore } from "../../src/domain/ports/retention.js";
 import { SqliteStoreKernel } from "./sqlite-store-kernel.js";
 import { createOutboxTestDriver } from "./outbox-test-driver.js";
 
 export type SqliteBindingStore = SqliteStoreKernel & SqliteStoreLifecycle & LeaseStore & HealthStore &
-  InboundMessageDispatchStore & SqliteRetentionStore & WorkerCardDisplayStore & CommandIntentStore & NaturalLanguageCommandConfirmationStore & ControllerInterpretationStore & SessionOperationStore & {
+  InboundMessageDispatchStore & RetentionStore & WorkerCardDisplayStore & CommandIntentStore & NaturalLanguageCommandConfirmationStore & ControllerInterpretationStore & SessionOperationStore & {
     inspectIntegrity: ReturnType<SqliteStoreKernel["capabilityModules"]>["integrity"]["inspectIntegrity"];
     getSessionOperation: ReturnType<SqliteStoreKernel["capabilityModules"]>["sessionOperations"]["getSessionOperation"];
   } & ReturnType<SqliteStoreKernel["capabilityModules"]>["approvals"] &

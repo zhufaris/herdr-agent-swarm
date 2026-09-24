@@ -5,10 +5,10 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
+import type { WorkerCardDisplayPort } from "../domain/ports/worker-card-display.js";
 import { PrimaryToolBroker, type PrimaryWorkerCreationPort } from "./primary-tool-broker.js";
 import { safeLogError } from "./safe-error.js";
 import { ActiveWorkTracker } from "./active-work-tracker.js";
-import type { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
@@ -29,7 +29,7 @@ export class PrimaryToolGateway {
   private accepting = false;
   private workerCreation: PrimaryWorkerCreationPort | undefined;
 
-  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}, private readonly workerCards?: Pick<WorkerCardDisplayWorkflow, "show">) {}
+  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}, private readonly workerCards?: WorkerCardDisplayPort) {}
 
   issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolLaunch {
     const capability = randomBytes(32).toString("hex");

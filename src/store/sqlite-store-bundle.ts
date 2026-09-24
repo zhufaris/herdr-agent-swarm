@@ -16,18 +16,12 @@ import { SqliteCapabilityGraph } from "./sqlite/capability-graph.js";
 import type { SqliteContext } from "./sqlite/context.js";
 import type { SqliteLeaseStore } from "./sqlite/lease-store.js";
 import type { WorkerSessionThreadApplicationStore } from "../domain/ports/worker-session-thread.js";
+import type { RetentionStore } from "../domain/ports/retention.js";
 
 export interface SqliteStoreLifecycle {
   activateWriteFence(ownerId: string, fencingToken: number): void;
   deactivateWriteFence(): void;
   close(): void;
-}
-
-export interface SqliteRetentionStore {
-  compactDeliveryIntents(limit: number): number;
-  pruneDeliveredOutboundReplies(cutoff: string, limit: number): number;
-  pruneAcceptedInboundMessages(cutoff: string, limit: number): number;
-  pruneTerminalSessionOperations(cutoff: string, limit: number): number;
 }
 
 export interface SqliteStoreBundle {
@@ -69,7 +63,7 @@ export interface SqliteStoreBundle {
   readonly controllerInterpretations: ControllerInterpretationStore;
   readonly startupRecovery: StartupRecoveryStore;
   readonly startupViews: StartupViewStore;
-  readonly retention: SqliteRetentionStore;
+  readonly retention: RetentionStore;
   readonly workerCardDisplay: WorkerCardDisplayStore;
   readonly workerSessionThreads: WorkerSessionThreadApplicationStore;
 }

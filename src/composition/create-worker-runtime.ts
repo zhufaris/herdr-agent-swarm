@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
-import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
+import type { InstanceLifecycleStore, InstanceStore, InstanceTurnStore } from "../domain/ports/instance.js";
 import { InstanceControlWorkflow } from "../coordinator/instance-control-workflow.js";
 import { InstanceMessagingWorkflow } from "../coordinator/instance-messaging-workflow.js";
 import { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
@@ -14,7 +14,6 @@ import { WorkerTurnObserver } from "../coordinator/worker-turn-observer.js";
 import { InstanceWorkScheduler } from "../events/instance-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { PrimaryToolGateway } from "../runtime/primary-tool-gateway.js";
-import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { WorktreeManager } from "../runtime/worktree-manager.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { HerdrPaneHost } from "../runtime/herdr/pane-host.js";
@@ -22,8 +21,11 @@ import type { TraexTranscriptReader } from "../runtime/traex-transcript.js";
 import { RuntimeLink } from "./runtime-link.js";
 import { feishuGatewayWorkerPresentation } from "../gateways/feishu/presentation.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
+import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
 
-export type WorkerRuntimeStores = Pick<SqliteStoreBundle, "instance" | "instanceLifecycle" | "instanceTurns" | "workerCardDisplay">;
+export interface WorkerRuntimeStores {
+  instance: InstanceStore; instanceLifecycle: InstanceLifecycleStore; instanceTurns: InstanceTurnStore; workerCardDisplay: WorkerCardDisplayStore;
+}
 
 export function createWorkerRuntime(options: {
   config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;

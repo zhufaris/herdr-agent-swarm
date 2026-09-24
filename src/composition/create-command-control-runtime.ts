@@ -9,7 +9,6 @@ import { SwarmCommandContextResolver } from "../coordinator/swarm-command-contex
 import { SwarmCommandGateway } from "../coordinator/swarm-command-gateway.js";
 import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
 import type { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
 import type { createOutboundRuntime } from "./create-outbound-runtime.js";
@@ -17,8 +16,16 @@ import type { createPrimaryRuntime } from "./create-primary-runtime.js";
 import type { createWorkerRuntime } from "./create-worker-runtime.js";
 import type { ApplicationPresentation, PanePresentation } from "../domain/ports/presentation.js";
 import { WorkerSessionThreadWorkflow } from "../coordinator/worker-session-thread-workflow.js";
+import type { PaneControlStore } from "../domain/ports/pane-operations.js";
+import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
+import type { CardInteractionStore, InboundRoutingStore, ModelSelectionStore, SessionOperationStore } from "../domain/ports/workflow.js";
+import type { InstanceStore } from "../domain/ports/instance.js";
+import type { WorkerSessionThreadApplicationStore } from "../domain/ports/worker-session-thread.js";
 
-export type CommandControlStores = Pick<SqliteStoreBundle, "modelSelection" | "paneControl" | "sessionOperations" | "cardInteraction" | "inboundRouting" | "commandIntents" | "instance" | "workerSessionThreads">;
+export interface CommandControlStores {
+  modelSelection: ModelSelectionStore; paneControl: PaneControlStore; sessionOperations: SessionOperationStore; cardInteraction: CardInteractionStore;
+  inboundRouting: InboundRoutingStore; commandIntents: CommandIntentWorkflowStore; instance: InstanceStore; workerSessionThreads: WorkerSessionThreadApplicationStore;
+}
 
 export function createCommandControlRuntime(options: {
   config: BridgeConfig; stores: CommandControlStores; logger: Logger; turnControl: TurnControlWorkflow; scheduler: PromptWorkScheduler;

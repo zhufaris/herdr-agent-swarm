@@ -1,5 +1,6 @@
 import type { HealthStore } from "../../domain/ports/health.js";
-import type { SqliteRetentionStore, SqliteStoreLifecycle } from "../sqlite-store-bundle.js";
+import type { RetentionStore } from "../../domain/ports/retention.js";
+import type { SqliteStoreLifecycle } from "../sqlite-store-bundle.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteInboundProjectStore } from "./inbound-project-store.js";
@@ -21,7 +22,7 @@ export class SqliteHealthStoreAdapter implements HealthStore {
   listBindings(): ReturnType<HealthStore["listBindings"]> { return this.bindings.listBindings(); }
 }
 
-export class SqliteRetentionStoreAdapter implements SqliteRetentionStore {
+export class SqliteRetentionStoreAdapter implements RetentionStore {
   constructor(
     private readonly outbox: SqliteOutboxStore,
     private readonly inbound: SqliteInboundProjectStore,
