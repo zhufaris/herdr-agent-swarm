@@ -94,5 +94,5 @@ function matchesExactTurn(observation: TraexTranscriptObservation, expected: Exa
 }
 
 function hasObservation(observation: TraexTranscriptObservation): boolean {
-  return Boolean(observation.turnId || observation.freshTurnStart || observation.requestText !== undefined || observation.answerDelta || observation.toolActivities?.length || observation.mainStatus || observation.turnLifecycle);
+  return Boolean(observation.turnId || observation.freshTurnStart || observation.requestText !== undefined || observation.answerDelta || observation.timelineDeltas?.length || observation.toolActivities?.length || observation.mainStatus || observation.turnLifecycle);
 }

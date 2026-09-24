@@ -13,6 +13,12 @@ export function createLatestSchema(context: SqliteContext): void {
   createInstanceLeaseSchema(context);
   context.database.exec(`
   CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
+  CREATE TABLE IF NOT EXISTS answer_timeline_items(
+    aggregate_kind TEXT NOT NULL CHECK(aggregate_kind IN ('primary-run','worker-turn')), aggregate_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence >= 0), item_json TEXT NOT NULL CHECK(json_valid(item_json)),
+    PRIMARY KEY(aggregate_kind, aggregate_id, item_id)
+  );
+  CREATE INDEX IF NOT EXISTS answer_timeline_items_order ON answer_timeline_items(aggregate_kind, aggregate_id, sequence, item_id);
   CREATE TABLE IF NOT EXISTS bindings(
     id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
     root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,

@@ -1,6 +1,7 @@
 import type { AgentState, EventOrigin } from "./types.js";
 import type { AgentKind } from "./agent-instance.js";
 import type { MainCardLiveStatus, RunProgressEvent } from "./run-card-view.js";
+import type { AnswerTimelineDelta } from "./answer-timeline.js";
 
 interface EventBase<T extends string, P> {
   eventId: string;
@@ -17,6 +18,7 @@ export interface TurnOutputObservation {
     previousSnapshot?: string;
     update?: "append" | "replace" | "replace-status" | "replace-all";
     toolActivities: Omit<RunProgressEvent, "occurredAt">[];
+    timelineDeltas?: AnswerTimelineDelta[];
     hasToolActivitySnapshot?: boolean;
   };
   main: {
@@ -29,7 +31,7 @@ export interface TurnOutputObservation {
 export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObservation {
   const value = payload as {
     observation?: TurnOutputObservation; answerSnapshot?: string; previousAnswerSnapshot?: string; answerUpdate?: TurnOutputObservation["answer"]["update"];
-    progressEvents?: TurnOutputObservation["answer"]["toolActivities"]; hasProgressSnapshot?: boolean; mainStatus?: TurnOutputObservation["main"]["status"]; model?: string; context?: string;
+    progressEvents?: TurnOutputObservation["answer"]["toolActivities"]; timelineDeltas?: AnswerTimelineDelta[]; hasProgressSnapshot?: boolean; mainStatus?: TurnOutputObservation["main"]["status"]; model?: string; context?: string;
   };
   if (value.observation) return value.observation;
   return {
@@ -38,6 +40,7 @@ export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObse
       ...(value.previousAnswerSnapshot === undefined ? {} : { previousSnapshot: value.previousAnswerSnapshot }),
       ...(value.answerUpdate === undefined ? {} : { update: value.answerUpdate }),
       toolActivities: value.progressEvents ?? [],
+      ...(value.timelineDeltas?.length ? { timelineDeltas: value.timelineDeltas } : {}),
       ...(value.hasProgressSnapshot === undefined ? {} : { hasToolActivitySnapshot: value.hasProgressSnapshot })
     },
     main: {

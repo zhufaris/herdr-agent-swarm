@@ -199,4 +199,22 @@ describe("topic view reducer", () => {
       phase: "done", answer: "x".repeat(9_000), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
     });
   });
+
+  it("upserts answer timeline items by stable identity and canonical sequence", () => {
+    const queued = createQueuedRunCard({ promptId: "p-timeline", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    const first = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "", progressEvents: [], timelineDeltas: [
+      { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", state: "running" },
+      { kind: "agent_message", id: "message:1", sequence: 1, markdown: "Checking" }
+    ] });
+    const updated = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "", progressEvents: [], timelineDeltas: [
+      { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }
+    ] });
+    const duplicate = reduceRunCard(updated, { type: "output", occurredAt: "three", answerSnapshot: "", progressEvents: [], timelineDeltas: [updated.timelineItems[1]!] });
+
+    expect(updated.timelineItems).toEqual([
+      { kind: "agent_message", id: "message:1", sequence: 1, markdown: "Checking" },
+      { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }
+    ]);
+    expect(duplicate).toBe(updated);
+  });
 });

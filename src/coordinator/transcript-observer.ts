@@ -8,6 +8,7 @@ import { abortableWait } from "../runtime/abortable-wait.js";
 import { appendTurnOutput, createBoundedTurnOutput, legacyTruncatedTurnOutputPrefix } from "../runtime/bounded-turn-output.js";
 import { projectOwnedTranscriptOutput } from "./owned-transcript-output-projector.js";
 import { transcriptSessionFor } from "../domain/transcript-observer-identity.js";
+import { applyAnswerTimelineDeltas, type AnswerTimelineItem } from "../domain/answer-timeline.js";
 
 export type TurnOutputSource =
   | { mode: "unavailable"; reason: string }
@@ -85,9 +86,11 @@ export class TranscriptObserver {
       if (opened.mode !== "typed") return fallback();
       const source: TurnOutputSource = { mode: "typed", cursor: opened.cursor, emitted: Boolean(persistedAnswer), output: createBoundedTurnOutput(persistedAnswer) };
       let replayedAnswer = createBoundedTurnOutput();
+      let replayedTimeline: AnswerTimelineItem[] = [];
       let latestMainStatus: TraexTranscriptObservation["mainStatus"];
       await opened.cursor.drain({ limit: DETACHED_REPLAY_DRAIN_LIMIT, onObservation: async (observation) => {
         replayedAnswer = appendTurnOutput(replayedAnswer, observation.answerDelta);
+        replayedTimeline = applyAnswerTimelineDeltas(replayedTimeline, observation.timelineDeltas ?? []);
         if (observation.mainStatus) latestMainStatus = mergeMainStatus(latestMainStatus, observation.mainStatus);
         if (observation.turnLifecycle?.state === "completed" || observation.turnLifecycle?.state === "aborted") source.terminalLifecycle = observation.turnLifecycle;
         return "continue" as const;
@@ -97,13 +100,15 @@ export class TranscriptObserver {
         source.output = replayedAnswer;
         if (legacyPrefix !== null) {
           await this.options.publishObservation(binding.id, prompt.id, {
-            answer: { snapshot: replayedAnswer.text, update: "replace-all", toolActivities: [] },
+            answer: { snapshot: replayedAnswer.text, update: "replace-all", toolActivities: [], ...(replayedTimeline.length ? { timelineDeltas: replayedTimeline } : {}) },
             main: {}
           });
         } else {
           const suffix = replayedAnswer.text.slice(persistedAnswer.length).trimStart();
-          if (suffix) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: suffix }, Date.parse(prompt.transcriptTurnStartedAt));
+          if (suffix || replayedTimeline.length) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: suffix, ...(replayedTimeline.length ? { timelineDeltas: replayedTimeline } : {}) }, Date.parse(prompt.transcriptTurnStartedAt));
         }
+      } else if (replayedTimeline.length) {
+        await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: "", timelineDeltas: replayedTimeline }, Date.parse(prompt.transcriptTurnStartedAt));
       }
       if (latestMainStatus) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: "", mainStatus: latestMainStatus }, Date.parse(prompt.transcriptTurnStartedAt));
       return source;

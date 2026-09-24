@@ -7,6 +7,7 @@ import { mapAnswerPage, mapBinding, type AnswerPageRow, type BindingRow } from "
 import type { SqliteContext } from "./context.js";
 import { linkAnswerRecovery, recordAnswerCoverage } from "./delivery-recovery-evidence.js";
 import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
+import { SqliteAnswerTimelineStore } from "./answer-timeline-store.js";
 
 export const answerPageDeliveryFactsSql = {
   latestContent: `
@@ -46,6 +47,7 @@ export const answerPageDeliveryFactsSql = {
 } as const;
 
 export class SqliteProjectionStore {
+  private readonly timelines: SqliteAnswerTimelineStore;
   constructor(
     private readonly context: SqliteContext,
     private readonly dependencies: {
@@ -55,7 +57,7 @@ export class SqliteProjectionStore {
       getModelPreference(bindingId: string): ModelPreference | null;
       refreshOutboxLaneHead(laneKey: string): void;
     }
-  ) {}
+  ) { this.timelines = new SqliteAnswerTimelineStore(context); }
 
   getBinding(id: string): Binding | null { return this.dependencies.getBinding(id); }
   getModelPreference(bindingId: string): ModelPreference | null { return this.dependencies.getModelPreference(bindingId); }
@@ -162,17 +164,18 @@ export class SqliteProjectionStore {
     return this.context.transaction(() => {
       this.context.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, session_title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, progress_summary_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, worker_activity_json = ?, worker_dependency_revision = ?, worker_context_frozen_at = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
         .run(view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
+      this.timelines.save("primary-run", view.promptId, view.timelineItems ?? []);
       return this.loadRunCard(view.promptId)!;
     });
   }
 
   loadRunCard(promptId: string): RunCardView | null {
     const row = this.context.database.prepare("SELECT state_json FROM run_cards_view WHERE prompt_id = ?").get(promptId) as { state_json: string } | undefined;
-    return row ? JSON.parse(row.state_json) as RunCardView : null;
+    return row ? this.hydrateRunCard(row.state_json) : null;
   }
 
   listRunCards(bindingId: string): RunCardView[] {
-    return (this.context.database.prepare("SELECT state_json FROM run_cards_view WHERE binding_id = ? ORDER BY created_at, prompt_id").all(bindingId) as Array<{ state_json: string }>).map((row) => JSON.parse(row.state_json) as RunCardView);
+    return (this.context.database.prepare("SELECT state_json FROM run_cards_view WHERE binding_id = ? ORDER BY created_at, prompt_id").all(bindingId) as Array<{ state_json: string }>).map((row) => this.hydrateRunCard(row.state_json));
   }
 
   listActionableStartupRunCards(bindingId: string): RunCardView[] {
@@ -211,7 +214,7 @@ export class SqliteProjectionStore {
       )
       ORDER BY card.created_at, card.prompt_id
     `).all(bindingId) as Array<{ state_json: string }>;
-    return rows.map((row) => JSON.parse(row.state_json) as RunCardView);
+    return rows.map((row) => this.hydrateRunCard(row.state_json));
   }
 
   loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null {
@@ -232,7 +235,7 @@ export class SqliteProjectionStore {
         CASE WHEN card.phase NOT IN ('running','blocked') THEN card.prompt_id END DESC
       LIMIT 1
     `).get(bindingId, preferredPromptId) as { state_json: string } | undefined;
-    return row ? JSON.parse(row.state_json) as RunCardView : null;
+    return row ? this.hydrateRunCard(row.state_json) : null;
   }
 
   listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[] {
@@ -244,7 +247,7 @@ export class SqliteProjectionStore {
       WHERE card.binding_id = ? AND card.phase IN (${placeholders})
       ORDER BY card.created_at, card.prompt_id
     `).all(bindingId, ...phases) as Array<{ state_json: string }>;
-    return rows.map((row) => JSON.parse(row.state_json) as RunCardView);
+    return rows.map((row) => this.hydrateRunCard(row.state_json));
   }
 
   getActiveAnswerPage(promptId: string): AnswerPage | null {
@@ -408,10 +411,13 @@ export class SqliteProjectionStore {
   }
 
   insertRunCard(view: RunCardView): void {
-    this.context.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, progress_summary_json, queue_position, started_at, finished_at, notice, worker_activity_json, worker_dependency_revision, worker_context_frozen_at, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
-    this.context.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'streaming', ?, ?)")
-      .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
+    this.context.transaction(() => {
+      this.context.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, progress_summary_json, queue_position, started_at, finished_at, notice, worker_activity_json, worker_dependency_revision, worker_context_frozen_at, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
+      this.timelines.save("primary-run", view.promptId, view.timelineItems ?? []);
+      this.context.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'streaming', ?, ?)")
+        .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);
+    });
   }
 
   private reserveAnswerPageIntent(promptId: string, pageIndex: number, reserve: (page: AnswerPage, view: RunCardView) => AnswerPageReservationOutcome): AnswerPageReservationOutcome {
@@ -426,6 +432,11 @@ export class SqliteProjectionStore {
     const binding = this.dependencies.getBinding(id);
     if (!binding) throw new Error(`Binding not found: ${id}`);
     return binding;
+  }
+
+  private hydrateRunCard(stateJson: string): RunCardView {
+    const view = JSON.parse(stateJson) as RunCardView;
+    return { ...view, timelineItems: Array.isArray(view.timelineItems) ? view.timelineItems : [] };
   }
 
   private nextMainCardSequence(binding: Binding): number {

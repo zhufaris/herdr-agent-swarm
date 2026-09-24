@@ -34,6 +34,7 @@ export class SqliteMigrations {
     this.restoreRunCardViewAndIndexes(runCardViewNeedsRebuild);
     this.runHistoricalAnswerConvergence();
     this.applyFinalDeliveryAndGatewayCompatibility();
+    this.ensureAnswerTimelines();
   }
 
   private prepareRunCardView(): boolean {
@@ -186,6 +187,24 @@ export class SqliteMigrations {
     this.gateway.ensureGatewayScopedOutboxLanes();
     this.cards.ensureOutboundClaims();
     this.gateway.convergeLegacyExpiredAnswerTargets();
+  }
+
+  private ensureAnswerTimelines(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS answer_timeline_items(
+        aggregate_kind TEXT NOT NULL CHECK(aggregate_kind IN ('primary-run','worker-turn')), aggregate_id TEXT NOT NULL, item_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK(sequence >= 0), item_json TEXT NOT NULL CHECK(json_valid(item_json)),
+        PRIMARY KEY(aggregate_kind, aggregate_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS answer_timeline_items_order ON answer_timeline_items(aggregate_kind, aggregate_id, sequence, item_id);
+      CREATE TRIGGER IF NOT EXISTS answer_timeline_primary_delete AFTER DELETE ON run_cards BEGIN
+        DELETE FROM answer_timeline_items WHERE aggregate_kind = 'primary-run' AND aggregate_id = OLD.prompt_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS answer_timeline_worker_delete AFTER DELETE ON instance_turns BEGIN
+        DELETE FROM answer_timeline_items WHERE aggregate_kind = 'worker-turn' AND aggregate_id = OLD.id;
+      END;
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (50);
+    `);
   }
 
   canonicalizeLegacyAnswerTargets(timestamp: string): void {

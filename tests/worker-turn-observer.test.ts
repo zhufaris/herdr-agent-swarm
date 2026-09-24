@@ -55,12 +55,13 @@ describe("WorkerTurnObserver", () => {
 
     await observer.observe("turn-1", {
       turnId: runtimeTurnId, answerDelta: "second",
+      timelineDeltas: [{ kind: "final_answer", id: `final:${runtimeTurnId}`, sequence: 1, markdown: "trusted final" }],
       mainStatus: { tokenCount: 5_000 },
       turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "trusted final" }
     });
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted final" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted final", tokenCount: 5_000, resultCapture: "captured" });
+    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted final", tokenCount: 5_000, resultCapture: "captured", timelineItems: [{ kind: "final_answer", markdown: "trusted final" }] });
   });
 
   it("persists and publishes visible progress only for the exact owned transcript", async () => {

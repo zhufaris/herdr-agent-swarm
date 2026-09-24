@@ -72,6 +72,32 @@ describe("TranscriptObserver detached output recovery", () => {
     expect(source).toMatchObject({ mode: "typed", output: { text: persisted } });
     expect(publishObservation).not.toHaveBeenCalled();
   });
+
+  it("replays a durable timeline even when legacy answer text is unchanged", async () => {
+    let read = false;
+    const timelineDeltas = [{ kind: "agent_message" as const, id: "message:1", sequence: 1, markdown: "Recovered" }];
+    const reader: TraexTranscriptReaderPort = {
+      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
+      async openAtTurn() { return { mode: "typed", cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          if (read) return { answerDelta: "" };
+          read = true;
+          return { turnId, answerDelta: "", timelineDeltas, turnLifecycle: { turnId, state: "active", startedAt } };
+        }
+      } }; }
+    };
+    const publishObservation = vi.fn(async () => {});
+    const observer = new TranscriptObserver({
+      store: { getBinding: () => binding(), getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => ({ answer: "" }) as never },
+      reader, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
+      isBindingActive: () => true, isStopping: () => false, publishObservation
+    });
+
+    await observer.openDetached(binding(), prompt());
+
+    expect(publishObservation).toHaveBeenCalledWith("b1", "p1", expect.objectContaining({ answer: expect.objectContaining({ timelineDeltas }) }));
+  });
 });
 
 function binding(): Binding {

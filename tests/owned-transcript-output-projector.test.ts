@@ -27,6 +27,16 @@ describe("owned transcript output projector", () => {
     });
   });
 
+  it("projects timeline deltas even when legacy answer text is unchanged", () => {
+    const timelineDeltas = [{ kind: "tool" as const, id: "tool:1", sequence: 1, category: "test" as const, label: "npm test", state: "running" as const }];
+    const result = projectOwnedTranscriptOutput({
+      state: { emitted: false, output: { text: "", truncated: false } },
+      observation: { answerDelta: "", timelineDeltas }
+    });
+
+    expect(result.observation?.answer.timelineDeltas).toEqual(timelineDeltas);
+  });
+
   it("keeps previous output and emits no event for an empty nonterminal observation", () => {
     expect(projectOwnedTranscriptOutput({ state: { emitted: true, output: { text: "prior", truncated: false } }, observation: { answerDelta: "" } }))
       .toEqual({ state: { emitted: true, output: { text: "prior", truncated: false } } });

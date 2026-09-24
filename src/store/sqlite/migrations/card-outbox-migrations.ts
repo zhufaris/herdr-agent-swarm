@@ -638,7 +638,9 @@ export class CardOutboxMigrations {
       DROP VIEW IF EXISTS run_cards_view;
       CREATE VIEW run_cards_view AS SELECT *, json_object(
         'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'sessionTitle', session_title, 'requestText', request_text,
-        'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END, 'progressEvents', json(progress_events_json), 'progressSummary', json(progress_summary_json),
+        'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END,
+        'timelineItems', json(COALESCE((SELECT json_group_array(json(item_json)) FROM (SELECT item_json FROM answer_timeline_items WHERE aggregate_kind = 'primary-run' AND aggregate_id = run_cards.prompt_id ORDER BY sequence, item_id)), '[]')),
+        'progressEvents', json(progress_events_json), 'progressSummary', json(progress_summary_json),
         'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'workerActivity', json(worker_activity_json), 'workerDependencyRevision', worker_dependency_revision, 'workerContextFrozenAt', worker_context_frozen_at, 'activityAt', activity_at,
         'viewVersion', view_version, 'deliveredVersion', delivered_version, 'answerDeliveredVersion', answer_delivered_version, 'createdAt', created_at, 'updatedAt', updated_at
       ) AS state_json FROM run_cards;
@@ -648,6 +650,8 @@ export class CardOutboxMigrations {
   runCardViewNeedsRebuild(): boolean {
     const view = this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'run_cards_view'").get();
     if (!view) return true;
+    const viewSql = String((this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'run_cards_view'").get() as { sql?: string } | undefined)?.sql ?? "");
+    if (!viewSql.includes("timelineItems")) return true;
     const columns = new Set((this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map((column) => column.name));
     return [
       "binding_generation", "conversion_parent_prompt_id", "queue_feedback_json",

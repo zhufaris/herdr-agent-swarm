@@ -177,7 +177,7 @@ function runCardChange(event: BridgeEvent): RunCardChange | null {
     case "TurnStarted": return { type: "started", occurredAt: event.occurredAt };
     case "TurnOutputObserved": {
       const answer = normalizeTurnOutputObservation(event.payload).answer;
-      return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };
+      return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(answer.timelineDeltas?.length ? { timelineDeltas: answer.timelineDeltas } : {}), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };
     }
     case "AgentStateChanged": return event.payload.state === "blocked"
       ? { type: "blocked", occurredAt: event.occurredAt, notice: "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。" }

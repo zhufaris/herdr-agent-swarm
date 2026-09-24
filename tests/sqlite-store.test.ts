@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createBridgeEvent } from "../src/domain/create-bridge-event.js";
 import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
-import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
@@ -6056,5 +6056,46 @@ describe("SQLite store", () => {
 
     expect(store.getPaneControlOperation("model-1")).toMatchObject({ state: "running", detail: null });
     expect(store.listPendingOutboundReplies()).toEqual([]);
+  });
+
+  it("persists Primary answer timelines across reopen and updates stable items atomically", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-primary-timeline-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const running = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", state: "running" }] });
+    const done = reduceRunCard(running, { type: "output", occurredAt: "latest", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }] });
+    store.saveRunCard(done);
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.loadRunCard("p1")?.timelineItems).toEqual([{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }]);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 50").get()).toEqual({ version: 50 });
+  });
+
+  it("persists Worker answer timelines across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-timeline-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const worker = store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "now" });
+    store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view: queued, render: renderWorkerTurnCard });
+    store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "later", answer: "", timelineDeltas: [{ kind: "agent_message", id: "message:1", sequence: 1, markdown: "Inspecting" }] }, render: renderWorkerTurnCard });
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.loadWorkerTurnCard("turn-1")?.timelineItems).toEqual([{ kind: "agent_message", id: "message:1", sequence: 1, markdown: "Inspecting" }]);
+  });
+
+  it("rolls back a Primary view when its timeline rows cannot be persisted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const next = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "visible", progressEvents: [], timelineDeltas: [{ kind: "agent_message", id: "message:1", sequence: 1, markdown: "visible" }] });
+    store.database.exec("CREATE TRIGGER reject_timeline BEFORE INSERT ON answer_timeline_items BEGIN SELECT RAISE(ABORT, 'reject timeline'); END");
+
+    expect(() => store!.saveRunCard(next)).toThrow(/reject timeline/);
+    expect(store.loadRunCard("p1")).toMatchObject({ answer: "", timelineItems: [], viewVersion: 1 });
   });
 });

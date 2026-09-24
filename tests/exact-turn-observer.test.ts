@@ -90,6 +90,14 @@ describe("ExactTurnObserver", () => {
     });
   });
 
+  it("preserves a timeline-only observation", async () => {
+    const observation = { turnId: exact.turnId, answerDelta: "", timelineDeltas: [{ kind: "tool" as const, id: "tool:1", sequence: 1, category: "read" as const, label: "config", state: "running" as const }] };
+    const opened = await new ExactTurnObserver(reader([observation])).open({ session, boundary: { kind: "latest" } });
+    if (opened.mode !== "typed") throw new Error("expected typed cursor");
+
+    await expect(opened.cursor.read()).resolves.toEqual({ kind: "accepted", observation });
+  });
+
   it("reports an unsupported recovery cursor without falling back to latest", async () => {
     const source: TraexTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
 

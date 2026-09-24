@@ -2,6 +2,7 @@ import { stableElementId } from "./stable-element-id.js";
 import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
 import type { PrimaryWorkerActivitySummary } from "./card-context-summary.js";
 import type { AgentKind } from "./agent-instance.js";
+import { applyAnswerTimelineDeltas, sameAnswerTimeline, terminalizeAnswerTimelineTools, type AnswerTimelineDelta, type AnswerTimelineItem } from "./answer-timeline.js";
 
 export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
 export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
@@ -49,6 +50,7 @@ export interface RunCardView {
   answerSegments: string[];
   answerDraft: string;
   answerDraftTransient: boolean;
+  timelineItems: AnswerTimelineItem[];
   progressEvents: RunProgressEvent[];
   progressSummary: RunProgressSummary;
   queuePosition: number;
@@ -72,7 +74,7 @@ export type RunCardChange =
   | { type: "queue-feedback"; occurredAt: string; feedback: QueueWaitFeedback | null }
   | { type: "started"; occurredAt: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; hasProgressSnapshot?: boolean }
+  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; timelineDeltas?: AnswerTimelineDelta[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string; replaceAnswer?: boolean }
   | { type: "failed"; occurredAt: string; notice: string };
 
@@ -82,7 +84,7 @@ export function createQueuedRunCard(input: {
 }): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
-    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false,
+    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, timelineItems: [],
     progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
@@ -125,24 +127,28 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
     case "output": {
       const answerState = reduceAnswerSnapshot(state, change.answerSnapshot, change.answerUpdate ?? "replace");
       const answer = renderAnswer(answerState.answerSegments, answerState.answerDraft);
+      const timelineItems = applyAnswerTimelineDeltas(state.timelineItems ?? [], change.timelineDeltas ?? []);
       if (change.hasProgressSnapshot) {
         const progress = progressSnapshot(change.progressEvents);
-        if (answer === state.answer && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
-        patch = { answer, ...answerState, progressEvents: progress.events, progressSummary: progress.summary };
+        if (answer === state.answer && sameAnswerTimeline(timelineItems, state.timelineItems ?? []) && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
+        patch = { answer, ...answerState, timelineItems, progressEvents: progress.events, progressSummary: progress.summary };
         break;
       }
       const progress = mergeRecentProgress(state.progressEvents, state.progressSummary, change.progressEvents);
-      if (answer === state.answer && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
-      patch = { answer, ...answerState, progressEvents: progress.events, progressSummary: progress.summary };
+      if (answer === state.answer && sameAnswerTimeline(timelineItems, state.timelineItems ?? []) && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
+      patch = { answer, ...answerState, timelineItems, progressEvents: progress.events, progressSummary: progress.summary };
       break;
     }
     case "completed":
-      if (state.phase === "completed" && state.answer.trim() === change.answer.trim()) return state;
-      patch = { phase: "completed", ...completeAnswer(state, change.answer, change.replaceAnswer === true), finishedAt: change.occurredAt, queuePosition: 0, notice: null };
+      {
+        const timelineItems = terminalizeAnswerTimelineTools(state.timelineItems ?? []);
+        if (state.phase === "completed" && state.answer.trim() === change.answer.trim() && sameAnswerTimeline(timelineItems, state.timelineItems ?? [])) return state;
+        patch = { phase: "completed", ...completeAnswer(state, change.answer, change.replaceAnswer === true), timelineItems, finishedAt: change.occurredAt, queuePosition: 0, notice: null };
+      }
       break;
     case "failed":
       if (state.phase === "failed" && state.notice === change.notice) return state;
-      patch = { phase: "failed", finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
+      patch = { phase: "failed", timelineItems: terminalizeAnswerTimelineTools(state.timelineItems ?? []), finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }
   const activityAt = change.type === "queue-position" || change.type === "queue-feedback" ? state.activityAt : change.occurredAt;

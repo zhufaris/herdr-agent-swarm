@@ -1,6 +1,7 @@
 import { stableElementId } from "./stable-element-id.js";
 import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, type RunProgressEvent, type RunProgressSummary } from "./run-card-view.js";
 import type { CardTargetRef } from "./card-target-ref.js";
+import { applyAnswerTimelineDeltas, sameAnswerTimeline, terminalizeAnswerTimelineTools, type AnswerTimelineDelta, type AnswerTimelineItem } from "./answer-timeline.js";
 
 export type WorkerTurnCardPhase =
   | "queued"
@@ -29,6 +30,7 @@ export interface WorkerTurnCardView {
   phase: WorkerTurnCardPhase;
   requestText: string;
   answer: string;
+  timelineItems: AnswerTimelineItem[];
   statusTitle: string | null;
   tokenCount: number | null;
   progressEvents: RunProgressEvent[];
@@ -68,8 +70,8 @@ export type WorkerTurnCardChange =
   | { type: "preparing"; occurredAt: string }
   | { type: "running"; occurredAt: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answer: string; statusTitle?: string | null; tokenCount?: number | null; progressEvents?: RunProgressEvent[] }
-  | { type: "completed"; occurredAt: string; answer: string; tokenCount?: number | null }
+  | { type: "output"; occurredAt: string; answer: string; statusTitle?: string | null; tokenCount?: number | null; progressEvents?: RunProgressEvent[]; timelineDeltas?: AnswerTimelineDelta[] }
+  | { type: "completed"; occurredAt: string; answer: string; tokenCount?: number | null; timelineDeltas?: AnswerTimelineDelta[] }
   | { type: "completed-without-output"; occurredAt: string; notice: string }
   | { type: "failed" | "cancelled" | "dispatch-uncertain"; occurredAt: string; notice: string };
 
@@ -91,7 +93,7 @@ export function createQueuedWorkerTurnCard(input: {
     turnId: input.turnId, instanceId: input.instanceId, instanceGeneration: input.instanceGeneration, workerSessionGeneration: input.workerSessionGeneration ?? 1,
     workerName: input.workerName, parentTurnId: input.parentTurnId, rootMessageId: input.rootMessageId,
     messageId: null, cardId: null, elementId: workerTurnElementId(input.turnId, 0), progressSequence: 0, phase: "queued",
-    requestText: input.requestText, answer: "", statusTitle: null, tokenCount: null, progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
+    requestText: input.requestText, answer: "", timelineItems: [], statusTitle: null, tokenCount: null, progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, startedAt: null, finishedAt: null,
     notice: null, resultCapture: input.resultCapture ?? "pending", workerMain: { aggregateKind: "worker-session", aggregateId: input.instanceId, generation: input.workerSessionGeneration ?? 1, messageId: null }, primaryAnswer: input.primaryAnswer ?? null, pageIndex: 0, pageStart: 0, sequence: 0,
     viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
@@ -134,27 +136,29 @@ export function reduceWorkerTurnCard(state: WorkerTurnCardView, change: WorkerTu
     case "output":
       {
         const progress = mergeRecentProgress(state.progressEvents, state.progressSummary, change.progressEvents ?? []);
+        const timelineItems = applyAnswerTimelineDeltas(state.timelineItems ?? [], change.timelineDeltas ?? []);
         const statusTitle = change.statusTitle === undefined ? state.statusTitle : change.statusTitle;
         const tokenCount = change.tokenCount === undefined ? state.tokenCount : change.tokenCount;
-        if (state.answer === change.answer && state.statusTitle === statusTitle && state.tokenCount === tokenCount && sameProgress(state.progressEvents, progress.events)) return state;
-        patch = { answer: change.answer, statusTitle, tokenCount, progressEvents: progress.events, progressSummary: progress.summary };
+        if (state.answer === change.answer && sameAnswerTimeline(state.timelineItems ?? [], timelineItems) && state.statusTitle === statusTitle && state.tokenCount === tokenCount && sameProgress(state.progressEvents, progress.events)) return state;
+        patch = { answer: change.answer, timelineItems, statusTitle, tokenCount, progressEvents: progress.events, progressSummary: progress.summary };
       }
       break;
     case "completed":
       {
         const tokenCount = change.tokenCount === undefined ? state.tokenCount : change.tokenCount;
-        if (state.phase === "completed" && state.answer === change.answer && state.tokenCount === tokenCount && state.resultCapture === "captured") return state;
-        patch = { phase: "completed", answer: change.answer, tokenCount, resultCapture: "captured", queuePosition: 0, finishedAt: change.occurredAt, notice: null };
+        const timelineItems = terminalizeAnswerTimelineTools(applyAnswerTimelineDeltas(state.timelineItems ?? [], change.timelineDeltas ?? []));
+        if (state.phase === "completed" && state.answer === change.answer && state.tokenCount === tokenCount && state.resultCapture === "captured" && sameAnswerTimeline(state.timelineItems ?? [], timelineItems)) return state;
+        patch = { phase: "completed", answer: change.answer, timelineItems, tokenCount, resultCapture: "captured", queuePosition: 0, finishedAt: change.occurredAt, notice: null };
       }
       break;
     case "completed-without-output":
       if (state.phase === "completed" && state.resultCapture === "unavailable" && state.notice === change.notice) return state;
-      patch = { phase: "completed", answer: "", resultCapture: "unavailable", queuePosition: 0, finishedAt: change.occurredAt, notice: change.notice };
+      patch = { phase: "completed", answer: "", timelineItems: terminalizeAnswerTimelineTools(state.timelineItems ?? []), resultCapture: "unavailable", queuePosition: 0, finishedAt: change.occurredAt, notice: change.notice };
       break;
     case "failed":
     case "cancelled":
       if (state.phase === change.type && state.notice === change.notice) return state;
-      patch = { phase: change.type, queuePosition: 0, finishedAt: change.occurredAt, notice: change.notice };
+      patch = { phase: change.type, timelineItems: terminalizeAnswerTimelineTools(state.timelineItems ?? []), queuePosition: 0, finishedAt: change.occurredAt, notice: change.notice };
       break;
     case "dispatch-uncertain":
       if (state.phase === change.type && state.notice === change.notice) return state;

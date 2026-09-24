@@ -40,9 +40,9 @@ export function projectOwnedTranscriptOutput(input: {
       ...(input.observation.mainStatus.tokenCount !== undefined ? { tokenCount: input.observation.mainStatus.tokenCount } : {})
     }
     : undefined;
-  const observation = answerChanged || input.observation.toolActivities?.length || mainStatus
+  const observation = answerChanged || input.observation.timelineDeltas?.length || input.observation.toolActivities?.length || mainStatus
     ? {
-      answer: { snapshot: answerSnapshot, update: answerUpdate, toolActivities: input.observation.toolActivities ?? [] },
+      answer: { snapshot: answerSnapshot, update: answerUpdate, toolActivities: input.observation.toolActivities ?? [], ...(input.observation.timelineDeltas?.length ? { timelineDeltas: input.observation.timelineDeltas } : {}) },
       main: { ...(mainStatus ? { status: mainStatus } : {}) }
     }
     : undefined;
