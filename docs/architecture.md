@@ -372,7 +372,7 @@ The production implementation uses the following modules and seams.
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
-| `PromptRunWorkflow` | FIFO turn execution and detached recovery | Separate `PromptDispatchStore`, `PromptRecoveryStore`, and `PromptSessionStore` capabilities plus `HerdrPort`, `TraexControlPort`, and `PromptWorkScheduler` |
+| `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted transcript turn |
 | `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
 | `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
@@ -406,7 +406,7 @@ responsibility is a business or application concern.
 | --- | --- | --- |
 | `Binding` | `TopicPaneBinding` in explanatory and external-facing contexts | The controlled association between a Lark topic or root message and a Herdr pane. `Binding` remains an acceptable short internal domain term. |
 | `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
-| prompt execution | `PromptRunWorkflow` | Owns FIFO turn draining, detached observation, `TurnSupervisor`, and prompt-specific shutdown behavior. |
+| prompt execution | `PromptRunWorkflow` | Lifecycle facade for scheduling, safety, process-local ownership, recovery controls, and prompt-specific shutdown; dispatch and detached polling stay behind dedicated deep modules. |
 | `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
 | runtime event wiring | `RuntimeEventIntegration` | Composition owner for lifecycle fan-out, durable-work wake-ups, and the bounded Herdr hint connection; it exposes only reliability-specific interfaces. |
 | workflow wake-up bus | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
@@ -698,7 +698,10 @@ Lark message or card action                 Herdr Socket event
                               |                    -> authoritative snapshot
                               v
                        PromptRunWorkflow
-                       FIFO turn / detached observer
+                     lifecycle facade / ownership
+                        /                    \
+          PrimaryPromptDispatcher    DetachedPromptObserver
+              FIFO live attempt       exact no-replay recovery
                               |
                               v
                      Herdr port -> TraeX
@@ -1090,8 +1093,8 @@ reconciliation persists `agent_session_source`,
 This canonical Herdr tuple is the only transcript identity; the bridge has no
 session-report socket or fallback identity.
 
-`PromptRunWorkflow` opens the corresponding
-transcript at EOF before dispatch, but only when exactly one filename matches
+`PromptTurnExecutor` opens the corresponding transcript at EOF before dispatch,
+but only when exactly one filename matches
 the UUID and its `session_meta` record carries the same ID. It reads complete
 newline-terminated records from a byte cursor. While `agent prompt --wait` owns
 submission and settlement, one attached
@@ -1101,10 +1104,11 @@ the durable dispatch and transcript-turn fence; inherited or unscoped output is
 never published. Command settlement stops the observer before the bounded final
 drain, and their shared observation signature suppresses duplicate publication.
 If the Herdr waiter becomes uncertain after dispatch, the same binding worker
-hands its live cursor and accumulated Answer state directly to detached
-observation. This closes the EOF reopen gap without replaying the prompt. A
-process restart still opens a new cursor and fences output with the durable turn
-ID and start timestamp because cursor internals are deliberately process-local.
+hands its live cursor and accumulated Answer state directly to
+`DetachedPromptObserver`. This closes the EOF reopen gap without replaying the
+prompt. After restart, `observe(prompt)` reloads the durable Prompt and Binding,
+opens a new cursor, and fences output with the persisted turn ID and start
+timestamp because cursor internals are deliberately process-local.
 `history_mutation.payload.items`
 in append mutations is the canonical typed Answer-content source. Assistant
 `message` items contribute only their ordered `output_text` parts. A

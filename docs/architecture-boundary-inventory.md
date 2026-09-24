@@ -35,7 +35,7 @@ Each seam must satisfy all of the following before it is marked complete:
 | 1 | Runtime events and work scheduling | SQLite or fresh Herdr state; never the in-process bus | `RuntimeEventBus` behind lifecycle, inbound, work, and Herdr-specific interfaces | Complete | Closed typed channels, named subscribers, startup buffering, keyed coalescing, failure diagnostics, awaited shutdown, and architecture checks. `runtime-event-bus.test.ts` covers the engine. |
 | 2 | Exact-turn control and steering | SQLite operation state plus fresh exact Herdr turn identity | `TurnControlWorkflow` for validation/acceptance; `TurnControlDispatcher` for owner-serialized effects | Complete | Active control returns after durable acceptance; dispatcher revalidates and claims before effect. Same-owner order, cross-owner independence, and accepted-versus-dispatching recovery are covered by `turn-control-dispatcher.test.ts`. |
 | 3 | Inbound admission and routing | Durable inbound rows and frozen routing context | `DurableInboundPipeline`, `InboundMessageRoutingWorkflow`, and `PromptAdmissionWorkflow` | Complete | The pipeline owns authorization, compact durable admission, scope-FIFO claim/release, retry, recovery, shutdown settlement, and the sole completion log. Routing returns one structured disposition, while ordinary and initial Prompt acceptance share one atomic workflow. Runtime hints contain only `eventId` and are best-effort; SQLite scanning remains authoritative. |
-| 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact transcript identity | `PromptRunWorkflow` with dispatch, recovery, and session store interfaces | Needs deepening | Store ports are narrow, but the workflow remains a large orchestration module. Extract one execution lifecycle module only where it reduces caller knowledge without splitting atomic Prompt transitions. |
+| 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact transcript identity | `PromptRunWorkflow` lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver` | Complete | The facade owns scheduling, safety, process-local exclusion, recovery controls, and shutdown. `drain(bindingId)` hides durable FIFO claim, fresh-pane preflight, fenced release, execution, and archive policy; `observe(prompt)` hides exact-turn reopening, ownership, polling, settlement, and uncertain no-replay recovery. |
 | 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | Instance control, turn supervisor, Worker observer, and instance scheduler interfaces | Needs audit | Consumer-shaped ports exist. Verify that card convergence, dispatch uncertainty, and instance lifecycle do not leak through shared implementation-shaped interfaces. |
 | 6 | Card projection and convergence | Durable Run Card, Worker Turn Card, Main Card, page, and delivery-version state | Pure view reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` | Complete | Primary and Worker continuation share one handoff policy; frozen-page offsets, checkpoint-gated Main Card retargeting, direct-Herdr pagination, duplicate convergence, stale targets, and startup recovery are covered through domain, workflow, SQLite, renderer, and context-rebuild tests. |
 | 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` plus `OutboundDeliveryExecutor` and `GatewayDeliveryPort` | Needs audit | Retry/dead-letter/frozen intent behavior exists. Review the large dispatcher and recovery store for policy leakage and ensure the event wake-up migration removed all production-local scheduler ownership. |
@@ -48,7 +48,7 @@ Each seam must satisfy all of the following before it is marked complete:
 
 The next passes follow risk and dependency direction:
 
-1. Deepen Primary execution/observation, then Worker execution/observation.
+1. Audit and deepen Worker execution/observation.
 2. Audit durable delivery and Herdr reconciliation after their producers expose
    stable interfaces.
 3. Finish with command/control and runtime lifecycle/health.
@@ -106,3 +106,21 @@ Verification on 2026-09-24: focused Inbound/EventBus/composition/architecture
 tests passed (9 files, 156 tests); the full suite passed (196 files, 2,635
 tests); TypeScript typecheck, production build, architecture import check,
 documentation audit, and `git diff --check` also passed.
+
+## Primary execution and observation completion evidence
+
+The Primary pass is complete because `PromptRunWorkflow` is now a lifecycle
+facade rather than the implementation owner for dispatch and detached polling.
+It retains scheduler subscription, safety scans, process-local worker exclusion,
+manual awake/skip controls, diagnostics, and shutdown. `PrimaryPromptDispatcher`
+owns the per-Binding durable FIFO loop and permits claim release only before
+dispatch evidence. `DetachedPromptObserver` reloads durable identity and settles
+only the exact persisted transcript turn; uncertain observation remains detached
+and never submits the Prompt again. `PromptTurnExecutor` remains the single live
+attempt module and hands its process-local cursor directly to the detached
+observer when an attached wait becomes uncertain.
+
+Verification on 2026-09-24 covers fresh busy-pane release, exact detached-turn
+settlement, attached-to-detached cursor continuity, startup recovery, safety
+scanning, FIFO concurrency, architecture dependency direction, and the full
+repository suite.

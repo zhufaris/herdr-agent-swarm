@@ -364,6 +364,24 @@ describe("application composition boundaries", () => {
     expect(bundle).not.toContain("readonly promptRun: PromptRunStore");
   });
 
+  it("keeps Primary execution and detached observation behind deep modules", () => {
+    const facade = readFileSync(new URL("../src/coordinator/prompt-run-workflow.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/coordinator/primary-prompt-dispatcher.ts", import.meta.url), "utf8");
+    const observer = readFileSync(new URL("../src/coordinator/detached-prompt-observer.ts", import.meta.url), "utf8");
+    expect(dispatcher).toContain("implements PrimaryPromptDispatcherPort");
+    expect(observer).toContain("implements DetachedPromptObserverPort");
+    expect(facade).toContain("this.dispatcher.drain(bindingId)");
+    expect(facade).toContain("this.detachedObserver.observe(prompt)");
+    expect(facade).not.toContain("claimNextDispatchablePrompt");
+    expect(facade).not.toContain("requireMatchingRuntimeIdentity");
+    expect(facade).not.toContain("settleDetachedPrompt");
+    expect(facade).not.toContain("decideDetachedTurnTerminalOutcome");
+    for (const source of [dispatcher, observer]) {
+      expect(source).not.toMatch(/from .*\/(?:composition|store\/sqlite|cards)\//);
+      expect(source).not.toContain("LarkPort");
+    }
+  });
+
   it("exposes Primary runtime state through a read-only domain seam", () => {
     const statePort = readFileSync(new URL("../src/domain/ports/primary-runtime-state.ts", import.meta.url), "utf8");
     const promptRun = readFileSync(new URL("../src/coordinator/prompt-run-workflow.ts", import.meta.url), "utf8");
@@ -586,7 +604,7 @@ describe("application composition boundaries", () => {
   it("keeps persisted output fingerprint policy in the domain", () => {
     expect(existsSync(new URL("../src/domain/output-fingerprint.ts", import.meta.url))).toBe(true);
     expect(existsSync(new URL("../src/runtime/output.ts", import.meta.url))).toBe(false);
-    for (const path of ["external-turn-observer.ts", "prompt-run-workflow.ts", "prompt-turn-executor.ts"]) {
+    for (const path of ["external-turn-observer.ts", "detached-prompt-observer.ts", "prompt-turn-executor.ts"]) {
       const source = readFileSync(new URL(`../src/coordinator/${path}`, import.meta.url), "utf8");
       expect(source).toContain("../domain/output-fingerprint.js");
     }
