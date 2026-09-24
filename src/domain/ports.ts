@@ -3,6 +3,7 @@ export type { AcceptInstanceTurnWithCardInput, InstanceLifecycleStore, InstanceS
 export type { TurnControlStore } from "./ports/turn-control.js";
 export type { AcceptPromptInput, ClaimedPrompt, DetachedPromptSkipResult, PromptAcceptanceStore, PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "./ports/prompt.js";
 export type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore } from "./ports/projection.js";
+export type { AnswerPageConvergencePort, MainCardConvergencePort } from "./ports/card-convergence.js";
 export type { BindingProvisioningStore, RetiredPaneCleanupStore, RuntimeReconciliationStore } from "./ports/binding.js";
 export type { PaneCloseStore, PaneControlStore } from "./ports/pane-operations.js";
 export type { ImmediateOutboundDispatcher, OutboundCheckpointSubscriber, OutboundIntentPort, OutboundIntentStore, OutboxDispatcherControl, OutboxStore } from "./ports/outbox.js";

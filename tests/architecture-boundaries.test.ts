@@ -491,15 +491,27 @@ describe("application composition boundaries", () => {
   it("composes startup projection workflows through explicit consumer stores", () => {
     const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
     const composition = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
+    const outbound = readFileSync(new URL("../src/composition/create-outbound-runtime.ts", import.meta.url), "utf8");
+    const projector = readFileSync(new URL("../src/events/conversation-view-projector.ts", import.meta.url), "utf8");
+    const port = readFileSync(new URL("../src/domain/ports/card-convergence.ts", import.meta.url), "utf8");
     expect(converger).toContain("export interface StartupViewProjectionStores");
-    for (const capability of ["startupViews", "answerPages", "mainCards"]) {
-      expect(converger).toContain(`${capability}:`);
-      expect(composition).toContain(`${capability}: stores.${capability}`);
-    }
+    expect(converger).toContain("startupViews: StartupViewStore");
+    expect(converger).not.toContain("AnswerPageStore");
+    expect(converger).not.toContain("MainCardStore");
     expect(converger).not.toMatch(/store as .*Store/);
+    expect(converger).not.toContain("new AnswerPageWorkflow");
+    expect(converger).not.toContain("new MainCardWorkflow");
+    expect(projector).not.toMatch(/from .*coordinator/);
+    expect(projector).not.toContain("new AnswerPageWorkflow");
+    expect(projector).not.toContain("new MainCardWorkflow");
+    expect(port).toContain("export interface AnswerPageConvergencePort");
+    expect(port).toContain("export interface MainCardConvergencePort");
     expect(composition).toContain("new StartupViewConverger({");
-    expect(composition).not.toContain("answerPageWorkflow:");
-    expect(composition).not.toContain("mainCardWorkflow:");
+    expect(composition).toContain("stores: { startupViews: stores.startupViews }");
+    expect(composition).toContain("answerPages, mainCards");
+    expect(outbound).toContain("new AnswerPageWorkflow");
+    expect(outbound).toContain("new MainCardWorkflow");
+    expect(readFileSync(new URL("../scripts/check-architecture-imports.mjs", import.meta.url), "utf8")).toContain('importer.startsWith("src/events/") && target.startsWith("src/coordinator/")');
   });
 
   it("bounds startup Answer convergence to durable actionable Run Cards", () => {

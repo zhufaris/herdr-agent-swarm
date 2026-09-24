@@ -4,10 +4,9 @@ import { planAnswerPage, type AnswerPagePlanningPort } from "../domain/answer-pa
 import { answerElementId } from "../domain/run-card-view.js";
 import type { AnswerPageStore } from "../domain/ports/projection.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
+import type { AnswerPageConvergencePort } from "../domain/ports/card-convergence.js";
 
-export interface AnswerPageWorkflowPort { converge(promptId: string, workClass?: OutboundWorkClass): Promise<void>; }
-
-export class AnswerPageWorkflow implements AnswerPageWorkflowPort {
+export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   private readonly tails = new Map<string, Promise<void>>();
   private readonly planning: AnswerPagePlanningPort;
   constructor(

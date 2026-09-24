@@ -9,10 +9,10 @@ import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { resolveCatalogModel } from "../domain/model-selection.js";
 import { isNativeTraexSession } from "../domain/traex-session-identity.js";
-import type { MainCardWorkflowPort } from "./main-card-workflow.js";
+import type { MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
-interface Options { config: BridgeConfig; store: ModelSelectionStore; traexControl: TraexControlPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardWorkflowPort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
+interface Options { config: BridgeConfig; store: ModelSelectionStore; traexControl: TraexControlPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardConvergencePort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
 
 const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。";
 

@@ -13,6 +13,7 @@ import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { MainCardWorkflow } from "../src/coordinator/main-card-workflow.js";
 import { StartupViewConverger } from "../src/coordinator/startup-view-converger.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 import { answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
@@ -1294,10 +1295,12 @@ describe("Lark channel publisher", () => {
     }
     const startup = new StartupViewConverger({
       config: { projects: [{ id: "bridge", displayName: "Bridge", spaceName: "herdr-lark-bridge", description: "Bridge", workspaceId: "wH", cwd: "/work/bridge" }] } as never,
-      stores: { startupViews: store, answerPages: store, mainCards: store },
+      stores: { startupViews: store },
       outbound: { enqueueRunCardUpdate: vi.fn() } as unknown as OutboundIntentPort,
       outboundWork: { wake: () => {}, subscribe: () => () => {} },
-      presentation: primaryPresentation
+      presentation: primaryPresentation,
+      answerPages: new AnswerPageWorkflow(store, () => {}, primaryPresentation),
+      mainCards: new MainCardWorkflow(store, () => {}, primaryPresentation)
     });
     await startup.converge();
 

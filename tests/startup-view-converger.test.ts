@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { StartupViewConverger, type StartupViewConvergerOptions } from "../src/coordinator/startup-view-converger.js";
+import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
+import { MainCardWorkflow } from "../src/coordinator/main-card-workflow.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { OutboundIntentPort } from "../src/domain/ports.js";
@@ -12,12 +14,15 @@ const config = {
 } as const satisfies Pick<BridgeConfig, "projects">;
 
 function createConverger(store: SqliteBindingStore, overrides: Partial<StartupViewConvergerOptions> = {}): StartupViewConverger {
+  const outboundWork = overrides.outboundWork ?? { wake: () => {}, subscribe: () => () => {} };
   return new StartupViewConverger({
     config,
-    stores: { startupViews: store, answerPages: store, mainCards: store },
+    stores: { startupViews: store },
     outbound: { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort,
-    outboundWork: { wake: () => {}, subscribe: () => () => {} },
+    outboundWork,
     presentation: primaryPresentation,
+    answerPages: new AnswerPageWorkflow(store, () => outboundWork.wake(), primaryPresentation),
+    mainCards: new MainCardWorkflow(store, () => outboundWork.wake(), primaryPresentation),
     ...overrides
   });
 }
@@ -115,7 +120,7 @@ describe("StartupViewConverger", () => {
     }
     const mainCards = { project: vi.fn(async (view: { bindingId: string }) => { if (view.bindingId === "bad") throw new Error("bad view"); }) };
     const logger = { warn: vi.fn() };
-    const converger = createConverger(store, { mainCardWorkflow: mainCards, logger });
+    const converger = createConverger(store, { mainCards, logger });
 
     await expect(converger.converge()).resolves.toEqual(["bad"]);
     expect(mainCards.project).toHaveBeenCalledTimes(2);
@@ -212,7 +217,7 @@ describe("StartupViewConverger", () => {
     store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'done'").run();
     const mainCards = { project: vi.fn(async () => undefined) };
 
-    await createConverger(store, { mainCardWorkflow: mainCards }).converge();
+    await createConverger(store, { mainCards }).converge();
 
     expect(mainCards.project).not.toHaveBeenCalled();
     store.close();
@@ -225,7 +230,7 @@ describe("StartupViewConverger", () => {
     store.saveTopicView({ ...initialTopicView("pending-view"), title: "pending", workspaceId: "wH", spaceName: "herdr-lark-bridge", phase: "done", viewVersion: 2, deliveredVersion: 1 });
     const mainCards = { project: vi.fn(async () => undefined) };
 
-    await createConverger(store, { mainCardWorkflow: mainCards }).convergeBindings(["absent", "pending-view"]);
+    await createConverger(store, { mainCards }).convergeBindings(["absent", "pending-view"]);
 
     expect(mainCards.project).toHaveBeenCalledOnce();
     expect(mainCards.project).toHaveBeenCalledWith(expect.objectContaining({ bindingId: "pending-view" }), "history");

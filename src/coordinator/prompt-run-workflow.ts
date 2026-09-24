@@ -18,7 +18,7 @@ import { PromptRunRegistry } from "./prompt-run-registry.js";
 import { abortedPromptNotice, decideDetachedTurnTerminalOutcome, isLaterConflictingTranscriptTurn } from "./prompt-execution-lifecycle.js";
 import { requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 import { PromptSafetyScanner } from "./prompt-safety-scanner.js";
-import type { MainCardWorkflowPort } from "./main-card-workflow.js";
+import type { MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 import { TranscriptObserver, type TurnOutputSource } from "./transcript-observer.js";
 import { PromptTurnExecutor } from "./prompt-turn-executor.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
@@ -54,7 +54,7 @@ interface PromptRunWorkflowOptions {
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
   observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
   recoverExternalTurns?: (binding: Binding, prompt: PromptJob) => Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }>;
-  mainCards?: Pick<MainCardWorkflowPort, "converge">;
+  mainCards?: Pick<MainCardConvergencePort, "converge">;
 }
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";

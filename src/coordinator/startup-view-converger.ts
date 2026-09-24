@@ -1,13 +1,9 @@
 import type { BridgeConfig } from "../config.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
-import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
 import type { StartupViewStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
-import type { AnswerPageWorkflowPort } from "./answer-page-workflow.js";
-import { AnswerPageWorkflow } from "./answer-page-workflow.js";
+import type { AnswerPageConvergencePort, MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 import { initialTopicView, mirrorRunCardToTopic, updateTopicView } from "../domain/topic-view.js";
-import type { MainCardWorkflowPort } from "./main-card-workflow.js";
-import { MainCardWorkflow } from "./main-card-workflow.js";
 import type { Binding } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { Logger } from "pino";
@@ -17,8 +13,6 @@ import { ProjectCatalog } from "./project-catalog.js";
 export interface StartupViewConvergerPort { converge(): Promise<readonly string[]>; convergeBindings(bindingIds: readonly string[]): Promise<readonly string[]>; }
 export interface StartupViewProjectionStores {
   startupViews: StartupViewStore;
-  answerPages: AnswerPageStore;
-  mainCards: MainCardStore;
 }
 
 export interface StartupViewConvergerOptions {
@@ -27,15 +21,15 @@ export interface StartupViewConvergerOptions {
   outbound: OutboundIntentPort;
   outboundWork: OutboundWorkNotifier;
   presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">;
-  answerPageWorkflow?: AnswerPageWorkflowPort;
-  mainCardWorkflow?: MainCardWorkflowPort;
+  answerPages: AnswerPageConvergencePort;
+  mainCards: MainCardConvergencePort;
   logger?: Pick<Logger, "warn">;
 }
 
 export class StartupViewConverger implements StartupViewConvergerPort {
   private readonly projectRoutes: ProjectCatalog;
-  private readonly pageWorkflow: AnswerPageWorkflowPort;
-  private readonly mainCardWorkflow: MainCardWorkflowPort;
+  private readonly answerPages: AnswerPageConvergencePort;
+  private readonly mainCards: MainCardConvergencePort;
   private readonly store: StartupViewStore;
   private readonly outbound: OutboundIntentPort;
   private readonly outboundWork: OutboundWorkNotifier;
@@ -48,8 +42,8 @@ export class StartupViewConverger implements StartupViewConvergerPort {
     this.outboundWork = options.outboundWork;
     this.presentation = options.presentation;
     this.logger = options.logger;
-    this.pageWorkflow = options.answerPageWorkflow ?? new AnswerPageWorkflow(options.stores.answerPages, () => options.outboundWork.wake(), options.presentation);
-    this.mainCardWorkflow = options.mainCardWorkflow ?? new MainCardWorkflow(options.stores.mainCards, () => options.outboundWork.wake(), options.presentation);
+    this.answerPages = options.answerPages;
+    this.mainCards = options.mainCards;
     this.projectRoutes = new ProjectCatalog(options.config.projects);
   }
 
@@ -102,12 +96,12 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
         if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current), "history"); this.outboundWork.wake(); }
         if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
-        else if (current.answerCardId) await this.pageWorkflow.converge(current.promptId, "history");
+        else if (current.answerCardId) await this.answerPages.converge(current.promptId, "history");
       }
       const latestRun = this.store.loadStartupMainRunCard(binding.id, reconciledTopicView.activePromptId);
       const terminal = binding.lifecycle === "draining" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed";
       const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
-      await this.mainCardWorkflow.project(finalTopic, "history");
+      await this.mainCards.project(finalTopic, "history");
   }
 
   private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }

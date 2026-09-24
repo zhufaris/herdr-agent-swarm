@@ -3,7 +3,7 @@ import type { BridgeConfig } from "../config.js";
 import type { HerdrPort, TraexControlPort, TraexTranscriptReaderPort } from "../domain/ports/external.js";
 import { feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import { ExternalTurnObserver } from "../coordinator/external-turn-observer.js";
-import type { MainCardWorkflowPort } from "../coordinator/main-card-workflow.js";
+import type { MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 import { PromptRunWorkflow } from "../coordinator/prompt-run-workflow.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
@@ -24,7 +24,7 @@ export interface PrimaryRuntimeStores {
 export function createPrimaryRuntime(options: {
   config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: TraexTranscriptReaderPort;
-  mainCards: Pick<MainCardWorkflowPort, "converge">;
+  mainCards: Pick<MainCardConvergencePort, "converge">;
   agentDrivers: AgentDriverCatalog;
   presentation?: PrimaryPresentation;
 }) {

@@ -19,13 +19,12 @@ import { createCompatibilityGatewayIngressSink } from "../gateways/compatibility
 import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
 import { NaturalLanguageCommandWorkflow } from "../coordinator/natural-language-command-workflow.js";
 import type { PromptAcceptanceStore } from "../domain/ports/prompt.js";
-import type { AnswerPageStore, MainCardStore } from "../domain/ports/projection.js";
 import type { InboundMessageDispatchStore, InboundRoutingStore, StartupRecoveryStore, StartupViewStore } from "../domain/ports/workflow.js";
 import type { NaturalLanguageCommandConfirmationStore } from "../domain/ports/natural-language-command-confirmation.js";
 
 export interface IngressRecoveryStores {
   inboundDispatch: InboundMessageDispatchStore; promptAcceptance: PromptAcceptanceStore; inboundRouting: InboundRoutingStore;
-  startupRecovery: StartupRecoveryStore; startupViews: StartupViewStore; answerPages: AnswerPageStore; mainCards: MainCardStore;
+  startupRecovery: StartupRecoveryStore; startupViews: StartupViewStore;
   naturalLanguageCommandConfirmations: NaturalLanguageCommandConfirmationStore;
 }
 
@@ -37,13 +36,13 @@ export function createIngressRecoveryRuntime(options: {
   naturalLanguageCommands: NaturalLanguageCommandInterpreter;
 }) {
   const { config, stores, logger, bus, scheduler, inboundWork, infrastructure, delivery, primary, bindingSession, commandControl, presentation } = options;
-  const { herdr, gateway } = infrastructure; const { outbound, outboundWork } = delivery; const { promptRun, primaryState } = primary;
+  const { herdr, gateway } = infrastructure; const { outbound, outboundWork, answerPages, mainCards } = delivery; const { promptRun, primaryState } = primary;
   const { provisioning, paneClosure, reconciler, retiredPaneCleanup } = bindingSession;
   const { paneControl, sessionOperations, cardInteractions, swarmCommands, instanceInteractions, workerSessionThreads, modelSelection } = commandControl;
   const startupViews = new StartupViewConverger({
     config,
-    stores: { startupViews: stores.startupViews, answerPages: stores.answerPages, mainCards: stores.mainCards },
-    outbound, outboundWork, presentation: presentation.primary, logger
+    stores: { startupViews: stores.startupViews },
+    outbound, outboundWork, presentation: presentation.primary, answerPages, mainCards, logger
   });
   const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, inboundWork, logger });
   const naturalLanguageWorkflow = new NaturalLanguageCommandWorkflow({ store: stores.naturalLanguageCommandConfirmations, outbound, outboundWork, presentation: presentation.application, swarmCommands, instanceInteractions });

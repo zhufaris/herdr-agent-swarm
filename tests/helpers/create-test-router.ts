@@ -24,6 +24,7 @@ import { TurnControlWorkflow } from "../../src/coordinator/turn-control-workflow
 import { SwarmCommandContextResolver } from "../../src/coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway.js";
 import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
+import { AnswerPageWorkflow } from "../../src/coordinator/answer-page-workflow.js";
 import type { HerdrPort, LarkPort, TraexControlPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
 import { cardKitPanePresentation } from "../../src/cards/cardkit-pane-presentation.js";
 import { cardKitPrimaryPresentation } from "../../src/cards/cardkit-primary-presentation.js";
@@ -121,8 +122,11 @@ export function createTestRouter(
   const messageRouting = new InboundMessageRoutingWorkflow({ config, stores: { routing: store, promptAcceptance: store }, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, presentation: cardKitPrimaryPresentation, primaryState: promptRun, provisioning, swarmCommands });
   const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: async (binding, selection) => { await messageRouting.enqueueInitialProjectPrompt(binding, selection); } });
   const startupViews = new StartupViewConverger({
-    config, stores: { startupViews: store, answerPages: store, mainCards: store },
-    outbound: writer, outboundWork, presentation: cardKitPrimaryPresentation, logger
+    config, stores: { startupViews: store },
+    outbound: writer, outboundWork, presentation: cardKitPrimaryPresentation,
+    answerPages: new AnswerPageWorkflow(store, () => outboundWork.wake(), cardKitPrimaryPresentation, logger),
+    mainCards: new MainCardWorkflow(store, () => outboundWork.wake(), cardKitPrimaryPresentation, logger),
+    logger
   });
   const gateway = createFeishuGatewayPlugin({ createTransport: () => lark }).create({ gatewayId: config.gateway?.id ?? "feishu:primary", ...config.lark }, { logger });
   const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundDispatcher.receiveMessage(message), handleAction: (action) => cardActionRouter.handle(action) });

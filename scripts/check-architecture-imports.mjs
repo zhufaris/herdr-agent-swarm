@@ -27,6 +27,9 @@ for (const file of files) {
     if (importer.startsWith("src/domain/") && target.startsWith("src/runtime/")) {
       violations.push(`${importer} may not depend on the runtime layer ${target}`);
     }
+    if (importer.startsWith("src/events/") && target.startsWith("src/coordinator/")) {
+      violations.push(`${importer} may not depend on the coordinator layer ${target}`);
+    }
     if (importer.startsWith("src/gateways/") && /^(src\/(?:composition|coordinator)\/|src\/runtime\/(?:herdr|traex)|src\/(?:domain|events)\/.*prompt)/.test(target)) {
       violations.push(`${importer} may not depend on workflow or Agent runtime module ${target}`);
     }

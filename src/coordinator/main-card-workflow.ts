@@ -3,13 +3,9 @@ import type { MainCardStore } from "../domain/ports/projection.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { updateTopicModelPreference, type TopicViewState } from "../domain/topic-view.js";
 import type { OutboundWorkClass } from "../domain/types.js";
+import type { MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 
-export interface MainCardWorkflowPort {
-  converge(bindingId: string, workClass?: OutboundWorkClass): Promise<void>;
-  project(view: TopicViewState, workClass?: OutboundWorkClass): Promise<void>;
-}
-
-export class MainCardWorkflow implements MainCardWorkflowPort {
+export class MainCardWorkflow implements MainCardConvergencePort {
   private readonly tails = new Map<string, Promise<void>>();
 
   constructor(private readonly store: MainCardStore, private readonly wake: () => void, private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard">, private readonly logger?: Logger) {}

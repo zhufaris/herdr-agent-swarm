@@ -4,7 +4,7 @@ import { ExternalTurnObserver } from "../src/coordinator/external-turn-observer.
 import type { TraexTranscriptObservation } from "../src/domain/ports.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
-import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
+import { TestConversationViewProjector as ConversationViewProjector } from "./helpers/create-test-conversation-view-projector.js";
 import { HerdrEventRouter } from "../src/runtime/herdr-event-router.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
