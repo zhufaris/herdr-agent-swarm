@@ -5,6 +5,7 @@ import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderPr
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { stripNativeTaskFrame } from "../src/runtime/native-task-frame.js";
+import { SWARM_COMMAND_DEFINITIONS } from "../src/domain/swarm-command.js";
 
 function findTaggedNodes(value: unknown, tag: string): Array<Record<string, unknown>> {
   if (Array.isArray(value)) return value.flatMap((item) => findTaggedNodes(item, tag));
@@ -97,6 +98,13 @@ describe("run card", () => {
     expect(help).toContain("/swarm skip");
     expect(help).toContain("此前结果仍不确定");
     expect(help).toContain("其它 slash 命令会原样提交给 TraeX");
+  });
+
+  it("renders every typed Swarm command and keeps remote approval unavailable", () => {
+    const help = JSON.stringify(renderHelpCard());
+    for (const definition of Object.values(SWARM_COMMAND_DEFINITIONS)) expect(help).toContain(definition.syntax);
+    expect(help).toContain("高风险 TraeX 审批必须在 Herdr 终端完成");
+    expect(help).not.toMatch(/远程批准|批准 TraeX|绕过审批/);
   });
 
   it("renders project buttons with opaque ids and no host routing details", () => {

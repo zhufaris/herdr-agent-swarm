@@ -11,7 +11,7 @@ const project = { id: "project", displayName: "Project", spaceName: "space", des
 const config = { projects: [project], defaultProjectId: "project", lark: { adminOpenIds: ["admin"] } } as never;
 const message = { eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "", mentionsBot: true, isRootMessage: false };
 
-function setup(activeTurn: () => { promptId: string; paneId: string } | null = () => ({ promptId: "prompt", paneId: "w1:p1" })) {
+function setup(activeTurn: () => { promptId: string; paneId: string } | null = () => ({ promptId: "prompt", paneId: "w1:p1" }), logger = pino({ enabled: false })) {
   const store = new SqliteBindingStore(":memory:");
   store.createPendingBinding({ id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
   store.updateBinding("binding", { paneId: "w1:p1", traexSessionId: "terminal", state: "active", lifecycle: "active", attachment: "attached" });
@@ -28,9 +28,14 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
   const wakeCardContext = vi.fn();
   let gateway!: SwarmCommandGateway;
   const wakeCommand = vi.fn((intentId: string) => { queueMicrotask(() => gateway.wakeAcceptedIntent({ id: intentId })); });
-  gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger: pino({ enabled: false }), provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, wakeCardContext, wakeCommand, presentation: applicationPresentation } as never);
+  gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, wakeCardContext, wakeCommand, presentation: applicationPresentation } as never);
   const workerCreation = new ProgrammaticWorkerCreation(gateway, 1_000);
   return { store, gateway, workerCreation, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound, wakeCardContext, wakeCommand };
+}
+
+function capturingLogger() {
+  const records: Array<Record<string, unknown>> = [];
+  return { logger: pino({ level: "trace" }, { write(chunk: string) { records.push(JSON.parse(chunk) as Record<string, unknown>); } }), records };
 }
 
 async function waitForIntentState(store: SqliteBindingStore, state: string): Promise<void> {
@@ -51,6 +56,16 @@ describe("SwarmCommandGateway", () => {
     await vi.waitFor(() => expect(fixture.sessionAdministration.rename).toHaveBeenCalledOnce());
     release();
     await waitForIntentState(fixture.store, "succeeded");
+    fixture.store.close();
+  });
+
+  it("logs correlation metadata without raw command arguments", async () => {
+    const capture = capturingLogger();
+    const fixture = setup(undefined, capture.logger);
+    await fixture.gateway.submit({ source: "literal", message: { ...message, messageId: "logged-rename" }, command: { kind: "rename", title: "secret title" } });
+    await vi.waitFor(() => expect(capture.records.some(({ event }) => event === "swarm-command-terminal")).toBe(true));
+    expect(capture.records).toEqual(expect.arrayContaining([expect.objectContaining({ event: "swarm-command-admitted", intentId: expect.any(String), laneKey: "binding:binding", commandKind: "rename", source: "literal" }), expect.objectContaining({ event: "swarm-command-executing", commandKind: "rename" }), expect.objectContaining({ event: "swarm-command-terminal", outcome: "succeeded" })]));
+    expect(JSON.stringify(capture.records)).not.toContain("secret title");
     fixture.store.close();
   });
 

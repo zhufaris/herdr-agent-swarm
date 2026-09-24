@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveTopicTitle, parseCommand, parseInstanceCommand, splitMessage } from "../src/domain/commands.js";
-import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_POLICIES, swarmCommandDefinition, swarmCommandPolicy, swarmCommandSourceDecision } from "../src/domain/swarm-command.js";
+import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS, SWARM_COMMAND_POLICIES, swarmCommandDefinition, swarmCommandPolicy, swarmCommandSourceDecision } from "../src/domain/swarm-command.js";
 
 describe("commands", () => {
   it("parses supported commands", () => {
@@ -94,6 +94,12 @@ describe("commands", () => {
     expect(swarmCommandSourceDecision({ kind: "stop" }, "literal")).toBe("admit");
     expect(swarmCommandSourceDecision({ kind: "stop" }, "card")).toBe("admit");
     expect(swarmCommandSourceDecision({ kind: "stop" }, "primary-tool")).toBe("unsupported");
+  });
+
+  it("places every command definition in exactly one help group", () => {
+    const grouped = SWARM_COMMAND_HELP_GROUPS.flatMap(({ kinds }) => kinds);
+    expect(grouped.sort()).toEqual(Object.keys(SWARM_COMMAND_DEFINITIONS).sort());
+    expect(new Set(grouped).size).toBe(grouped.length);
   });
 
   it("derives bounded titles and splits at line boundaries", () => {

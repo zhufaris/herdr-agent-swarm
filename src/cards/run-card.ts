@@ -11,6 +11,7 @@ import { actionRow, cardSection, lifecycleMarker, passiveCardElements, recentIte
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
 import { currentPageActionLabel } from "../domain/card-page-handoff.js";
+import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS } from "../domain/swarm-command.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -335,6 +336,13 @@ function formatTokenCount(tokens: number | null): string | null {
 }
 
 export function renderHelpCard(): object {
+  const commandGroups = SWARM_COMMAND_HELP_GROUPS.map((group) => ({
+    tag: "markdown",
+    content: [`**${group.title}**`, ...group.kinds.map((kind) => {
+      const definition = SWARM_COMMAND_DEFINITIONS[kind];
+      return `\`${definition.syntax}\`  ${definition.summary}`;
+    })].join("\n")
+  }));
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: "HerdrSwarm 帮助" } },
@@ -347,35 +355,8 @@ export function renderHelpCard(): object {
         "**紧急操作**",
         "`/swarm stop` 停止当前任务 · `/swarm status` 刷新状态"
       ].join("\n") },
-      { tag: "collapsible_panel", expanded: false, header: { title: { tag: "plain_text", content: "高级命令与恢复" } }, elements: [
-      { tag: "markdown", content: [
-        "`/swarm new [标题] [--agent traex|pi|codex|claude-code]`  选择项目和 Primary Agent（默认 traex）",
-        "`/swarm reset [标题]`  使用当前 Agent 类型安全切换到新会话（旧 pane 仅在确认空闲后自动关闭）",
-        "`/swarm stop`  中断 exact active turn，不停止 pane、不取消 FIFO",
-        "`/swarm steer <文本>`  active 时注入 exact turn，idle 时优先于普通队列执行",
-        "`/swarm projects`  打开项目选择卡片",
-        "`/swarm spaces`  按 Space 查看全部 Pane",
-        "`/swarm panes`  列出当前 Space 的 active Pane，并将所选入口卡片发送到群聊",
-        "`/swarm sessions`  查看当前群的会话",
-        "`/swarm failures`  查看并处理发送失败",
-        "`/swarm attach <space> <pane>`  按 ID 或唯一名称连接已有受支持 Agent pane",
-        "`/swarm status`  查看当前绑定",
-        "`/swarm model [name]`  查看或切换当前 Pane 的 TraeX 模型",
-        "`/swarm worker create <name> [--agent <kind>] [--model <name>] [--start]`  在当前 Primary 下创建 Worker",
-        "`/swarm rename <标题>`  重命名当前 pane",
-        "`/swarm close`  请求关闭当前 Primary 拓扑（需要 60 秒内二次确认）",
-        "`/swarm close confirm <code>`  best-effort 关闭安全 Worker，再关闭 Primary",
-        "`/swarm pane close [confirm <code>]`  兼容别名",
-        "`/swarm reattach <pane>`  重新连接已验证的原 Pane",
-        "`/swarm replace`  创建新的 Pane generation（不会重放任务）",
-        "`/swarm resume`  验证后恢复已归档会话",
-        "`/swarm awake`  从 detached turn 后补投影遗漏的 Herdr Answer Card（不会重发任务）",
-        "`/swarm skip`  人工跳过当前话题最早的 detached Primary 任务并继续 FIFO（此前结果仍不确定）",
-        "`/swarm help`  显示本卡片", "",
-        "只有 `/swarm …` 会由 HerdrSwarm 处理；其它 slash 命令会原样提交给 TraeX。"
-      ].join("\n") }
-      ] },
-      { tag: "markdown", content: "高风险审批必须在 Herdr 终端完成" }
+      { tag: "collapsible_panel", expanded: false, header: { title: { tag: "plain_text", content: "全部命令" } }, elements: commandGroups },
+      { tag: "markdown", content: "自然语言只对 stop、skip 和最终关闭确认增加二次确认。高风险 TraeX 审批必须在 Herdr 终端完成；其它 slash 命令会原样提交给 TraeX。" }
     ] }
   };
 }

@@ -84,6 +84,7 @@ export class SwarmCommandGateway implements SwarmCommandRuntime {
     if (!this.accepting) return { outcome: "rejected", commandKind: command.kind, code: "shutting_down", message: "Swarm command admission is stopping" };
     const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() }, request.source, this.options.presentation.commandStatus);
     if (accepted.outcome === "conflict") return { outcome: "conflict", commandKind: command.kind, intent: accepted.intent };
+    this.options.logger.info({ event: "swarm-command-admitted", intentId: accepted.intent.id, laneKey: accepted.intent.laneKey, commandKind: command.kind, source: request.source, outcome: accepted.outcome }, "Swarm command admitted");
     this.options.wakeOutbound?.();
     if (this.options.wakeCommand) this.options.wakeCommand(accepted.intent.id);
     else this.dispatcher.wake(accepted.intent.id);

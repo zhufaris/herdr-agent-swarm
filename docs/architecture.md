@@ -563,15 +563,15 @@ transition justification and an architecture-test allowlist update.
 
 ### Swarm command bounded context
 
-Every parsed `/swarm` command enters `SwarmCommandGateway`; the inbound router no
-longer owns per-command authorization or dispatch branches. The gateway resolves
+Every parsed `/swarm` command enters the `SwarmCommandRuntime`; the inbound router no
+longer owns per-command authorization or dispatch branches. The runtime resolves
 one immutable context containing the chat/project scope and, for Primary-scoped
 commands, the binding generation plus both runtime identity dimensions:
 
 ```text
 Lark text ───────────────┐
-                        ├─> SwarmCommandGateway
-CardKit Worker create ──┘      |
+CardKit Worker create ───┼─> SwarmCommandRuntime
+Primary Tool create ─────┘      |
                                +─ query -> handler + audit
                                |           (no CommandIntent)
                                +─ mutation -> accept -> CommandIntentDispatcher
@@ -579,8 +579,8 @@ CardKit Worker create ──┘      |
                                                         -> owning aggregate
 ```
 
-The gateway owns only ingress context resolution, query routing, durable mutation
-admission, and Worker-result adaptation. `CommandIntentDispatcher` owns claim,
+The runtime owns normalized context resolution, source/risk policy, query routing,
+durable mutation admission, and observation. `CommandIntentDispatcher` owns claim,
 execution, settlement, recovery, and shutdown. Mutation lanes serialize commands
 for the same chat, project, or Primary while
 allowing unrelated Primary sessions to proceed independently. `CommandIntent`
@@ -592,7 +592,12 @@ Startup marks any interrupted `executing` intent `uncertain` and drains only
 intents that never started. A handler error after invocation is also conservative
 `uncertain`, because an external Herdr effect may already have occurred. Neither
 case is blindly replayed. Queries use the same parser, context, policy, and
-authorization path but create no command intent.
+authorization path but create no command intent. Mutation admission atomically
+creates the intent, Command Status view, and outbox create intent, then returns
+without waiting for the external effect. Intent-ID hints reduce latency; periodic
+SQLite scans converge missed hints. Programmatic Worker callers reconstruct results
+from durable outcome identity and Instance state, including after restart. Only
+destructive natural-language commands require durable confirmation.
 Shutdown first stops new Lark, card, and inbound acceptance, then waits for all
 claimed command lanes to settle before the remaining workflows and SQLite store
 are stopped.

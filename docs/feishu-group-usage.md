@@ -191,9 +191,15 @@ Controller Agent 解释。未显式提及 Bot 的普通群消息不会被当作�
 - `@Bot 创建 reviewer worker 并启动`
 - `@Bot 发送给 worker reviewer: run tests`
 
-只读查询直接执行。任何改变状态的自然语言命令都会先生成 durable confirmation
-卡片；只有同一群中的原始发起者能在过期前确认。关闭 Pane 仍需已有的 close-code
-二次确认。高风险 TraeX 审批仍只能在 Herdr 本地完成。
+只读查询和可恢复的状态变更会直接进入统一 Swarm Command Runtime；mutation 在 SQLite
+完成 durable admission 后立即返回，随后由后台 dispatcher 按 scope lane FIFO 执行。只有
+`stop`、`skip` 和最终的 `close confirm` 这三类 destructive mutation 在自然语言入口生成
+durable confirmation 卡片；只有同一群中的原始发起者能在过期前确认。显式 `/swarm ...`
+仍保持原有直接语义。高风险 TraeX 审批仍只能在 Herdr 本地完成。
+
+每个 mutation 都有稳定的 Command Status Card，依次显示 accepted、executing 和终态。
+服务重启后状态从 SQLite 恢复；中断的 `executing` 命令会标记为 `uncertain`，不会自动重放。
+CardKit 投递失败只进入 durable outbox 重试，不会再次执行命令。
 
 自然语言不能创建或删除已配置项目或 Herdr Workspace；`projects.json` 仍是路由和
 安全边界。需要直接、确定的命令入口时使用 `/swarm ...`。Controller 不可用时，

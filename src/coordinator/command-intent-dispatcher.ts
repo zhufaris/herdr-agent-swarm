@@ -64,6 +64,7 @@ export class CommandIntentDispatcher {
     const previous = this.laneWorkers.get(laneKey) ?? Promise.resolve();
     const worker = previous.catch(() => undefined).then(async () => {
       for (let intent = this.options.store.claimNextCommandIntent(laneKey, this.options.presentation.commandStatus); intent; intent = this.options.store.claimNextCommandIntent(laneKey, this.options.presentation.commandStatus)) {
+        this.options.logger.info({ event: "swarm-command-executing", intentId: intent.id, laneKey: intent.laneKey, commandKind: intent.command.kind, attemptCount: intent.attemptCount, outcome: "executing" }, "Swarm command execution started");
         this.options.wakeOutbound?.();
         await this.executeMutation(intent);
       }
@@ -141,10 +142,12 @@ export class CommandIntentDispatcher {
         if (intent.idempotencyKey.startsWith("lark-message:")) await this.reply(message, `Worker ${result.instance.name} 已创建${result.status === "created-start-failed" ? `，但启动失败：${result.error}` : "。"}`);
       } else throw new Error(`Query command ${command.kind} cannot execute as mutation`);
       this.options.store.finishCommandIntent(intent.id, ok ? "succeeded" : "rejected", { code: ok ? outcomeCode : "rejected", detail: ok ? outcomeDetail : null, ...operation }, this.options.presentation.commandStatus);
+      this.options.logger.info({ event: "swarm-command-terminal", intentId: intent.id, laneKey: intent.laneKey, commandKind: intent.command.kind, outcome: ok ? "succeeded" : "rejected", outcomeCode: ok ? outcomeCode : "rejected" }, "Swarm command execution settled");
       this.options.wakeOutbound?.();
     } catch (error) {
       const detail = safeLogError(error).message;
       this.options.store.finishCommandIntent(intent.id, effectMayHaveStarted ? "uncertain" : "failed", { code: effectMayHaveStarted ? "external_effect_uncertain" : "failed", detail, ...operation }, this.options.presentation.commandStatus);
+      this.options.logger.warn({ event: "swarm-command-terminal", intentId: intent.id, laneKey: intent.laneKey, commandKind: intent.command.kind, err: safeLogError(error), outcome: effectMayHaveStarted ? "uncertain" : "failed" }, "Swarm command execution did not complete cleanly");
       this.options.wakeOutbound?.();
       await this.reject(message, detail, intent.command.kind, "failed");
     }
