@@ -17,6 +17,7 @@ import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
+import { CommandIntentObserver, type CommandIntentObservation } from "./command-intent-observer.js";
 import { SwarmCommandContextResolver, type SwarmCommandContextResolution } from "./swarm-command-context-resolver.js";
 
 interface Options {
@@ -28,6 +29,7 @@ interface Options {
   wakeCardContext(): void;
   wakeOutbound?(): void;
   wakeCommand?(intentId: string): void;
+  observationTimeoutMs?: number;
   presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult" | "commandStatus">;
 }
 
@@ -42,7 +44,7 @@ export type SwarmCommandRequest =
   | PrimaryToolCommandRequest;
 export type SwarmCommandReceipt =
   | { outcome: "query-completed"; commandKind: BridgeCommand["kind"] }
-  | { outcome: "accepted"; commandKind: BridgeCommand["kind"]; intent: CommandIntent; workerResult?: CreateWorkerResult }
+  | { outcome: "accepted"; commandKind: BridgeCommand["kind"]; intent: CommandIntent }
   | { outcome: "rejected"; commandKind: BridgeCommand["kind"]; code: string; message: string }
   | { outcome: "conflict"; commandKind: BridgeCommand["kind"]; intent: CommandIntent };
 
@@ -52,6 +54,7 @@ export interface SwarmCommandGatewayPort {
   resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution;
   drainAcceptedIntent(intent: CommandIntent): Promise<void>;
   wakeAcceptedIntent(intent: Pick<CommandIntent, "id">): void;
+  observe(intentId: string, timeoutMs?: number): Promise<CommandIntentObservation>;
   start(intervalMs: number): void;
   createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult>;
   createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult>;
@@ -61,12 +64,14 @@ export interface SwarmCommandGatewayPort {
 
 export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   private readonly dispatcher: CommandIntentDispatcher;
+  private readonly observer: CommandIntentObserver;
   private accepting = true;
-  constructor(private readonly options: Options) { this.dispatcher = new CommandIntentDispatcher(options); }
+  constructor(private readonly options: Options) { this.dispatcher = new CommandIntentDispatcher(options); this.observer = new CommandIntentObserver({ store: options.store, instances: options.instanceControl }); }
 
   resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution { return this.options.resolver.resolve(message, command); }
   async drainAcceptedIntent(intent: CommandIntent): Promise<void> { await this.dispatcher.drain(intent); }
   wakeAcceptedIntent(intent: Pick<CommandIntent, "id">): void { this.dispatcher.wake(intent.id); }
+  observe(intentId: string, timeoutMs = 0): Promise<CommandIntentObservation> { return this.observer.observe(intentId, timeoutMs); }
   start(intervalMs: number): void { this.dispatcher.start(intervalMs); }
 
   async handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void> {
@@ -91,28 +96,30 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     this.options.wakeOutbound?.();
     if (this.options.wakeCommand) this.options.wakeCommand(accepted.intent.id);
     else this.dispatcher.wake(accepted.intent.id);
-    const workerResult = command.kind === "worker_create" && (request.source === "card" || request.source === "primary-tool")
-      ? await this.dispatcher.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey)
-      : undefined;
-    return { outcome: "accepted", commandKind: command.kind, intent: this.options.store.getCommandIntent(accepted.intent.id) ?? accepted.intent, ...(workerResult ? { workerResult } : {}) };
+    return { outcome: "accepted", commandKind: command.kind, intent: this.options.store.getCommandIntent(accepted.intent.id) ?? accepted.intent };
   }
 
   async createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult> {
     const receipt = await this.submit({ source: "card", action, bindingId, command });
     if (receipt.outcome !== "accepted") throw new Error(receipt.outcome === "rejected" ? receipt.message : "命令幂等标识已用于不同请求。");
-    if (!receipt.workerResult) throw new Error("Worker creation did not complete");
-    return receipt.workerResult;
+    return this.awaitWorkerResult(receipt.intent.id);
   }
 
   async createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult> {
     const receipt = await this.submit({ source: "primary-tool", ...input });
     if (receipt.outcome !== "accepted") throw new Error(receipt.outcome === "rejected" ? receipt.message : "Idempotency key was already used for a different Worker creation request");
-    if (!receipt.workerResult) throw new Error("Worker creation did not complete");
-    return receipt.workerResult;
+    return this.awaitWorkerResult(receipt.intent.id);
   }
 
   recover(): Promise<void> { return this.dispatcher.recover(); }
   stop(): Promise<void> { this.accepting = false; return this.dispatcher.stop(); }
+
+  private async awaitWorkerResult(intentId: string): Promise<CreateWorkerResult> {
+    const observation = await this.observe(intentId, this.options.observationTimeoutMs ?? 29_000);
+    if (observation.outcome === "succeeded" && observation.workerResult) return observation.workerResult;
+    if (observation.outcome === "pending") throw new Error(`Worker creation is still ${observation.intent.state}; observe intent ${intentId} again`);
+    throw new Error(observation.intent.outcome?.detail ?? `Worker creation ended ${observation.outcome}`);
+  }
 
   private async executeQuery(message: IncomingLarkMessage, command: BridgeCommand, binding: Binding | null): Promise<void> {
     if (command.kind === "help") return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-query:${message.messageId}:help`, this.options.presentation.help());

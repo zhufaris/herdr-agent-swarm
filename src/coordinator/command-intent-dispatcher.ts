@@ -1,5 +1,4 @@
 import type { Logger } from "pino";
-import type { CreateWorkerResult } from "../domain/agent-instance.js";
 import type { CommandIntent, CommandIntentOutcome } from "../domain/command-intent.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { InstanceControlPort } from "../domain/ports/instance-workflows.js";
@@ -22,15 +21,13 @@ interface Options {
   resolver: SwarmCommandContextResolver; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger;
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort; promptRun: PromptRunWorkflowPort;
-  instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">; wakeCardContext(): void;
+  instanceControl: Pick<InstanceControlPort, "createWorker">; wakeCardContext(): void;
   wakeOutbound?(): void;
   presentation: Pick<ApplicationPresentation, "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult" | "commandStatus">;
 }
 
 export class CommandIntentDispatcher {
   private readonly laneWorkers = new Map<string, Promise<void>>();
-  private readonly workerResults = new Map<string, CreateWorkerResult>();
-  private readonly awaitedWorkerResults = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private accepting = true;
   constructor(private readonly options: Options) {}
@@ -46,25 +43,6 @@ export class CommandIntentDispatcher {
     this.timer = setInterval(() => { void this.scanAccepted(); }, intervalMs);
     this.timer.unref();
   }
-  async resultForWorkerCreate(intentId: string, laneKey: string): Promise<CreateWorkerResult> {
-    this.awaitedWorkerResults.add(intentId);
-    try { await this.drain({ laneKey }); } finally { this.awaitedWorkerResults.delete(intentId); }
-    const result = this.workerResults.get(intentId);
-    if (result) {
-      this.workerResults.delete(intentId);
-      return result;
-    }
-    const current = this.options.store.getCommandIntent(intentId);
-    const workerId = current?.outcome?.operationKind === "worker" ? current.outcome.operationId : null;
-    if (workerId) {
-      const instance = this.options.instanceControl.inspect(workerId).instance;
-      return current?.outcome?.code === "created_start_failed"
-        ? { status: "created-start-failed", instance, error: current.outcome.detail ?? "Worker start failed" }
-        : { status: "created", instance };
-    }
-    throw new Error(current?.outcome?.detail ?? "Worker creation did not complete");
-  }
-
   async recover(): Promise<void> {
     const count = this.options.store.recoverExecutingCommandIntents(new Date().toISOString(), this.options.presentation.commandStatus);
     if (count) this.options.logger.warn({ event: "swarm-command-recovered", count, outcome: "uncertain" }, "terminalized interrupted swarm commands without replay");
@@ -155,7 +133,6 @@ export class CommandIntentDispatcher {
       else if (command.kind === "worker_create") {
         if (!intent.context.projectId || !intent.context.primary) throw new Error("Worker creation requires Primary context");
         const result = await this.options.instanceControl.createWorker({ actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, projectId: intent.context.projectId, bindingId: intent.context.primary.bindingId, name: command.name, agentKind: command.agentKind, model: command.model, start: command.start });
-        if (this.awaitedWorkerResults.has(intent.id)) this.workerResults.set(intent.id, result);
         operation = { operationKind: "worker", operationId: result.instance.id };
         if (!intent.context.rootMessageId) throw new Error("Worker creation requires a Primary root message");
         const entryRegistered = this.options.store.registerWorkerThreadEntry({ commandIntentId: intent.id, workerId: result.instance.id, workerSessionGeneration: result.instance.workerSessionGeneration, bindingId: intent.context.primary.bindingId, bindingGeneration: intent.context.primary.bindingGeneration, rootMessageId: intent.context.rootMessageId });
