@@ -30,7 +30,7 @@ export function projectToolCall(name: string, argumentsJson: string): ProjectedT
 }
 
 export function projectToolResult(descriptor: ToolActivityDescriptor, output: unknown): string {
-  const normalized = normalizeOutput(output);
+  const normalized = normalizeToolOutput(output);
   const status = explicitStatus(output, normalized);
   if (descriptor.category === "Command" && !descriptor.target) return "";
   if (descriptor.category === "Command") return renderCommandResult(descriptor, output, normalized, status);
@@ -50,7 +50,7 @@ export function projectToolResult(descriptor: ToolActivityDescriptor, output: un
 }
 
 export function projectToolResultState(output: unknown): "active" | "done" | "failed" {
-  const normalized = normalizeOutput(output);
+  const normalized = normalizeToolOutput(output);
   const status = explicitStatus(output, normalized);
   return status.kind === "success" ? "done" : status.kind === "running" ? "active" : "failed";
 }
@@ -160,7 +160,7 @@ function boundTarget(value: string, escapeInlineMarkdown = true): string {
   return safe.length <= TARGET_LIMIT ? safe : safe.slice(0, TARGET_LIMIT - 1).trimEnd() + "…";
 }
 
-function normalizeOutput(output: unknown): string {
+export function normalizeToolOutput(output: unknown): string {
   if (typeof output === "string") return output.trim();
   if (!Array.isArray(output)) return "";
   return output.flatMap((part) => {

@@ -1,6 +1,7 @@
 import type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, RuntimeObservation, RuntimeTurnObservation } from "../types.js";
 import type { RunProgressEvent } from "../run-card-view.js";
 import type { ModelDispatch, TraexModelSummary } from "../model-selection.js";
+import type { AnswerTimelineDelta } from "../answer-timeline.js";
 
 export interface TraexModelPromptDispatchOptions {
   modelDispatch: ModelDispatch;
@@ -73,6 +74,7 @@ export interface TraexTranscriptObservation {
   freshTurnStart?: boolean;
   requestText?: string;
   answerDelta: string;
+  timelineDeltas?: AnswerTimelineDelta[];
   toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
   mainStatus?: TraexTranscriptMainStatus;
   turnLifecycle?: { turnId: string; state: "active" | "completed" | "aborted"; startedAt: string; finalAnswer?: string; reason?: string };
