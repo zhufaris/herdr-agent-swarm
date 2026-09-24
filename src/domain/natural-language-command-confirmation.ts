@@ -1,5 +1,6 @@
 import type { BridgeCommand, InstanceCommand } from "./types.js";
 import type { AcceptCommandIntentInput, AcceptCommandIntentResult } from "./command-intent.js";
+import type { CommandStatusRenderer } from "./ports/swarm-command.js";
 import { z } from "zod";
 
 export type NaturalLanguageCommandConfirmationState = "pending" | "consumed" | "expired" | "cancelled";
@@ -69,5 +70,5 @@ export type ConfirmNaturalLanguageSwarmCommandResult =
   | Exclude<DecideNaturalLanguageCommandConfirmationResult, { outcome: "consumed" | "cancelled" }>;
 
 export interface ConfirmNaturalLanguageSwarmCommandInput {
-  id: string; actorOpenId: string; chatId: string; decidedAt: string; commandIntent: AcceptCommandIntentInput;
+  id: string; actorOpenId: string; chatId: string; decidedAt: string; commandIntent: AcceptCommandIntentInput; renderStatus?: CommandStatusRenderer;
 }

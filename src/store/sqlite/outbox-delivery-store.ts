@@ -31,7 +31,7 @@ export class SqliteOutboxDeliveryStore {
   markDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean {
     return this.context.transaction(() => {
       if (!this.queue.matchesClaim(id, claim)) return false;
-      const row = this.context.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, thread_alias_id, worker_thread_id, kind, payload, root_message_id, state FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; thread_alias_id: string | null; worker_thread_id: string | null; kind: string; payload: string; root_message_id: string | null; state: OutboundReply["state"] } | undefined;
+      const row = this.context.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, thread_alias_id, worker_thread_id, kind, payload, root_message_id, projection_key, snapshot_revision, state FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; thread_alias_id: string | null; worker_thread_id: string | null; kind: string; payload: string; root_message_id: string | null; projection_key: string | null; snapshot_revision: number; state: OutboundReply["state"] } | undefined;
       if (!row || row.state !== "pending") {
         if (claim) this.queue.releaseClaim(id);
         return false;
@@ -131,6 +131,7 @@ export class SqliteOutboxDeliveryStore {
         // Historical Worker Task Cards no longer mirror Primary Answer delivery.
       }
       if (row.selection_id && row.kind === "card_reply") this.context.database.prepare("UPDATE project_selections SET selector_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), row.selection_id);
+      if (row.projection_key?.startsWith("command-status:")) this.settleCommandStatusProjection(row, messageId, cardId ?? null);
       if (row.binding_id && row.target_role === "session_status") {
         const binding = this.dependencies.getBinding(row.binding_id);
         if (!binding) throw new Error(`Binding not found: ${row.binding_id}`);
@@ -142,6 +143,16 @@ export class SqliteOutboxDeliveryStore {
       confirmAnswerRecoveries(this.context, id);
       return true;
     });
+  }
+
+  private settleCommandStatusProjection(row: { projection_key: string | null; snapshot_revision: number; kind: string; binding_id: string | null }, messageId: string, cardId: string | null): void {
+    if (!row.projection_key) return;
+    const intentId = row.projection_key.slice("command-status:".length);
+    if (row.kind === "card_reply") this.context.database.prepare("UPDATE command_status_views SET message_id = COALESCE(message_id, ?), card_id = COALESCE(card_id, ?), delivered_revision = MAX(delivered_revision, ?), updated_at = ? WHERE intent_id = ?").run(messageId, cardId, row.snapshot_revision, now(), intentId);
+    else this.context.database.prepare("UPDATE command_status_views SET delivered_revision = MAX(delivered_revision, ?), updated_at = ? WHERE intent_id = ?").run(row.snapshot_revision, now(), intentId);
+    const latest = this.context.database.prepare("SELECT message_id, card_json, revision, delivered_revision FROM command_status_views WHERE intent_id = ?").get(intentId) as { message_id: string | null; card_json: string; revision: number; delivered_revision: number } | undefined;
+    if (!latest?.message_id || latest.revision <= latest.delivered_revision) return;
+    this.queue.enqueue({ id: `${row.projection_key}:update:${latest.revision}`, idempotencyKey: `${row.projection_key}:update:${latest.revision}`, bindingId: row.binding_id, targetRole: "operation_result", rootMessageId: latest.message_id, kind: "card_update", payload: latest.card_json, projectionKey: row.projection_key, snapshotRevision: latest.revision, laneKeyOverride: row.projection_key });
   }
 
   checkpointCard(id: string, cardId: string, claim?: OutboundDeliveryClaim): OutboundReply | null {

@@ -688,6 +688,7 @@ describe("application composition boundaries", () => {
       "instance.ts",
       "pane-operations.ts",
       "prompt-run.ts",
+      "swarm-command.ts",
       "turn-control.ts",
       "worker-card-display.ts",
       "worker-session-thread.ts",

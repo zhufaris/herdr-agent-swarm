@@ -66,12 +66,12 @@ type StoreCluster = {
   workerCardDisplays: SqliteWorkerCardDisplayStore;
 };
 
-function createIndependentStores(context: SqliteContext) {
+function createIndependentStores(context: SqliteContext, enqueueCommandStatus: (input: import("./outbox-queue-store.js").EnqueueOutboundReplyInput) => unknown) {
   return {
     threadAliases: new SqliteBindingThreadAliasStore(context),
     workerThreads: new SqliteWorkerSessionThreadStore(context),
     operations: new SqliteOperationsStore(context),
-    commandIntents: new SqliteCommandIntentStore(context),
+    commandIntents: new SqliteCommandIntentStore(context, { enqueue: enqueueCommandStatus }),
     controllerInterpretations: new SqliteControllerInterpretationStore(context),
     inboundProjects: new SqliteInboundProjectStore(context),
     approvals: new SqliteApprovalStore(context)
@@ -79,12 +79,12 @@ function createIndependentStores(context: SqliteContext) {
 }
 
 function createStoreCluster(context: SqliteContext): StoreCluster {
-  const independent = createIndependentStores(context);
   const cardContextsLink = new StoreLink<SqliteCardContextStore>("card contexts");
   const outboxLink = new StoreLink<SqliteOutboxStore>("outbox");
   const promptsLink = new StoreLink<SqlitePromptStore>("prompts");
   const workerTurnsLink = new StoreLink<SqliteWorkerTurnStore>("worker turns");
   const instancesLink = new StoreLink<SqliteInstanceStore>("instances");
+  const independent = createIndependentStores(context, (input) => outboxLink.get().enqueueOutboundReply(input));
 
   const bindings = new SqliteBindingLifecycleStore(context, (bindingId, reason) => cardContextsLink.get().invalidateBindingWorkerContexts(bindingId, reason));
   const sessionOperations = new SqliteSessionOperationStore(context, (id) => bindings.getBinding(id));

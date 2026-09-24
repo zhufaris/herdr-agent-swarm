@@ -23,7 +23,8 @@ interface Options {
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort; promptRun: PromptRunWorkflowPort;
   instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">; wakeCardContext(): void;
-  presentation: Pick<ApplicationPresentation, "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult">;
+  wakeOutbound?(): void;
+  presentation: Pick<ApplicationPresentation, "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult" | "commandStatus">;
 }
 
 export class CommandIntentDispatcher {
@@ -53,7 +54,7 @@ export class CommandIntentDispatcher {
   }
 
   async recover(): Promise<void> {
-    const count = this.options.store.recoverExecutingCommandIntents(new Date().toISOString());
+    const count = this.options.store.recoverExecutingCommandIntents(new Date().toISOString(), this.options.presentation.commandStatus);
     if (count) this.options.logger.warn({ event: "swarm-command-recovered", count, outcome: "uncertain" }, "terminalized interrupted swarm commands without replay");
     const lanes = new Set(this.options.store.listRecoverableCommandIntents().filter(({ state }) => state === "accepted").map(({ laneKey }) => laneKey));
     await Promise.all([...lanes].map((lane) => this.drainLane(lane)));
@@ -66,7 +67,10 @@ export class CommandIntentDispatcher {
   private async drainLane(laneKey: string): Promise<void> {
     const previous = this.laneWorkers.get(laneKey) ?? Promise.resolve();
     const worker = previous.catch(() => undefined).then(async () => {
-      for (let intent = this.options.store.claimNextCommandIntent(laneKey); intent; intent = this.options.store.claimNextCommandIntent(laneKey)) await this.executeMutation(intent);
+      for (let intent = this.options.store.claimNextCommandIntent(laneKey, this.options.presentation.commandStatus); intent; intent = this.options.store.claimNextCommandIntent(laneKey, this.options.presentation.commandStatus)) {
+        this.options.wakeOutbound?.();
+        await this.executeMutation(intent);
+      }
     }).finally(() => { if (this.laneWorkers.get(laneKey) === worker) this.laneWorkers.delete(laneKey); });
     this.laneWorkers.set(laneKey, worker);
     await worker;
@@ -141,15 +145,17 @@ export class CommandIntentDispatcher {
         if (result.status === "created-start-failed") { outcomeCode = "created_start_failed"; outcomeDetail = result.error; }
         if (intent.idempotencyKey.startsWith("lark-message:")) await this.reply(message, `Worker ${result.instance.name} 已创建${result.status === "created-start-failed" ? `，但启动失败：${result.error}` : "。"}`);
       } else throw new Error(`Query command ${command.kind} cannot execute as mutation`);
-      this.options.store.finishCommandIntent(intent.id, ok ? "succeeded" : "rejected", { code: ok ? outcomeCode : "rejected", detail: ok ? outcomeDetail : null, ...operation });
+      this.options.store.finishCommandIntent(intent.id, ok ? "succeeded" : "rejected", { code: ok ? outcomeCode : "rejected", detail: ok ? outcomeDetail : null, ...operation }, this.options.presentation.commandStatus);
+      this.options.wakeOutbound?.();
     } catch (error) {
       const detail = safeLogError(error).message;
-      this.options.store.finishCommandIntent(intent.id, effectMayHaveStarted ? "uncertain" : "failed", { code: effectMayHaveStarted ? "external_effect_uncertain" : "failed", detail, ...operation });
+      this.options.store.finishCommandIntent(intent.id, effectMayHaveStarted ? "uncertain" : "failed", { code: effectMayHaveStarted ? "external_effect_uncertain" : "failed", detail, ...operation }, this.options.presentation.commandStatus);
+      this.options.wakeOutbound?.();
       await this.reject(message, detail, intent.command.kind, "failed");
     }
   }
 
-  private finish(intent: CommandIntent, state: "rejected", code: string, detail: string): void { this.options.store.finishCommandIntent(intent.id, state, { code, detail, operationKind: null, operationId: null }); }
+  private finish(intent: CommandIntent, state: "rejected", code: string, detail: string): void { this.options.store.finishCommandIntent(intent.id, state, { code, detail, operationKind: null, operationId: null }, this.options.presentation.commandStatus); this.options.wakeOutbound?.(); }
   private async awake(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding) return false; const result = await this.options.promptRun.awake(binding.id); const recovered = result.outcome === "recovered";
     const detail = recovered ? `已从 Herdr transcript 恢复 ${result.recoveredTurns} 个遗漏 turn；每个 turn 使用新的 Answer Card，未向 TraeX 重发任务。` : result.outcome === "busy" ? "当前绑定仍在切换观察器，请稍后重试 `/swarm awake`。" : result.reason === "no_detached_prompt" ? "当前没有 detached prompt，无需唤醒。" : result.reason === "no_complete_later_turn" ? "没有找到可安全恢复的完整后续 Herdr turn；原任务保持 detached，不会重发。" : `无法安全恢复（${result.reason}）；原任务保持 detached，不会重发。`;

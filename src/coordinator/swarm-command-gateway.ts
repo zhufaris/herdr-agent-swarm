@@ -26,7 +26,8 @@ interface Options {
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
   promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">;
   wakeCardContext(): void;
-  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult">;
+  wakeOutbound?(): void;
+  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult" | "commandStatus">;
 }
 
 type WorkerCreateCommand = Extract<BridgeCommand, { kind: "worker_create" }>;
@@ -78,8 +79,9 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
       this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${command.kind}`, target: resolved.laneKey, outcome: "success" });
       return { outcome: "query-completed", commandKind: command.kind };
     }
-    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() });
+    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() }, request.source, this.options.presentation.commandStatus);
     if (accepted.outcome === "conflict") return { outcome: "conflict", commandKind: command.kind, intent: accepted.intent };
+    this.options.wakeOutbound?.();
     const workerResult = command.kind === "worker_create" && (request.source === "card" || request.source === "primary-tool")
       ? await this.dispatcher.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey)
       : (await this.dispatcher.drain(accepted.intent), undefined);

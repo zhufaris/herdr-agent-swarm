@@ -398,8 +398,8 @@ describe("SQLite store", () => {
       expect(store!.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "worker-session" && targetId === "reviewer")).toMatchObject({ requestedDependencyRevision: revisionAfterRegistration });
       const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
       expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
-      expect(store!.listPendingOutboundReplies()).toHaveLength(1);
-      const group = store!.listPendingOutboundReplies()[0]!;
+      expect(store!.listPendingOutboundReplies().filter(({ kind }) => kind === "group_card_create")).toHaveLength(1);
+      const group = store!.listPendingOutboundReplies().find(({ kind }) => kind === "group_card_create")!;
       expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(group.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
 
       const invalidation = store!.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "worker-session" && targetId === "reviewer");
@@ -763,6 +763,60 @@ describe("SQLite store", () => {
     expect(store.claimNextCommandIntent()).toMatchObject({ id: "command-3", state: "executing" });
     expect(store.finishCommandIntent("command-1", "succeeded", { code: "created", detail: null, operationKind: "binding", operationId: "binding-1" })).toMatchObject({ state: "succeeded", outcome: { operationId: "binding-1" } });
     expect(store.claimNextCommandIntent("project:project")).toMatchObject({ id: "command-2", state: "executing" });
+  });
+
+  it("atomically projects Command intent lifecycle through one durable status card", () => {
+    store = new SqliteBindingStore(":memory:");
+    const context = { chatId: "chat", topicId: null, rootMessageId: "root", sourceMessageId: "message-1", actorOpenId: "admin", projectId: "project", workspaceId: "workspace", primary: null };
+    const input = { id: "status-1", idempotencyKey: "status-key", laneKey: "project:project", command: { kind: "new", title: "One" } as const, context, replayPolicy: "reconcilable" as const, acceptedAt: "2026-09-24T00:00:00.000Z" };
+
+    expect(store.acceptCommandIntent(input, "natural-language")).toMatchObject({ outcome: "accepted" });
+    expect(store.getCommandStatusView("status-1")).toMatchObject({ state: "accepted", source: "natural-language", revision: 1, deliveredRevision: 0 });
+    let pending = store.listPendingOutboundReplies();
+    expect(pending).toEqual([expect.objectContaining({ kind: "card_reply", rootMessageId: "root" })]);
+    expect((store.database.prepare("SELECT projection_key, snapshot_revision FROM outbound_replies WHERE id = ?").get(pending[0]!.id))).toEqual({ projection_key: "command-status:status-1", snapshot_revision: 1 });
+
+    expect(store.acceptCommandIntent({ ...input, id: "ignored" }, "literal")).toMatchObject({ outcome: "duplicate", intent: { id: "status-1" } });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(store.claimNextCommandIntent("project:project")).toMatchObject({ state: "executing" });
+    expect(store.getCommandStatusView("status-1")).toMatchObject({ state: "executing", revision: 2 });
+    pending = store.listPendingOutboundReplies();
+    expect(pending).toHaveLength(1);
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE id = ?").get(pending[0]!.id)).toEqual({ snapshot_revision: 2 });
+
+    const claim = store.claimOutboundReply(pending[0]!.id, null)!;
+    expect(store.markOutboundReplyDelivered(claim, "status-message", "status-card")).toBe(true);
+    expect(store.getCommandStatusView("status-1")).toMatchObject({ messageId: "status-message", cardId: "status-card", deliveredRevision: 2 });
+    expect(store.finishCommandIntent("status-1", "succeeded", { code: "created", detail: null, operationKind: "binding", operationId: "binding-1" })).toMatchObject({ state: "succeeded" });
+    expect(store.getCommandStatusView("status-1")).toMatchObject({ state: "succeeded", revision: 3, deliveredRevision: 2 });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "status-message" })]);
+  });
+
+  it("rolls back Command intent and status when outbox admission conflicts", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id: "occupied", idempotencyKey: "command-status:rollback:create", rootMessageId: "root", kind: "card_reply", payload: "{}", workClass: "history" });
+    const context = { chatId: "chat", topicId: null, rootMessageId: "root", sourceMessageId: "message", actorOpenId: "admin", projectId: null, workspaceId: null, primary: null };
+    expect(() => store!.acceptCommandIntent({ id: "rollback", idempotencyKey: "rollback", laneKey: "chat:chat", command: { kind: "close" }, context, replayPolicy: "safe-before-effect", acceptedAt: "2026-09-24T00:00:00.000Z" })).toThrow("outbound_idempotency_conflict");
+    expect(store.getCommandIntent("rollback")).toBeNull();
+    expect(store.getCommandStatusView("rollback")).toBeNull();
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 49").get()).toEqual({ version: 49 });
+  });
+
+  it("catches up a Command status advanced while its create card is in flight", () => {
+    store = new SqliteBindingStore(":memory:");
+    const context = { chatId: "chat", topicId: null, rootMessageId: "root", sourceMessageId: "message", actorOpenId: "admin", projectId: null, workspaceId: null, primary: null };
+    store.acceptCommandIntent({ id: "in-flight", idempotencyKey: "in-flight", laneKey: "chat:chat", command: { kind: "close" }, context, replayPolicy: "safe-before-effect", acceptedAt: "2026-09-24T00:00:00.000Z" });
+    const create = store.listPendingOutboundReplies()[0]!;
+    const deliveryClaim = store.claimOutboundReply(create.id, null)!;
+
+    expect(store.claimNextCommandIntent("chat:chat")).toMatchObject({ state: "executing" });
+    expect(store.getCommandStatusView("in-flight")).toMatchObject({ state: "executing", revision: 2, deliveredRevision: 0 });
+    expect(store.listPendingOutboundReplies()).toHaveLength(1);
+    expect(store.markOutboundReplyDelivered(deliveryClaim, "status-message", "status-card")).toBe(true);
+
+    expect(store.getCommandStatusView("in-flight")).toMatchObject({ messageId: "status-message", revision: 2, deliveredRevision: 1 });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "status-message" })]);
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE kind = 'card_update'").get()).toEqual({ snapshot_revision: 2 });
   });
 
   it("recovers accepted Command intents and terminalizes executing work as uncertain", () => {

@@ -61,7 +61,7 @@ export class SqliteNaturalLanguageCommandConfirmationStore {
         this.resolve(checked.confirmation.id, "cancelled", "command_mismatch", input.decidedAt);
         return { outcome: "stale", confirmation: this.require(checked.confirmation.id) };
       }
-      const commandIntent = this.commandIntents.accept(input.commandIntent);
+      const commandIntent = this.commandIntents.accept(input.commandIntent, "natural-language", input.renderStatus);
       if (commandIntent.outcome === "conflict") {
         this.resolve(checked.confirmation.id, "cancelled", "command_intent_conflict", input.decidedAt);
         return { outcome: "stale", confirmation: this.require(checked.confirmation.id) };

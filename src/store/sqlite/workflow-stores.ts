@@ -14,12 +14,13 @@ export class SqliteCommandIntentStoreAdapter implements CommandIntentWorkflowSto
     }
   ) {}
 
-  acceptCommandIntent: CommandIntentStore["acceptCommandIntent"] = (input) => this.store.accept(input);
+  acceptCommandIntent: CommandIntentStore["acceptCommandIntent"] = (input, source, renderStatus) => this.store.accept(input, source, renderStatus);
   getCommandIntent: CommandIntentStore["getCommandIntent"] = (id) => this.store.get(id);
-  claimNextCommandIntent: CommandIntentStore["claimNextCommandIntent"] = (laneKey) => this.store.claimNext(laneKey);
-  finishCommandIntent: CommandIntentStore["finishCommandIntent"] = (id, state, outcome) => this.store.finish(id, state, outcome);
+  getCommandStatusView: CommandIntentStore["getCommandStatusView"] = (id) => this.store.getStatus(id);
+  claimNextCommandIntent: CommandIntentStore["claimNextCommandIntent"] = (laneKey, renderStatus) => this.store.claimNext(laneKey, renderStatus);
+  finishCommandIntent: CommandIntentStore["finishCommandIntent"] = (id, state, outcome, renderStatus) => this.store.finish(id, state, outcome, renderStatus);
   listRecoverableCommandIntents: CommandIntentStore["listRecoverableCommandIntents"] = () => this.store.listRecoverable();
-  recoverExecutingCommandIntents: CommandIntentStore["recoverExecutingCommandIntents"] = (recoveredAt) => this.store.recoverExecuting(recoveredAt);
+  recoverExecutingCommandIntents: CommandIntentStore["recoverExecutingCommandIntents"] = (recoveredAt, renderStatus) => this.store.recoverExecuting(recoveredAt, renderStatus);
   registerWorkerThreadEntry: CommandIntentStore["registerWorkerThreadEntry"] = (input) => this.store.registerWorkerThreadEntry(input);
   audit: CommandIntentWorkflowStore["audit"] = (input) => this.dependencies.audit(input);
   getBinding: CommandIntentWorkflowStore["getBinding"] = (id) => this.dependencies.getBinding(id);

@@ -12,7 +12,7 @@ import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 interface Options {
   store: NaturalLanguageCommandConfirmationStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; outboundWork: OutboundWorkNotifier;
-  presentation: Pick<ApplicationPresentation, "naturalLanguageCommandConfirmation" | "naturalLanguageCommandGuidance" | "requestRejected">;
+  presentation: Pick<ApplicationPresentation, "naturalLanguageCommandConfirmation" | "naturalLanguageCommandGuidance" | "requestRejected" | "commandStatus">;
   swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: Pick<InstanceInteractionWorkflowPort, "handleCommand" | "resolveNaturalLanguageMutationTarget">; confirmationTtlMs?: number; now?: () => Date; idFactory?: () => string;
 }
 
@@ -62,10 +62,12 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
       if (policy.mode !== "mutation" || policy.replay === "none") return stale();
       const accepted = this.options.store.confirmNaturalLanguageSwarmCommand({
         id: confirmationId, actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt,
-        commandIntent: { id: randomUUID(), idempotencyKey: `natural-language-confirmation:${confirmationId}:${current.envelope.command.kind}`, laneKey: resolution.laneKey, command: current.envelope.command, context: resolution.context, replayPolicy: policy.replay, acceptedAt: decidedAt }
+        commandIntent: { id: randomUUID(), idempotencyKey: `natural-language-confirmation:${confirmationId}:${current.envelope.command.kind}`, laneKey: resolution.laneKey, command: current.envelope.command, context: resolution.context, replayPolicy: policy.replay, acceptedAt: decidedAt },
+        renderStatus: this.options.presentation.commandStatus
       });
       if (accepted.outcome === "unauthorized") return { toast: { type: "error", content: "只有原请求人可以确认或取消。" } };
       if (accepted.outcome !== "consumed") return stale();
+      this.options.outboundWork.wake();
       await this.options.swarmCommands.drainAcceptedIntent(accepted.commandIntent.intent);
       return { toast: { type: "success", content: "已确认，命令已提交。" } };
     }

@@ -127,6 +127,7 @@ export class SqliteMigrations {
     this.prompt.ensureSwarmCommandIntents();
     this.ensureNaturalLanguageCommandConfirmations();
     this.ensureControllerInterpretationJobs();
+    this.ensureCommandStatusViews();
     this.worker.ensureWorkerCardDisplayRequests();
     this.worker.ensureWorkerSessionThreads();
     this.worker.ensureWorkerThreadEntryRequests();
@@ -217,6 +218,18 @@ export class SqliteMigrations {
         state TEXT NOT NULL CHECK(state IN ('active','stale')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (48);
+    `);
+  }
+
+  private ensureCommandStatusViews(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS command_status_views(
+        intent_id TEXT PRIMARY KEY REFERENCES swarm_command_intents(id) ON DELETE CASCADE, command_kind TEXT NOT NULL, summary TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('literal','natural-language','card','primary-tool')),
+        actor_open_id TEXT NOT NULL, lane_key TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('accepted','executing','succeeded','rejected','failed','uncertain')), attempt_count INTEGER NOT NULL DEFAULT 0, outcome_json TEXT,
+        message_id TEXT, card_id TEXT, card_json TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision >= 1), delivered_revision INTEGER NOT NULL DEFAULT 0 CHECK(delivered_revision >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS command_status_views_state ON command_status_views(state, updated_at);
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (49);
     `);
   }
 }
