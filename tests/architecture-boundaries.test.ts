@@ -639,6 +639,12 @@ describe("application composition boundaries", () => {
     expect(facade).not.toContain("instance_plan_removal");
     expect(facade).not.toContain("instance_create_submit");
     expect(facade).not.toContain("decideWorkerCardBindingOwnership");
+    expect(facade).toContain("implements InstanceInteractionWorkflowPort");
+    for (const path of ["card-action-router.ts", "inbound-message-routing-workflow.ts", "natural-language-command-workflow.ts"]) {
+      const source = readFileSync(new URL(`../src/coordinator/${path}`, import.meta.url), "utf8");
+      expect(source).toContain("InstanceInteractionWorkflowPort");
+      expect(source).not.toMatch(/import type \{ InstanceInteractionWorkflow \}/);
+    }
   });
 
   it("keeps instance control and messaging behind domain workflow ports", () => {

@@ -203,12 +203,13 @@ then let projections and the outbox repair Lark.
 ### Consumer-shaped ports preserve deep modules
 
 A workflow receives the smallest named interface that expresses its complete
-responsibility. Startup view convergence explicitly receives startup recovery,
-Answer-page, and Main-Card stores. Instance messaging, turn supervision, exact
-observation, runtime reconciliation, and lifecycle control each use a named
-consumer port. The concrete SQLite capability can satisfy several ports while
-keeping SQL and transaction ownership internal. Narrowing an interface must not
-split an atomic aggregate transition.
+responsibility. Startup view convergence receives `StartupViewStore` plus the
+Answer-page and Main-Card convergence ports; only outbound composition constructs
+those projection workflows from their stores. Instance messaging, turn
+supervision, exact observation, runtime reconciliation, and lifecycle control
+each use a named consumer port. The concrete SQLite capability can satisfy
+several ports while keeping SQL and transaction ownership internal. Narrowing an
+interface must not split an atomic aggregate transition.
 
 ### One SQLite context owns atomic workflow transitions
 
@@ -490,10 +491,12 @@ The outbound, Primary, Worker, and application composition factories declare
 consumer-specific `Pick<SqliteStoreBundle, ...>` inputs. Only the parent bridge
 composition receives the full bundle. New cross-context capability access in a
 child factory is therefore a TypeScript error.
-Startup view composition passes `StartupViewStore`, `AnswerPageStore`, and
-`MainCardStore` as one named consumer dependency. `StartupViewConverger` uses
-the first for recovery and traversal and constructs its two projection
-workflows from the latter stores; it never casts one store into another.
+Startup view composition passes `StartupViewStore` for recovery and traversal,
+then reuses the `AnswerPageConvergencePort` and `MainCardConvergencePort` adapters
+already created by outbound composition. `StartupViewConverger` neither receives
+the underlying Answer/Main stores nor constructs projection workflows. Live,
+checkpoint, and startup convergence therefore share one pair of serialized
+workflow instances without exposing their storage capabilities to consumers.
 
 Instance orchestration follows the same consumer-first rule. Messaging, turn
 supervision, exact transcript observation, runtime reconciliation, and lifecycle

@@ -17,14 +17,14 @@ import { PermanentInboundMessageRejection } from "../domain/permanent-inbound-me
 import { isInstanceTurnCapacityExceeded } from "../domain/instance-turn-capacity-error.js";
 import { isInstanceTargetError } from "../domain/instance-target-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
-import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
+import type { InstanceInteractionWorkflowPort } from "./instance-interaction-workflow.js";
 import type { PrimaryRuntimeStatePort } from "../domain/ports/primary-runtime-state.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { executePromptAcceptanceEffects } from "./prompt-acceptance-effects.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
-import type { NaturalLanguageCommandWorkflow } from "./natural-language-command-workflow.js";
+import type { NaturalLanguageCommandWorkflowPort } from "./natural-language-command-workflow.js";
 import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../domain/prompt-input-policy.js";
 
 export interface InboundMessageRoutingWorkflowPort {
@@ -34,9 +34,9 @@ export interface InboundMessageRoutingWorkflowPort {
 
 interface Options {
   config: BridgeConfig; stores: { routing: Pick<InboundRoutingStore, "findBindingByLarkScope" | "isBindingThreadAlias">; promptAcceptance: PromptAcceptanceStore }; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
-  primaryState: Pick<PrimaryRuntimeStatePort, "activeTurn">; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
+  primaryState: Pick<PrimaryRuntimeStatePort, "activeTurn">; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: Pick<InstanceInteractionWorkflowPort, "handleCommand" | "handleOrdinaryMessage">;
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "handleMessage">;
-  naturalLanguage?: { interpreter: NaturalLanguageCommandInterpreter; workflow: Pick<NaturalLanguageCommandWorkflow, "handle"> };
+  naturalLanguage?: { interpreter: NaturalLanguageCommandInterpreter; workflow: Pick<NaturalLanguageCommandWorkflowPort, "handle"> };
 }
 
 export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkflowPort {

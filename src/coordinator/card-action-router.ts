@@ -5,13 +5,13 @@ import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActi
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { CardInteractionWorkflowPort } from "./card-interaction-workflow.js";
 import type { DeliveryRecoveryWorkflowPort } from "./delivery-recovery-workflow.js";
-import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
+import type { InstanceInteractionWorkflowPort } from "./instance-interaction-workflow.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import { parseCardActionCommand, type CardActionCommand } from "./card-action-command.js";
 import { ProjectCatalog } from "./project-catalog.js";
-import type { NaturalLanguageCommandWorkflow } from "./natural-language-command-workflow.js";
+import type { NaturalLanguageCommandWorkflowPort } from "./natural-language-command-workflow.js";
 
 export interface CardActionRouterPort {
   handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void>;
@@ -26,8 +26,8 @@ interface Options {
   cardInteractions: CardInteractionWorkflowPort;
   modelSelection: ModelSelectionWorkflowPort;
   deliveryRecovery: DeliveryRecoveryWorkflowPort;
-  instanceInteractions?: InstanceInteractionWorkflow;
-  naturalLanguageCommands?: Pick<NaturalLanguageCommandWorkflow, "decide">;
+  instanceInteractions?: Pick<InstanceInteractionWorkflowPort, "handleCardAction">;
+  naturalLanguageCommands?: Pick<NaturalLanguageCommandWorkflowPort, "decide">;
   logger: Pick<Logger, "info" | "error">;
   enqueueInitialPrompt(binding: Binding, selection: ProjectSelection): Promise<void>;
 }

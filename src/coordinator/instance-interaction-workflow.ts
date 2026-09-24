@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
-import type { InstanceCommand, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, ProjectConfig } from "../domain/types.js";
+import type { Binding, InstanceCommand, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, ProjectConfig } from "../domain/types.js";
+import type { AgentInstance } from "../domain/agent-instance.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 import type { InstanceControlPort, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
@@ -15,6 +16,13 @@ import type { InstanceCardActionCommand } from "./card-action-command.js";
 import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 export type { InstanceCardActionCommand } from "./card-action-command.js";
 
+export interface InstanceInteractionWorkflowPort {
+  handleCommand(message: IncomingLarkMessage, command: InstanceCommand): Promise<void>;
+  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: AgentInstance; binding: Binding | null } | { outcome: "rejected"; message: string };
+  handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean>;
+  handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand): Promise<LarkCardActionResult>;
+}
+
 interface Options {
   projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore;
   control: Pick<InstanceControlPort, "createWorker" | "start" | "stop" | "planRemoval" | "confirmRemoval" | "inspect" | "listWorkersForParent">;
@@ -25,7 +33,7 @@ interface Options {
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "publishFromCard">;
 }
 
-export class InstanceInteractionWorkflow {
+export class InstanceInteractionWorkflow implements InstanceInteractionWorkflowPort {
   private readonly context: InstanceConversationContext;
   private readonly commands: InstanceCommandActions;
   private readonly workerCards: WorkerCardActions;
@@ -46,7 +54,7 @@ export class InstanceInteractionWorkflow {
     return this.commands.handle(message, command);
   }
 
-  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: import("../domain/agent-instance.js").AgentInstance; binding: import("../domain/types.js").Binding | null } | { outcome: "rejected"; message: string } {
+  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: AgentInstance; binding: Binding | null } | { outcome: "rejected"; message: string } {
     if (!this.isOperator(message.actorOpenId)) return { outcome: "rejected", message: "你没有 Agent 管理权限。" };
     const context = this.context.resolve(message);
     const binding = context.conversationKey.startsWith("binding:") ? this.options.store.getBinding(context.conversationKey.slice(8)) : null;

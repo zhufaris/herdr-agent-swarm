@@ -7,16 +7,21 @@ import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import { swarmCommandPolicy } from "../domain/swarm-command.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, InstanceCommand, LarkCardActionResult } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
-import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
+import type { InstanceInteractionWorkflowPort } from "./instance-interaction-workflow.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 
 interface Options {
   store: NaturalLanguageCommandConfirmationStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; outboundWork: OutboundWorkNotifier;
   presentation: Pick<ApplicationPresentation, "naturalLanguageCommandConfirmation" | "naturalLanguageCommandGuidance" | "requestRejected">;
-  swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow; confirmationTtlMs?: number; now?: () => Date; idFactory?: () => string;
+  swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: Pick<InstanceInteractionWorkflowPort, "handleCommand" | "resolveNaturalLanguageMutationTarget">; confirmationTtlMs?: number; now?: () => Date; idFactory?: () => string;
 }
 
-export class NaturalLanguageCommandWorkflow {
+export interface NaturalLanguageCommandWorkflowPort {
+  handle(message: IncomingLarkMessage, result: Exclude<NaturalLanguageCommandResult, { outcome: "task" | "unresolved" }>): Promise<void>;
+  decide(action: IncomingLarkCardAction, confirmationId: string, decision: "confirm" | "cancel"): Promise<LarkCardActionResult>;
+}
+
+export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWorkflowPort {
   constructor(private readonly options: Options) {}
 
   async handle(message: IncomingLarkMessage, result: Exclude<NaturalLanguageCommandResult, { outcome: "task" | "unresolved" }>): Promise<void> {
