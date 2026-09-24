@@ -43,6 +43,14 @@ describe("run card", () => {
     expect(card).not.toContain("TraeX · datasage");
   });
 
+  it("opens only a checkpointed current Answer page from Primary Main", () => {
+    const target = { aggregateKind: "primary-turn" as const, aggregateId: "prompt-1", generation: 3, messageId: "answer-page-2" };
+    const card = JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), bindingGeneration: 3, phase: "running", currentAnswer: target }));
+    expect(card).toContain("打开当前回复");
+    expect(card).toContain("answer-page-2");
+    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), currentAnswer: { ...target, messageId: null } }))).not.toContain("打开当前回复");
+  });
+
   it("documents Primary-scoped Worker creation", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/swarm worker create <name>");

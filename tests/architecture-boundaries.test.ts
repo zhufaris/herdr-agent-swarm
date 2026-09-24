@@ -72,17 +72,17 @@ describe("application composition boundaries", () => {
     const storeBundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
     const kernel = readFileSync(new URL("./helpers/sqlite-store-kernel.ts", import.meta.url), "utf8");
     const composition = `${factory}\n${application}\n${bindingSession}\n${commandControl}\n${ingressRecovery}\n${primary}`;
-    expect(router).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
+    expect(router).not.toMatch(/new (?:DurableInboundPipeline|CardActionRouter|PromptRunWorkflow|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(router).not.toMatch(/import (?!type).*?(?:bridge-event-bus|lark-outbox-dispatcher|prompt-work-scheduler|inbound-work-notifier)/);
     expect(router).not.toContain("BindingStorePort");
-    for (const component of ["InboundMessageDispatcher", "CardActionRouter", "PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger", "StartupRecoveryWorkflow"]) {
+    for (const component of ["DurableInboundPipeline", "CardActionRouter", "PromptRunWorkflow", "BindingProvisioningWorkflow", "ModelSelectionWorkflow", "PaneControlWorkflow", "OperationsQueryWorkflow", "SessionAdministrationWorkflow", "DeliveryRecoveryWorkflow", "PaneClosureWorkflow", "HerdrRuntimeReconciler", "StartupViewConverger", "StartupRecoveryWorkflow"]) {
       expect(composition).toContain(`new ${component}`);
       expect(main).not.toContain(`new ${component}`);
     }
     for (const childFactory of ["createBindingSessionRuntime", "createCommandControlRuntime", "createIngressRecoveryRuntime"]) {
       expect(application).toContain(`${childFactory}({`);
     }
-    expect(application).not.toMatch(/new (?:InboundMessageDispatcher|CardActionRouter|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
+    expect(application).not.toMatch(/new (?:DurableInboundPipeline|CardActionRouter|BindingProvisioningWorkflow|ModelSelectionWorkflow|PaneControlWorkflow|OperationsQueryWorkflow|SessionAdministrationWorkflow|DeliveryRecoveryWorkflow|PaneClosureWorkflow|HerdrRuntimeReconciler|StartupViewConverger|StartupRecoveryWorkflow)/);
     expect(main).toContain("createManagedBridgeRuntime({");
     expect(main).not.toContain("createSqliteStoreBundle");
     expect(main).not.toContain("createBridgeRuntime");
@@ -219,9 +219,10 @@ describe("application composition boundaries", () => {
       expect(source).not.toContain("InProcessInboundWorkNotifier");
       expect(source).not.toContain("InProcessPromptWorkScheduler");
     }
-    for (const implementation of ["BridgeEventBus", "InProcessInboundWorkNotifier", "InProcessOutboundWorkNotifier", "InProcessPromptWorkScheduler", "WorkWakeupHub"]) {
-      expect(integration).toContain(`new ${implementation}`);
-    }
+    expect(integration).toContain("new RuntimeEventBus(logger)");
+    for (const implementation of ["BridgeEventBus", "InProcessInboundWorkNotifier", "InProcessOutboundWorkNotifier", "InProcessPromptWorkScheduler", "WorkWakeupHub"]) expect(integration).not.toContain(`new ${implementation}`);
+    expect(factory).toContain("new TurnControlDispatcher");
+    expect(factory).toContain('events.onWork("turn-control-dispatcher"');
     expect(integration).not.toContain("publish(event: unknown");
     expect(integration).not.toContain("publish(event: any");
   });
@@ -379,9 +380,11 @@ describe("application composition boundaries", () => {
     expect(primary).toContain("return { externalTurns, promptRun, primaryState }");
     expect(bindingSession).not.toMatch(/promptRun\.isBindingBusy/);
     expect(commandControl).not.toMatch(/promptRun\.activeTurn/);
-    expect(inboundRouting).toContain("primaryState: Pick<PrimaryRuntimeStatePort, \"activeTurn\">");
+    const promptAdmission = readFileSync(new URL("../src/coordinator/prompt-admission-workflow.ts", import.meta.url), "utf8");
+    expect(promptAdmission).toContain("primaryState: Pick<PrimaryRuntimeStatePort, \"activeTurn\">");
     expect(inboundRouting).not.toContain("PromptRunWorkflowPort");
-    expect(ingressRecovery).toContain("primaryState, provisioning");
+    expect(ingressRecovery).toContain("new PromptAdmissionWorkflow({");
+    expect(ingressRecovery).toContain("primaryState, lifecycleEvents");
   });
 
   it("gives inbound message routing separate routing and prompt acceptance ports", () => {
@@ -390,20 +393,22 @@ describe("application composition boundaries", () => {
     const bundle = readFileSync(new URL("../src/store/sqlite-store-bundle.ts", import.meta.url), "utf8");
     const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
     expect(workflow).not.toContain("interface InboundMessageRoutingStore");
-    expect(workflow).toContain("stores: { routing:");
-    expect(workflow).toContain("promptAcceptance: PromptAcceptanceStore");
+    const admission = readFileSync(new URL("../src/coordinator/prompt-admission-workflow.ts", import.meta.url), "utf8");
+    expect(workflow).toContain("routing: Pick<InboundRoutingStore");
+    expect(workflow).toContain("promptAdmission: PromptAdmissionWorkflowPort");
+    expect(admission).toContain("store: PromptAcceptanceStore");
     expect(recoveryCapabilities).not.toContain("SqliteIngressCapabilityStore");
     expect(bundle).not.toContain("inboundMessages");
     expect(graph).not.toContain("inboundMessages:");
   });
 
   it("executes prompt acceptance effects only from a committed typed receipt", () => {
-    const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    const admission = readFileSync(new URL("../src/coordinator/prompt-admission-workflow.ts", import.meta.url), "utf8");
     const effects = readFileSync(new URL("../src/coordinator/prompt-acceptance-effects.ts", import.meta.url), "utf8");
     const context = readFileSync(new URL("../src/store/sqlite/context.ts", import.meta.url), "utf8");
-    expect(routing).toContain("acceptPromptWithEffects");
-    expect(routing).toContain("executePromptAcceptanceEffects(receipt, this.options)");
-    expect(routing).not.toContain('scheduler.wake({ kind: "prompt-ready"');
+    expect(admission).toContain("acceptPromptWithEffects");
+    expect(admission).toContain("executePromptAcceptanceEffects(receipt, this.options)");
+    expect(admission).not.toContain('scheduler.wake({ kind: "prompt-ready"');
     expect(effects).toContain("receipt.consumeEffects()");
     expect(context).toContain("receipt.markCommitted()");
     expect(context).toContain("receipt.markRolledBack()");
@@ -641,8 +646,9 @@ describe("application composition boundaries", () => {
     const safety = readFileSync(new URL("../src/coordinator/prompt-safety-scanner.ts", import.meta.url), "utf8");
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     expect(`${run}\n${safety}`).toContain("ports/prompt-run.js");
-    expect(routing).toContain("ports/prompt-acceptance.js");
-    expect(`${run}\n${safety}\n${routing}`).not.toContain("ports/prompt.js");
+    const admission = readFileSync(new URL("../src/coordinator/prompt-admission-workflow.ts", import.meta.url), "utf8");
+    expect(admission).toContain("ports/prompt-acceptance.js");
+    expect(`${run}\n${safety}\n${routing}\n${admission}`).not.toContain("ports/prompt.js");
   });
 
   it("keeps ordinary card replies on the Primary prompt path", () => {
@@ -815,12 +821,12 @@ describe("application composition boundaries", () => {
 
   it("keeps durable inbound persistence and retry mechanics outside message routing", () => {
     const router = readFileSync(new URL("../src/coordinator/inbound-router.ts", import.meta.url), "utf8");
-    const dispatcher = readFileSync(new URL("../src/coordinator/inbound-message-dispatcher.ts", import.meta.url), "utf8");
-    expect(router).toContain("InboundMessageDispatcherPort");
+    const pipeline = readFileSync(new URL("../src/coordinator/durable-inbound-pipeline.ts", import.meta.url), "utf8");
+    expect(router).toContain("DurableInboundPipelinePort");
     expect(router).not.toContain("claimNextInboundMessage");
     expect(router).not.toContain("scheduleRetry");
-    expect(dispatcher).toContain("claimNextInboundMessage");
-    expect(dispatcher).toContain("scheduleRetry");
+    expect(pipeline).toContain("claimNextInboundMessage");
+    expect(pipeline).toContain("scheduleRetry");
   });
 
   it("keeps card action parsing and authorization outside message routing", () => {
@@ -855,7 +861,8 @@ describe("application composition boundaries", () => {
     expect(commands).toContain("ModelSelectionWorkflowPort");
     expect(commands).toContain("PaneControlWorkflowPort");
     expect(commands).toContain("PaneClosureWorkflowPort");
-    expect(recovery).toContain("InboundMessageRoutingWorkflowPort");
+    expect(recovery).toContain("PromptAdmissionWorkflowPort");
+    expect(recovery).not.toContain("InboundMessageRouterPort");
     expect(commands).toContain("operationsQuery.listSpaces");
     expect(commands).toContain("sessionAdministration.rename");
     expect(commands).toContain("paneClosure.requestPaneClose");

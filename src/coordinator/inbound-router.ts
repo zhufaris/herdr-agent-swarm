@@ -3,7 +3,7 @@ import type { InboundDispatcherDiagnostics, IncomingLarkCardAction, IncomingLark
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { CardActionRouterPort } from "./card-action-router.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
-import type { InboundMessageDispatcherPort } from "./inbound-message-dispatcher.js";
+import type { DurableInboundPipelinePort } from "./durable-inbound-pipeline.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
@@ -22,7 +22,7 @@ export interface InboundRouterPort {
 }
 
 export interface InboundRouterOptions {
-  gatewayIngress: Pick<GatewayIngressPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
+  gatewayIngress: Pick<GatewayIngressPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {
@@ -36,17 +36,17 @@ export class InboundRouter implements InboundRouterPort {
   }
 
   snapshot(): StartupRecoveryDiagnostics { return this.options.startupRecovery.snapshot(); }
-  inboundSnapshot(): InboundDispatcherDiagnostics { return this.options.inboundDispatcher.snapshot(); }
+  inboundSnapshot(): InboundDispatcherDiagnostics { return this.options.inboundPipeline.snapshot(); }
   reconcileHerdrWorkspaces(workspaceIds?: readonly string[]): Promise<void> { return this.options.reconciler.requestReconciliation(workspaceIds); }
   async reconcile(): Promise<void> { await Promise.all([this.options.reconciler.reconcile(), this.options.retiredPaneCleanup.requestScan()]); }
-  async handleMessage(message: IncomingLarkMessage): Promise<void> { await this.options.inboundDispatcher.handleMessage(message); }
+  async handleMessage(message: IncomingLarkMessage): Promise<void> { await this.options.inboundPipeline.receive(message); }
   async handleCardAction(action: IncomingLarkCardAction): Promise<import("../domain/types.js").LarkCardActionResult | void> { return this.options.cardActionRouter.handle(action); }
 
   async stop(context?: ShutdownContext): Promise<void> {
     await this.options.startupRecovery.stop();
     const cardActionsStopped = this.options.cardActionRouter.stop();
     await this.options.gatewayIngress.stop();
-    await Promise.allSettled([this.options.inboundDispatcher.stop(), cardActionsStopped]);
+    await Promise.allSettled([this.options.inboundPipeline.stop(), cardActionsStopped]);
     await this.options.swarmCommands.stop();
     await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop()]);
   }

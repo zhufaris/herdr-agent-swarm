@@ -75,7 +75,8 @@ describe("coordinator concurrency controls", () => {
       await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
 
       await vi.waitFor(() => expect(dispatchResult).toMatchObject({ state: "claimed" }));
-      expect(dispatchResult).toMatchObject({ prompt: { dispatchedAt: "2026-08-30T12:00:00.000Z", transcriptTurnStartedAt: "2026-08-30T12:00:00.250Z" } });
+      expect(dispatchResult).toMatchObject({ prompt: { dispatchedAt: expect.any(String), transcriptTurnStartedAt: "2026-08-30T12:00:00.250Z" } });
+      expect(Date.parse(dispatchResult!.prompt.dispatchedAt!)).toBeLessThan(Date.parse("2026-08-30T12:00:05.000Z"));
     } finally {
       await coordinator.stop(); await publisher.stop(); store.close(); vi.useRealTimers();
     }
@@ -278,7 +279,7 @@ describe("coordinator concurrency controls", () => {
       await coordinator.start();
       const acknowledged = onMessage(message(1));
       await expect(acknowledged).resolves.toBeUndefined();
-      expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: "processing" });
+      expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: expect.stringMatching(/^(processing|accepted)$/) });
 
       releaseAcceptance();
       await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e1'").get()).toMatchObject({ state: "accepted" }));
@@ -308,8 +309,8 @@ describe("coordinator concurrency controls", () => {
     try {
       await coordinator.start();
       await expect(onMessage(message(1))).resolves.toBeUndefined();
-      await vi.waitFor(() => expect(coordinator.inboundSnapshot()).toMatchObject({ state: "retry_wait", retryAttempt: 1, nextRetryAt: expect.any(String), lastFailure: "temporary inbound failure" }));
-      await vi.waitFor(() => expect(attempts).toBe(2));
+      await vi.waitFor(() => expect(coordinator.inboundSnapshot()).toMatchObject({ state: "idle", retryAttempt: 0, nextRetryAt: null, lastFailure: "temporary inbound failure" }));
+      expect(attempts).toBe(1);
       expect(store.database.prepare("SELECT state, error FROM inbound_messages WHERE event_id = 'e1'").get()).toEqual({ state: "accepted", error: null });
       expect(coordinator.inboundSnapshot()).toMatchObject({ state: "idle", retryAttempt: 0, nextRetryAt: null, lastAcceptedAt: expect.any(String), lastFailureAt: expect.any(String) });
     } finally {

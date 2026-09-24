@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../../src/config.js";
 import { BindingProvisioningWorkflow } from "../../src/coordinator/binding-provisioning-workflow.js";
 import { CardInteractionWorkflow } from "../../src/coordinator/card-interaction-workflow.js";
 import { HerdrRuntimeReconciler } from "../../src/coordinator/herdr-runtime-reconciler.js";
 import { InboundRouter } from "../../src/coordinator/inbound-router.js";
-import { InboundMessageDispatcher } from "../../src/coordinator/inbound-message-dispatcher.js";
+import { DurableInboundPipeline } from "../../src/coordinator/durable-inbound-pipeline.js";
 import { CardActionRouter } from "../../src/coordinator/card-action-router.js";
 import { InboundMessageRoutingWorkflow } from "../../src/coordinator/inbound-message-routing-workflow.js";
+import { PromptAdmissionWorkflow } from "../../src/coordinator/prompt-admission-workflow.js";
 import { ModelSelectionWorkflow } from "../../src/coordinator/model-selection-workflow.js";
 import { PaneControlWorkflow } from "../../src/coordinator/pane-control-workflow.js";
 import { OperationsQueryWorkflow } from "../../src/coordinator/operations-query-workflow.js";
@@ -21,6 +23,7 @@ import { RetiredPaneCleanupWorkflow } from "../../src/coordinator/retired-pane-c
 import { StartupViewConverger } from "../../src/coordinator/startup-view-converger.js";
 import { StartupRecoveryWorkflow } from "../../src/coordinator/startup-recovery-workflow.js";
 import { TurnControlWorkflow } from "../../src/coordinator/turn-control-workflow.js";
+import { TurnControlDispatcher } from "../../src/coordinator/turn-control-dispatcher.js";
 import { SwarmCommandContextResolver } from "../../src/coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway.js";
 import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
@@ -103,7 +106,8 @@ export function createTestRouter(
   };
   const provisioning = new BindingProvisioningWorkflow({ config, store, herdr, agentDrivers, gatewayEffects, lifecycleEvents: bus, outbound: writer, outboundWork, immediateOutbound: outbound, scheduler, primaryTools, wakeRetiredPaneCleanup: () => void retiredPaneCleanup.requestScan(), presentation: cardKitApplicationPresentation, logger });
   const modelSelection = new ModelSelectionWorkflow({ config, store, traexControl, outbound: writer, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => promptRun.activeTurn(bindingId), presentation: cardKitApplicationPresentation, logger });
-  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: cardKitApplicationPresentation });
+  const turnControlDispatcher = new TurnControlDispatcher({ store, herdr, presentation: cardKitApplicationPresentation, wakeOutbound: () => outboundWork.wake(), logger });
+  const turnControl = new TurnControlWorkflow({ store, herdr, idFactory: randomUUID, wakePrimary: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), wakeTurnControl: (owner) => turnControlDispatcher.wake(owner), presentation: cardKitApplicationPresentation });
   const paneControl = new PaneControlWorkflow({ store, outbound: writer, presentation: cardKitPanePresentation, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const operationsQuery = new OperationsQueryWorkflow({ config, store, herdr, outbound: writer, presentation: cardKitApplicationPresentation, logger });
   const sessionAdministration = new SessionAdministrationWorkflow({ config, store, herdr, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), presentation: cardKitApplicationPresentation });
@@ -116,11 +120,12 @@ export function createTestRouter(
     discoverPane: (pane, project) => provisioning.discover(pane, project), scheduler,
     isBindingBusy: (bindingId) => promptRun.isBindingBusy(bindingId), externalTurnObserver: externalTurns, presentation: cardKitApplicationPresentation
   });
-  const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store, inboundWork, logger });
   const commandResolver = new SwarmCommandContextResolver({ config, store, activeTurn: (bindingId) => promptRun.activeTurn(bindingId) });
   const swarmCommands = new SwarmCommandGateway({ store, resolver: commandResolver, outbound: writer, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: { createWorker: async () => { throw new Error("Worker creation is not configured in this test fixture"); }, inspect: () => { throw new Error("Worker inspection is not configured in this test fixture"); } }, wakeCardContext: () => {}, presentation: cardKitApplicationPresentation });
-  const messageRouting = new InboundMessageRoutingWorkflow({ config, stores: { routing: store, promptAcceptance: store }, lifecycleEvents: bus, outbound: writer, outboundWork, logger, scheduler, presentation: cardKitPrimaryPresentation, primaryState: promptRun, provisioning, swarmCommands });
-  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: async (binding, selection) => { await messageRouting.enqueueInitialProjectPrompt(binding, selection); } });
+  const promptAdmission = new PromptAdmissionWorkflow({ config, store, routing: store, primaryState: promptRun, lifecycleEvents: bus, outbound: writer, outboundWork, scheduler, presentation: cardKitPrimaryPresentation });
+  const messageRouting = new InboundMessageRoutingWorkflow({ config, routing: store, promptAdmission, outbound: writer, logger, presentation: cardKitPrimaryPresentation, provisioning, swarmCommands });
+  const inboundPipeline = new DurableInboundPipeline({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store, router: messageRouting, inboundWork, logger });
+  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store, provisioning, cardInteractions, modelSelection, deliveryRecovery, logger, enqueueInitialPrompt: async (binding, selection) => { await promptAdmission.acceptInitial(binding, selection); } });
   const startupViews = new StartupViewConverger({
     config, stores: { startupViews: store },
     outbound: writer, outboundWork, presentation: cardKitPrimaryPresentation,
@@ -129,10 +134,24 @@ export function createTestRouter(
     logger
   });
   const gateway = createFeishuGatewayPlugin({ createTransport: () => lark }).create({ gatewayId: config.gateway?.id ?? "feishu:primary", ...config.lark }, { logger });
-  const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundDispatcher.receiveMessage(message), handleAction: (action) => cardActionRouter.handle(action) });
-  const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
-  const router = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
+  const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundPipeline.receive(message), handleAction: (action) => cardActionRouter.handle(action) });
+  const startupRecovery = new StartupRecoveryWorkflow({ config, store, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundPipeline, cardActionRouter, promptAdmission, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
+  const router = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundPipeline, cardActionRouter, startupRecovery });
+  const receive = router.handleMessage.bind(router);
+  router.handleMessage = async (message) => {
+    await receive(message);
+    await waitForAcceptedInbound(store, message.eventId);
+  };
   return router;
+}
+
+async function waitForAcceptedInbound(store: SqliteBindingStore, eventId: string): Promise<void> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const row = store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = ?").get(eventId) as { state: string } | undefined;
+    if (!row || row.state === "accepted") return;
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for inbound acceptance: ${eventId}`);
 }
 
 function fallbackPromptPane(binding: ReturnType<SqliteBindingStore["findBindingByPane"]>, paneId: string): NonNullable<Awaited<ReturnType<HerdrPort["getPane"]>>> {

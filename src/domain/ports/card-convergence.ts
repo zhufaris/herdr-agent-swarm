@@ -9,3 +9,7 @@ export interface MainCardConvergencePort {
   converge(bindingId: string, workClass?: OutboundWorkClass): Promise<void>;
   project(view: TopicViewState, workClass?: OutboundWorkClass): Promise<void>;
 }
+
+export interface WorkerTurnCardConvergencePort {
+  converge(turnId: string): Promise<void>;
+}

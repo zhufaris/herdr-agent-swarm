@@ -10,6 +10,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { QueueFeedbackProjector } from "../events/queue-feedback-projector.js";
 import { AnswerPageWorkflow } from "../coordinator/answer-page-workflow.js";
 import { MainCardWorkflow } from "../coordinator/main-card-workflow.js";
+import { WorkerTurnCardWorkflow } from "../coordinator/worker-turn-card-workflow.js";
 import { feishuGatewayApplicationPresentation, feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import { OutboxRetentionMaintainer } from "../runtime/outbox-retention-maintainer.js";
 import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
@@ -17,10 +18,11 @@ import type { OutboundIntentStore, OutboxStore } from "../domain/ports/outbox.js
 import type { AnswerPageStore, MainCardStore, ProjectionStore, QueueFeedbackStore } from "../domain/ports/projection.js";
 import type { CardContextProjectionStore } from "../domain/ports/card-context.js";
 import type { RetentionStore } from "../domain/ports/retention.js";
+import type { WorkerTurnCardStore } from "../domain/ports/instance.js";
 
 export interface OutboundRuntimeStores {
   outboundIntent: OutboundIntentStore; outbox: OutboxStore; answerPages: AnswerPageStore; mainCards: MainCardStore;
-  projection: ProjectionStore; queueFeedback: QueueFeedbackStore; cardContext: CardContextProjectionStore; retention: RetentionStore;
+  projection: ProjectionStore; queueFeedback: QueueFeedbackStore; cardContext: CardContextProjectionStore; retention: RetentionStore; workerTurns: WorkerTurnCardStore;
 }
 
 export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRuntimeStores, gateway: GatewaySession, bus: LifecycleEventPublisher & LifecycleEventSubscriber, outboundWork: OutboundWorkNotifier, logger: Logger, presentation: { primary: PrimaryPresentation; application: ApplicationPresentation } = { primary: feishuGatewayPrimaryPresentation, application: feishuGatewayApplicationPresentation }) {
@@ -28,9 +30,11 @@ export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRunt
   const channelPublisher = new GatewayOutboxDispatcher(stores.outbox, gateway.delivery, logger, outboundWork, config.runtimeTuning.outboxSafetyScanIntervalMs);
   const answerPages = new AnswerPageWorkflow(stores.answerPages, () => outboundWork.wake(), presentation.primary, logger, { pageLimit: config.runtimeTuning.cards.answerPageLimitChars, answerStreamContent: presentation.primary.answerStreamContent, renderAnswerStreamPage: presentation.primary.answerStreamPage });
   const mainCards = new MainCardWorkflow(stores.mainCards, () => outboundWork.wake(), presentation.primary, logger);
+  const workerTurnCards = new WorkerTurnCardWorkflow(stores.workerTurns, () => outboundWork.wake(), presentation.application, config.runtimeTuning.cards.answerPageLimitChars, logger);
+  channelPublisher.onWorkerTurnCheckpoint((turnId) => { void workerTurnCards.converge(turnId); });
   const projector = new ConversationViewProjector(bus, stores.projection, outbound, channelPublisher, logger, presentation.primary, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cards.updateDebounceMs });
   const queueFeedbackProjector = new QueueFeedbackProjector({ store: stores.queueFeedback, outboundWork, logger, presentation: presentation.primary });
   const cardContextRebuilder = new CardContextRebuilder(stores.cardContext, () => outboundWork.wake(), logger, presentation.application, outboundWork);
   const outboxRetention = new OutboxRetentionMaintainer(stores.retention, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
-  return { outboundWork, outbound, channelPublisher, answerPages, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention };
+  return { outboundWork, outbound, channelPublisher, answerPages, workerTurnCards, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention };
 }

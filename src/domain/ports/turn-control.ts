@@ -33,7 +33,6 @@ export interface InterruptCommand {
 export interface TurnControlPort {
   steer(input: SteerCommand): Promise<SteerOutcome>;
   interrupt(input: InterruptCommand): Promise<SteerOutcome>;
-  recover(): Promise<{ resumed: TurnControlOperation[]; uncertain: TurnControlOperation[] }>;
 }
 
 export type TurnControlRequestErrorCode = "not-active" | "blocked" | "unsupported";
@@ -56,6 +55,7 @@ export interface TurnControlStore {
   convertTurnControlToPrimaryPriority(input: { operationId: string; prompt: AcceptPromptInput["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null;
   convertTurnControlToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "render"> & { view?: AcceptInstanceTurnWithCardInput["view"]; render?: AcceptInstanceTurnWithCardInput["render"] }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null;
   recoverTurnControlOperations(renderResult?: (operation: TurnControlOperation) => object): { accepted: TurnControlOperation[]; uncertain: TurnControlOperation[] };
+  listAcceptedTurnControlOperations(owner: TurnControlOwner): TurnControlOperation[];
 }
 
 export interface TurnControlWorkflowStore extends TurnControlStore,

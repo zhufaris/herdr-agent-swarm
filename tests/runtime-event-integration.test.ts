@@ -9,14 +9,17 @@ describe("RuntimeEventIntegration", () => {
     events.connectHerdrHints(async () => {});
     events.seal();
 
-    expect(events.snapshot()).toEqual({
+    expect(events.snapshot()).toMatchObject({
       reliability: {
         inbound: "durable-record-plus-hint",
         lifecycle: "transactional-state-plus-fanout",
         work: "best-effort-wakeup",
         herdr: "bounded-reconciliation-hint"
       },
-      lifecycle: { listenerCount: 0, publicationCount: 0, subscriberFailures: 0, failuresBySubscriber: {}, lastFailureAt: null, lastFailedSubscriber: null }
+      lifecycle: { listenerCount: 0, publicationCount: 0, subscriberFailures: 0, failuresBySubscriber: {}, lastFailureAt: null, lastFailedSubscriber: null },
+      channels: {
+        lifecycle: { published: 0 }, inbound: { published: 0 }, work: { published: 0 }, herdr: { published: 0 }
+      }
     });
     expect(events).not.toHaveProperty("publish");
   });

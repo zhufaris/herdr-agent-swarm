@@ -1,8 +1,9 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
 import { CardActionRouter } from "../coordinator/card-action-router.js";
-import { InboundMessageDispatcher } from "../coordinator/inbound-message-dispatcher.js";
+import { DurableInboundPipeline } from "../coordinator/durable-inbound-pipeline.js";
 import { InboundMessageRoutingWorkflow } from "../coordinator/inbound-message-routing-workflow.js";
+import { PromptAdmissionWorkflow } from "../coordinator/prompt-admission-workflow.js";
 import { InboundRouter } from "../coordinator/inbound-router.js";
 import { StartupRecoveryWorkflow } from "../coordinator/startup-recovery-workflow.js";
 import { StartupViewConverger } from "../coordinator/startup-view-converger.js";
@@ -44,12 +45,13 @@ export function createIngressRecoveryRuntime(options: {
     stores: { startupViews: stores.startupViews },
     outbound, outboundWork, presentation: presentation.primary, answerPages, mainCards, logger
   });
-  const inboundDispatcher = new InboundMessageDispatcher({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, inboundWork, logger });
   const naturalLanguageWorkflow = new NaturalLanguageCommandWorkflow({ store: stores.naturalLanguageCommandConfirmations, outbound, outboundWork, presentation: presentation.application, swarmCommands, instanceInteractions });
-  const messageRouting = new InboundMessageRoutingWorkflow({ config, stores: { routing: stores.inboundRouting, promptAcceptance: stores.promptAcceptance }, lifecycleEvents: bus, outbound, outboundWork, logger, scheduler, presentation: presentation.primary, primaryState, provisioning, swarmCommands, instanceInteractions, workerSessionThreads, naturalLanguage: { interpreter: options.naturalLanguageCommands, workflow: naturalLanguageWorkflow } });
-  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery: bindingSession.deliveryRecovery, instanceInteractions, naturalLanguageCommands: naturalLanguageWorkflow, logger, enqueueInitialPrompt: async (binding, selection) => { await messageRouting.enqueueInitialProjectPrompt(binding, selection); } });
-  const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundDispatcher.receiveMessage(message), handleAction: (action) => cardActionRouter.handle(action) });
-  const startupRecovery = new StartupRecoveryWorkflow({ config, store: stores.startupRecovery, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundWork, inboundDispatcher, cardActionRouter, messageRouting, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
-  const coordinator = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundDispatcher, cardActionRouter, startupRecovery });
+  const promptAdmission = new PromptAdmissionWorkflow({ config, store: stores.promptAcceptance, routing: stores.inboundRouting, primaryState, lifecycleEvents: bus, outbound, outboundWork, scheduler, presentation: presentation.primary });
+  const messageRouting = new InboundMessageRoutingWorkflow({ config, routing: stores.inboundRouting, promptAdmission, outbound, logger, presentation: presentation.primary, provisioning, swarmCommands, instanceInteractions, workerSessionThreads, naturalLanguage: { interpreter: options.naturalLanguageCommands, workflow: naturalLanguageWorkflow } });
+  const inboundPipeline = new DurableInboundPipeline({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, store: stores.inboundDispatch, router: messageRouting, inboundWork, logger });
+  const cardActionRouter = new CardActionRouter({ chatId: config.lark.chatId, allowedOpenIds: config.lark.allowedOpenIds, adminOpenIds: config.lark.adminOpenIds, projects: config.projects, store: stores.inboundRouting, provisioning, cardInteractions, modelSelection, deliveryRecovery: bindingSession.deliveryRecovery, instanceInteractions, naturalLanguageCommands: naturalLanguageWorkflow, logger, enqueueInitialPrompt: async (binding, selection) => { await promptAdmission.acceptInitial(binding, selection); } });
+  const gatewaySink = createCompatibilityGatewayIngressSink({ receiveMessage: (message) => inboundPipeline.receive(message), handleAction: (action) => cardActionRouter.handle(action) });
+  const startupRecovery = new StartupRecoveryWorkflow({ config, store: stores.startupRecovery, herdr, gatewayIngress: gateway.ingress, gatewaySink, logger, scheduler, inboundPipeline, cardActionRouter, promptAdmission, promptRun, provisioning, paneControl, paneClosure, sessionOperations, swarmCommands, reconciler, retiredPaneCleanup, startupViews });
+  const coordinator = new InboundRouter({ gatewayIngress: gateway.ingress, promptRun, reconciler, retiredPaneCleanup, sessionOperations, swarmCommands, inboundPipeline, cardActionRouter, startupRecovery });
   return { coordinator };
 }

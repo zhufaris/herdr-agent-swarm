@@ -32,6 +32,8 @@ export interface ManagedBridgeRuntimeDependencies {
   instanceTurns: { prepareRecovery(): void; reconcile(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> };
   herdrSnapshotCache: { withStartupSnapshotReuse<T>(operation: () => Promise<T>): Promise<T> };
   instanceWork: { stop(context?: ShutdownContext): Promise<void> };
+  turnControlDispatcher: { recover(): Promise<unknown>; stop(context?: ShutdownContext): Promise<void> };
+  runtimeEvents: { stop(): Promise<void> };
   createHealthServer(): Promise<HealthServer>;
   channelPublisher: { start(): void; stop(context?: ShutdownContext): Promise<void> };
   outboxRetention: { start(): void; stop(): Promise<void> };
@@ -161,12 +163,16 @@ export class ManagedBridgeRuntime implements ManagedBridgeRuntimePort {
       this.assertStarting();
       this.registerCleanup("coordinator", "workers", "writer", (context) => d.coordinator.stop(context));
       this.registerCleanup("instanceWork", "workers", "writer", (context) => d.instanceWork.stop(context));
+      this.registerCleanup("runtimeEvents", "workers", "non-writer", () => d.runtimeEvents.stop());
+      this.registerCleanup("turnControlDispatcher", "workers", "writer", (context) => d.turnControlDispatcher.stop(context));
       await d.coordinator.prepareDelivery();
       this.assertStarting();
       await d.herdrSnapshotCache.withStartupSnapshotReuse(async () => {
         await d.instanceRuntime.reconcile();
         this.assertStarting();
         await d.instanceTurns.reconcile();
+        this.assertStarting();
+        await d.turnControlDispatcher.recover();
         this.assertStarting();
         await d.coordinator.recoverRuntime();
       });

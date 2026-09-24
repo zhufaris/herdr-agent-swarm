@@ -22,6 +22,8 @@ import { RuntimeLink } from "./runtime-link.js";
 import { feishuGatewayWorkerPresentation } from "../gateways/feishu/presentation.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { WorkerCardDisplayStore } from "../domain/ports/worker-card-display.js";
+import type { WorkerTurnCardConvergencePort } from "../domain/ports/card-convergence.js";
+import { safeLogError } from "../runtime/safe-error.js";
 
 export interface WorkerRuntimeStores {
   instance: InstanceStore; instanceExecution: InstanceLifecycleStore & InstanceTurnStore; workerCardDisplay: WorkerCardDisplayStore;
@@ -31,14 +33,16 @@ export function createWorkerRuntime(options: {
   config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlPort;
   paneHost: PaneHost; agentDrivers: AgentDriverCatalog; worktrees: WorktreePort;
   transcriptReader: TraexTranscriptReader; outboundWork: OutboundWorkNotifier; applicationPresentation: ApplicationPresentation;
+  workerTurnCards: WorkerTurnCardConvergencePort;
 }) {
-  const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, applicationPresentation } = options;
+  const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, workerTurnCards, applicationPresentation } = options;
   const instanceWorkLink = new RuntimeLink<InstanceWorkScheduler>("instance work scheduler");
   const executionStore = stores.instanceExecution;
-  const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
-  const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, logger });
+  const convergeWorkerTurn = (turnId: string) => { void workerTurnCards.converge(turnId).catch((error) => logger.warn({ event: "worker-turn-card-convergence-failed", turnId, err: safeLogError(error), outcome: "retry_on_checkpoint_or_recovery" }, "Worker Task Card convergence failed")); };
+  const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
+  const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, logger });
   instanceWorkLink.connect(instanceWork);
-  const instanceTurns = new InstanceTurnSupervisor({ store: executionStore, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), presentation: feishuGatewayWorkerPresentation, logger });
+  const instanceTurns = new InstanceTurnSupervisor({ store: executionStore, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, logger });
   const instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store: executionStore, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeCardContext: () => outboundWork.wake(), logger });
   const instanceMessaging = new InstanceMessagingWorkflow({ store: stores.instance, turnControl, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), idFactory: randomUUID, presentation: feishuGatewayWorkerPresentation, maxQueueDepth: config.maxQueueDepth });
   const workerCardDisplay = new WorkerCardDisplayWorkflow(stores.workerCardDisplay, () => outboundWork.wake(), applicationPresentation);

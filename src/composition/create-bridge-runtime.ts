@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
 import { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
+import { TurnControlDispatcher } from "../coordinator/turn-control-dispatcher.js";
 import { SqliteIntegrityAuditor } from "../runtime/sqlite-integrity-auditor.js";
 import { WorkerDatabaseIntegrityStore } from "../runtime/sqlite-integrity-worker.js";
 import type { SqliteStoreBundle } from "../store/sqlite-store-bundle.js";
@@ -24,11 +25,13 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   const events = new RuntimeEventIntegration(logger);
   const infrastructure = createInfrastructureRuntime(config, logger, availability, events.herdrHintConsumer);
   const { herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers, worktrees, transcriptReader } = infrastructure;
-  const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), wakePrimary: (bindingId) => events.wakePrimary(bindingId), wakeInstance: (instanceId) => events.wakeInstance(instanceId), maxQueueDepth: config.maxQueueDepth });
+  const turnControlDispatcher = new TurnControlDispatcher({ store: stores.turnControl, herdr, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), logger });
+  const turnControl = new TurnControlWorkflow({ store: stores.turnControl, herdr, idFactory: randomUUID, presentation: applicationPresentation, wakeOutbound: () => events.wakeOutbound(), wakePrimary: (bindingId) => events.wakePrimary(bindingId), wakeInstance: (instanceId) => events.wakeInstance(instanceId), wakeTurnControl: (owner) => events.wakeTurnControl(owner.kind, owner.id), maxQueueDepth: config.maxQueueDepth });
+  events.onWork("turn-control-dispatcher", (hint) => { if (hint.kind === "turn-control-ready") turnControlDispatcher.wake({ kind: hint.ownerKind, id: hint.ownerId }); });
   const bus = events.lifecycle; const scheduler = events.promptWork; const inboundWork = events.inboundWork;
-  const delivery = createOutboundRuntime(config, stores, infrastructure.gateway, bus, events.outboundWork, logger, presentation);
+  const delivery = createOutboundRuntime(config, { ...stores, workerTurns: stores.instance }, infrastructure.gateway, bus, events.outboundWork, logger, presentation);
   const { outboundWork, channelPublisher, mainCards, projector, queueFeedbackProjector, cardContextRebuilder, outboxRetention } = delivery;
-  const worker = createWorkerRuntime({ config, stores: { instance: stores.instance, instanceExecution: stores.instance, workerCardDisplay: stores.workerCardDisplay }, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, applicationPresentation });
+  const worker = createWorkerRuntime({ config, stores: { instance: stores.instance, instanceExecution: stores.instance, workerCardDisplay: stores.workerCardDisplay }, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, workerTurnCards: delivery.workerTurnCards, applicationPresentation });
   const { instanceWork, instanceTurns, instanceRuntime, primaryToolGateway, instanceWorker } = worker;
   events.registerInstanceWakeup((instanceId) => instanceWork.wake(instanceId));
   const sqliteIntegrity = new SqliteIntegrityAuditor(new WorkerDatabaseIntegrityStore(config.databasePath), config.sqliteIntegrityAudit, logger);
@@ -52,7 +55,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
   events.seal();
   const lifecycle = {
     primaryToolGateway, naturalLanguageCommands, sqliteIntegrity, instanceRuntime, instanceTurns,
-    herdrSnapshotCache: herdr, instanceWork, channelPublisher, outboxRetention, projector,
+    herdrSnapshotCache: herdr, instanceWork, turnControlDispatcher, runtimeEvents: events, channelPublisher, outboxRetention, projector,
     cardContextRebuilder, queueFeedbackProjector, bus, coordinator, paneRetention, externalTurns,
     ...(herdrSocketSubscriber ? { herdrSocketSubscriber } : {})
   };

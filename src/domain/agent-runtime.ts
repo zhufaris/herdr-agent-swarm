@@ -18,6 +18,7 @@ export type DispatchReceipt =
   | { status: "not-delivered"; reason: string }
   | { status: "delivery-uncertain"; reason: string };
 export type SteerReceipt =
+  | { status: "accepted"; operationId: string }
   | { status: "delivered"; operationId?: string; turnId?: string }
   | { status: "unsupported"; reason?: string }
   | { status: "not-active"; reason?: string }
@@ -25,6 +26,7 @@ export type SteerReceipt =
   | { status: "delivery-uncertain"; operationId: string; reason: string }
   | { status: "failed"; reason: string };
 export type InterruptReceipt =
+  | { status: "accepted"; operationId: string }
   | { status: "interrupted" }
   | { status: "not-active"; reason?: string }
   | { status: "blocked"; reason: string }

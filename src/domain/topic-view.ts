@@ -5,6 +5,7 @@ import { EMPTY_PROGRESS_SUMMARY, mergeRecentProgress, progressSnapshot, type Mai
 import type { PrimaryWorkerSummary } from "./card-context-summary.js";
 import type { ModelPreference, ModelPreferenceState } from "./model-selection.js";
 import type { AgentKind } from "./agent-instance.js";
+import { sameCardTargetRef, type CardTargetRef } from "./card-target-ref.js";
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 
@@ -15,6 +16,7 @@ export interface TopicViewState {
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; progressSummary: RunProgressSummary; model: string | null; context: string | null;
   modelPreference: TopicModelPreference | null;
   liveStatus: MainCardLiveStatus | null;
+  currentAnswer: CardTargetRef | null;
   primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
   workers: PrimaryWorkerSummary[]; workerOverflowCount: number; workerDependencyRevision: number;
   activityAt: string | null;
@@ -23,7 +25,11 @@ export interface TopicViewState {
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, bindingGeneration: 1, title: "Agent task", agentKind: "traex", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, currentAnswer: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+}
+
+export function updateTopicCurrentAnswer(state: TopicViewState, currentAnswer: CardTargetRef | null): TopicViewState {
+  return sameCardTargetRef(state.currentAnswer, currentAnswer) ? state : { ...state, currentAnswer, viewVersion: state.viewVersion + 1 };
 }
 
 export function updateTopicModelPreference(state: TopicViewState, preference: ModelPreference | null): TopicViewState {
@@ -132,6 +138,7 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.tabId === right.tabId && left.paneId === right.paneId && left.worktreeName === right.worktreeName
     && left.phase === right.phase && left.agentState === right.agentState && left.queueDepth === right.queueDepth
     && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
+    && sameCardTargetRef(left.currentAnswer, right.currentAnswer)
     && left.model === right.model && left.context === right.context
     && sameTopicModelPreference(left.modelPreference, right.modelPreference)
     && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice

@@ -121,6 +121,20 @@ describe("instance cards", () => {
     expect(JSON.stringify(renderWorkerMainCard(view))).not.toContain('\"tag\":\"note\"');
   });
 
+  it("opens the latest checkpointed Task page from Worker Main", () => {
+    const base = {
+      workerId: "i1", workerName: "reviewer", workerSessionGeneration: 1, ownerName: "owner", parentBindingId: "binding-1", parentBindingGeneration: 3, parentPaneId: "w1:p0",
+      workspace: "/repo", branch: "main", model: "sonnet", runtimeState: "working" as const, runtimeAttached: true, desiredState: "running" as const, parentActive: true, paneId: "w1:p1", runtimeGeneration: 2,
+      currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [], messageId: "worker-main-message", cardId: "worker-main-card", dependencyRevision: 1,
+      viewVersion: 1, deliveredVersion: 1, frozenAt: null, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+    const task = { turnId: "turn-pages", title: "review", phase: "running" as const, durationSeconds: 1, taskCard: { aggregateKind: "worker-turn" as const, aggregateId: "turn-pages", generation: 2, messageId: "page-2-message" }, updatedAt: base.updatedAt };
+    const text = JSON.stringify(renderWorkerMainCard({ ...base, currentTask: task }));
+    expect(text).toContain("打开当前 Task");
+    expect(text).toContain("page-2-message");
+    expect(JSON.stringify(renderWorkerMainCard({ ...base, currentTask: { ...task, taskCard: { ...task.taskCard, messageId: null } } }))).not.toContain("打开当前 Task");
+  });
+
   it("includes its Primary pane and project in the continuously updated Worker Main identity", () => {
     const view = {
       workerId: "i1", workerName: "reviewer", workerSessionGeneration: 1, ownerName: "owner", parentPaneId: "w1:p0", primaryPaneName: "primary-review", projectId: "swarm",

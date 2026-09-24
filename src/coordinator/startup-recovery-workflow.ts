@@ -3,14 +3,13 @@ import { projectSpaceName, type BridgeConfig } from "../config.js";
 import type { GatewayIngressPort, GatewayIngressSink } from "../gateways/contract/plugin.js";
 import type { StartupRecoveryStore } from "../domain/ports/workflow.js";
 import type { StartupRecoveryDiagnostics } from "../domain/types.js";
-import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { CardActionRouterPort } from "./card-action-router.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
-import type { InboundMessageDispatcherPort } from "./inbound-message-dispatcher.js";
-import type { InboundMessageRoutingWorkflowPort } from "./inbound-message-routing-workflow.js";
+import type { DurableInboundPipelinePort } from "./durable-inbound-pipeline.js";
+import type { PromptAdmissionWorkflowPort } from "./prompt-admission-workflow.js";
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
 import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
@@ -29,13 +28,12 @@ export interface StartupRecoveryWorkflowPort {
 }
 
 export interface StartupRecoveryWorkflowOptions {
-  config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; gatewayIngress: GatewayIngressPort; gatewaySink: GatewayIngressSink; logger: Logger; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
-  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "recover">; inboundDispatcher: InboundMessageDispatcherPort; cardActionRouter: CardActionRouterPort; messageRouting: InboundMessageRoutingWorkflowPort;
+  config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; gatewayIngress: GatewayIngressPort; gatewaySink: GatewayIngressSink; logger: Logger; scheduler: PromptWorkScheduler;
+  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "recover">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; promptAdmission: Pick<PromptAdmissionWorkflowPort, "acceptInitial">;
 }
 
 /** Coordinates the ordered, degradable recovery sequence before accepting Lark work. */
 export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
-  private stopInboundSubscription: (() => void) | null = null;
   private stopControlSubscription: (() => void) | null = null;
   private prepareDeliveryPromise: Promise<void> | null = null;
   private runtimeRecoveryPromise: Promise<void> | null = null;
@@ -64,23 +62,22 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   }
 
   async start(): Promise<void> {
-    const { config, gatewayIngress, gatewaySink, promptRun, reconciler, provisioning, retiredPaneCleanup, inboundWork, inboundDispatcher } = this.options;
+    const { config, gatewayIngress, gatewaySink, promptRun, reconciler, provisioning, retiredPaneCleanup, inboundPipeline } = this.options;
     await this.prepareDelivery();
     if (this.runtimeRecoveryPrepared) this.runtimeRecoveryPrepared = false;
     else { this.runtimeRecoveryPromise = null; await this.recoverRuntime(); this.runtimeRecoveryPrepared = false; }
     promptRun.start(); this.options.sessionOperations.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);
-    this.stopInboundSubscription = inboundWork.subscribe((event) => this.options.messageRouting.handle(event.payload));
     await gatewayIngress.start(gatewaySink);
     await this.runStage("provisioning", () => provisioning.recover());
     await this.runStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
-    inboundDispatcher.start(); await inboundDispatcher.drain();
+    inboundPipeline.start();
     this.diagnostics = { ...this.diagnostics, state: this.diagnostics.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
   }
 
   private async performRuntimeRecovery(): Promise<void> {
-    const { config, herdr, logger, reconciler, paneControl, retiredPaneCleanup, inboundDispatcher } = this.options;
+    const { config, herdr, logger, reconciler, paneControl, retiredPaneCleanup, inboundPipeline } = this.options;
     this.startupViewRecovery.start();
-    const recoveredInbound = inboundDispatcher.recoverProcessingMessages();
+    const recoveredInbound = inboundPipeline.recover();
     if (recoveredInbound > 0) logger.warn({ event: "startup-inbound-recovered", recovered: recoveredInbound, outcome: "requeued" }, "returned interrupted inbound messages to acceptance queue");
     const workspaceAssertions = new Map<string, { workspaceId: string; spaceName: string; explicitSpaceName: boolean }>();
     for (const project of config.projects) {
@@ -101,7 +98,6 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   }
 
   async stop(): Promise<void> {
-    this.stopInboundSubscription?.(); this.stopInboundSubscription = null;
     this.stopControlSubscription?.(); this.stopControlSubscription = null;
     await this.startupViewRecovery.stop();
   }
@@ -133,7 +129,7 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
     for (const selection of this.options.store.listCompletedProjectSelectionsWithInitialPrompt()) {
       if (!selection.bindingId) continue;
       const binding = this.options.store.getBinding(selection.bindingId);
-      if (binding) await this.options.messageRouting.enqueueInitialProjectPrompt(binding, selection);
+      if (binding) await this.options.promptAdmission.acceptInitial(binding, selection);
     }
   }
 

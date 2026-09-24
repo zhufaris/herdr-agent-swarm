@@ -26,6 +26,8 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     instanceTurns: { prepareRecovery() { mark("instance-turns:prepare"); }, async reconcile() { mark("instance-turns:reconcile"); }, start() { mark("instance-turns:start"); }, async stop() { mark("instance-turns:stop"); } },
     herdrSnapshotCache: { async withStartupSnapshotReuse(operation) { mark("snapshot-reuse:start"); try { return await operation(); } finally { mark("snapshot-reuse:stop"); } } },
     instanceWork: { async stop() { mark("instance-work:stop"); } },
+    turnControlDispatcher: { async recover() { mark("turn-control:recover"); }, async stop() { mark("turn-control:stop"); } },
+    runtimeEvents: { async stop() { mark("runtime-events:stop"); } },
     createHealthServer: async () => { mark("health:start"); return { close(callback) { mark("health:stop"); callback(); } }; },
     channelPublisher: { start() { mark("publisher:start"); }, async stop() { mark("publisher:stop"); } },
     outboxRetention: { start() { mark("outbox-retention:start"); }, async stop() { mark("outbox-retention:stop"); } },
@@ -132,7 +134,7 @@ describe("ManagedBridgeRuntime", () => {
     expect(calls).toEqual([
       "lease:acquire", "fence:start", "lease:start",
       "instance-turns:prepare", "primary-tools:start", "natural-language:start", "integrity:start", "integrity:run",
-      "coordinator:prepare-delivery", "snapshot-reuse:start", "instance-runtime:reconcile", "instance-turns:reconcile", "coordinator:recover-runtime", "snapshot-reuse:stop", "health:start",
+      "coordinator:prepare-delivery", "snapshot-reuse:start", "instance-runtime:reconcile", "instance-turns:reconcile", "turn-control:recover", "coordinator:recover-runtime", "snapshot-reuse:stop", "health:start",
       "publisher:start", "outbox-retention:start", "projector:start", "card-context:start",
       "queue-feedback:start", "queue-feedback:converge", "coordinator:start",
       "pane-retention:scan", "pane-retention:start", "external-turns:start",
@@ -285,7 +287,7 @@ describe("ManagedBridgeRuntime", () => {
     await expect(signalStop).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
     expect(calls).toEqual([
       "socket-ingress:stop", "socket-drain:stop", "natural-language:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
-      "instance-turns:stop", "instance-runtime:stop", "instance-work:stop", "coordinator:stop",
+      "instance-turns:stop", "instance-runtime:stop", "turn-control:stop", "runtime-events:stop", "instance-work:stop", "coordinator:stop",
       "integrity:stop", "queue-feedback:stop", "card-context:stop", "projector:stop",
       "outbox-retention:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
     ]);

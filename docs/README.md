@@ -10,6 +10,7 @@ current supported behavior and its boundaries.
 | --- | --- |
 | Understand request flow, authority, durability, recovery, and no-replay rules | [Architecture](architecture.md) |
 | Find the owning module, port, adapter, or composition seam | [Architecture reference](architecture-reference.md) |
+| Track Clean Architecture completion across the major workflow seams | [Architecture boundary inventory](architecture-boundary-inventory.md) |
 | Learn the domain language and ownership boundaries | [Domain contexts](domain/README.md) |
 | Use the service from a configured Feishu group | [Feishu group usage](feishu-group-usage.md) |
 | Prepare or inspect a published release | [Releases](releases.md) |

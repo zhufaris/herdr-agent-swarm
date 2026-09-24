@@ -2,10 +2,11 @@ import { EventEmitter } from "node:events";
 import type { InboundMessageReceivedEvent } from "../domain/events.js";
 
 type InboundWorkListener = (event: InboundMessageReceivedEvent) => void | Promise<void>;
+export type InboundWorkHint = InboundMessageReceivedEvent;
 
 export interface InboundWorkNotifier {
   subscribe(listener: InboundWorkListener): () => void;
-  notify(event: InboundMessageReceivedEvent): Promise<void>;
+  notify(event: InboundWorkHint): Promise<void>;
 }
 
 export class InProcessInboundWorkNotifier extends EventEmitter implements InboundWorkNotifier {
@@ -14,7 +15,7 @@ export class InProcessInboundWorkNotifier extends EventEmitter implements Inboun
     return () => this.off("inbound-work", listener);
   }
 
-  async notify(event: InboundMessageReceivedEvent): Promise<void> {
+  async notify(event: InboundWorkHint): Promise<void> {
     const listeners = this.listeners("inbound-work") as InboundWorkListener[];
     await Promise.all(listeners.map((listener) => listener(event)));
   }

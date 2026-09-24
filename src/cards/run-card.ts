@@ -10,6 +10,7 @@ import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 import { actionRow, cardSection, lifecycleMarker, passiveCardElements, recentItems } from "./card-style.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
+import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -146,6 +147,7 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
+  if (input.currentAnswer?.messageId) elements.push(callbackButton(currentPageActionLabel("answer"), { action: "card_target_open", ...input.currentAnswer }, "primary"));
   const createWorker = { tag: "form", name: "primary_worker_create_form", elements: [
     { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "Worker name，例如 reviewer" } },
     formSubmitButton("创建并启动 Worker", "primary_worker_create_submit", {

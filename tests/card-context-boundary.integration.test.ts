@@ -4,7 +4,7 @@ import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
-import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { createQueuedWorkerTurnCard, workerTurnElementId } from "../src/domain/worker-turn-card-view.js";
 import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
 import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
@@ -158,6 +158,7 @@ describe("card context boundaries", () => {
     const wakeOutbound: string[] = [];
     const rebuilder = new CardContextRebuilder(store, () => wakeOutbound.push("wake"), { debug() {}, error() {} } as never, applicationPresentation);
     await rebuilder.requestScan();
+    expect(store.loadTopicView("binding")).toMatchObject({ currentAnswer: { aggregateKind: "primary-turn", aggregateId: answer.promptId, generation: 1, messageId: "answer-message" } });
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ currentTask: { turnId: task.turnId, title: "Review durable boundary", requestText: task.requestText, taskCard: { messageId: null } }, queueCount: 1, frozenAt: null });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerId: worker.id, currentTaskTitle: "Review durable boundary" }] });
     expect(store.loadRunCard(answer.promptId)).toMatchObject({ workerActivity: [{ workerId: worker.id, taskCount: 1, latestTaskCard: { messageId: null } }], workerContextFrozenAt: null });
@@ -169,6 +170,10 @@ describe("card context boundaries", () => {
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerMain: { messageId: "worker-main-message" } }] });
     expect(store.loadWorkerTurnCard(task.turnId)).toMatchObject({ workerMain: { messageId: null }, primaryAnswer: { messageId: null } });
     expect(store.listPendingOutboundReplies().some(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")).toBe(true);
+    const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(taskCreate.id, "worker-task-page-1", "worker-task-card-1");
+    await rebuilder.requestScan();
+    expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ currentTask: { taskCard: { messageId: "worker-task-page-1" } } });
     const workerMainUpdate = store.listPendingOutboundReplies().find(({ workerId, kind }) => workerId === worker.id && kind === "card_update")!;
     expect(workerMainUpdate.laneKey).toBe("gateway:feishu:primary:worker-main:reviewer:1");
     expect(workerMainUpdate.rootMessageId).toBe("worker-main-message");
@@ -189,5 +194,54 @@ describe("card context boundaries", () => {
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ runtimeState: "terminated", frozenAt: expect.any(String) });
     expect(store.loadTopicView("binding")?.workers).toEqual([]);
     expect(wakeOutbound.length).toBeGreaterThan(0);
+  });
+
+  it("keeps Worker page offsets canonical and retargets Worker Main after continuation delivery", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding", projectId: "project", workspaceId: "herdr", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane", lastAgentState: "working" });
+    store.saveTopicView({ ...initialTopicView("binding"), title: "Primary", workspaceId: "herdr", paneId: "primary:pane", phase: "running", viewVersion: 1 });
+    const created = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "project", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding", bindingGeneration: 1, paneId: "primary:pane", nativeSessionId: "primary-session" },
+      workspace: { id: "worker-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "herdr", paneId: "worker:pane", nativeSessionId: "worker-session" })!;
+    const task = createQueuedWorkerTurnCard({
+      turnId: "worker-turn", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Produce a long report", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z"
+    });
+    store.acceptInstanceTurnWithCard({ id: task.turnId, idempotencyKey: task.turnId, actor: { kind: "human", userId: "operator" }, projectId: "project", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: task.requestText, parentTurnId: null, sourceMessageId: "source", view: task, render: renderWorkerTurnCard });
+    const rebuilder = new CardContextRebuilder(store, () => {}, { debug() {}, error() {} } as never, applicationPresentation);
+    await rebuilder.requestScan();
+
+    const workerMainCreate = store.listPendingOutboundReplies().find(({ workerId }) => workerId === worker.id)!;
+    store.markOutboundReplyDelivered(workerMainCreate.id, "worker-main-message", "worker-main-card", "worker-topic");
+    const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(taskCreate.id, "worker-task-page-1", "worker-task-card-1");
+    await rebuilder.requestScan();
+
+    const completed = store.transitionInstanceTurnWithProjection({
+      turnId: task.turnId, expectedGeneration: worker.generation, state: "completed", result: "long result", eventKind: "turn.completed",
+      change: { type: "completed", occurredAt: "2026-09-05T00:01:00.000Z", answer: "long result" }, render: renderWorkerTurnCard
+    })!;
+    expect(store.reserveWorkerTurnContinuation({
+      turnId: task.turnId, pageIndex: 0, cardId: "worker-task-card-1", summary: "回答将在第 2 页继续", nextPageIndex: 1, nextPageStart: 1_234, nextElementId: workerTurnElementId(task.turnId, 1), rootMessageId: task.rootMessageId, viewVersion: completed.view.viewVersion, card: { page: 2 }
+    })).toBe("reserved");
+
+    const continuationIntents = store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === task.turnId);
+    const finish = continuationIntents.find(({ kind }) => kind === "stream_finish")!;
+    const continuation = continuationIntents.find(({ kind }) => kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(finish.id, "worker-task-card-1");
+    expect(store.listWorkerTurnCardPages(task.turnId)).toEqual(expect.arrayContaining([expect.objectContaining({ pageIndex: 0, pageStart: 0, state: "frozen" })]));
+
+    store.markOutboundReplyDelivered(continuation.id, "worker-task-page-2", "worker-task-card-2");
+    expect(store.listWorkerTurnCardPages(task.turnId)).toEqual([
+      expect.objectContaining({ pageIndex: 0, pageStart: 0, messageId: "worker-task-page-1", state: "frozen" }),
+      expect.objectContaining({ pageIndex: 1, pageStart: 1_234, messageId: "worker-task-page-2", state: "active" })
+    ]);
+    await rebuilder.requestScan();
+    expect(store.loadWorkerMainView(worker.id, worker.workerSessionGeneration)).toMatchObject({
+      currentTask: { turnId: task.turnId, taskCard: { aggregateKind: "worker-turn", aggregateId: task.turnId, generation: worker.generation, messageId: "worker-task-page-2" } }
+    });
   });
 });

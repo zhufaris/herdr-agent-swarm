@@ -9,7 +9,7 @@ import { workerPresentation } from "./helpers/presentation.js";
 let store: SqliteBindingStore | undefined;
 afterEach(() => { store?.close(); store = undefined; });
 
-function setup(state: "dispatching" | "running") {
+function setup(state: "dispatching" | "running", options: { convergeWorkerTurn?: (turnId: string) => void } = {}) {
   store = new SqliteBindingStore(":memory:");
   store.createPendingBinding({ id: "binding", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root-1", title: "Primary", creatorOpenId: "ou_primary" });
   store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p0" });
@@ -22,11 +22,19 @@ function setup(state: "dispatching" | "running") {
   const inspectPane = vi.fn(async () => ({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" }));
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
-  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake, wakeOutbound, presentation: workerPresentation });
+  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake, wakeOutbound, convergeWorkerTurn: options.convergeWorkerTurn, presentation: workerPresentation });
   return { supervisor, inspectPane, wake, wakeOutbound };
 }
 
 describe("InstanceTurnSupervisor", () => {
+  it("re-converges durable Worker Task cards during startup recovery", () => {
+    const convergeWorkerTurn = vi.fn();
+    const { supervisor } = setup("running", { convergeWorkerTurn });
+    vi.spyOn(store!, "listActionableWorkerTurnCardIds").mockReturnValue(["turn"]);
+    supervisor.prepareRecovery();
+    expect(convergeWorkerTurn).toHaveBeenCalledWith("turn");
+  });
+
   it("does not wake recovered claims before fresh runtime reconciliation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });

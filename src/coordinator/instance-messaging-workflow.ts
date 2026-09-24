@@ -46,7 +46,7 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
       const outcome = await this.options.turnControl.steer({ owner: { kind: "instance", id: target.id }, actor: input.actor, text: input.text, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
       if (outcome.mode === "priority") return { status: "delivered", operationId: outcome.logicalTurnId, ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
       const { operation } = outcome;
-      return { ...turnControlSteerReceipt(operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
+      return { ...turnControlSteerReceipt(operation.id, operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const durable = input.resultTargetMessageId ? { durableResult: false as const } : {};
@@ -66,7 +66,7 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
       const outcome = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
       if (outcome.mode === "priority") return { status: "failed", reason: "Interrupt unexpectedly resolved to a priority turn", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
       const { operation } = outcome;
-      return { ...turnControlInterruptReceipt(operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
+      return { ...turnControlInterruptReceipt(operation.id, operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const durable = input.resultTargetMessageId ? { durableResult: false as const } : {};
@@ -124,11 +124,13 @@ function delay(timeoutMs: number): Promise<void> {
   return new Promise((resolve) => { const timer = setTimeout(resolve, timeoutMs); timer.unref?.(); });
 }
 
-function turnControlSteerReceipt(state: import("../domain/turn-control.js").TurnControlState, result: Record<string, unknown> | null): SteerReceipt {
+function turnControlSteerReceipt(operationId: string, state: import("../domain/turn-control.js").TurnControlState, result: Record<string, unknown> | null): SteerReceipt {
   if (result && typeof result.status === "string") return result as SteerReceipt;
+  if (state === "accepted" || state === "dispatching") return { status: "accepted", operationId };
   return state === "uncertain" ? { status: "delivery-uncertain", operationId: "unknown", reason: "Stored steering result is unavailable" } : { status: "failed", reason: "Stored steering result is invalid" };
 }
-function turnControlInterruptReceipt(state: import("../domain/turn-control.js").TurnControlState, result: Record<string, unknown> | null): InterruptReceipt {
+function turnControlInterruptReceipt(operationId: string, state: import("../domain/turn-control.js").TurnControlState, result: Record<string, unknown> | null): InterruptReceipt {
   if (result && typeof result.status === "string") return result as InterruptReceipt;
+  if (state === "accepted" || state === "dispatching") return { status: "accepted", operationId };
   return state === "uncertain" ? { status: "delivery-uncertain", operationId: "unknown", reason: "Stored interrupt result is unavailable" } : { status: "failed", reason: "Stored interrupt result is invalid" };
 }

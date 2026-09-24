@@ -8,7 +8,8 @@ import { TestConversationViewProjector as ConversationViewProjector } from "./he
 import { HerdrEventRouter } from "../src/runtime/herdr-event-router.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
-import { primaryPresentation } from "./helpers/presentation.js";
+import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
+import { applicationPresentation, primaryPresentation } from "./helpers/presentation.js";
 import type { LarkPort } from "../src/domain/ports.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { MAX_TURN_OUTPUT_CHARS, TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
@@ -70,6 +71,63 @@ describe("ExternalTurnObserver", () => {
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get()).toEqual(deliveryCount);
 
     await observer.stop(); await projector.stop(); stopProjector(); stopPublisher(); await publisher.stop(); store.close();
+  });
+
+  it("continues a long direct Herdr answer and points Primary Main at the checkpointed latest page", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", statusMessageId: "main-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", spaceName: "repo", paneId: "w1:p1", phase: "ready", agentState: "idle" });
+    const answer = Array.from({ length: 1_500 }, (_, index) => `Herdr direct answer segment ${index}`).join("\n");
+    const observations: TraexTranscriptObservation[] = [
+      { turnId: "turn-long", freshTurnStart: true, requestText: "direct long request", answerDelta: answer, turnLifecycle: { turnId: "turn-long", state: "active", startedAt: "2026-09-24T00:00:00.000Z" } },
+      { turnId: "turn-long", answerDelta: "", turnLifecycle: { turnId: "turn-long", state: "completed", startedAt: "2026-09-24T00:00:00.000Z", finalAnswer: answer } },
+      { answerDelta: "" }
+    ];
+    const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
+    const transcriptReader = { open: vi.fn(async () => ({ mode: "typed" as const, cursor })) };
+    const createdMessages: string[] = [];
+    const mainUpdates: object[] = [];
+    const lark: LarkPort = {
+      async start() {}, async stop() {}, isReady: () => true,
+      async createTopic() { return { topicId: "topic", rootMessageId: "root" }; },
+      async replyText() { return { messageId: "text" }; },
+      async replyCard() { return { messageId: "card" }; },
+      async replyStreamingCard() {
+        const page = createdMessages.length + 1;
+        const messageId = `answer-${page}`;
+        createdMessages.push(messageId);
+        return { messageId, cardId: `answer-card-${page}` };
+      },
+      async streamCardContent() {}, async finishStreamingCard() {},
+      async updateCard(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
+      async shareThread() { return { messageId: "shared" }; }
+    };
+    const logger = pino({ enabled: false });
+    const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, logger);
+    const stopPublisher = publisher.start();
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, logger, primaryPresentation, undefined, undefined, { cardUpdateDebounceMs: 0, mainCardUpdateDebounceMs: 0 });
+    const stopProjector = projector.start();
+    const observer = new ExternalTurnObserver({ store, transcriptReader, bus, outboundWork: { wake() { void publisher.requestScan(); } }, logger, presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external-long" });
+
+    await observer.observe(store.getBinding("b1")!);
+    await observer.observe(store.getBinding("b1")!);
+    await vi.waitFor(() => expect(store.loadRunCard("external-long")).toMatchObject({ phase: "completed" }));
+    await vi.waitFor(() => expect(store.listAnswerPages("external-long").length).toBeGreaterThan(1));
+    await vi.waitFor(() => expect(store.listAnswerPages("external-long").at(-1)).toMatchObject({ state: "finished" }));
+    const latestMessageId = store.listAnswerPages("external-long").at(-1)!.messageId!;
+    const contextRebuilder = new CardContextRebuilder(store, () => { void publisher.requestScan(); }, logger, applicationPresentation);
+    await contextRebuilder.requestScan();
+    await publisher.drain();
+    await vi.waitFor(() => expect(store.loadTopicView("b1")?.currentAnswer?.messageId).toBe(latestMessageId));
+
+    const pages = store.listAnswerPages("external-long");
+    expect(pages[0]).toMatchObject({ state: "frozen", messageId: "answer-1" });
+    expect(pages.at(-1)).toMatchObject({ messageId: latestMessageId });
+    expect(mainUpdates.some((card) => JSON.stringify(card).includes(latestMessageId))).toBe(true);
+
+    await observer.stop(); await projector.stop(); await contextRebuilder.stop(); stopProjector(); stopPublisher(); await publisher.stop(); store.close();
   });
 
   it("opens only the active binding attached to a targeted Pane", async () => {

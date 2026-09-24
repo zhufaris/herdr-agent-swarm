@@ -1,6 +1,7 @@
 import type { RunCardView } from "./run-card-view.js";
 import { answerElementId } from "./run-card-view.js";
 import type { AnswerPage, AnswerPageDeliveryFacts } from "./types.js";
+import { continuationSummary } from "./card-page-handoff.js";
 
 export interface AnswerPagePlanningPort {
   answerStreamContent(view: RunCardView): string;
@@ -32,7 +33,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
     }
     const nextPageIndex = page.pageIndex + 1;
     return {
-      type: "continue", currentSummary: `回答将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex,
+      type: "continue", currentSummary: continuationSummary(nextPageIndex), nextPageIndex,
       nextPageStart: facts.latestContent.sourceEnd, nextElementId: answerElementId(view.promptId, nextPageIndex),
       initialContent: planning.renderAnswerStreamPage(content, facts.latestContent.sourceEnd, planning.pageLimit).page
     };
@@ -51,7 +52,7 @@ export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: Answe
     if (facts.finishPending) return { type: "wait" };
     const nextPageIndex = page.pageIndex + 1;
     return {
-      type: "continue", currentSummary: `回答将在第 ${nextPageIndex + 1} 页继续`, nextPageIndex,
+      type: "continue", currentSummary: continuationSummary(nextPageIndex), nextPageIndex,
       nextPageStart: rendered.nextPageStart, nextElementId: answerElementId(view.promptId, nextPageIndex),
       initialContent: planning.renderAnswerStreamPage(content, rendered.nextPageStart, planning.pageLimit).page
     };

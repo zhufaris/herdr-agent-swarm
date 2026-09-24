@@ -130,6 +130,13 @@ export class SqliteWorkerTurnStore {
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[] {
     return (this.context.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? ORDER BY page_index").all(turnId) as Array<Record<string, unknown>>).map(mapWorkerTurnCardPage);
   }
+  listActionableWorkerTurnCardIds(): string[] {
+    return (this.context.database.prepare(`SELECT DISTINCT card.turn_id
+      FROM worker_turn_cards card
+      JOIN worker_turn_card_pages page ON page.turn_id = card.turn_id
+      WHERE page.state = 'active' AND page.message_id IS NOT NULL AND page.card_id IS NOT NULL
+      ORDER BY card.updated_at, card.turn_id`).all() as Array<{ turn_id: string }>).map(({ turn_id }) => turn_id);
+  }
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts {
     const page = this.context.database.prepare("SELECT element_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(turnId, pageIndex) as { element_id: string } | undefined;
     if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
@@ -188,7 +195,7 @@ export class SqliteWorkerTurnStore {
       const liveContinuation = page.pageIndex > 0 && page.state === "active" && (view.phase === "running" || view.phase === "blocked");
       const completedPage = ["active", "finished"].includes(page.state) && view.phase === "completed";
       if ((!liveContinuation && !completedPage) || page.cardId !== input.cardId || page.messageId !== input.messageId) return "stale";
-      const key = `worker-turn:hydrate:${input.turnId}:${input.pageIndex}:${input.cardId}:${view.phase}`;
+      const key = `worker-turn:hydrate:${input.turnId}:${input.pageIndex}:${input.cardId}:${view.phase}:${page.state}`;
       if (this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) return "waiting";
       this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `worker-turn:${input.turnId}` });
       return "reserved";

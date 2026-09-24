@@ -34,6 +34,7 @@ export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStor
   convertTurnControlToPrimaryPriority: TurnControlStore["convertTurnControlToPrimaryPriority"] = (input) => this.controls.convertToPrimaryPriority(input);
   convertTurnControlToWorkerPriority: TurnControlStore["convertTurnControlToWorkerPriority"] = (input) => this.controls.convertToWorkerPriority(input);
   recoverTurnControlOperations: TurnControlStore["recoverTurnControlOperations"] = (render) => this.controls.recover(render);
+  listAcceptedTurnControlOperations: TurnControlStore["listAcceptedTurnControlOperations"] = (owner) => this.controls.listAccepted(owner);
   getBinding: TurnControlWorkflowStore["getBinding"] = (id) => this.bindings.getBinding(id);
   getActiveOrdinaryPrompt: TurnControlWorkflowStore["getActiveOrdinaryPrompt"] = (id, generation) => this.promptDispatch.getActiveOrdinaryPrompt(id, generation);
   getAgentInstance: TurnControlWorkflowStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);

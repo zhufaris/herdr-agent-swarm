@@ -1,5 +1,4 @@
 import type { ControlActor } from "../domain/commands.js";
-import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
 import { TurnControlRequestError, type InterruptCommand, type SteerCommand, type SteerOutcome, type TurnControlPort, type TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
@@ -8,9 +7,8 @@ import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { TurnControlOperation, TurnTarget } from "../domain/turn-control.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../domain/worker-turn-card-view.js";
-import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { store: TurnControlWorkflowStore; herdr: Pick<HerdrPort, "getPane" | "interruptAgent">; idFactory: () => string; presentation: Pick<PrimaryPresentation, "answerCard"> & Pick<WorkerPresentation, "workerTurn" | "turnControlResult">; wakeOutbound?: () => void; wakePrimary?: (bindingId: string) => void; wakeInstance?: (instanceId: string) => void; maxQueueDepth?: number }
+interface Options { store: TurnControlWorkflowStore; herdr: Pick<HerdrPort, "getPane">; idFactory: () => string; presentation: Pick<PrimaryPresentation, "answerCard"> & Pick<WorkerPresentation, "workerTurn" | "turnControlResult">; wakeOutbound?: () => void; wakePrimary?: (bindingId: string) => void; wakeInstance?: (instanceId: string) => void; wakeTurnControl?: (owner: SteerCommand["owner"]) => void; maxQueueDepth?: number }
 
 export class TurnControlWorkflow implements TurnControlPort {
   private readonly lanes = new Map<string, Promise<SteerOutcome>>();
@@ -38,6 +36,7 @@ export class TurnControlWorkflow implements TurnControlPort {
     if (previous) {
       if (!sameControlRequest(previous, kind, input)) throw new Error("Idempotency key belongs to a different turn control operation");
       this.options.wakeOutbound?.();
+      if (previous.state === "accepted") this.options.wakeTurnControl?.(previous.target.owner);
       const priorityTurnId = previous.result?.status === "priority-accepted" && typeof previous.result.logicalTurnId === "string" ? previous.result.logicalTurnId : null;
       if (priorityTurnId) return { mode: "priority", logicalTurnId: priorityTurnId, duplicate: true };
       return { mode: "native", operation: previous, duplicate: true };
@@ -62,21 +61,8 @@ export class TurnControlWorkflow implements TurnControlPort {
     });
     if (!accepted.inserted) { this.options.wakeOutbound?.(); return { mode: "native", operation: accepted.operation, duplicate: true }; }
     this.options.wakeOutbound?.();
-    const dispatched = await this.dispatch(accepted.operation, input as SteerCommand);
-    this.options.wakeOutbound?.();
-    return dispatched.mode === "priority" ? dispatched : { mode: "native", operation: dispatched.operation, duplicate: false };
-  }
-
-  async recover(): Promise<{ resumed: TurnControlOperation[]; uncertain: TurnControlOperation[] }> {
-    const recovered = this.options.store.recoverTurnControlOperations(this.options.presentation.turnControlResult);
-    if (recovered.uncertain.length > 0) this.options.wakeOutbound?.();
-    const resumed: TurnControlOperation[] = [];
-    for (const operation of recovered.accepted) {
-      const outcome = await this.dispatch(operation, operation.kind === "steer" ? commandFromOperation(operation) : undefined);
-      if (outcome.mode === "native") resumed.push(outcome.operation);
-      this.options.wakeOutbound?.();
-    }
-    return { resumed, uncertain: recovered.uncertain };
+    this.options.wakeTurnControl?.(target.owner);
+    return { mode: "native", operation: accepted.operation, duplicate: false };
   }
 
   private async resolveTarget(owner: SteerCommand["owner"], kind: "steer" | "interrupt"): Promise<{ kind: "active"; target: TurnTarget } | { kind: "idle"; binding: Binding } | { kind: "idle-instance"; instance: NonNullable<ReturnType<TurnControlWorkflowStore["getAgentInstance"]>> }> {
@@ -134,41 +120,6 @@ export class TurnControlWorkflow implements TurnControlPort {
     return { mode: "priority", logicalTurnId: accepted.turn.id, duplicate: !accepted.inserted };
   }
 
-  private async dispatch(operation: TurnControlOperation, steerInput?: SteerCommand): Promise<{ mode: "native"; operation: TurnControlOperation } | SteerOutcome> {
-    const rejection = await this.revalidate(operation.target);
-    if (rejection) {
-      const rejected = { ...operation, state: "rejected" as const, result: { status: "rejected", reason: rejection } };
-      return { mode: "native", operation: this.options.store.rejectAcceptedTurnControlOperation({ id: operation.id, result: rejected.result, card: this.options.presentation.turnControlResult(rejected) }) ?? this.requireOperation(operation.id) };
-    }
-    const claimed = this.options.store.claimTurnControlOperation(operation.id);
-    if (!claimed) {
-      const rejected = { ...operation, state: "rejected" as const, result: { status: "rejected", reason: "Exact turn target changed before dispatch" } };
-      return { mode: "native", operation: this.options.store.rejectAcceptedTurnControlOperation({ id: operation.id, result: rejected.result, card: this.options.presentation.turnControlResult(rejected) }) ?? this.requireOperation(operation.id) };
-    }
-    try {
-      if (claimed.kind === "interrupt") {
-        if (!this.options.herdr.interruptAgent) return { mode: "native", operation: this.finish(claimed.id, { status: "unsupported", reason: "Herdr native interruption is unavailable" }) };
-        return { mode: "native", operation: this.finish(claimed.id, await this.options.herdr.interruptAgent({ paneId: claimed.target.paneId, agentSession: claimed.target.agentSession, runtimeTurnId: claimed.target.runtimeTurnId, idempotencyKey: claimed.id })) };
-      }
-      void steerInput;
-      return { mode: "native", operation: this.finish(claimed.id, { status: "unsupported", reason: "Herdr native steering is unavailable" }) };
-    } catch (error) {
-      const result = { status: "delivery-uncertain", reason: safeLogError(error).message };
-      return { mode: "native", operation: this.options.store.finishTurnControlOperation({ id: claimed.id, state: "uncertain", result, card: this.options.presentation.turnControlResult({ ...claimed, state: "uncertain", result }) }) ?? this.requireOperation(claimed.id) };
-    }
-  }
-
-  private finish(id: string, receipt: SteerReceipt | InterruptReceipt): TurnControlOperation {
-    const state = receipt.status === "delivered" || receipt.status === "interrupted" ? "delivered" : receipt.status === "delivery-uncertain" || receipt.status === "failed" ? "uncertain" : "rejected";
-    const operation = this.requireOperation(id);
-    return this.options.store.finishTurnControlOperation({ id, state, result: receipt, card: this.options.presentation.turnControlResult({ ...operation, state, result: receipt }) }) ?? this.requireOperation(id);
-  }
-
-  private async revalidate(target: TurnTarget): Promise<string | null> {
-    try { await this.requireControllablePane(target.paneId, target.agentSession, target.runtimeTurnId); return null; }
-    catch (error) { return safeLogError(error).message; }
-  }
-
   private async requireControllablePane(paneId: string, expectedSession: HerdrAgentSession | null, runtimeTurnId: string): Promise<HerdrPane> {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane) throw new TurnControlRequestError("not-active", "Herdr pane is no longer active");
@@ -188,11 +139,6 @@ export class TurnControlWorkflow implements TurnControlPort {
     return pane;
   }
 
-  private requireOperation(id: string): TurnControlOperation {
-    const operation = this.options.store.getTurnControlOperation(id);
-    if (!operation) throw new Error(`Turn control operation disappeared: ${id}`);
-    return operation;
-  }
 }
 
 function actorId(actor: ControlActor): string { return actor.kind === "human" ? actor.userId : `primary:${actor.bindingId}`; }
@@ -205,9 +151,4 @@ function sameControlRequest(operation: TurnControlOperation, kind: "steer" | "in
   const payload = kind === "steer" ? (input as SteerCommand).text : null;
   return operation.kind === kind && operation.target.owner.kind === input.owner.kind && operation.target.owner.id === input.owner.id
     && operation.payload === payload && operation.sourceMessageId === (input.sourceMessageId ?? null) && operation.sourceCardId === (input.sourceCardId ?? null);
-}
-
-function commandFromOperation(operation: TurnControlOperation): SteerCommand {
-  if (operation.kind !== "steer" || operation.payload === null) throw new Error("Cannot reconstruct a non-steer control operation");
-  return { owner: operation.target.owner, actor: operation.actor, text: operation.payload, idempotencyKey: operation.idempotencyKey, sourceMessageId: operation.sourceMessageId, sourceCardId: operation.sourceCardId };
 }

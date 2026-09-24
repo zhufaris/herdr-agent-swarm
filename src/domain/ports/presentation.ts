@@ -31,7 +31,7 @@ export interface PrimaryPresentation {
 }
 
 export interface WorkerPresentation {
-  workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage): object;
+  workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options?: { initialContent?: string }): object;
   workerHumanReviewNotification(input: WorkerHumanReviewNotificationInput): object;
   workerTurnProgress(view: WorkerTurnCardView): string;
   turnControlResult(operation: TurnControlOperation): object;

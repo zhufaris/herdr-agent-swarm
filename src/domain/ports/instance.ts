@@ -66,6 +66,7 @@ export interface InstanceStore {
   loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): PrimaryWorkerActivitySummary[];
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
+  listActionableWorkerTurnCardIds(): string[];
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
@@ -112,7 +113,7 @@ export type InstanceLifecycleStore = Pick<InstanceStore,
 
 export type InstanceTurnStore = Pick<InstanceStore,
   "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "getInstanceTurn" |
-  "claimInstanceTurnTranscript" | "loadWorkerTurnCard" | "findWorkerTurnByCardMessage" |
+  "claimInstanceTurnTranscript" | "loadWorkerTurnCard" | "findWorkerTurnByCardMessage" | "listActionableWorkerTurnCardIds" |
   "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "reserveWorkerTurnContent" |
   "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" | "reserveWorkerTurnCardHydration" |
   "reserveWorkerTurnContinuation" | "applyInstanceTurnProjection" |
@@ -121,6 +122,12 @@ export type InstanceTurnStore = Pick<InstanceStore,
   "listObservableInstanceTurns" | "listObservableInstanceTurnsByPaneIds" |
   "getInstanceTurnDiagnostics" | "updateInstanceTurn" | "completeInstanceTurn" |
   "listInstanceEvents" | "countPendingInstanceTurns"
+>;
+
+export type WorkerTurnCardStore = Pick<InstanceStore,
+  "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" |
+  "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
+  "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation"
 >;
 
 export type InstanceMessagingStore = Pick<InstanceStore,
@@ -133,7 +140,7 @@ export type InstanceMessagingStore = Pick<InstanceStore,
 export type InstanceTurnSupervisionStore = Pick<InstanceStore,
   "getAgentInstance" | "getInstanceTurn" | "getInstanceTurnDiagnostics" |
   "getWorkspaceLease" | "listObservableInstanceTurns" |
-  "listObservableInstanceTurnsByPaneIds" | "loadWorkerTurnCard" |
+  "listObservableInstanceTurnsByPaneIds" | "loadWorkerTurnCard" | "listActionableWorkerTurnCardIds" |
   "recoverInterruptedInstanceTurns" | "terminateWorkerSession" |
   "transitionInstanceTurnWithProjection" | "updateAgentInstanceObservation" |
   "updateInstanceTurn"

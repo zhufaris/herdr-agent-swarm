@@ -44,6 +44,9 @@ export class SqliteTurnControlStore {
 
   get(id: string): TurnControlOperation | null { const row = this.database.prepare("SELECT * FROM turn_control_operations WHERE id = ?").get(id) as TurnControlOperationRow | undefined; return row ? mapTurnControlOperation(row) : null; }
   getByIdempotencyKey(key: string): TurnControlOperation | null { const row = this.database.prepare("SELECT * FROM turn_control_operations WHERE idempotency_key = ?").get(key) as TurnControlOperationRow | undefined; return row ? mapTurnControlOperation(row) : null; }
+  listAccepted(owner: import("../../domain/turn-control.js").TurnControlOwner): TurnControlOperation[] {
+    return (this.database.prepare("SELECT * FROM turn_control_operations WHERE owner_kind = ? AND owner_id = ? AND state = 'accepted' ORDER BY created_at, rowid").all(owner.kind, owner.id) as TurnControlOperationRow[]).map(mapTurnControlOperation);
+  }
   getPrioritySteer(owner: import("../../domain/turn-control.js").TurnControlOwner, key: string): { logicalTurnId: string; text: string } | null {
     if (owner.kind === "binding") { const row = this.database.prepare("SELECT id, body FROM prompt_jobs WHERE binding_id = ? AND lark_message_id = ? AND priority = 'priority'").get(owner.id, `priority-steer:${key}`) as { id: string; body: string } | undefined; return row ? { logicalTurnId: row.id, text: row.body } : null; }
     const row = this.database.prepare("SELECT id, text FROM instance_turns WHERE instance_id = ? AND idempotency_key = ? AND priority = 'priority'").get(owner.id, key) as { id: string; text: string } | undefined;

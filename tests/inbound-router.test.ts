@@ -9,7 +9,7 @@ describe("InboundRouter shutdown", () => {
     const router = new InboundRouter({
       gatewayIngress: { async stop() { calls.push("gateway"); } },
       startupRecovery: { async start() {}, async stop() { calls.push("startup"); }, snapshot: () => ({}) },
-      inboundDispatcher: { async stop() { calls.push("messages"); }, snapshot: () => ({}) },
+      inboundPipeline: { async stop() { calls.push("messages"); }, snapshot: () => ({}) },
       cardActionRouter: { async handle() {}, stop() { calls.push("card-gate"); return callbacks.then(() => { calls.push("callbacks-drained"); }); } },
       swarmCommands: { async stop() { calls.push("commands"); } },
       retiredPaneCleanup: { async stop() { calls.push("retired"); } },

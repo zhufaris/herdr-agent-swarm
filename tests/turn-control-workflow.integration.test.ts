@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TurnControlWorkflow } from "../src/coordinator/turn-control-workflow.js";
+import { TurnControlDispatcher } from "../src/coordinator/turn-control-dispatcher.js";
 import type { HerdrPane } from "../src/domain/types.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
@@ -23,8 +24,9 @@ function setupWorker(
   store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
   const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1", ...overrides };
   const getPane = vi.fn(async () => pane);
-  const workflow = new TurnControlWorkflow({ store, herdr: { getPane, interruptAgent: interrupt }, idFactory: () => "control-1", maxQueueDepth, presentation: applicationPresentation });
-  return { workflow, getPane, steer, interrupt, worker, pane };
+  const dispatcher = new TurnControlDispatcher({ store, herdr: { getPane, interruptAgent: interrupt }, presentation: applicationPresentation, wakeOutbound: () => undefined });
+  const workflow = new TurnControlWorkflow({ store, herdr: { getPane }, idFactory: () => "control-1", maxQueueDepth, presentation: applicationPresentation, wakeTurnControl: (owner) => dispatcher.wake(owner) });
+  return { workflow, dispatcher, getPane, steer, interrupt, worker, pane };
 }
 
 describe("TurnControlWorkflow", () => {
@@ -38,9 +40,11 @@ describe("TurnControlWorkflow", () => {
     store.markPromptDispatched("prompt-1", "2026-09-03T00:00:00.000Z");
     store.claimPromptTranscriptTurn({ promptId: "prompt-1", bindingId: "b1", turnId: "runtime-1", startedAt: "2026-09-03T00:00:00.100Z" });
     const pane: HerdrPane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "working", foregroundExecutables: ["traex"], agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, steeringCapability: "native", activeTurnId: "runtime-1" };
-    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "control-primary", presentation: applicationPresentation });
+    const dispatcher = new TurnControlDispatcher({ store, herdr: { getPane: async () => pane }, presentation: applicationPresentation, wakeOutbound: () => undefined });
+    const workflow = new TurnControlWorkflow({ store, herdr: { getPane: async () => pane }, idFactory: () => "control-primary", presentation: applicationPresentation, wakeTurnControl: (owner) => dispatcher.wake(owner) });
 
-    await expect(workflow.steer({ owner: { kind: "binding", id: "b1" }, actor: { kind: "human", userId: "u1" }, text: "focus", idempotencyKey: "primary-steer-1" })).resolves.toMatchObject({ operation: { state: "rejected", result: { status: "unsupported" }, target: { owner: { kind: "binding", id: "b1" }, logicalTurnId: "prompt-1", runtimeTurnId: "runtime-1" } } });
+    await expect(workflow.steer({ owner: { kind: "binding", id: "b1" }, actor: { kind: "human", userId: "u1" }, text: "focus", idempotencyKey: "primary-steer-1" })).resolves.toMatchObject({ operation: { state: "accepted", result: null, target: { owner: { kind: "binding", id: "b1" }, logicalTurnId: "prompt-1", runtimeTurnId: "runtime-1" } } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-primary")).toMatchObject({ state: "rejected", result: { status: "unsupported" } }));
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual({ count: 1 });
   });
 
@@ -80,7 +84,8 @@ describe("TurnControlWorkflow", () => {
     const { workflow, steer, worker } = setupWorker({ agentState: "idle" });
 
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "focus", idempotencyKey: "stale-idle" }))
-      .resolves.toMatchObject({ mode: "native", operation: { state: "rejected", result: { status: "unsupported" } } });
+      .resolves.toMatchObject({ mode: "native", operation: { state: "accepted", result: null } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")).toMatchObject({ state: "rejected", result: { status: "unsupported" } }));
     expect(steer).not.toHaveBeenCalled();
   });
 
@@ -88,7 +93,8 @@ describe("TurnControlWorkflow", () => {
     const { workflow, getPane, steer, worker } = setupWorker();
     const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, text: "change direction", idempotencyKey: "message-1:steer", sourceMessageId: "message-1" };
 
-    await expect(workflow.steer(command)).resolves.toMatchObject({ duplicate: false, operation: { state: "rejected", result: { status: "unsupported" } } });
+    await expect(workflow.steer(command)).resolves.toMatchObject({ duplicate: false, operation: { state: "accepted", result: null } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")).toMatchObject({ state: "rejected", result: { status: "unsupported" } }));
     expect(getPane).toHaveBeenCalledTimes(2);
     expect(steer).not.toHaveBeenCalled();
     await expect(workflow.steer(command)).resolves.toMatchObject({ duplicate: true, operation: { state: "rejected" } });
@@ -125,7 +131,8 @@ describe("TurnControlWorkflow", () => {
     const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, idempotencyKey: "message-1:stop", sourceMessageId: "message-1" };
     const stateBeforeInterrupt = store!.getInstanceTurn("logical-1")!.state;
 
-    await expect(workflow.interrupt(command)).resolves.toMatchObject({ duplicate: false, operation: { kind: "interrupt", state: "delivered", result: { status: "interrupted" } } });
+    await expect(workflow.interrupt(command)).resolves.toMatchObject({ duplicate: false, operation: { kind: "interrupt", state: "accepted", result: null } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")).toMatchObject({ state: "delivered", result: { status: "interrupted" } }));
     expect(getPane).toHaveBeenCalledTimes(2);
     expect(interrupt).toHaveBeenCalledWith({ paneId: "w1:p1", agentSession: expect.objectContaining({ value: "session-1" }), runtimeTurnId: "runtime-1", idempotencyKey: "control-1" });
     expect(store!.getInstanceTurn("logical-1")).toMatchObject({ state: stateBeforeInterrupt, runtimeTurnId: "runtime-1" });
@@ -137,6 +144,7 @@ describe("TurnControlWorkflow", () => {
   it("persists a stop result that does not claim the turn already terminated", async () => {
     const { workflow, worker } = setupWorker();
     await workflow.interrupt({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, idempotencyKey: "stop-visible", sourceMessageId: "message-1", resultTargetMessageId: "root-1" });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")?.state).toBe("delivered"));
 
     const payload = store!.listPendingOutboundReplies()[0]!.payload;
     expect(payload).toContain("中断已发送");
@@ -147,7 +155,8 @@ describe("TurnControlWorkflow", () => {
   it("allows exact-turn stop when native text steering is unsupported", async () => {
     const { workflow, interrupt, worker } = setupWorker({ steeringCapability: "unsupported" });
     await expect(workflow.interrupt({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, idempotencyKey: "stop-no-steer" }))
-      .resolves.toMatchObject({ operation: { state: "delivered" } });
+      .resolves.toMatchObject({ operation: { state: "accepted" } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")?.state).toBe("delivered"));
     expect(interrupt).toHaveBeenCalledOnce();
   });
 
@@ -155,7 +164,8 @@ describe("TurnControlWorkflow", () => {
     const unsupported = vi.fn(async () => ({ status: "unsupported" as const, reason: "native steering unavailable" }));
     const { workflow, worker } = setupWorker({}, unsupported);
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "unsupported-visible", sourceMessageId: "message-1", resultTargetMessageId: "root-1" }))
-      .resolves.toMatchObject({ mode: "native", operation: { state: "rejected", result: { status: "unsupported" } } });
+      .resolves.toMatchObject({ mode: "native", operation: { state: "accepted", result: null } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")?.state).toBe("rejected"));
     const payload = store!.listPendingOutboundReplies()[0]!.payload;
     expect(payload).toContain("/swarm awake");
     expect(payload).toContain("/swarm skip");
@@ -167,6 +177,7 @@ describe("TurnControlWorkflow", () => {
     const { workflow, getPane, steer, worker } = setupWorker();
     const command = { owner: { kind: "instance" as const, id: worker.id }, actor: { kind: "human" as const, userId: "u1" }, text: "change direction", idempotencyKey: "message-1:steer", sourceMessageId: "message-1" };
     await workflow.steer(command);
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")?.state).toBe("rejected"));
     store!.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, expectedRuntimeTurnId: "runtime-1", state: "completed", eventKind: "turn.completed" });
     getPane.mockRejectedValue(new Error("must not observe a duplicate"));
 
@@ -178,6 +189,7 @@ describe("TurnControlWorkflow", () => {
   it("persists a payload-free durable result card for a Feishu steering request", async () => {
     const { workflow, worker } = setupWorker();
     await workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "do not expose this payload", idempotencyKey: "steer-visible", sourceMessageId: "message-1", resultTargetMessageId: "root-1" });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")?.state).toBe("rejected"));
 
     const replies = store!.listPendingOutboundReplies();
     expect(replies).toEqual([expect.objectContaining({ targetRole: "operation_result", rootMessageId: "root-1" })]);
@@ -202,7 +214,8 @@ describe("TurnControlWorkflow", () => {
     const { workflow, getPane, steer, worker, pane } = setupWorker();
     getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, activeTurnId: "runtime-2" });
 
-    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "steer-1" })).resolves.toMatchObject({ operation: { state: "rejected", result: { reason: expect.stringContaining("identity changed") } } });
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "steer-1" })).resolves.toMatchObject({ operation: { state: "accepted" } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")).toMatchObject({ state: "rejected", result: { reason: expect.stringContaining("identity changed") } }));
     expect(steer).not.toHaveBeenCalled();
   });
 
@@ -211,7 +224,8 @@ describe("TurnControlWorkflow", () => {
     getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, activeTurnId: null });
 
     await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "steer-null-turn" }))
-      .resolves.toMatchObject({ operation: { state: "rejected", result: { reason: expect.stringContaining("identity changed") } } });
+      .resolves.toMatchObject({ operation: { state: "accepted" } });
+    await vi.waitFor(() => expect(store!.getTurnControlOperation("control-1")).toMatchObject({ state: "rejected", result: { reason: expect.stringContaining("identity changed") } }));
     expect(steer).not.toHaveBeenCalled();
   });
 });

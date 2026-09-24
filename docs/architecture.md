@@ -255,6 +255,23 @@ These channels share composition but not semantics. There is no generic durable
 event log, no event sourcing, and no assumption that receiving an event proves a
 state transition.
 
+`RuntimeEventBus` owns the common typed envelope, named subscriptions, startup
+buffering, work-key coalescing, failure diagnostics, and shutdown settlement.
+Callers receive only narrow lifecycle, inbound, work, or Herdr interfaces; they
+cannot publish an untyped event. Work envelopes contain durable owner identifiers
+only, never Prompt, steering, terminal, or answer content.
+Inbound envelopes carry only the durable `eventId`; subscriber failure cannot
+fail the already durable Gateway acknowledgement or become workflow authority.
+
+Active-turn control follows a separate durable-effect seam.
+`TurnControlWorkflow` validates the caller and exact target, commits an accepted
+operation plus any result-card intent, and emits `turn-control-ready`. The
+owner-serialized `TurnControlDispatcher` reloads that intent, refreshes the Herdr
+turn fence, claims it, performs the permitted native interrupt (or explicitly
+rejects unsupported steering), persists the terminal result, and wakes delivery.
+Different owners progress independently. On startup, accepted work is resumed;
+an operation already in `dispatching` becomes `uncertain` and is never replayed.
+
 Primary binding and Worker instance reconciliation each own an independent
 `PriorityReconciliationRunner`. The shared runner is a domain-free single-writer
 scheduler: it coalesces only bounded Pane/workspace identifiers and one full-scan
@@ -525,9 +542,10 @@ turn/card/page/event changes atomic even though their implementations live in
 separate files.
 
 Durable inbox insertion, claim, acceptance, release, and interrupted-claim
-recovery belong exclusively to `InboundMessageDispatchStore`. Message routing
-retains only binding/project lookup and bridge-message classification; the
-kernel does not mirror the dispatcher operations as forwarding methods.
+recovery belong exclusively to `InboundMessageDispatchStore` and are orchestrated
+by `DurableInboundPipeline`. Message routing retains only binding/project lookup;
+bridge-message classification is part of pipeline admission, and the kernel does
+not mirror the pipeline operations as forwarding methods.
 
 Some atomic store operations still accept a renderer callback or an already
 materialized card. These are bounded transition seams for prompt and Worker-turn
@@ -701,6 +719,9 @@ and a session aggregate per Worker session generation:
 Lark inbound -> atomic InstanceTurn + WorkerTurnCard projection + invalidations
              -> FIFO scheduler -> exact structured observation
              -> SQLite result/page projection + durable context invalidations
+             -> WorkerTurnCardWorkflow
+                  +-> ordered progress/content/finish intents
+                  `-> immutable continuation pages
              -> CardContextRebuilder
                   +-> Worker Main snapshot
                   +-> exact Primary Main generation
@@ -716,17 +737,25 @@ claims output ownership only when the instance generation, runtime turn ID, and
 canonical turn start time all match. Restart recovery reopens that transcript
 boundary for observation and never calls the submission boundary again.
 
-One stable Worker Main Card is updated on the
+One stable Worker Main Card and one paginated Worker Task Card aggregate are
+updated through independent durable lanes. `WorkerTurnCardWorkflow` is the sole
+convergence path for live output, terminal hydration, finish, and continuation
+reservation. View changes and delivery checkpoints invoke the same idempotent
+`converge(turnId)` interface; startup scans active checkpointed pages so a crash
+between projection persistence and intent reservation cannot strand a card. The
+workflow never sends to Lark directly and never replays an Agent turn.
+
+The Worker Main Card is updated on the
 `worker-main:<workerId>:<workerSessionGeneration>` lane. For new Worker Session
 generations, its initial create is a durable group-root effect on
 `worker-thread:<workerId>:<workerSessionGeneration>`; the returned root becomes
 both the sole Main Card target and the fixed Worker interaction thread. It shows the current
 request, lifecycle, bounded progress/output, queue state, and recent terminal
 history. Completion remains visible until a newer task becomes current. SQLite
-retains the full sanitized canonical result and internal turn projection; no new
-per-turn card or continuation message is created. Previously delivered Task Cards
-remain immutable historical artifacts, and startup dismisses only legacy create
-intents that are proven never attempted.
+retains the full sanitized canonical result and internal turn projection. A long
+Task result finishes its current page and creates a continuation with deterministic
+source offsets; frozen Task pages are immutable. Main cards expose only targets
+whose message identity has already been checkpointed in SQLite.
 
 A real non-`blocked` to `blocked` Worker transition is also the reservation seam
 for a one-time Human Review notification. The transition inserts `turn.blocked`
@@ -816,11 +845,13 @@ change during the target decomposition without changing these steps.
    SQLite persistence, then terminally acknowledged only after the rejection card
    is reserved. Worker and continuation forms apply the same policy before they
    can create or steer work; input is rejected rather than silently truncated.
-2. A coalescing single-flight dispatcher claims persisted messages in FIFO order,
+2. `DurableInboundPipeline` claims persisted messages in FIFO order per scope,
    marks each accepted only after business handling completes, and releases a
-   failed item back to `received`. Failures retry automatically with bounded
-   exponential backoff, while a newly persisted message wakes the dispatcher
-   immediately. Startup returns interrupted `processing` rows to `received`;
+   failed item back to `received`. A retryable scope does not block independent
+   scopes. Failures retry automatically with bounded exponential backoff, while a
+   newly persisted message requests an immediate drain and also publishes a
+   content-free best-effort wake hint. Startup returns interrupted `processing`
+   rows to `received`;
    shutdown cancels retry timers and waits only for the active drain, leaving any
    unclaimed rows durable for the next start.
    `/status` exposes aggregate-only inbound counts, retry backlog age, the most
@@ -830,10 +861,14 @@ change during the target decomposition without changing these steps.
    Accepted inbound rows share the configured outbox retention window and are
    pruned in an independently bounded batch loop. Rows still in `received` or
    `processing` are never removed by retention.
-3. A command is handled as a binding or operational workflow. Ordinary text in
+3. `InboundMessageRoutingWorkflow.route` applies the fixed route precedence and
+   returns one structured decision/disposition. A command is handled as a binding
+   or operational workflow. Ordinary text in
    an active bound topic normally becomes a FIFO prompt job. A conservative
    classifier may route an eligible short continuation to the exact active turn;
    all other ordinary messages remain FIFO. One SQLite acceptance transaction
+   is owned by `PromptAdmissionWorkflow`, shared by ordinary replies and recovered
+   initial-project prompts. The transaction
    rechecks the binding generation and queue limit.
    Exact, case-insensitive `/swarm stop` uses a freshly identity-checked,
    best-effort local interruption
@@ -1171,8 +1206,11 @@ Binding reconciliation completes. Instance reconciliation, Worker turn
 observation, and retired-pane cleanup remain independent consumers of the same
 bounded hint. The Primary observer publishes the existing lifecycle events, so
 `ConversationViewProjector` independently converges the corresponding Answer
-Card and the owning Main Card through their durable outbox paths. Ordinary Bridge
-dispatch still establishes an EOF baseline. An external observation may replay
+Card and the owning Main Card through their durable outbox paths. Bridge-owned
+and direct Herdr turns therefore share Answer pagination, continuation handoff,
+delivery checkpointing, Main Card navigation, retry, and restart recovery;
+`execution_origin` changes ownership evidence, not card delivery semantics.
+Ordinary Bridge dispatch still establishes an EOF baseline. An external observation may replay
 only the latest active turn within its bounded scan window; it never imports
 completed history. Lost or failed hints retain the periodic observer scan as the
 convergence path.
@@ -1220,8 +1258,9 @@ UUID and reconciliation has persisted it in SQLite. The bridge never matches a t
 from cwd, timestamps, titles, or newest-file order, and it does not automatically
 restart or replace existing panes to enable typed output.
 
-`AnswerPageWorkflow` is the single live and startup convergence path for Answer
-delivery. It uses a deterministic planner to compare the canonical RunCard answer
+`AnswerPageWorkflow` is the single live and startup convergence path for Primary
+Answer delivery, while `WorkerTurnCardWorkflow` applies the same durable handoff
+policy to Worker Task output. The Primary workflow uses a deterministic planner to compare the canonical RunCard answer
 with the authoritative active page, then asks SQLite to reserve the next content,
 finish, or continuation transition. Page sequence advancement, the compatibility
 RunCard mirror, and the corresponding outbox intent are committed atomically.

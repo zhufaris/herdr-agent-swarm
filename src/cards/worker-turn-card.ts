@@ -18,7 +18,7 @@ const STATE = {
 
 const REQUEST_PREVIEW_LIMIT = 2_000;
 
-export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean } = {}): object {
+export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string } = {}): object {
   const state = STATE[view.phase];
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
@@ -26,7 +26,9 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   const firstPage = pageIndex === 0;
   const showOutput = view.phase === "completed";
   const content = showOutput
-    ? page?.state === "active"
+    ? options.initialContent !== undefined
+      ? options.initialContent
+      : page?.state === "active"
       ? "正在整理最终输出…"
       : renderLarkMarkdownPage(workerTurnContent(view), page?.pageStart ?? view.pageStart, 9_000).page || workerTurnStatusContent(view)
     : "";

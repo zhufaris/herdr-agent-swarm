@@ -1,4 +1,4 @@
-import type { AgentState, EventOrigin, IncomingLarkMessage } from "./types.js";
+import type { AgentState, EventOrigin } from "./types.js";
 import type { AgentKind } from "./agent-instance.js";
 import type { MainCardLiveStatus, RunProgressEvent } from "./run-card-view.js";
 
@@ -72,5 +72,5 @@ export interface InboundMessageReceivedEvent {
   type: "InboundMessageReceived";
   origin: "lark";
   occurredAt: string;
-  payload: IncomingLarkMessage;
+  payload: { eventId: string };
 }

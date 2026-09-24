@@ -62,7 +62,10 @@ export class SqliteOutboxDeliveryStore {
               if (pageIndex > 0) this.context.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND state = 'active' AND page_index < ?").run(now(), row.prompt_id, pageIndex);
               this.context.database.prepare("UPDATE answer_pages SET message_id = ?, card_id = COALESCE(?, card_id), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, state = 'active', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'").run(messageId, cardId ?? null, cardId ?? null, now(), row.prompt_id, pageIndex);
               const latest = this.dependencies.loadRunCard(row.prompt_id);
-              if (latest && latest.viewVersion > latest.answerDeliveredVersion) this.dependencies.invalidateCardContexts([{ targetKind: "primary-turn", targetId: latest.promptId, targetGeneration: latest.bindingGeneration, reason: "answer-create.delivered" }]);
+              if (latest) this.dependencies.invalidateCardContexts([
+                ...(latest.viewVersion > latest.answerDeliveredVersion ? [{ targetKind: "primary-turn" as const, targetId: latest.promptId, targetGeneration: latest.bindingGeneration, reason: "answer-create.delivered" }] : []),
+                { targetKind: "primary-session", targetId: latest.bindingId, targetGeneration: latest.bindingGeneration, reason: "answer-create.delivered" }
+              ]);
             }
           } else {
             this.context.database.prepare("UPDATE run_cards SET answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
@@ -93,6 +96,15 @@ export class SqliteOutboxDeliveryStore {
           if (updated.changes > 0) {
             if (pageIndex > 0) this.context.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, pageIndex);
             this.context.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'").run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, pageIndex);
+            const latest = this.dependencies.loadWorkerTurnCard(row.worker_turn_id);
+            if (latest) {
+              const main = this.dependencies.loadWorkerMainView(latest.instanceId, latest.workerSessionGeneration);
+              this.dependencies.invalidateCardContexts([
+                { targetKind: "worker-session", targetId: latest.instanceId, targetGeneration: latest.workerSessionGeneration, reason: "worker-turn-create.delivered" },
+                ...(main ? [{ targetKind: "primary-session" as const, targetId: main.parentBindingId, targetGeneration: main.parentBindingGeneration, reason: "worker-turn-create.delivered" }] : []),
+                ...(latest.primaryAnswer ? [{ targetKind: "primary-turn" as const, targetId: latest.primaryAnswer.aggregateId, targetGeneration: latest.primaryAnswer.generation, reason: "worker-turn-create.delivered" }] : [])
+              ]);
+            }
           }
         } else {
           this.context.database.prepare("UPDATE worker_turn_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ?").run(row.view_version ?? 0, now(), row.worker_turn_id);

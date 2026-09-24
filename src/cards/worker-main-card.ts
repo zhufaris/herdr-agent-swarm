@@ -5,6 +5,7 @@ import { callbackButton } from "./cardkit-button.js";
 import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems } from "./card-style.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
+import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 
 const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "排队", preparing: "准备中", running: "执行中", blocked: "阻塞", completed: "完成", failed: "失败", cancelled: "取消", "dispatch-uncertain": "派发不确定" };
 const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovisioned: "未配置", starting: "启动中", idle: "空闲", working: "工作中", blocked: "阻塞", detached: "已脱离", stopped: "已停止", failed: "失败", terminated: "已终止" };
@@ -126,6 +127,7 @@ function pushActions(elements: object[], view: WorkerMainView, snapshot: boolean
     const identity = { turnId: task.turnId, instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId };
     if (interaction.actionLabel) { guidance.push(interaction.guidance); buttons.push(callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", ...identity }, "primary")); }
     if (interaction.canInterrupt) buttons.push(callbackButton("停止当前任务", { action: "worker_task_interrupt", ...identity }, "danger"));
+    if (task.taskCard.messageId) buttons.push(callbackButton(currentPageActionLabel("task"), { action: "card_target_open", ...task.taskCard }, "default"));
   }
   if (canSubmitWorkerMainTask(view)) { guidance.push(task ? `新任务将进入 FIFO 队列；当前还有 ${view.queueCount} 条等待。` : "新任务可立即执行，且与历史任务无父子关系。"); buttons.push(callbackButton("发起新任务", { action: "worker_new_task_form", instanceId: view.workerId, generation: view.runtimeGeneration, workerSessionGeneration: view.workerSessionGeneration, sourceCardMessageId: view.messageId }, "primary")); }
   const row = actionRow(buttons);

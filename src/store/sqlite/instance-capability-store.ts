@@ -54,6 +54,7 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   listWorkerTurnCardPages: InstanceStore["listWorkerTurnCardPages"] = (turnId) => this.turns.listWorkerTurnCardPages(turnId);
   getWorkerTurnCardDeliveryFacts: InstanceStore["getWorkerTurnCardDeliveryFacts"] = (turnId, pageIndex) => this.turns.getWorkerTurnCardDeliveryFacts(turnId, pageIndex);
   reserveWorkerTurnContent: InstanceStore["reserveWorkerTurnContent"] = (input) => this.turns.reserveWorkerTurnContent(input);
+  listActionableWorkerTurnCardIds: InstanceStore["listActionableWorkerTurnCardIds"] = () => this.turns.listActionableWorkerTurnCardIds();
   reserveWorkerTurnProgress: InstanceStore["reserveWorkerTurnProgress"] = (input) => this.turns.reserveWorkerTurnProgress(input);
   reserveWorkerTurnFinish: InstanceStore["reserveWorkerTurnFinish"] = (input) => this.turns.reserveWorkerTurnFinish(input);
   reserveWorkerTurnCardHydration: InstanceStore["reserveWorkerTurnCardHydration"] = (input) => this.turns.reserveWorkerTurnCardHydration(input);
