@@ -34,7 +34,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      stores: inboundStores(store), promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: { info, error: vi.fn() }
+      stores: inboundStores(store), primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: { info, error: vi.fn() }
     } as never);
     const message = { eventId: "event-correlated", messageId: "message-correlated", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: false, isRootMessage: false };
 
@@ -64,7 +64,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
     const store = { findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 0), acceptPromptWithEffects: vi.fn((input) => ({ result: { inserted: false, prompt: input.prompt, view: input.view }, commitState: "committed", consumeEffects: () => [] })) };
     const naturalLanguage = { interpreter: { interpret: vi.fn(() => ({ outcome: "command", source: "deterministic", family: "swarm", command: { kind: "stop" } })) }, workflow: { handle: vi.fn() } };
-    const workflow = new InboundMessageRoutingWorkflow({ config: { projects: [], lark: { adminOpenIds: ["operator"] } }, stores: inboundStores(store), naturalLanguage, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false }) } as never);
+    const workflow = new InboundMessageRoutingWorkflow({ config: { projects: [], lark: { adminOpenIds: ["operator"] } }, stores: inboundStores(store), naturalLanguage, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false }) } as never);
     const mentioned = { eventId: "e1", messageId: "m1", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "停止当前任务", mentionsBot: true, isRootMessage: false };
     await workflow.handle(mentioned);
     expect(naturalLanguage.workflow.handle).toHaveBeenCalledOnce();
@@ -82,7 +82,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const workflow = new InboundMessageRoutingWorkflow({
       config: { defaultProjectId: "default", projects: [], lark: { adminOpenIds: ["operator"] } },
       stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 0), acceptPromptWithEffects: vi.fn((input) => ({ result: { inserted: false, prompt: { ...input.prompt, id: "initial-durable-prompt" }, view: input.view }, commitState: "committed", consumeEffects: () => [] })) }),
-      provisioning, presentation: primaryPresentation, logger: { info, error: vi.fn() }, promptRun: { activeTurn: vi.fn(() => null) }
+      provisioning, presentation: primaryPresentation, logger: { info, error: vi.fn() }, primaryState: { activeTurn: vi.fn(() => null) }
     } as never);
     const message = { eventId: "event-1", messageId: "message-1", parentMessageId: null, chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "operator", text: "ship it", mentionsBot: true, isRootMessage: true };
 
@@ -106,7 +106,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
         acceptPromptWithEffects: vi.fn(() => { throw new Error("This topic's prompt queue is full"); })
       }),
       provisioning: { provisionDefaultProject: vi.fn(async () => ({ binding, selection })) }, outbound: { enqueueCard: vi.fn(async () => undefined) },
-      presentation: primaryPresentation, logger: { info, error: vi.fn() }, promptRun: { activeTurn: vi.fn(() => null) }
+      presentation: primaryPresentation, logger: { info, error: vi.fn() }, primaryState: { activeTurn: vi.fn(() => null) }
     } as never);
     const message = { eventId: "event-full", messageId: "message-full", parentMessageId: null, chatId: "chat", topicId: "message-full", rootMessageId: "message-full", actorOpenId: "operator", text: "ship it", mentionsBot: true, isRootMessage: true };
 
@@ -237,7 +237,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => true) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      stores: inboundStores(store), instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), instanceInteractions, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-worker-reply", messageId: "message-worker-reply", parentMessageId: "worker-task-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
 
@@ -256,7 +256,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      stores: inboundStores(store), instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), instanceInteractions, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-primary-reply", messageId: "message-primary-reply", parentMessageId: "primary-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue primary", mentionsBot: true, isRootMessage: false };
 
@@ -275,7 +275,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
     const workflow = new InboundMessageRoutingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      stores: inboundStores(store), instanceInteractions, promptRun: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), instanceInteractions, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = {
       eventId: "event-flattened-card-reply", messageId: "text-created-from-task-card-reply",

@@ -18,7 +18,7 @@ import { isInstanceTurnCapacityExceeded } from "../domain/instance-turn-capacity
 import { isInstanceTargetError } from "../domain/instance-target-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { InstanceInteractionWorkflow } from "./instance-interaction-workflow.js";
-import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
+import type { PrimaryRuntimeStatePort } from "../domain/ports/primary-runtime-state.js";
 import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { executePromptAcceptanceEffects } from "./prompt-acceptance-effects.js";
@@ -34,7 +34,7 @@ export interface InboundMessageRoutingWorkflowPort {
 
 interface Options {
   config: BridgeConfig; stores: { routing: Pick<InboundRoutingStore, "findBindingByLarkScope" | "isBindingThreadAlias">; promptAcceptance: PromptAcceptanceStore }; lifecycleEvents: LifecycleEventPublisher; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; scheduler: PromptWorkScheduler; presentation: Pick<PrimaryPresentation, "answerCard" | "disconnectedTopic" | "requestRejected">;
-  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
+  primaryState: Pick<PrimaryRuntimeStatePort, "activeTurn">; provisioning: BindingProvisioningWorkflowPort; swarmCommands: SwarmCommandGatewayPort; instanceInteractions?: InstanceInteractionWorkflow;
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "handleMessage">;
   naturalLanguage?: { interpreter: NaturalLanguageCommandInterpreter; workflow: Pick<NaturalLanguageCommandWorkflow, "handle"> };
 }
@@ -121,7 +121,7 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRoutingWorkf
   private async enqueue(binding: Binding, message: IncomingLarkMessage, body = message.text): Promise<{ promptId: string } | null> {
     const answerRootMessageId = this.options.stores.routing.isBindingThreadAlias(message.topicId, message.rootMessageId) ? message.rootMessageId : binding.rootMessageId;
     if (!answerRootMessageId) throw new Error("This binding has no Lark root message");
-    const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.promptRun.activeTurn(binding.id)?.promptId ?? null;
+    const promptId = randomUUID(); const acceptedAt = new Date().toISOString(); const capturedParentPromptId = this.options.primaryState.activeTurn(binding.id)?.promptId ?? null;
     const common = { promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(body), sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.spaceNameFor(binding), requestText: body, occurredAt: acceptedAt };
     let receipt: ReturnType<PromptAcceptanceStore["acceptPromptWithEffects"]>;
     try {

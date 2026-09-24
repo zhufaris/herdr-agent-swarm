@@ -363,6 +363,27 @@ describe("application composition boundaries", () => {
     expect(bundle).not.toContain("readonly promptRun: PromptRunStore");
   });
 
+  it("exposes Primary runtime state through a read-only domain seam", () => {
+    const statePort = readFileSync(new URL("../src/domain/ports/primary-runtime-state.ts", import.meta.url), "utf8");
+    const promptRun = readFileSync(new URL("../src/coordinator/prompt-run-workflow.ts", import.meta.url), "utf8");
+    const primary = readFileSync(new URL("../src/composition/create-primary-runtime.ts", import.meta.url), "utf8");
+    const bindingSession = readFileSync(new URL("../src/composition/create-binding-session-runtime.ts", import.meta.url), "utf8");
+    const commandControl = readFileSync(new URL("../src/composition/create-command-control-runtime.ts", import.meta.url), "utf8");
+    const ingressRecovery = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
+    const inboundRouting = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
+    expect(statePort).toContain("export interface PrimaryRuntimeStatePort");
+    expect(statePort).toContain("activeTurn(bindingId: string)");
+    expect(statePort).toContain("isBindingBusy(bindingId: string)");
+    expect(promptRun).toContain("PromptRunWorkflowPort extends PrimaryRuntimeStatePort");
+    expect(primary).toContain("const primaryState: PrimaryRuntimeStatePort = promptRun");
+    expect(primary).toContain("return { externalTurns, promptRun, primaryState }");
+    expect(bindingSession).not.toMatch(/promptRun\.isBindingBusy/);
+    expect(commandControl).not.toMatch(/promptRun\.activeTurn/);
+    expect(inboundRouting).toContain("primaryState: Pick<PrimaryRuntimeStatePort, \"activeTurn\">");
+    expect(inboundRouting).not.toContain("PromptRunWorkflowPort");
+    expect(ingressRecovery).toContain("primaryState, provisioning");
+  });
+
   it("gives inbound message routing separate routing and prompt acceptance ports", () => {
     const workflow = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const recoveryCapabilities = readFileSync(new URL("../src/store/sqlite/recovery-capability-store.ts", import.meta.url), "utf8");

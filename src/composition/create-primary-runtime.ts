@@ -14,6 +14,7 @@ import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
 import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../domain/ports/prompt.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
+import type { PrimaryRuntimeStatePort } from "../domain/ports/primary-runtime-state.js";
 
 export interface PrimaryRuntimeStores {
   externalTurns: ExternalTurnObservationStore; promptDispatch: PromptDispatchStore; promptRecovery: PromptRecoveryStore;
@@ -44,5 +45,6 @@ export function createPrimaryRuntime(options: {
     recoverExternalTurns: (binding, prompt) => externalTurns.recoverAfterDetachedTurn(binding, prompt)
   });
   promptRunLink.connect(promptRun);
-  return { externalTurns, promptRun };
+  const primaryState: PrimaryRuntimeStatePort = promptRun;
+  return { externalTurns, promptRun, primaryState };
 }

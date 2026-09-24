@@ -22,20 +22,13 @@ import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { TranscriptObserver, type TurnOutputSource } from "./transcript-observer.js";
 import { PromptTurnExecutor } from "./prompt-turn-executor.js";
 import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { ActiveTurnSnapshot, PrimaryRuntimeStatePort } from "../domain/ports/primary-runtime-state.js";
 
-export interface ActiveTurnSnapshot {
-  promptId: string;
-  paneId: string;
-  state: Binding["lastAgentState"];
-}
-
-export interface PromptRunWorkflowPort {
+export interface PromptRunWorkflowPort extends PrimaryRuntimeStatePort {
   prepareRecovery(): void;
   start(): void;
   requestSafetyScan(): void;
   snapshot(): PromptWorkerDiagnostics;
-  activeTurn(bindingId: string): ActiveTurnSnapshot | null;
-  isBindingBusy(bindingId: string): boolean;
   awake(bindingId: string): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "busy" | "unavailable"; reason: string }>;
   skipDetached(bindingId: string, expectedBindingGeneration: number, actorOpenId: string, sourceMessageId: string, rootMessageId: string | null): DetachedPromptSkipResult;
   stop(context?: ShutdownContext): Promise<void>;
