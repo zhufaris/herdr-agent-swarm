@@ -19,6 +19,7 @@ implemented. Current records:
 - [Herdr runtime reconciliation implementation plan](plans/2026-09-24-herdr-runtime-reconciliation-plan.md)
 - [Command control execution design](specs/2026-09-24-command-control-execution-design.md)
 - [Command control execution implementation plan](plans/2026-09-24-command-control-execution-plan.md)
+- [Runtime health snapshot design](specs/2026-09-24-runtime-health-snapshot-design.md)
 - [Inbound admission and routing implementation plan](plans/2026-09-24-inbound-admission-routing-plan.md)
 
 The service's current maintainer, user, and operator documentation starts at the
