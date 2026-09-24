@@ -2,7 +2,7 @@ import type { ControlActor } from "../domain/commands.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
-import type { TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
+import type { InterruptCommand, SteerCommand, SteerOutcome, TurnControlPort, TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { Binding, HerdrAgentSession, HerdrPane } from "../domain/types.js";
 import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { TurnControlOperation, TurnTarget } from "../domain/turn-control.js";
@@ -10,15 +10,9 @@ import { createQueuedRunCard } from "../domain/run-card-view.js";
 import { createQueuedWorkerTurnCard } from "../domain/worker-turn-card-view.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-export type SteerOutcome =
-  | { mode: "native"; operation: TurnControlOperation; duplicate: boolean }
-  | { mode: "priority"; logicalTurnId: string; duplicate: boolean };
-
 interface Options { store: TurnControlWorkflowStore; herdr: Pick<HerdrPort, "getPane" | "interruptAgent">; idFactory: () => string; presentation: Pick<PrimaryPresentation, "answerCard"> & Pick<WorkerPresentation, "workerTurn" | "turnControlResult">; wakeOutbound?: () => void; wakePrimary?: (bindingId: string) => void; wakeInstance?: (instanceId: string) => void; maxQueueDepth?: number }
-interface SteerCommand { owner: { kind: "binding" | "instance"; id: string }; actor: ControlActor; text: string; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
-interface InterruptCommand { owner: SteerCommand["owner"]; actor: ControlActor; idempotencyKey: string; sourceMessageId?: string | null; sourceCardId?: string | null; resultTargetMessageId?: string | null }
 
-export class TurnControlWorkflow {
+export class TurnControlWorkflow implements TurnControlPort {
   private readonly lanes = new Map<string, Promise<SteerOutcome>>();
   constructor(private readonly options: Options) {}
 

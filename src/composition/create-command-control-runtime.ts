@@ -7,7 +7,7 @@ import { PaneControlWorkflow } from "../coordinator/pane-control-workflow.js";
 import { SessionOperationWorkflow } from "../coordinator/session-operation-workflow.js";
 import { SwarmCommandContextResolver } from "../coordinator/swarm-command-context-resolver.js";
 import { SwarmCommandGateway } from "../coordinator/swarm-command-gateway.js";
-import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
+import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { createBindingSessionRuntime } from "./create-binding-session-runtime.js";
 import type { createInfrastructureRuntime } from "./create-infrastructure-runtime.js";
@@ -28,7 +28,7 @@ export interface CommandControlStores {
 }
 
 export function createCommandControlRuntime(options: {
-  config: BridgeConfig; stores: CommandControlStores; logger: Logger; turnControl: TurnControlWorkflow; scheduler: PromptWorkScheduler;
+  config: BridgeConfig; stores: CommandControlStores; logger: Logger; turnControl: TurnControlPort; scheduler: PromptWorkScheduler;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; presentation: { application: ApplicationPresentation; pane: PanePresentation };

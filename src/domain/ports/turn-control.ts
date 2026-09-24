@@ -5,6 +5,36 @@ import type { RunCardView } from "../run-card-view.js";
 import type { AcceptInstanceTurnWithCardInput } from "./instance.js";
 import type { AcceptPromptInput } from "./prompt.js";
 import type { InstanceStore } from "./instance.js";
+import type { ControlActor } from "../commands.js";
+
+export type SteerOutcome =
+  | { mode: "native"; operation: TurnControlOperation; duplicate: boolean }
+  | { mode: "priority"; logicalTurnId: string; duplicate: boolean };
+
+export interface SteerCommand {
+  owner: TurnControlOwner;
+  actor: ControlActor;
+  text: string;
+  idempotencyKey: string;
+  sourceMessageId?: string | null;
+  sourceCardId?: string | null;
+  resultTargetMessageId?: string | null;
+}
+
+export interface InterruptCommand {
+  owner: TurnControlOwner;
+  actor: ControlActor;
+  idempotencyKey: string;
+  sourceMessageId?: string | null;
+  sourceCardId?: string | null;
+  resultTargetMessageId?: string | null;
+}
+
+export interface TurnControlPort {
+  steer(input: SteerCommand): Promise<SteerOutcome>;
+  interrupt(input: InterruptCommand): Promise<SteerOutcome>;
+  recover(): Promise<{ resumed: TurnControlOperation[]; uncertain: TurnControlOperation[] }>;
+}
 
 export interface TurnControlStore {
   getPrioritySteer(owner: TurnControlOwner, idempotencyKey: string): { logicalTurnId: string; text: string } | null;

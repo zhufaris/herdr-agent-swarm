@@ -664,6 +664,24 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("keeps turn control consumers behind its domain port", () => {
+    const port = readFileSync(new URL("../src/domain/ports/turn-control.ts", import.meta.url), "utf8");
+    const implementation = readFileSync(new URL("../src/coordinator/turn-control-workflow.ts", import.meta.url), "utf8");
+    expect(port).toContain("export interface TurnControlPort");
+    expect(implementation).toContain("implements TurnControlPort");
+    for (const path of [
+      "src/coordinator/pane-control-workflow.ts",
+      "src/coordinator/instance-messaging-workflow.ts",
+      "src/composition/create-worker-runtime.ts",
+      "src/composition/create-command-control-runtime.ts",
+      "src/composition/create-application-runtime.ts"
+    ]) {
+      const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+      expect(source).toContain("TurnControlPort");
+      expect(source).not.toMatch(/import type \{ TurnControlWorkflow \}/);
+    }
+  });
+
   it("keeps Worker Session Thread protocol behind its deep modules", () => {
     const routing = readFileSync(new URL("../src/coordinator/inbound-message-routing-workflow.ts", import.meta.url), "utf8");
     const instances = readFileSync(new URL("../src/coordinator/instance-interaction-workflow.ts", import.meta.url), "utf8");

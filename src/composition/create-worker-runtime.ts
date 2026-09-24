@@ -9,7 +9,7 @@ import { InstanceMessagingWorkflow } from "../coordinator/instance-messaging-wor
 import { WorkerCardDisplayWorkflow } from "../coordinator/worker-card-display-workflow.js";
 import { InstanceRuntimeReconciler } from "../coordinator/instance-runtime-reconciler.js";
 import { InstanceTurnSupervisor } from "../coordinator/instance-turn-supervisor.js";
-import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
+import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import { WorkerTurnObserver } from "../coordinator/worker-turn-observer.js";
 import { InstanceWorkScheduler } from "../events/instance-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
@@ -28,7 +28,7 @@ export interface WorkerRuntimeStores {
 }
 
 export function createWorkerRuntime(options: {
-  config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;
+  config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlPort;
   paneHost: PaneHost; agentDrivers: AgentDriverCatalog; worktrees: WorktreePort;
   transcriptReader: TraexTranscriptReader; outboundWork: OutboundWorkNotifier; applicationPresentation: ApplicationPresentation;
 }) {

@@ -3,10 +3,10 @@ import type { PaneControlStore } from "../domain/ports/pane-operations.js";
 import type { Binding, IncomingLarkMessage } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { PanePresentation } from "../domain/ports/presentation.js";
+import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
-import type { TurnControlWorkflow } from "./turn-control-workflow.js";
 
-interface Options { store: PaneControlStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "requestRejected">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt" | "recover">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
+interface Options { store: PaneControlStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "requestRejected">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: TurnControlPort; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
 export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean>; }
 
 export class PaneControlWorkflow implements PaneControlWorkflowPort {

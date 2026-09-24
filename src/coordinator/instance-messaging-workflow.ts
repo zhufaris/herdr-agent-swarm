@@ -6,11 +6,11 @@ import type { InstanceEvent, InstanceTurn } from "../domain/instance-turn.js";
 import { createQueuedWorkerTurnCard, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { InstanceMessagingStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
-import type { TurnControlWorkflow } from "./turn-control-workflow.js";
+import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import { assertPromptInputSize } from "../domain/prompt-input-policy.js";
 import type { InstanceConversationView, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
 
-interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlWorkflow, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
+interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlPort, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
 const INSTANCE_EVENT_POLL_INTERVAL_MS = 250;
 
 export class InstanceMessagingWorkflow implements InstanceMessagingPort {

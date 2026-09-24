@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
 import { feishuGatewayApplicationPresentation, feishuGatewayPanePresentation, feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
-import type { TurnControlWorkflow } from "../coordinator/turn-control-workflow.js";
+import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -18,7 +18,7 @@ import type { NaturalLanguageCommandRuntime } from "../runtime/natural-language-
 export interface ApplicationRuntimeStores extends BindingSessionStores, CommandControlStores, IngressRecoveryStores {}
 
 export function createApplicationRuntime(options: {
-  config: BridgeConfig; stores: ApplicationRuntimeStores; logger: Logger; turnControl: TurnControlWorkflow;
+  config: BridgeConfig; stores: ApplicationRuntimeStores; logger: Logger; turnControl: TurnControlPort;
   bus: LifecycleEventPublisher; scheduler: PromptWorkScheduler; inboundWork: InboundWorkNotifier;
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
