@@ -1100,6 +1100,24 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
+For transcripts that expose structured history, `answer_timeline_items` is the
+canonical Primary and Worker Answer projection. Agent Markdown, Tool calls and
+results, lifecycle status, and the final answer retain transcript order and stable
+item IDs. Primary and Worker cards use the same pure CardKit timeline renderer;
+Tool items are collapsed by default and their redacted command/result details are
+bounded before delivery. Historical rows without timeline items keep the legacy
+sanitized Markdown path.
+
+Timeline pagination uses an item cursor `(itemIndex, markdownOffset)`. Agent
+Markdown may split at Markdown-safe boundaries, but Tool and status panels remain
+whole. `answer_timeline_page_checkpoints` persists each page start, delivered
+cursor, item fingerprints, and pending outbox reply. The cursor advances only in
+the same transaction that marks the matching Lark delivery successful. Frozen
+pages are never patched: a changed Tool result from a frozen page is represented
+once on the active page by deterministic `late:<tool-id>` projection. Both timeline
+tables participate in the instance write fence and are rebuilt through additive
+migration 50/51 rather than rewriting legacy Answer content.
+
 Managed TraeX startup uses Herdr 0.9's native `agent start --kind traex`
 surface. Herdr publishes the canonical TraeX thread UUID through the
 `herdr:traex` integration source and owns Agent lifecycle state. Normal Herdr
@@ -1351,6 +1369,14 @@ the created `statusMessageId` when applicable, and advances `deliveredVersion`
 monotonically. The resulting checkpoint hint immediately asks the workflow to
 check whether a newer persisted version arrived while the prior card was in
 flight.
+
+Primary and Worker Main Cards deliberately do not duplicate the Answer timeline.
+Both use the same compact `当前活动` selection: the active non-plan activity when
+one exists, otherwise the newest non-plan activity. The full ordered Agent/Tool
+history stays in the Answer or Worker Task Card. Blocked state remains an orange
+Human Review notice, while Command Status cards remain a separate command
+admission/execution projection; neither surface adds remote approval or arbitrary
+terminal input.
 
 Startup compares `viewVersion` with `deliveredVersion` and recreates only missing
 intent. It does not re-read terminal scrollback or replay a TraeX prompt to

@@ -97,11 +97,11 @@ describe("Worker Main card", () => {
     }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "2026-09-05T00:01:00.000Z" });
     const elements = (renderWorkerMainCard(projected) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } }; elements?: Array<{ content?: string }> }> } }).body.elements;
     const progress = elements.find((element) => element.header?.title?.content?.startsWith("📋 任务清单"));
-    const activity = elements.find((element) => element.header?.title?.content?.startsWith("⚙️ 最近活动"));
+    const activity = elements.find((element) => element.header?.title?.content?.startsWith("⚙️ 当前活动"));
 
     expect(progress?.elements?.map(({ content }) => content).join("\n")).toContain("Inspect current state");
     expect(progress?.elements?.map(({ content }) => content).join("\n")).not.toMatch(/Read ownership policy|Legacy activity/);
-    expect(activity?.elements?.map(({ content }) => content).join("\n")).toMatch(/Read ownership policy|Legacy activity/);
+    expect(activity?.elements?.map(({ content }) => content).join("\n")).toBe("✓ • Legacy activity");
   });
 
   it("groups state, elapsed time, tokens, and plan under current task before latest message and activity", () => {
@@ -118,7 +118,7 @@ describe("Worker Main card", () => {
     const text = (element: typeof elements[number]) => element.content ?? element.header?.title?.content ?? "";
     const taskIndex = elements.findIndex((element) => text(element).includes("当前任务"));
     const messageIndex = elements.findIndex((element) => text(element).includes("最新消息"));
-    const activityIndex = elements.findIndex((element) => text(element).includes("最近活动"));
+    const activityIndex = elements.findIndex((element) => text(element).includes("当前活动"));
     const taskRegion = JSON.stringify(elements.slice(taskIndex, messageIndex));
 
     expect(taskRegion).toContain("Inspecting ownership fences");
@@ -142,7 +142,7 @@ describe("Worker Main card", () => {
     expect(JSON.stringify(renderWorkerMainCard(projected))).not.toContain("tokens");
   });
 
-  it("renders tool-only progress as recent activity without a misleading current-progress panel", () => {
+  it("renders tool-only progress as current activity without a misleading plan panel", () => {
     const projected = reduceWorkerMainView(view(), { type: "tasks", currentTask: {
       turnId: "turn-current", title: "Run tests", phase: "running", durationSeconds: 10, updatedAt: "now",
       taskCard: { aggregateKind: "worker-turn", aggregateId: "turn-current", generation: 4, messageId: null },
@@ -151,7 +151,7 @@ describe("Worker Main card", () => {
     const rendered = JSON.stringify(renderWorkerMainCard(projected));
 
     expect(rendered).not.toContain("📋 任务清单");
-    expect(rendered).toContain("⚙️ 最近活动");
+    expect(rendered).toContain("⚙️ 当前活动");
     expect(rendered).toContain("Command · npm test");
   });
 

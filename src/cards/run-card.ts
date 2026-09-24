@@ -13,6 +13,7 @@ import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-
 import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS } from "../domain/swarm-command.js";
 import { renderAnswerTimeline } from "./answer-timeline.js";
+import { currentMainCardActivity } from "../domain/main-card-activity.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -169,8 +170,8 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     if (row) elements.push(row);
     if (canCreateWorker) elements.push(createWorker);
   } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, ...(canCreateWorker ? [createWorker] : []));
-  const recentActivity = recentItems(progress.filter((event) => !planKeys.has(event.key)), 5);
-  if (recentActivity.length) elements.push(...renderProgressTimeline(recentActivity, input.phase, { title: "⚙️ 最新活动", summary: summarizeProgress(recentActivity), visibleCount: 5 }));
+  const currentActivity = currentMainCardActivity(progress, planKeys);
+  if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前活动", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",

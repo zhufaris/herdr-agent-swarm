@@ -6,6 +6,7 @@ import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems }
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 import { currentPageActionLabel } from "../domain/card-page-handoff.js";
+import { currentMainCardActivity } from "../domain/main-card-activity.js";
 
 const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "排队", preparing: "准备中", running: "执行中", blocked: "阻塞", completed: "完成", failed: "失败", cancelled: "取消", "dispatch-uncertain": "派发不确定" };
 const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovisioned: "未配置", starting: "启动中", idle: "空闲", working: "工作中", blocked: "阻塞", detached: "已脱离", stopped: "已停止", failed: "失败", terminated: "已终止" };
@@ -13,7 +14,7 @@ const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovis
 export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?: boolean; projectDisplayName?: string } = {}): object {
   const progressEvents = view.currentTask?.progressEvents ?? [];
   const planProgress = progressEvents.filter(({ key }) => key.startsWith("plan:"));
-  const recentActivity = progressEvents.filter(({ key }) => !key.startsWith("plan:"));
+  const currentActivity = currentMainCardActivity(progressEvents, new Set(planProgress.map(({ key }) => key)));
   const elements: object[] = [
     { tag: "markdown", content: compactMetadata([`${lifecycleMarker(view.runtimeState)} ${RUNTIME_LABEL[view.runtimeState]}`, `Worker \`${workerPaneLabel(view)}\``, `队列 \`${view.queueCount}\``, view.model ? `模型 \`${safe(view.model)}\`` : null]) },
   ];
@@ -22,7 +23,7 @@ export function renderWorkerMainCard(view: WorkerMainView, options: { snapshot?:
   elements.push({ tag: "markdown", content: currentTaskContent(view.currentTask) });
   if (planProgress.length && view.currentTask) elements.push(...renderProgressTimeline(planProgress, timelinePhase(view.currentTask.phase), { title: "📋 任务清单", visibleCount: 5 }));
   if (view.currentTask?.answer) elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("📝", "最新消息")}\n\n${safeOutput(view.currentTask.answer)}` });
-  if (recentActivity.length && view.currentTask) elements.push(...renderProgressTimeline(recentActivity, timelinePhase(view.currentTask.phase), { title: "⚙️ 最近活动", visibleCount: 5 }));
+  if (currentActivity.length && view.currentTask) elements.push(...renderProgressTimeline(currentActivity, timelinePhase(view.currentTask.phase), { title: "⚙️ 当前活动", visibleCount: 1 }));
   pushActions(elements, view, options.snapshot === true);
   elements.push({ tag: "markdown", content: `${cardSection("📨", "队列")}\n${view.queueCount} 条等待${view.nextTaskTitle ? `  ·  下一项 ${safe(view.nextTaskTitle)}` : ""}` });
   if (view.recentTasks.length > 0) {

@@ -263,7 +263,7 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     const liveIndex = elements.findIndex((element) => element.header?.title?.content === "🎯 当前任务 · 1/2");
     const workersIndex = elements.findIndex((element) => element.content?.startsWith("**🤖 Workers**"));
-    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 最新活动"));
+    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 当前活动"));
     const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息**"));
     const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
 
@@ -294,7 +294,7 @@ describe("run card", () => {
     });
   });
 
-  it("shows the newest compact answer preview and recent activity on the group project entry card", () => {
+  it("shows the newest compact answer preview and current activity on the group project entry card", () => {
     const answer = `old answer ${"x".repeat(2_700)} newest conclusion`;
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "datasage / Fix login", spaceName: "datasage_semantic_knowledge", paneId: "wD:p9",
@@ -314,7 +314,7 @@ describe("run card", () => {
     expect(serialized).toContain("newest conclusion");
     expect(serialized).toContain("old answer");
     expect(serialized).toContain("✓ 🛠️ changed secret.ts");
-    expect(serialized).toContain("最新活动");
+    expect(serialized).toContain("当前活动");
   });
 
   it("keeps both ends of a long JSON message in main-card previews without mutating state", () => {
@@ -361,7 +361,7 @@ describe("run card", () => {
     expect(progress.length).toBeLessThanOrEqual(220);
   });
 
-  it("shows bounded recent activity and up to six latest answer lines on the project card", () => {
+  it("shows one current activity and up to six latest answer lines on the project card", () => {
     const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
@@ -377,15 +377,15 @@ describe("run card", () => {
     const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
       .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content ?? "";
 
-    expect(serialized).toContain("🛠️ 修改卡片渲染");
     expect(serialized).toContain("🧪 运行聚焦测试");
-    expect(serialized).toContain("🔎 检查调用位置");
-    expect(serialized).toContain("读取旧配置");
+    expect(serialized).not.toContain("🛠️ 修改卡片渲染");
+    expect(serialized).not.toContain("🔎 检查调用位置");
+    expect(serialized).not.toContain("读取旧配置");
     expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-6));
     expect(serialized).not.toContain("**项目任务**");
   });
 
-  it("keeps only the five newest activity summaries on the project card", () => {
+  it("keeps only the newest activity summary on the project card", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",
       recentProgress: Array.from({ length: 10 }, (_, index) => ({
@@ -395,7 +395,7 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     const visibleActivities = [...serialized.matchAll(/activity-(\d+)/g)].map((match) => Number(match[1]));
 
-    expect([...new Set(visibleActivities)].sort((left, right) => left - right)).toEqual([6, 7, 8, 9, 10]);
+    expect([...new Set(visibleActivities)]).toEqual([10]);
   });
 
   it("bounds the six-line project-card preview at 3000 characters", () => {
@@ -423,7 +423,7 @@ describe("run card", () => {
       .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content;
 
     expect(latestMessage).toBeUndefined();
-    expect(JSON.stringify(card)).toContain("⚙️ 最新活动");
+    expect(JSON.stringify(card)).toContain("⚙️ 当前活动");
     expect(JSON.stringify(card)).toContain("正在运行聚焦测试");
   });
 

@@ -172,11 +172,12 @@ generation，不支持接管。成功操作以 Toast 和原卡刷新反馈；确
 
 ## 卡片如何更新
 
-- 项目主卡展示绑定与最近会话的摘要；它不是终端输出的事实来源。
+- 项目主卡和 Worker Main Card 展示状态、最新可读消息，以及最多一条 `当前活动`：优先显示仍在执行的工具，否则显示最近一条非计划活动。完整 Agent/Tool 顺序只在 Answer/Worker Task Card 展示；Main Card 不是终端输出的事实来源。
 - 每条普通请求拥有一个 Answer 卡片。原始飞书消息就是请求记录，Bridge 不再创建独立 Request 卡。
-- Answer 卡通过 CardKit 流式 Markdown 元素显示经过清洗的 TraeX 终端内容，包括可见的工作状态、工具摘要、审批提示和最终回答。
-- 内容接近 CardKit 限制时，当前 Answer 卡被冻结，后续内容会在新的“继续回复”卡片中显示；早期卡片不会被改写或删除。
+- 新的结构化 Answer 卡按 Herdr transcript 的顺序交错展示 Agent 文本和 Tool 调用。Tool 默认折叠；展开后只显示经过脱敏和长度限制的 command/result。旧任务没有结构化时间线时继续使用原有安全 Markdown 展示。
+- 内容接近 CardKit 限制时，Agent Markdown 可在安全边界分页，Tool 面板不会跨页。当前 Answer 卡被冻结后，后续内容会在新的“继续回复”卡片中显示；早期卡片不会被改写或删除。冻结页中的 Tool 若较晚返回结果，当前页会新增一条带原页引用的完成项。
 - Bridge 不显示模型 reasoning、内部控制标记、prompt 回显、终端装饰或敏感值。高风险审批仍只能在 Herdr 中完成。
+- Human Review 继续以橙色“需要处理”和单独飞书通知呈现；Command Status Card 继续只表示 Swarm 指令的受理与执行，不会混入 Agent Answer 时间线。
 
 ## 群内自然语言 Swarm 指令
 
