@@ -30,6 +30,32 @@ function setup(activeTurn: () => { promptId: string; paneId: string } | null = (
 }
 
 describe("SwarmCommandGateway", () => {
+  it("normalizes literal queries and mutations into typed receipts", async () => {
+    const fixture = setup();
+    await expect(fixture.gateway.submit({ source: "literal", message, command: { kind: "status" } })).resolves.toMatchObject({ outcome: "query-completed", commandKind: "status" });
+    await expect(fixture.gateway.submit({ source: "literal", message: { ...message, messageId: "rename-submit" }, command: { kind: "rename", title: "Next" } })).resolves.toMatchObject({ outcome: "accepted", commandKind: "rename", intent: { state: "succeeded" } });
+    expect(fixture.sessionAdministration.emitStatus).toHaveBeenCalledOnce();
+    expect(fixture.sessionAdministration.rename).toHaveBeenCalledOnce();
+    fixture.store.close();
+  });
+
+  it("returns typed source-equivalent authorization rejections before admission", async () => {
+    const fixture = setup();
+    const member = { ...message, actorOpenId: "member" };
+    await expect(fixture.gateway.submit({ source: "literal", message: member, command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false } })).resolves.toMatchObject({ outcome: "rejected", code: "administrator_required" });
+    await expect(fixture.gateway.submit({ source: "natural-language", message: member, command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false } })).resolves.toMatchObject({ outcome: "rejected", code: "administrator_required" });
+    expect(fixture.store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 0 });
+    fixture.store.close();
+  });
+
+  it("normalizes CardKit Worker admission without caller-owned lane or replay policy", async () => {
+    const fixture = setup();
+    const command = { kind: "worker_create" as const, name: "reviewer", agentKind: "traex" as const, model: null, start: false };
+    const receipt = await fixture.gateway.submit({ source: "card", action: { messageId: "card-submit", chatId: "chat", operatorOpenId: "admin", value: {} }, bindingId: "binding", command });
+    expect(receipt).toMatchObject({ outcome: "accepted", commandKind: "worker_create", intent: { laneKey: "binding:binding", replayPolicy: "reconcilable" } });
+    fixture.store.close();
+  });
+
   it.each([
     [{ kind: "help" }, "outbound", "enqueueCard"], [{ kind: "projects" }, "provisioning", "selectProject"], [{ kind: "spaces" }, "operationsQuery", "listSpaces"], [{ kind: "panes" }, "operationsQuery", "listTopicPanes"],
     [{ kind: "sessions", cursor: null }, "operationsQuery", "listSessions"], [{ kind: "failures" }, "operationsQuery", "listFailures"], [{ kind: "status" }, "sessionAdministration", "emitStatus"],

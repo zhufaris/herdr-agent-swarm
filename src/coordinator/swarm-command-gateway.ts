@@ -29,7 +29,23 @@ interface Options {
   presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult">;
 }
 
+type WorkerCreateCommand = Extract<BridgeCommand, { kind: "worker_create" }>;
+type PrimaryToolCommandRequest = {
+  source: "primary-tool"; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: WorkerCreateCommand;
+};
+export type SwarmCommandRequest =
+  | { source: "literal"; message: IncomingLarkMessage; command: BridgeCommand }
+  | { source: "natural-language"; message: IncomingLarkMessage; command: BridgeCommand }
+  | { source: "card"; action: IncomingLarkCardAction; bindingId: string; command: WorkerCreateCommand }
+  | PrimaryToolCommandRequest;
+export type SwarmCommandReceipt =
+  | { outcome: "query-completed"; commandKind: BridgeCommand["kind"] }
+  | { outcome: "accepted"; commandKind: BridgeCommand["kind"]; intent: CommandIntent; workerResult?: CreateWorkerResult }
+  | { outcome: "rejected"; commandKind: BridgeCommand["kind"]; code: string; message: string }
+  | { outcome: "conflict"; commandKind: BridgeCommand["kind"]; intent: CommandIntent };
+
 export interface SwarmCommandGatewayPort {
+  submit(request: SwarmCommandRequest): Promise<SwarmCommandReceipt>;
   handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void>;
   resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution;
   drainAcceptedIntent(intent: CommandIntent): Promise<void>;
@@ -47,42 +63,41 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   async drainAcceptedIntent(intent: CommandIntent): Promise<void> { await this.dispatcher.drain(intent); }
 
   async handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void> {
-    const resolved = this.options.resolver.resolve(message, command);
-    if (resolved.outcome === "rejected") return this.reject(message, resolved.message, command.kind, resolved.code);
+    const receipt = await this.submit({ source: "literal", message, command });
+    if (receipt.outcome === "rejected") await this.reject(message, receipt.message, command.kind, receipt.code);
+    else if (receipt.outcome === "conflict") await this.reject(message, "命令幂等标识已用于不同请求。", command.kind, "idempotency_conflict");
+  }
+
+  async submit(request: SwarmCommandRequest): Promise<SwarmCommandReceipt> {
+    const normalized = this.normalize(request);
+    if (normalized.outcome === "rejected") return { outcome: "rejected", commandKind: request.command.kind, code: normalized.code, message: normalized.message };
+    const { message, command, resolved, idempotencyKey } = normalized;
     const policy = swarmCommandPolicy(command);
     if (policy.mode === "query") {
       await this.executeQuery(message, command, resolved.binding);
       this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${command.kind}`, target: resolved.laneKey, outcome: "success" });
-      return;
+      return { outcome: "query-completed", commandKind: command.kind };
     }
-    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey: `lark-message:${message.messageId}:${command.kind}`, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() });
-    if (accepted.outcome === "conflict") return this.reject(message, "命令幂等标识已用于不同请求。", command.kind, "idempotency_conflict");
-    await this.dispatcher.drain(accepted.intent);
+    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() });
+    if (accepted.outcome === "conflict") return { outcome: "conflict", commandKind: command.kind, intent: accepted.intent };
+    const workerResult = command.kind === "worker_create" && (request.source === "card" || request.source === "primary-tool")
+      ? await this.dispatcher.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey)
+      : (await this.dispatcher.drain(accepted.intent), undefined);
+    return { outcome: "accepted", commandKind: command.kind, intent: this.options.store.getCommandIntent(accepted.intent.id) ?? accepted.intent, ...(workerResult ? { workerResult } : {}) };
   }
 
   async createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult> {
-    const binding = this.options.store.getBinding(bindingId);
-    const message: IncomingLarkMessage = { eventId: `card:${action.messageId}`, messageId: action.messageId, parentMessageId: null, chatId: action.chatId, topicId: binding?.topicId ?? null, rootMessageId: binding?.rootMessageId ?? action.messageId, actorOpenId: action.operatorOpenId, text: "/swarm worker create", mentionsBot: true, isRootMessage: false };
-    const resolved = this.options.resolver.resolve(message, command, bindingId);
-    if (resolved.outcome === "rejected") throw new Error(resolved.message);
-    const requestFingerprint = createHash("sha256").update(JSON.stringify(command)).digest("hex");
-    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey: `lark-card:${action.messageId}:worker-create:${action.operatorOpenId}:${requestFingerprint}`, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: "reconcilable", acceptedAt: new Date().toISOString() });
-    if (accepted.outcome === "conflict") throw new Error("命令幂等标识已用于不同请求。");
-    return this.dispatcher.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey);
+    const receipt = await this.submit({ source: "card", action, bindingId, command });
+    if (receipt.outcome !== "accepted") throw new Error(receipt.outcome === "rejected" ? receipt.message : "命令幂等标识已用于不同请求。");
+    if (!receipt.workerResult) throw new Error("Worker creation did not complete");
+    return receipt.workerResult;
   }
 
   async createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult> {
-    const binding = this.options.store.getBinding(input.bindingId);
-    if (!binding || binding.generation !== input.bindingGeneration || binding.rootMessageId !== input.rootMessageId) throw new Error("Primary tool context is stale");
-    const prompt = this.options.primaryPrompts.getActiveOrdinaryPrompt(input.bindingId, input.bindingGeneration);
-    if (!prompt || prompt.id !== input.parentPromptId || prompt.larkMessageId !== input.sourceMessageId) throw new Error("Primary tool active prompt changed");
-    const message: IncomingLarkMessage = { eventId: `primary-tool:${input.parentPromptId}:${input.idempotencyKey}`, messageId: input.sourceMessageId, parentMessageId: null, chatId: binding.chatId, topicId: binding.topicId, rootMessageId: input.rootMessageId, actorOpenId: prompt.actorOpenId, text: "Primary tool worker create", mentionsBot: true, isRootMessage: false };
-    const resolved = this.options.resolver.resolve(message, input.command, input.bindingId);
-    if (resolved.outcome === "rejected") throw new Error(resolved.message);
-    const context = { ...resolved.context, primary: { ...resolved.context.primary!, activePromptId: input.parentPromptId } };
-    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey: `primary-tool:${input.bindingId}:${input.bindingGeneration}:${input.parentPromptId}:${input.idempotencyKey}`, laneKey: resolved.laneKey, command: input.command, context, replayPolicy: "reconcilable", acceptedAt: new Date().toISOString() });
-    if (accepted.outcome === "conflict") throw new Error("Idempotency key was already used for a different Worker creation request");
-    return this.dispatcher.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey);
+    const receipt = await this.submit({ source: "primary-tool", ...input });
+    if (receipt.outcome !== "accepted") throw new Error(receipt.outcome === "rejected" ? receipt.message : "Idempotency key was already used for a different Worker creation request");
+    if (!receipt.workerResult) throw new Error("Worker creation did not complete");
+    return receipt.workerResult;
   }
 
   recover(): Promise<void> { return this.dispatcher.recover(); }
@@ -98,6 +113,31 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
     if (command.kind === "status" && binding) return this.options.sessionAdministration.emitStatus(binding);
     if (command.kind === "model") { await this.options.modelSelection.runModel(message, binding, null); return; }
     throw new Error(`Mutation command ${command.kind} cannot execute as query`);
+  }
+  private normalize(request: SwarmCommandRequest): { outcome: "resolved"; message: IncomingLarkMessage; command: BridgeCommand; resolved: Extract<SwarmCommandContextResolution, { outcome: "resolved" }>; idempotencyKey: string } | Extract<SwarmCommandContextResolution, { outcome: "rejected" }> {
+    if (request.source === "literal" || request.source === "natural-language") {
+      const resolved = this.options.resolver.resolve(request.message, request.command);
+      if (resolved.outcome === "rejected") return resolved;
+      const prefix = request.source === "literal" ? "lark-message" : "natural-language";
+      return { outcome: "resolved", message: request.message, command: request.command, resolved, idempotencyKey: `${prefix}:${request.message.messageId}:${request.command.kind}` };
+    }
+    if (request.source === "card") {
+      const binding = this.options.store.getBinding(request.bindingId);
+      const message: IncomingLarkMessage = { eventId: `card:${request.action.messageId}`, messageId: request.action.messageId, parentMessageId: null, chatId: request.action.chatId, topicId: binding?.topicId ?? null, rootMessageId: binding?.rootMessageId ?? request.action.messageId, actorOpenId: request.action.operatorOpenId, text: "/swarm worker create", mentionsBot: true, isRootMessage: false };
+      const resolved = this.options.resolver.resolve(message, request.command, request.bindingId);
+      if (resolved.outcome === "rejected") return resolved;
+      const fingerprint = createHash("sha256").update(JSON.stringify(request.command)).digest("hex");
+      return { outcome: "resolved", message, command: request.command, resolved, idempotencyKey: `lark-card:${request.action.messageId}:worker-create:${request.action.operatorOpenId}:${fingerprint}` };
+    }
+    const binding = this.options.store.getBinding(request.bindingId);
+    if (!binding || binding.generation !== request.bindingGeneration || binding.rootMessageId !== request.rootMessageId) return { outcome: "rejected", code: "binding_required", message: "Primary tool context is stale" };
+    const prompt = this.options.primaryPrompts.getActiveOrdinaryPrompt(request.bindingId, request.bindingGeneration);
+    if (!prompt || prompt.id !== request.parentPromptId || prompt.larkMessageId !== request.sourceMessageId) return { outcome: "rejected", code: "binding_required", message: "Primary tool active prompt changed" };
+    const message: IncomingLarkMessage = { eventId: `primary-tool:${request.parentPromptId}:${request.idempotencyKey}`, messageId: request.sourceMessageId, parentMessageId: null, chatId: binding.chatId, topicId: binding.topicId, rootMessageId: request.rootMessageId, actorOpenId: prompt.actorOpenId, text: "Primary tool worker create", mentionsBot: true, isRootMessage: false };
+    const resolved = this.options.resolver.resolve(message, request.command, request.bindingId);
+    if (resolved.outcome === "rejected") return resolved;
+    const context = { ...resolved.context, primary: { ...resolved.context.primary!, activePromptId: request.parentPromptId } };
+    return { outcome: "resolved", message, command: request.command, resolved: { ...resolved, context }, idempotencyKey: `primary-tool:${request.bindingId}:${request.bindingGeneration}:${request.parentPromptId}:${request.idempotencyKey}` };
   }
   private async reject(message: IncomingLarkMessage, reason: string, kind: string, outcome: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-rejected:${message.messageId}:${kind}`, this.options.presentation.requestRejected(reason)); this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${kind}`, target: message.messageId, outcome }); }
 }
