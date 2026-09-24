@@ -44,3 +44,8 @@ export interface AgentRuntimeDriver {
   steer?(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt>;
   interrupt?(runtime: AgentRuntimeRef): Promise<InterruptReceipt>;
 }
+
+export interface AgentDriverCatalog {
+  get(kind: AgentKind): AgentRuntimeDriver | null;
+  describe(kind: AgentKind): AgentCapabilities;
+}

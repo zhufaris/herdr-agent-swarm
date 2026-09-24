@@ -1,5 +1,5 @@
 import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
-import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { Logger } from "pino";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";
@@ -16,7 +16,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverRegistry; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverCatalog; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;

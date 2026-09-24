@@ -451,6 +451,21 @@ describe("application composition boundaries", () => {
     expect(supervisor).not.toContain("WorkerTurnObserver");
   });
 
+  it("keeps Agent driver lookup behind a domain catalog", () => {
+    const contract = readFileSync(new URL("../src/domain/agent-runtime.ts", import.meta.url), "utf8");
+    const registry = readFileSync(new URL("../src/runtime/agents/agent-driver.ts", import.meta.url), "utf8");
+    expect(contract).toContain("export interface AgentDriverCatalog");
+    expect(registry).toContain("implements AgentDriverCatalog");
+    for (const file of [
+      "instance-control-workflow.ts", "instance-interaction-workflow.ts", "prompt-run-workflow.ts",
+      "prompt-turn-executor.ts", "binding-provisioning-workflow.ts"
+    ]) {
+      const source = readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8");
+      expect(source).not.toContain("AgentDriverRegistry");
+    }
+    expect(readFileSync(new URL("../src/events/instance-work-scheduler.ts", import.meta.url), "utf8")).not.toContain("AgentDriverRegistry");
+  });
+
   it("composes startup projection workflows through explicit consumer stores", () => {
     const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
     const composition = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");

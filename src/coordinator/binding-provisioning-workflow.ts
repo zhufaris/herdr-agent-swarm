@@ -22,7 +22,7 @@ import { BindingAttachmentUseCase } from "./binding-provisioning/binding-attachm
 import { BindingStartupRecovery } from "./binding-provisioning/binding-startup-recovery.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import { agentKindFromHerdr, matchesAgentKind, type AgentKind } from "../domain/agent-instance.js";
-import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 
 export interface BindingProvisioningWorkflowPort {
@@ -51,7 +51,7 @@ interface Options {
     issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolConfiguration;
     configurationForBinding(bindingId: string, generation: number): PrimaryToolConfiguration;
   };
-  agentDrivers?: AgentDriverRegistry;
+  agentDrivers?: AgentDriverCatalog;
   wakeRetiredPaneCleanup?: () => void;
   logger: Logger;
   presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus" | "attachStatus" | "mainCard" | "requestRejected">;

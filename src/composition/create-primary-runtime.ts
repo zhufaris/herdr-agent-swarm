@@ -10,7 +10,7 @@ import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { RuntimeLink } from "./runtime-link.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
-import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
 import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../domain/ports/prompt.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
@@ -25,7 +25,7 @@ export function createPrimaryRuntime(options: {
   config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: TraexTranscriptReaderPort;
   mainCards: Pick<MainCardWorkflowPort, "converge">;
-  agentDrivers: AgentDriverRegistry;
+  agentDrivers: AgentDriverCatalog;
   presentation?: PrimaryPresentation;
 }) {
   const { config, stores, logger, herdr, traexControl, bus, scheduler, outboundWork, transcriptReader, mainCards, agentDrivers } = options;

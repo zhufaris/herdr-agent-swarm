@@ -2,11 +2,11 @@ import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { InstanceStore } from "../../domain/ports/instance.js";
 import type { ApplicationPresentation } from "../../domain/ports/presentation.js";
 import type { ProjectConfig } from "../../domain/types.js";
-import type { AgentDriverRegistry } from "../../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../../domain/agent-runtime.js";
 import type { InstanceControlWorkflow } from "../instance-control-workflow.js";
 
 export class InstanceViewQuery {
-  constructor(private readonly options: { store: InstanceStore; control: InstanceControlWorkflow; drivers: AgentDriverRegistry; presentation: Pick<ApplicationPresentation, "instanceDetail" | "instanceDirectory"> }) {}
+  constructor(private readonly options: { store: InstanceStore; control: InstanceControlWorkflow; drivers: AgentDriverCatalog; presentation: Pick<ApplicationPresentation, "instanceDetail" | "instanceDirectory"> }) {}
 
   directory(project: ProjectConfig, conversationKey: string): object {
     const selected = this.options.store.getConversationTarget(conversationKey);

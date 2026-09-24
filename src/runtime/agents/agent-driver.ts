@@ -1,5 +1,5 @@
 import type { AgentKind } from "../../domain/agent-instance.js";
-import type { AgentCapabilities, AgentRuntimeDriver } from "../../domain/agent-runtime.js";
+import type { AgentCapabilities, AgentDriverCatalog, AgentRuntimeDriver } from "../../domain/agent-runtime.js";
 
 const unavailableCapabilities: AgentCapabilities = {
   available: false, structuredEvents: false, nativeResume: false, primaryTools: false,
@@ -7,7 +7,7 @@ const unavailableCapabilities: AgentCapabilities = {
   modelSelection: "unsupported", usageReporting: false
 };
 
-export class AgentDriverRegistry {
+export class AgentDriverRegistry implements AgentDriverCatalog {
   private readonly drivers: ReadonlyMap<AgentKind, AgentRuntimeDriver>;
 
   constructor(drivers: readonly AgentRuntimeDriver[]) {

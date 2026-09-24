@@ -21,7 +21,7 @@ import { PromptSafetyScanner } from "./prompt-safety-scanner.js";
 import type { MainCardWorkflowPort } from "./main-card-workflow.js";
 import { TranscriptObserver, type TurnOutputSource } from "./transcript-observer.js";
 import { PromptTurnExecutor } from "./prompt-turn-executor.js";
-import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { ActiveTurnSnapshot, PrimaryRuntimeStatePort } from "../domain/ports/primary-runtime-state.js";
 
 export interface PromptRunWorkflowPort extends PrimaryRuntimeStatePort {
@@ -44,7 +44,7 @@ interface PromptRunWorkflowOptions {
   logger: Logger;
   presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard">;
   turnTimeoutMs: number;
-  agentDrivers?: AgentDriverRegistry;
+  agentDrivers?: AgentDriverCatalog;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
   staleClaimGraceMs?: number;

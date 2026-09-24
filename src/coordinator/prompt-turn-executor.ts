@@ -9,7 +9,7 @@ import { outputFingerprint } from "../runtime/output.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { abortedPromptNotice, decidePromptExecutionFailure } from "./prompt-execution-lifecycle.js";
 import type { TranscriptObserver, TurnOutputSource } from "./transcript-observer.js";
-import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -20,7 +20,7 @@ interface PromptTurnExecutorOptions {
   transcript: TranscriptObserver;
   logger: Logger;
   turnTimeoutMs: number;
-  agentDrivers?: AgentDriverRegistry;
+  agentDrivers?: AgentDriverCatalog;
   isBindingActive(bindingId: string): boolean;
   isStopping(): boolean;
   updateTurnState(bindingId: string, promptId: string, state: import("../domain/types.js").AgentState): void;

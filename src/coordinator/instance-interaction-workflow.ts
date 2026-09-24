@@ -3,7 +3,7 @@ import type { InstanceStore } from "../domain/ports/instance.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { InstanceCommand, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, ProjectConfig } from "../domain/types.js";
-import type { AgentDriverRegistry } from "../runtime/agents/agent-driver.js";
+import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 import type { InstanceControlWorkflow } from "./instance-control-workflow.js";
 import type { InstanceMessagingWorkflow } from "./instance-messaging-workflow.js";
@@ -17,7 +17,7 @@ import { contentIdempotencyKey } from "../runtime/idempotency-key.js";
 export type { InstanceCardActionCommand } from "./card-action-command.js";
 
 interface Options {
-  projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverRegistry; outbound: OutboundIntentPort;
+  projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore; control: InstanceControlWorkflow; messaging: InstanceMessagingWorkflow; drivers: AgentDriverCatalog; outbound: OutboundIntentPort;
   presentation: Pick<ApplicationPresentation, "answerCard" | "commandResult" | "projectDirectory" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">;
   workerCreation?: WorkerCreationGateway; idFactory?: () => string;
   wakeOutbound?: () => void;
