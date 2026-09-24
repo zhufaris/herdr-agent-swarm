@@ -191,6 +191,13 @@ describe("TurnControlWorkflow", () => {
     expect(steer).not.toHaveBeenCalled();
   });
 
+  it("exposes expected runtime absence through a stable request error code", async () => {
+    const { workflow, getPane, worker } = setupWorker();
+    getPane.mockResolvedValueOnce(null);
+    await expect(workflow.steer({ owner: { kind: "instance", id: worker.id }, actor: { kind: "human", userId: "u1" }, text: "change", idempotencyKey: "missing-pane" }))
+      .rejects.toMatchObject({ name: "TurnControlRequestError", code: "not-active", message: "Herdr pane is no longer active" });
+  });
+
   it("rejects a changed runtime turn during the fresh pre-claim observation", async () => {
     const { workflow, getPane, steer, worker, pane } = setupWorker();
     getPane.mockResolvedValueOnce(pane).mockResolvedValueOnce({ ...pane, activeTurnId: "runtime-2" });
