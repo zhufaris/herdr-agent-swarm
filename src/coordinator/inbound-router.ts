@@ -8,7 +8,7 @@ import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupRecoveryWorkflowPort } from "./startup-recovery-workflow.js";
-import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
+import type { SwarmCommandRuntime } from "./swarm-command-gateway.js";
 
 export interface InboundRouterPort {
   prepareDelivery(): Promise<void>;
@@ -22,7 +22,7 @@ export interface InboundRouterPort {
 }
 
 export interface InboundRouterOptions {
-  gatewayIngress: Pick<GatewayIngressPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "stop">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
+  gatewayIngress: Pick<GatewayIngressPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandRuntime, "stop">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {

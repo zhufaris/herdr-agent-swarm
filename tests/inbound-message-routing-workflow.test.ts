@@ -134,7 +134,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     const store = { findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) };
     const workerSessionThreads = { handleMessage: vi.fn(async () => ({ handled: true as const, disposition: "command_completed" as const })) };
     const instanceInteractions = { handleCommand: vi.fn(), handleOrdinaryMessage: vi.fn() };
-    const swarmCommands = { handle: vi.fn() };
+    const swarmCommands = { submit: vi.fn() };
     const workflow = routingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } }, stores: inboundStores(store), instanceInteractions, workerSessionThreads, swarmCommands, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
@@ -144,7 +144,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 
     expect(workerSessionThreads.handleMessage).toHaveBeenCalledWith(message);
     expect(instanceInteractions.handleCommand).not.toHaveBeenCalled();
-    expect(swarmCommands.handle).not.toHaveBeenCalled();
+    expect(swarmCommands.submit).not.toHaveBeenCalled();
   });
 
   it("rejects a known stale Worker thread instead of falling through to Primary or provisioning", async () => {

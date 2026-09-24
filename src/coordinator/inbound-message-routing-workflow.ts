@@ -10,7 +10,7 @@ import { isInstanceTurnCapacityExceeded } from "../domain/instance-turn-capacity
 import { isInstanceTargetError } from "../domain/instance-target-error.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { InstanceInteractionWorkflowPort } from "./instance-interaction-workflow.js";
-import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
+import type { SwarmCommandRuntime } from "./swarm-command-gateway.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 import type { NaturalLanguageCommandInterpreter } from "../domain/natural-language-command.js";
 import type { NaturalLanguageCommandWorkflowPort } from "./natural-language-command-workflow.js";
@@ -36,7 +36,7 @@ interface Options {
   logger: Pick<Logger, "error">;
   presentation: Pick<PrimaryPresentation, "disconnectedTopic" | "requestRejected">;
   provisioning: BindingProvisioningWorkflowPort;
-  swarmCommands: SwarmCommandGatewayPort;
+  swarmCommands: Pick<SwarmCommandRuntime, "submit">;
   instanceInteractions?: Pick<InstanceInteractionWorkflowPort, "handleCommand" | "handleOrdinaryMessage">;
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "handleMessage">;
   naturalLanguage?: { interpreter: NaturalLanguageCommandInterpreter; workflow: Pick<NaturalLanguageCommandWorkflowPort, "handle"> };
@@ -84,7 +84,9 @@ export class InboundMessageRoutingWorkflow implements InboundMessageRouterPort {
         disposition = "rejected";
       } else if (command) {
         decision = `command:${command.kind}`;
-        await this.options.swarmCommands.handle(message, command);
+        const receipt = await this.options.swarmCommands.submit({ source: "literal", message, command });
+        if (receipt.outcome === "rejected") { await this.reject(message, receipt.message); disposition = "rejected"; }
+        else if (receipt.outcome === "conflict") { await this.reject(message, "命令幂等标识已用于不同请求。"); disposition = "rejected"; }
       } else if (message.mentionsBot && this.options.naturalLanguage) {
         const interpreted = await this.options.naturalLanguage.interpreter.interpret(message.text, message);
         if (interpreted.outcome === "unresolved") {

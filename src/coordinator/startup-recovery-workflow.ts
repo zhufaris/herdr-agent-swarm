@@ -16,7 +16,7 @@ import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
-import type { SwarmCommandGatewayPort } from "./swarm-command-gateway.js";
+import type { SwarmCommandRuntime } from "./swarm-command-gateway.js";
 import { StartupViewRecovery } from "./startup-view-recovery.js";
 
 export interface StartupRecoveryWorkflowPort {
@@ -29,7 +29,7 @@ export interface StartupRecoveryWorkflowPort {
 
 export interface StartupRecoveryWorkflowOptions {
   config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; gatewayIngress: GatewayIngressPort; gatewaySink: GatewayIngressSink; logger: Logger; scheduler: PromptWorkScheduler;
-  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandGatewayPort, "recover" | "start">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; promptAdmission: Pick<PromptAdmissionWorkflowPort, "acceptInitial">;
+  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandRuntime, "recover" | "start">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; promptAdmission: Pick<PromptAdmissionWorkflowPort, "acceptInitial">;
 }
 
 /** Coordinates the ordered, degradable recovery sequence before accepting Lark work. */

@@ -33,5 +33,5 @@ export function createApplicationRuntime(options: {
   const runtimeCommandEvents = options.runtimeEvents ? { onWork: options.runtimeEvents.onWork.bind(options.runtimeEvents), wakeSwarmCommand: options.runtimeEvents.wakeSwarmCommand.bind(options.runtimeEvents) } : {};
   const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession, ...runtimeCommandEvents });
   const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl, naturalLanguageCommands: options.naturalLanguageCommands });
-  return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter, swarmCommands: commandControl.swarmCommands };
+  return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter, swarmCommands: commandControl.swarmCommands, programmaticWorkerCreation: commandControl.programmaticWorkerCreation };
 }

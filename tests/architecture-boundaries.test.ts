@@ -924,7 +924,7 @@ describe("application composition boundaries", () => {
     const recovery = readFileSync(new URL("../src/coordinator/startup-recovery-workflow.ts", import.meta.url), "utf8");
     expect(router).toContain("StartupRecoveryWorkflowPort");
     expect(router).not.toContain("operationsQuery.listSpaces");
-    expect(routing).toContain("SwarmCommandGatewayPort");
+    expect(routing).toContain("SwarmCommandRuntime");
     expect(routing).not.toContain("operationsQuery.listSpaces");
     expect(commands).toContain("OperationsQueryWorkflowPort");
     expect(commands).toContain("SessionAdministrationWorkflowPort");
@@ -961,6 +961,14 @@ describe("application composition boundaries", () => {
     expect(dispatcher).toContain("effectMayHaveStarted");
     expect(dispatcher).not.toContain("acceptCommandIntent");
     expect(dispatcher).not.toContain("executeQuery");
+    expect(gateway).toContain("export interface SwarmCommandRuntime");
+    expect(gateway).not.toContain("drainAcceptedIntent");
+    expect(gateway).not.toContain("createWorkerFromCard");
+    expect(gateway).not.toContain("createWorkerFromPrimaryTool");
+    const coordinator = new URL("../src/coordinator/", import.meta.url);
+    for (const file of readdirSync(coordinator).filter((name) => name.endsWith(".ts") && name !== "swarm-command-gateway.ts" && name !== "command-intent-dispatcher.ts")) {
+      expect(readFileSync(new URL(file, coordinator), "utf8"), file).not.toContain("./command-intent-dispatcher.js");
+    }
   });
 
   it("centralizes coordinator project lookup in ProjectCatalog", () => {
