@@ -10,7 +10,7 @@ import type { Binding, EventOrigin, PromptJob, PromptWorkerDiagnostics } from ".
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkHint, PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
-import { outputFingerprint } from "../runtime/output.js";
+import { outputFingerprint } from "../domain/output-fingerprint.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { abortableWait } from "../runtime/abortable-wait.js";
 import type { ShutdownContext } from "../runtime/shutdown-context.js";

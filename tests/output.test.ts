@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { outputFingerprint } from "../src/runtime/output.js";
+import { outputFingerprint } from "../src/domain/output-fingerprint.js";
 
 describe("terminal output", () => {
   it("produces stable content fingerprints", () => {

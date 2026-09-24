@@ -10,7 +10,7 @@ import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { Binding, EventOrigin, ExternalTurnSupersessionFence, PromptJob } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
-import { outputFingerprint } from "../runtime/output.js";
+import { outputFingerprint } from "../domain/output-fingerprint.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";

@@ -5,7 +5,7 @@ import type { HerdrPort, TraexControlPort } from "../domain/ports/external.js";
 import type { ClaimedPrompt } from "../domain/ports/prompt-acceptance.js";
 import type { PromptDispatchStore } from "../domain/ports/prompt-run.js";
 import type { EventOrigin, PromptJob } from "../domain/types.js";
-import { outputFingerprint } from "../runtime/output.js";
+import { outputFingerprint } from "../domain/output-fingerprint.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { abortedPromptNotice, decidePromptExecutionFailure } from "./prompt-execution-lifecycle.js";
 import type { TranscriptObserver, TurnOutputSource } from "./transcript-observer.js";

@@ -578,6 +578,15 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("keeps persisted output fingerprint policy in the domain", () => {
+    expect(existsSync(new URL("../src/domain/output-fingerprint.ts", import.meta.url))).toBe(true);
+    expect(existsSync(new URL("../src/runtime/output.ts", import.meta.url))).toBe(false);
+    for (const path of ["external-turn-observer.ts", "prompt-run-workflow.ts", "prompt-turn-executor.ts"]) {
+      const source = readFileSync(new URL(`../src/coordinator/${path}`, import.meta.url), "utf8");
+      expect(source).toContain("../domain/output-fingerprint.js");
+    }
+  });
+
   it("keeps production composition off the broad SQLite compatibility facade", () => {
     const productionFiles = [
       "../src/main.ts",
