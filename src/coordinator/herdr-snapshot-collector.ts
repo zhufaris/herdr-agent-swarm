@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { HerdrPane } from "../domain/types.js";
-import type { ReconciliationFailure } from "../runtime/diagnostics.js";
+import type { ReconciliationFailure } from "../domain/diagnostics.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
 import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
 import { safeLogError } from "../runtime/safe-error.js";

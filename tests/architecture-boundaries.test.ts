@@ -489,9 +489,18 @@ describe("application composition boundaries", () => {
     expect(types).toContain('from "./delivery.js"');
     expect(types).toContain('from "./runtime-observation.js"');
     expect(types).toContain('from "./project-selection.js"');
-    expect(types).toContain('from "../runtime/diagnostics.js"');
+    expect(types).toContain('from "./diagnostics.js"');
     expect(types).toContain('from "./inbound.js"');
     expect(types).not.toMatch(/export interface (?:Binding|PromptJob|OutboundReply|AnswerPage|ProjectSelection|HerdrPane|RuntimeObservation|IncomingLarkMessage|IncomingLarkCardAction|OutboxDispatcherDiagnostics|PromptWorkerDiagnostics)\b/);
+  });
+
+  it("keeps domain contracts independent from runtime implementations", () => {
+    const domainDir = fileURLToPath(new URL("../src/domain", import.meta.url));
+    for (const entry of readdirSync(domainDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const source = readFileSync(join(entry.parentPath, entry.name), "utf8");
+      expect(source, relative(domainDir, join(entry.parentPath, entry.name))).not.toMatch(/from "(?:\.\.\/)+runtime\//);
+    }
   });
 
   it("keeps production composition off the broad SQLite compatibility facade", () => {
