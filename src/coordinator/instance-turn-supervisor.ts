@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { matchesHerdrAgentKind } from "../domain/agent-instance.js";
 import type { InstanceTurnSupervisionStore } from "../domain/ports/instance.js";
-import type { PaneHost } from "../runtime/herdr/pane-host.js";
+import type { PaneHost } from "../domain/ports/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { FailureLogGate } from "../runtime/failure-log-gate.js";
 import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";

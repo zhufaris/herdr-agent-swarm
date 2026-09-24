@@ -466,6 +466,18 @@ describe("application composition boundaries", () => {
     expect(readFileSync(new URL("../src/events/instance-work-scheduler.ts", import.meta.url), "utf8")).not.toContain("AgentDriverRegistry");
   });
 
+  it("keeps Herdr pane operations behind a domain port", () => {
+    const port = readFileSync(new URL("../src/domain/ports/pane-host.ts", import.meta.url), "utf8");
+    const adapter = readFileSync(new URL("../src/runtime/herdr/pane-host.ts", import.meta.url), "utf8");
+    expect(port).toContain("export interface PaneHost");
+    expect(adapter).toContain("class HerdrPaneHost implements PaneHost");
+    for (const file of ["instance-control-workflow.ts", "instance-runtime-reconciler.ts", "instance-turn-supervisor.ts"]) {
+      const source = readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8");
+      expect(source).toContain('from "../domain/ports/pane-host.js"');
+      expect(source).not.toContain('from "../runtime/herdr/pane-host.js"');
+    }
+  });
+
   it("composes startup projection workflows through explicit consumer stores", () => {
     const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
     const composition = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");

@@ -6,7 +6,7 @@ import { primaryPaneToken } from "../domain/pane-title.js";
 import type { InstanceControlStore } from "../domain/ports/instance.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
-import type { PaneHost } from "../runtime/herdr/pane-host.js";
+import type { PaneHost } from "../domain/ports/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { WorktreeManager } from "../runtime/worktree-manager.js";
 import { preferredRuntimeSessionId, requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";

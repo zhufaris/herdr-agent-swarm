@@ -3,7 +3,7 @@ import { matchesHerdrAgentKind, type AgentInstance, type ObservedInstanceState }
 import { isNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { InstanceRuntimeReconciliationStore } from "../domain/ports/instance.js";
 import type { HerdrPane, ProjectConfig, ReconciliationDiagnostics } from "../domain/types.js";
-import type { PaneHost } from "../runtime/herdr/pane-host.js";
+import type { PaneHost } from "../domain/ports/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { PriorityReconciliationRunner, type PriorityReconciliationScope } from "../runtime/priority-reconciliation-runner.js";
 import { ProjectCatalog } from "./project-catalog.js";
