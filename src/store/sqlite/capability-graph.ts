@@ -36,16 +36,7 @@ import { SqliteWorkerSessionThreadStore } from "./worker-session-thread-store.js
 import { SqliteCommandIntentStoreAdapter, SqliteSessionOperationStoreAdapter } from "./workflow-stores.js";
 import { SqlitePaneControlCapabilityStore, SqliteTurnControlCapabilityStore } from "./control-capability-store.js";
 import { SqliteDeliveryRecoveryCapabilityStore, SqliteExternalTurnCapabilityStore, SqliteInboundRoutingCapabilityStore, SqliteStartupRecoveryCapabilityStore, SqliteStartupViewCapabilityStore } from "./recovery-capability-store.js";
-
-type FoundationStoreFactories = {
-  approvals: () => SqliteApprovalStore;
-  operations: () => SqliteOperationsStore;
-  commandIntents: () => SqliteCommandIntentStore;
-  controllerInterpretations: () => SqliteControllerInterpretationStore;
-  inboundProjects: () => SqliteInboundProjectStore;
-  threadAliases: () => SqliteBindingThreadAliasStore;
-  workerThreads: () => SqliteWorkerSessionThreadStore;
-};
+import { StoreLink } from "./store-link.js";
 
 type StoreCluster = {
   approvals: SqliteApprovalStore;
@@ -75,120 +66,129 @@ type StoreCluster = {
   workerCardDisplays: SqliteWorkerCardDisplayStore;
 };
 
-function createFoundationStoreFactories(context: SqliteContext): FoundationStoreFactories {
+function createIndependentStores(context: SqliteContext) {
   return {
-    threadAliases: () => new SqliteBindingThreadAliasStore(context),
-    workerThreads: () => new SqliteWorkerSessionThreadStore(context),
-    operations: () => new SqliteOperationsStore(context),
-    commandIntents: () => new SqliteCommandIntentStore(context),
-    controllerInterpretations: () => new SqliteControllerInterpretationStore(context),
-    inboundProjects: () => new SqliteInboundProjectStore(context),
-    approvals: () => new SqliteApprovalStore(context)
+    threadAliases: new SqliteBindingThreadAliasStore(context),
+    workerThreads: new SqliteWorkerSessionThreadStore(context),
+    operations: new SqliteOperationsStore(context),
+    commandIntents: new SqliteCommandIntentStore(context),
+    controllerInterpretations: new SqliteControllerInterpretationStore(context),
+    inboundProjects: new SqliteInboundProjectStore(context),
+    approvals: new SqliteApprovalStore(context)
   };
 }
 
-function createStoreCluster(context: SqliteContext, foundation: FoundationStoreFactories): StoreCluster {
-  const cluster = {} as StoreCluster;
-  cluster.bindings = new SqliteBindingLifecycleStore(context, (bindingId, reason) => cluster.cardContexts.invalidateBindingWorkerContexts(bindingId, reason));
-  cluster.threadAliases = foundation.threadAliases();
-  cluster.workerThreads = foundation.workerThreads();
-  cluster.operations = foundation.operations();
-  cluster.commandIntents = foundation.commandIntents();
-  cluster.sessionOperations = new SqliteSessionOperationStore(context, (id) => cluster.bindings.getBinding(id));
-  cluster.projections = new SqliteProjectionStore(context, {
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input),
-    hasPendingAnswerContinuation: (promptId, pageIndex) => cluster.outbox.hasPendingAnswerContinuation(promptId, pageIndex),
-    getBinding: (id) => cluster.bindings.getBinding(id),
-    getModelPreference: (bindingId) => cluster.prompts.getModelPreference(bindingId),
-    refreshOutboxLaneHead: (laneKey) => cluster.outbox.refreshOutboxLaneHead(laneKey)
+function createStoreCluster(context: SqliteContext): StoreCluster {
+  const independent = createIndependentStores(context);
+  const cardContextsLink = new StoreLink<SqliteCardContextStore>("card contexts");
+  const outboxLink = new StoreLink<SqliteOutboxStore>("outbox");
+  const promptsLink = new StoreLink<SqlitePromptStore>("prompts");
+  const workerTurnsLink = new StoreLink<SqliteWorkerTurnStore>("worker turns");
+  const instancesLink = new StoreLink<SqliteInstanceStore>("instances");
+
+  const bindings = new SqliteBindingLifecycleStore(context, (bindingId, reason) => cardContextsLink.get().invalidateBindingWorkerContexts(bindingId, reason));
+  const sessionOperations = new SqliteSessionOperationStore(context, (id) => bindings.getBinding(id));
+  const projections = new SqliteProjectionStore(context, {
+    enqueueOutboundReply: (input) => outboxLink.get().enqueueOutboundReply(input),
+    hasPendingAnswerContinuation: (promptId, pageIndex) => outboxLink.get().hasPendingAnswerContinuation(promptId, pageIndex),
+    getBinding: (id) => bindings.getBinding(id),
+    getModelPreference: (bindingId) => promptsLink.get().getModelPreference(bindingId),
+    refreshOutboxLaneHead: (laneKey) => outboxLink.get().refreshOutboxLaneHead(laneKey)
   });
-  cluster.outbox = new SqliteOutboxStore(context, {
-    getBinding: (id) => cluster.bindings.getBinding(id),
-    loadRunCard: (promptId) => cluster.projections.loadRunCard(promptId),
-    getActiveAnswerPage: (promptId) => cluster.projections.getActiveAnswerPage(promptId),
-    loadWorkerTurnCard: (turnId) => cluster.workerTurns.loadWorkerTurnCard(turnId),
-    listWorkerTurnCardPages: (turnId) => cluster.workerTurns.listWorkerTurnCardPages(turnId),
-    loadWorkerMainView: (workerId, generation) => cluster.cardContexts.loadWorkerMainView(workerId, generation),
-    saveRunCard: (view) => cluster.projections.saveRunCard(view),
-    persistBindingPatch: (id, patch) => cluster.bindings.persistBindingPatch(id, patch),
-    invalidateCardContexts: (targets) => cluster.cardContexts.invalidateCardContexts(targets)
-  }, cluster.threadAliases, cluster.workerThreads);
-  cluster.naturalLanguageCommandConfirmations = new SqliteNaturalLanguageCommandConfirmationStore(context, cluster.outbox, cluster.commandIntents);
-  cluster.controllerInterpretations = foundation.controllerInterpretations();
-  cluster.bindingProjections = new SqliteBindingProjectionStore(context, cluster.bindings, cluster.projections, {
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input),
-    listRunCardsByPhases: (bindingId, phases) => cluster.projections.listRunCardsByPhases(bindingId, phases)
+  const outbox = new SqliteOutboxStore(context, {
+    getBinding: (id) => bindings.getBinding(id),
+    loadRunCard: (promptId) => projections.loadRunCard(promptId),
+    getActiveAnswerPage: (promptId) => projections.getActiveAnswerPage(promptId),
+    loadWorkerTurnCard: (turnId) => workerTurnsLink.get().loadWorkerTurnCard(turnId),
+    listWorkerTurnCardPages: (turnId) => workerTurnsLink.get().listWorkerTurnCardPages(turnId),
+    loadWorkerMainView: (workerId, generation) => cardContextsLink.get().loadWorkerMainView(workerId, generation),
+    saveRunCard: (view) => projections.saveRunCard(view),
+    persistBindingPatch: (id, patch) => bindings.persistBindingPatch(id, patch),
+    invalidateCardContexts: (targets) => cardContextsLink.get().invalidateCardContexts(targets)
+  }, independent.threadAliases, independent.workerThreads);
+  outboxLink.connect(outbox);
+  const naturalLanguageCommandConfirmations = new SqliteNaturalLanguageCommandConfirmationStore(context, outbox, independent.commandIntents);
+  const bindingProjections = new SqliteBindingProjectionStore(context, bindings, projections, {
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input),
+    listRunCardsByPhases: (bindingId, phases) => projections.listRunCardsByPhases(bindingId, phases)
   });
-  cluster.prompts = new SqlitePromptStore(context, cluster.projections, {
-    listBindings: () => cluster.bindings.listBindings(),
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input)
+  const prompts = new SqlitePromptStore(context, projections, {
+    listBindings: () => bindings.listBindings(),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input)
   });
-  cluster.promptDispatch = new SqlitePromptDispatchStore(context, cluster.projections, {
-    persistBindingPatch: (id, patch) => cluster.bindings.persistBindingPatch(id, patch),
-    transitionBinding: (id, transition) => cluster.bindings.transitionBinding(id, transition),
-    loadCardContextInvalidation: (target) => cluster.cardContexts.loadCardContextInvalidation(target),
-    loadPrimaryWorkerActivity: (promptId, bindingGeneration) => cluster.cardContexts.loadPrimaryWorkerActivity(promptId, bindingGeneration)
+  promptsLink.connect(prompts);
+  const promptDispatch = new SqlitePromptDispatchStore(context, projections, {
+    persistBindingPatch: (id, patch) => bindings.persistBindingPatch(id, patch),
+    transitionBinding: (id, transition) => bindings.transitionBinding(id, transition),
+    loadCardContextInvalidation: (target) => cardContextsLink.get().loadCardContextInvalidation(target),
+    loadPrimaryWorkerActivity: (promptId, bindingGeneration) => cardContextsLink.get().loadPrimaryWorkerActivity(promptId, bindingGeneration)
   });
-  cluster.promptRecovery = new SqlitePromptRecoveryStore(context, cluster.projections, {
-    persistBindingPatch: (id, patch) => cluster.bindings.persistBindingPatch(id, patch),
-    transitionBinding: (id, transition) => cluster.bindings.transitionBinding(id, transition),
-    loadCardContextInvalidation: (target) => cluster.cardContexts.loadCardContextInvalidation(target),
-    loadPrimaryWorkerActivity: (promptId, bindingGeneration) => cluster.cardContexts.loadPrimaryWorkerActivity(promptId, bindingGeneration),
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input)
+  const promptRecovery = new SqlitePromptRecoveryStore(context, projections, {
+    persistBindingPatch: (id, patch) => bindings.persistBindingPatch(id, patch),
+    transitionBinding: (id, transition) => bindings.transitionBinding(id, transition),
+    loadCardContextInvalidation: (target) => cardContextsLink.get().loadCardContextInvalidation(target),
+    loadPrimaryWorkerActivity: (promptId, bindingGeneration) => cardContextsLink.get().loadPrimaryWorkerActivity(promptId, bindingGeneration),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input)
   });
-  cluster.promptAcceptance = new SqlitePromptAcceptanceStore(context, cluster.projections, {
-    getBinding: (id) => cluster.bindings.getBinding(id),
-    countPendingPrompts: (id) => cluster.prompts.countPendingPrompts(id)
+  const promptAcceptance = new SqlitePromptAcceptanceStore(context, projections, {
+    getBinding: (id) => bindings.getBinding(id),
+    countPendingPrompts: (id) => prompts.countPendingPrompts(id)
   });
-  cluster.externalTurnAdoption = new SqliteExternalTurnAdoptionStore(context, cluster.projections, (id) => cluster.promptDispatch.getPrompt(id));
-  cluster.workerTurns = new SqliteWorkerTurnStore(context, {
-    getAgentInstance: (id) => cluster.instances.getAgentInstance(id),
-    getBinding: (id) => cluster.bindings.getBinding(id),
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input),
-    invalidateWorkerCardContexts: (view, reason) => cluster.cardContexts.invalidateWorkerCardContexts(view, reason),
-    hasPendingOutboundReplyForWorkerTurn: (turnId) => cluster.outbox.hasPendingOutboundReplyForWorkerTurn(turnId)
+  const externalTurnAdoption = new SqliteExternalTurnAdoptionStore(context, projections, (id) => promptDispatch.getPrompt(id));
+  const workerTurns = new SqliteWorkerTurnStore(context, {
+    getAgentInstance: (id) => instancesLink.get().getAgentInstance(id),
+    getBinding: (id) => bindings.getBinding(id),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input),
+    invalidateWorkerCardContexts: (view, reason) => cardContextsLink.get().invalidateWorkerCardContexts(view, reason),
+    hasPendingOutboundReplyForWorkerTurn: (turnId) => outbox.hasPendingOutboundReplyForWorkerTurn(turnId)
   });
-  cluster.instances = new SqliteInstanceStore(context, {
-    invalidateWorkerInstanceContexts: (instance, reason) => cluster.cardContexts.invalidateWorkerInstanceContexts(instance, reason),
-    retireWorkerSession: (workerId, generation, occurredAt) => cluster.workerThreads.retireSession(workerId, generation, occurredAt)
+  workerTurnsLink.connect(workerTurns);
+  const instances = new SqliteInstanceStore(context, {
+    invalidateWorkerInstanceContexts: (instance, reason) => cardContextsLink.get().invalidateWorkerInstanceContexts(instance, reason),
+    retireWorkerSession: (workerId, generation, occurredAt) => independent.workerThreads.retireSession(workerId, generation, occurredAt)
   });
-  cluster.instanceOperations = new SqliteInstanceOperationStore(context, (id) => cluster.instances.getAgentInstance(id));
-  cluster.cardContexts = new SqliteCardContextStore(context, {
-    getAgentInstance: (id) => cluster.instances.getAgentInstance(id),
-    getWorkspaceLease: (id) => cluster.instances.getWorkspaceLease(id),
-    getBinding: (id) => cluster.bindings.getBinding(id),
-    loadWorkerTurnCard: (id) => cluster.workerTurns.loadWorkerTurnCard(id),
-    saveWorkerTurnCard: (view) => cluster.workerTurns.saveWorkerTurnCard(view),
-    loadTopicView: (id) => cluster.projections.loadTopicView(id),
-    saveTopicView: (view) => cluster.projections.saveTopicView(view),
-    loadRunCard: (id) => cluster.projections.loadRunCard(id),
-    saveRunCard: (view) => cluster.projections.saveRunCard(view),
-    reserveMainCard: (view, rootMessageId, card, paneEntryCard) => cluster.projections.reserveMainCardIntent(view, rootMessageId, card, undefined, paneEntryCard),
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input),
-    reserveWorkerMainPlacement: (view, card) => cluster.workerThreads.reserveCanonicalMain(view, card)
+  instancesLink.connect(instances);
+  const instanceOperations = new SqliteInstanceOperationStore(context, (id) => instances.getAgentInstance(id));
+  const cardContexts = new SqliteCardContextStore(context, {
+    getAgentInstance: (id) => instances.getAgentInstance(id),
+    getWorkspaceLease: (id) => instances.getWorkspaceLease(id),
+    getBinding: (id) => bindings.getBinding(id),
+    loadWorkerTurnCard: (id) => workerTurns.loadWorkerTurnCard(id),
+    saveWorkerTurnCard: (view) => workerTurns.saveWorkerTurnCard(view),
+    loadTopicView: (id) => projections.loadTopicView(id),
+    saveTopicView: (view) => projections.saveTopicView(view),
+    loadRunCard: (id) => projections.loadRunCard(id),
+    saveRunCard: (view) => projections.saveRunCard(view),
+    reserveMainCard: (view, rootMessageId, card, paneEntryCard) => projections.reserveMainCardIntent(view, rootMessageId, card, undefined, paneEntryCard),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input),
+    reserveWorkerMainPlacement: (view, card) => independent.workerThreads.reserveCanonicalMain(view, card)
   });
-  cluster.workerCardDisplays = new SqliteWorkerCardDisplayStore(context, {
-    loadWorkerMainProjectionSource: (workerId, generation) => cluster.cardContexts.loadWorkerMainProjectionSource(workerId, generation),
-    loadWorkerMainView: (workerId, generation) => cluster.cardContexts.loadWorkerMainView(workerId, generation),
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input)
+  cardContextsLink.connect(cardContexts);
+  const workerCardDisplays = new SqliteWorkerCardDisplayStore(context, {
+    loadWorkerMainProjectionSource: (workerId, generation) => cardContexts.loadWorkerMainProjectionSource(workerId, generation),
+    loadWorkerMainView: (workerId, generation) => cardContexts.loadWorkerMainView(workerId, generation),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input)
   });
-  cluster.turnControls = new SqliteTurnControlStore(context, {
-    getBinding: (id) => cluster.bindings.getBinding(id),
-    getAgentInstance: (id) => cluster.instances.getAgentInstance(id),
-    countPendingPrompts: (id) => cluster.prompts.countPendingPrompts(id),
-    countPendingInstanceTurns: (id, generation) => cluster.workerTurns.countPendingInstanceTurns(id, generation),
-    insertRunCard: (view) => cluster.projections.insertRunCard(view),
-    saveWorkerTurnCard: (view) => cluster.workerTurns.saveWorkerTurnCard(view),
-    invalidateWorkerCardContexts: (view, reason) => cluster.cardContexts.invalidateWorkerCardContexts(view, reason),
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input),
-    getPrompt: (id) => cluster.promptDispatch.getPrompt(id)
+  const turnControls = new SqliteTurnControlStore(context, {
+    getBinding: (id) => bindings.getBinding(id),
+    getAgentInstance: (id) => instances.getAgentInstance(id),
+    countPendingPrompts: (id) => prompts.countPendingPrompts(id),
+    countPendingInstanceTurns: (id, generation) => workerTurns.countPendingInstanceTurns(id, generation),
+    insertRunCard: (view) => projections.insertRunCard(view),
+    saveWorkerTurnCard: (view) => workerTurns.saveWorkerTurnCard(view),
+    invalidateWorkerCardContexts: (view, reason) => cardContexts.invalidateWorkerCardContexts(view, reason),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input),
+    getPrompt: (id) => promptDispatch.getPrompt(id)
   });
-  cluster.inboundProjects = foundation.inboundProjects();
-  cluster.paneOperations = new SqlitePaneOperationStore(context, {
-    enqueueOutboundReply: (input) => cluster.outbox.enqueueOutboundReply(input)
+  const paneOperations = new SqlitePaneOperationStore(context, {
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input)
   });
-  cluster.approvals = foundation.approvals();
-  return cluster;
+  for (const link of [cardContextsLink, outboxLink, promptsLink, workerTurnsLink, instancesLink]) link.get();
+  return {
+    ...independent, naturalLanguageCommandConfirmations, sessionOperations, workerTurns, projections, prompts, promptRecovery,
+    promptAcceptance, externalTurnAdoption, promptDispatch, outbox, instances, cardContexts, paneOperations, bindings,
+    bindingProjections, instanceOperations, turnControls, workerCardDisplays
+  };
 }
 
 export class SqliteCapabilityGraph {
@@ -228,8 +228,7 @@ export class SqliteCapabilityGraph {
     this.leases = leaseStore ?? new SqliteLeaseStore(this.context);
     this.migrations = new SqliteMigrations(this.context);
     this.migrations.run();
-    const foundation = createFoundationStoreFactories(this.context);
-    Object.assign(this, createStoreCluster(this.context, foundation));
+    Object.assign(this, createStoreCluster(this.context));
   }
 
   capabilityModules() {
