@@ -15,6 +15,7 @@ implemented. Current records:
 - [Worker execution and observation implementation plan](plans/2026-09-24-worker-execution-observation-plan.md)
 - [Durable outbound delivery design](specs/2026-09-24-durable-outbound-delivery-design.md)
 - [Durable outbound delivery implementation plan](plans/2026-09-24-durable-outbound-delivery-plan.md)
+- [Herdr runtime reconciliation design](specs/2026-09-24-herdr-runtime-reconciliation-design.md)
 - [Inbound admission and routing implementation plan](plans/2026-09-24-inbound-admission-routing-plan.md)
 
 The service's current maintainer, user, and operator documentation starts at the
