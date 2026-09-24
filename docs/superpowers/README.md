@@ -8,6 +8,7 @@ implemented. Current records:
 - [Card update stability design](specs/2026-09-24-card-update-stability-design.md)
 - [Runtime Event Bus design](specs/2026-09-24-runtime-event-bus-design.md)
 - [Runtime Event Bus implementation plan](plans/2026-09-24-runtime-event-bus-plan.md)
+- [Inbound admission and routing design](specs/2026-09-24-inbound-admission-routing-design.md)
 
 The service's current maintainer, user, and operator documentation starts at the
 [maintainer documentation map](../README.md). Completed or superseded designs,
