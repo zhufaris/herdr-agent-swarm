@@ -38,7 +38,7 @@ Each seam must satisfy all of the following before it is marked complete:
 | 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact transcript identity | `PromptRunWorkflow` lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver` | Complete | The facade owns scheduling, safety, process-local exclusion, recovery controls, and shutdown. `drain(bindingId)` hides durable FIFO claim, fresh-pane preflight, fenced release, execution, and archive policy; `observe(prompt)` hides exact-turn reopening, ownership, polling, settlement, and uncertain no-replay recovery. |
 | 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` behind dispatch and observation ports | Complete | Durable FIFO execution now lives in coordinator rather than events and consumes `WorkerTurnDispatchStore`. Exact live/restart observation stays behind `WorkerTurnObservationPort`; process-local single flight and watches remain non-durable hints while uncertain delivery never replays. |
 | 6 | Card projection and convergence | Durable Run Card, Worker Turn Card, Main Card, page, and delivery-version state | Pure view reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` | Complete | Primary and Worker continuation share one handoff policy; frozen-page offsets, checkpoint-gated Main Card retargeting, direct-Herdr pagination, duplicate convergence, stale targets, and startup recovery are covered through domain, workflow, SQLite, renderer, and context-rebuild tests. |
-| 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` plus `OutboundDeliveryExecutor` and `GatewayDeliveryPort` | Needs audit | Retry/dead-letter/frozen intent behavior exists. Review the large dispatcher and recovery store for policy leakage and ensure the event wake-up migration removed all production-local scheduler ownership. |
+| 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` lifecycle facade over `OutboundLaneDrain`, `OutboundDeliveryExecutor`, and `GatewayDeliveryPort` | Complete | The facade owns notifier subscription, safety/retry timers, dead-letter recovery, diagnostics, and shutdown. The drain engine owns bounded 3:1 lane scheduling, per-scan exclusion, same-reply protection, and fatal checkpoint convergence through `OutboundScanStore`; the executor owns one frozen claim-to-checkpoint attempt through `OutboundDeliveryStore`. |
 | 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` and owner-specific convergence modules | Needs deepening | Reconciliation is authoritative and tested, but the coordinator still combines scope planning, observation, binding convergence, and downstream wake decisions. |
 | 9 | Command and control | Durable command intent or owning aggregate, with immutable resolved context | `SwarmCommandGateway` and focused command workflows | Needs audit | Natural-language proposal, typed command, card action, and direct command paths converge on existing workflows. Verify that authorization and confirmation cannot be bypassed across entry paths. |
 | 10 | Runtime lifecycle, health, and operations | User systemd plus fenced SQLite lease; health is observation only | `ManagedBridgeRuntime`, health snapshot providers, and lifecycle ledger | Needs audit | Startup/shutdown ordering is explicit. Verify every writer is registered, diagnostic failure is content-safe, and readiness reflects all required dependencies without becoming workflow authority. |
@@ -48,8 +48,8 @@ Each seam must satisfy all of the following before it is marked complete:
 
 The next passes follow risk and dependency direction:
 
-1. Audit durable delivery and Herdr reconciliation now that their producers expose
-   stable interfaces.
+1. Deepen Herdr reconciliation now that its producers and outbound consumers
+   expose stable interfaces.
 2. Finish with command/control and runtime lifecycle/health.
 
 Each pass gets its own design record, implementation plan, focused verification,
@@ -139,3 +139,26 @@ Verification on 2026-09-24 covers exact-turn detachment after submission failure
 FIFO dispatch, structured and unstructured Agents, observer ownership, recovery
 supervision, shutdown, composition, architecture dependency direction, and the
 full repository suite.
+
+## Durable outbound delivery completion evidence
+
+The outbound pass is complete because `GatewayOutboxDispatcher` is now a
+lifecycle facade rather than the owner of lane scheduling and single-reply
+delivery. `OutboundLaneDrain` hides the four-slot work-conserving scan, live to
+history 3:1 selection, lane exclusion, same-reply suppression, wake revision,
+batch bound, and fatal checkpoint settlement behind `notifyRequest()` and
+`drain(...)`. `OutboundDeliveryExecutor` remains the sole owner of frozen plan
+preparation, exact claim, external execution, checkpoint, failure classification,
+and durable settlement.
+
+SQLite remains the delivery authority through separate `OutboundScanStore` and
+`OutboundDeliveryStore` capabilities. Process-local sets, counters, timers, and
+wake revisions affect only when eligible durable work is inspected. A failed
+lane is blocked only for the current scan, a checkpoint failure stops new claims
+while already active deliveries settle, and restart recovery continues from
+durable rows without repeating the corresponding Agent turn.
+
+Verification on 2026-09-24 covers independent-lane concurrency, current-scan
+failure isolation, 3:1 work-class fairness, claim and checkpoint fencing, retry
+and dead-letter behavior, shutdown settlement, composition, and architecture
+dependency direction.

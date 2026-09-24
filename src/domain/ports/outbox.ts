@@ -28,6 +28,21 @@ export interface OutboxStore {
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
 }
 
+export type OutboundScanStore = Pick<OutboxStore,
+  "getLarkDeliveryCooldown" | "getNextOutboundLaneHeadAttemptAt" |
+  "listOutboundLaneHeads" | "recoverEligibleDeadLetters"
+>;
+
+export type OutboundDeliveryStore = Pick<OutboxStore,
+  "checkpointOutboundReplyCard" | "claimOutboundReply" |
+  "dismissSupersededAnswerStream" | "getActiveAnswerPage" | "getBinding" |
+  "getPrompt" | "isActiveBindingThreadAlias" | "listWorkerTurnCardPages" |
+  "loadRunCard" | "loadWorkerMainView" | "loadWorkerTurnCard" |
+  "markOutboundReplyDelivered" | "markOutboundReplyFailedWithQuarantine" |
+  "prepareOutboundGatewayPlan" | "recordBridgeMessage" |
+  "rejectUnclaimedOutboundReply"
+>;
+
 export interface OutboundIntentStore {
   enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0]): OutboundReply;
   getActiveAnswerPage(promptId: string): AnswerPage | null;

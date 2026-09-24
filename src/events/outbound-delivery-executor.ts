@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { OutboundDeliveryClaim } from "../domain/delivery.js";
-import type { OutboxStore } from "../domain/ports/outbox.js";
+import type { OutboundDeliveryStore } from "../domain/ports/outbox.js";
 import type { OutboundReply } from "../domain/types.js";
 import { GatewayDeliveryError, type GatewayDeliveryPort, type GatewayDeliveryReceipt, type GatewayExternalRef } from "../gateways/contract/plugin.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -29,7 +29,7 @@ export class OutboundDeliveryExecutor {
   private readonly mainCardCheckpoints = new Set<MainCardCheckpoint>();
   private scheduler: PromptWorkScheduler | null = null;
 
-  constructor(private readonly store: OutboxStore, private readonly gateway: GatewayDeliveryPort, private readonly logger: Logger) {}
+  constructor(private readonly store: OutboundDeliveryStore, private readonly gateway: GatewayDeliveryPort, private readonly logger: Logger) {}
 
   onAnswerCheckpoint(listener: AnswerCheckpoint): () => void { return subscribe(this.answerCheckpoints, listener); }
   onWorkerTurnCheckpoint(listener: WorkerTurnCheckpoint): () => void { return subscribe(this.workerTurnCheckpoints, listener); }

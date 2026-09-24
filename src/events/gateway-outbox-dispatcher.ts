@@ -1,28 +1,18 @@
 import type { Logger } from "pino";
 import type { GatewayDeliveryPort } from "../gateways/contract/plugin.js";
-import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboxStore } from "../domain/ports/outbox.js";
-import type { OutboundReply, OutboxDispatcherDiagnostics } from "../domain/types.js";
+import type { OutboundCheckpointSubscriber, OutboxDispatcherControl, OutboundDeliveryStore, OutboundScanStore } from "../domain/ports/outbox.js";
+import type { OutboxDispatcherDiagnostics } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import type { PromptWorkScheduler } from "./prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
-import { DeliveryCheckpointError, OutboundDeliveryExecutor, type OutboundDeliveryResult } from "./outbound-delivery-executor.js";
-
-type ActiveDeliveryCompletion =
-  | { reply: OutboundReply; result: OutboundDeliveryResult; error?: never }
-  | { reply: OutboundReply; result?: never; error: unknown };
-type ScanMetrics = {
-  startedAt: number; attempted: number; delivered: number; failed: number;
-  externalDurationMs: number; checkpointDurationMs: number;
-  maxExternalDurationMs: number; maxCheckpointDurationMs: number;
-};
+import { OutboundDeliveryExecutor } from "./outbound-delivery-executor.js";
+import { OutboundLaneDrain } from "./outbound-lane-drain.js";
 
 /** Delivers user-visible lifecycle updates through a durable SQLite outbox. */
 export class GatewayOutboxDispatcher implements OutboxDispatcherControl, OutboundCheckpointSubscriber {
-  private static readonly MAX_CONCURRENT_DELIVERIES = 4;
   private static readonly SCAN_RETRY_BASE_MS = 250;
   private static readonly SCAN_RETRY_MAX_MS = 30_000;
-  private static readonly MAX_DELIVERIES_PER_SCAN = 100;
   private draining: Promise<void> | null = null;
   private readonly activeHandlers = new ActiveWorkTracker();
   private unsubscribe: (() => void) | null = null;
@@ -32,9 +22,8 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
   private safetyTimer: ReturnType<typeof setInterval> | null = null;
   private scanRequested = false;
   private forceRequested = false;
-  private scanRequestRevision = 0;
-  private scanWake: (() => void) | null = null;
   private readonly delivery: OutboundDeliveryExecutor;
+  private readonly laneDrain: OutboundLaneDrain;
   private lastScanAt: string | null = null;
   private lastScanOutcome: OutboxDispatcherDiagnostics["lastScanOutcome"] = null;
   private lastSuccessfulScanAt: string | null = null;
@@ -44,12 +33,15 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
   private lastDeliveryFailureAt: string | null = null;
 
   constructor(
-    private readonly store: OutboxStore,
+    private readonly store: OutboundScanStore & OutboundDeliveryStore,
     gateway: GatewayDeliveryPort,
     private readonly logger: Logger,
     private readonly work: OutboundWorkNotifier,
     private readonly safetyScanIntervalMs = 30_000
-  ) { this.delivery = new OutboundDeliveryExecutor(store, gateway, logger); }
+  ) {
+    this.delivery = new OutboundDeliveryExecutor(store, gateway, logger);
+    this.laneDrain = new OutboundLaneDrain({ store, delivery: this.delivery, logger });
+  }
 
   start(): () => void {
     if (this.unsubscribe) return this.unsubscribe;
@@ -109,8 +101,7 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
     if (this.stopping) return;
     this.scanRequested = true;
     this.forceRequested ||= force;
-    this.scanRequestRevision += 1;
-    this.scanWake?.();
+    this.laneDrain.notifyRequest();
     if (this.draining) return this.draining;
     this.draining = this.runRequestedScans().finally(() => {
       this.draining = null;
@@ -127,7 +118,14 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
       this.forceRequested = false;
       try {
         this.recoverTransientDeadLetters();
-        this.lastScanOutcome = await this.drainPending(force);
+        const result = await this.laneDrain.drain(force, {
+          isStopping: () => this.stopping,
+          track: (delivery) => this.trackHandler(delivery)
+        });
+        this.lastScanOutcome = result.outcome;
+        if (result.lastDeliveryAt) this.lastDeliveryAt = result.lastDeliveryAt;
+        if (result.lastDeliveryFailureAt) this.lastDeliveryFailureAt = result.lastDeliveryFailureAt;
+        if (result.attempted >= 100) this.scanRequested = true;
         this.consecutiveScanFailures = 0;
         this.lastSuccessfulScanAt = new Date().toISOString();
       } catch (error) {
@@ -161,113 +159,6 @@ export class GatewayOutboxDispatcher implements OutboxDispatcherControl, Outboun
   private async waitForActiveWork(): Promise<void> {
     await this.activeHandlers.settle();
     if (this.draining) await this.draining;
-  }
-
-  private async drainPending(force: boolean): Promise<"idle" | "delivered" | "failed"> {
-    const metrics: ScanMetrics = { startedAt: Date.now(), attempted: 0, delivered: 0, failed: 0, externalDurationMs: 0, checkpointDurationMs: 0, maxExternalDurationMs: 0, maxCheckpointDurationMs: 0 };
-    const blockedTargets = new Set<string>();
-    const attemptedReplyIds = new Set<string>();
-    const active = new Map<string, Promise<ActiveDeliveryCompletion>>();
-    let dispatchOrdinal = 0;
-    let outcome: "idle" | "delivered" | "failed" = "idle";
-    let observedScanRevision = this.scanRequestRevision;
-    let fatalError: unknown;
-    let fatal = false;
-    while (true) {
-      if (this.stopping && active.size === 0) {
-        this.logScanSummary(metrics, fatal ? "failed" : outcome);
-        if (fatal) throw fatalError;
-        return outcome;
-      }
-      const available = Math.min(
-        fatal || this.stopping ? 0 : GatewayOutboxDispatcher.MAX_CONCURRENT_DELIVERIES - active.size,
-        GatewayOutboxDispatcher.MAX_DELIVERIES_PER_SCAN - metrics.attempted
-      );
-      if (available > 0) {
-        const dueAt = force ? null : new Date().toISOString();
-        const excluded = [...blockedTargets, ...active.keys()];
-        const selected: OutboundReply[] = [];
-        if (available === 1) {
-          const preferred = dispatchOrdinal % 4 === 3 ? "history" : "live";
-          const reply = this.store.listOutboundLaneHeads(1, dueAt, excluded, preferred)[0]
-            ?? this.store.listOutboundLaneHeads(1, dueAt, excluded, preferred === "live" ? "history" : "live")[0];
-          if (reply) { selected.push(reply); dispatchOrdinal += 1; }
-        } else {
-          const candidates = {
-            live: this.store.listOutboundLaneHeads(available, dueAt, excluded, "live"),
-            history: this.store.listOutboundLaneHeads(available, dueAt, excluded, "history")
-          };
-          for (let slot = 0; slot < available; slot += 1) {
-            const preferred = dispatchOrdinal % 4 === 3 ? "history" : "live";
-            const fallback = preferred === "live" ? "history" : "live";
-            const reply = candidates[preferred].shift() ?? candidates[fallback].shift();
-            if (!reply) break;
-            selected.push(reply);
-            dispatchOrdinal += 1;
-          }
-        }
-        for (const reply of selected) {
-          if (attemptedReplyIds.has(reply.id)) { blockedTargets.add(reply.laneKey); continue; }
-          attemptedReplyIds.add(reply.id);
-          metrics.attempted += 1;
-          active.set(reply.laneKey, this.trackHandler(this.delivery.deliver(reply, dueAt)).then(
-            (result): ActiveDeliveryCompletion => ({ reply, result }),
-            (error): ActiveDeliveryCompletion => ({ reply, error })
-          ));
-        }
-        if (selected.length > 0) continue;
-      }
-      if (active.size === 0) {
-        if (fatal) { this.logScanSummary(metrics, "failed"); throw fatalError; }
-        if (metrics.attempted < GatewayOutboxDispatcher.MAX_DELIVERIES_PER_SCAN) { this.logScanSummary(metrics, outcome); return outcome; }
-        this.scanRequested = true;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        this.logScanSummary(metrics, outcome);
-        return outcome;
-      }
-      if (this.scanRequestRevision !== observedScanRevision) {
-        observedScanRevision = this.scanRequestRevision;
-        continue;
-      }
-      let wake!: () => void;
-      const wakeSignal = new Promise<null>((resolve) => { wake = () => resolve(null); });
-      this.scanWake = wake;
-      if (this.scanRequestRevision !== observedScanRevision) wake();
-      let completed: ActiveDeliveryCompletion | null;
-      try { completed = await Promise.race([...active.values(), wakeSignal]); }
-      finally { if (this.scanWake === wake) this.scanWake = null; }
-      if (!completed) { observedScanRevision = this.scanRequestRevision; continue; }
-      active.delete(completed.reply.laneKey);
-      if ("error" in completed) {
-        metrics.failed += 1;
-        if (completed.error instanceof DeliveryCheckpointError) this.addDeliveryTiming(metrics, completed.error.timing);
-        outcome = "failed"; fatal = true; fatalError = completed.error; continue;
-      }
-      const completedAt = new Date().toISOString();
-      this.addDeliveryTiming(metrics, completed.result);
-      if (completed.result.outcome === "failed") {
-        metrics.failed += 1;
-        blockedTargets.add(completed.reply.laneKey);
-        this.lastDeliveryFailureAt = completedAt;
-        outcome = "failed";
-      } else {
-        metrics.delivered += 1;
-        this.lastDeliveryAt = completedAt;
-        if (outcome === "idle") outcome = "delivered";
-      }
-    }
-  }
-
-  private addDeliveryTiming(metrics: ScanMetrics, result: OutboundDeliveryResult): void {
-    metrics.externalDurationMs += result.externalDurationMs;
-    metrics.checkpointDurationMs += result.checkpointDurationMs;
-    metrics.maxExternalDurationMs = Math.max(metrics.maxExternalDurationMs, result.externalDurationMs);
-    metrics.maxCheckpointDurationMs = Math.max(metrics.maxCheckpointDurationMs, result.checkpointDurationMs);
-  }
-
-  private logScanSummary(metrics: ScanMetrics, outcome: "idle" | "delivered" | "failed"): void {
-    if (metrics.attempted === 0) return;
-    this.logger.debug({ event: "gateway-outbox-scan-completed", attempted: metrics.attempted, delivered: metrics.delivered, failed: metrics.failed, durationMs: Date.now() - metrics.startedAt, externalDurationMs: metrics.externalDurationMs, checkpointDurationMs: metrics.checkpointDurationMs, maxExternalDurationMs: metrics.maxExternalDurationMs, maxCheckpointDurationMs: metrics.maxCheckpointDurationMs, outcome }, "Gateway outbox scan completed");
   }
 
   private scheduleRetry(): void {

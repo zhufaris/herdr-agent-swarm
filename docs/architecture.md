@@ -384,7 +384,7 @@ The production implementation uses the following modules and seams.
 | `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
 | `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
 | `StartupViewConverger` | Rebuilds startup-visible Answer and Main Card state from durable canonical projections | Named `StartupViewProjectionStores`; startup recovery, Answer pages, and Main Cards are explicit stores with no type assertion |
-| `GatewayOutboxDispatcher` | Durable Gateway delivery, retries, dead letters, and Answer-card checkpoints | `OutboxStore` plus one negotiated `GatewayDeliveryPort`; no direct aggregate mutation |
+| `GatewayOutboxDispatcher` / `OutboundLaneDrain` / `OutboundDeliveryExecutor` | Outbound lifecycle, bounded lane scheduling, and one frozen claim-to-checkpoint attempt | Lifecycle facade over `OutboundScanStore` and `OutboundDeliveryStore` plus one negotiated `GatewayDeliveryPort`; no direct aggregate mutation |
 | `createSqliteStoreBundle` / `SqliteCapabilityGraph` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production code cannot import the broad compatibility facade |
 | `SqliteStoreKernel` / `SqliteBindingStore` | Test and headless-smoke compatibility facades | Non-production adapters over the capability graph; they contain no schema ownership and cannot be imported by production source |
 | `SqliteBindingLifecycleStore` / `SqliteBindingProjectionStore` | Binding lifecycle, reset, cleanup, runtime convergence, and binding-owned projections | Keep lifecycle and projection responsibilities separate while sharing one transaction context |
@@ -1378,6 +1378,17 @@ idempotency keys. The dispatcher executes provider-neutral create, reply,
 replace, stream, finish, and share plans. It marks successful rows
 delivered; transient failures are retried with backoff; repeated failures become
 dead letters that an operator can retry or dismiss.
+
+The delivery path has three explicit modules. `GatewayOutboxDispatcher` is the
+lifecycle facade: it owns notifier subscription, scan coalescing, safety and retry
+timers, transient dead-letter recovery, diagnostics, and shutdown settlement.
+`OutboundLaneDrain` owns only one bounded work-conserving scan: four-way
+concurrency across independent lanes, strict per-lane exclusion, live-to-history
+3:1 preference, same-reply suppression, and stop-on-fatal-checkpoint behavior.
+`OutboundDeliveryExecutor` owns one candidate attempt from frozen plan through
+claim, external effect, and fenced checkpoint. The first two consume
+`OutboundScanStore`; the executor consumes `OutboundDeliveryStore`. Their
+process-local scheduling state never replaces SQLite lane heads or claims.
 
 `/swarm panes` may reserve a `group_card_create` intent for a selected active
 pane. Unlike a reply intent, it carries a validated chat target and durable

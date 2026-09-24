@@ -228,12 +228,22 @@ describe("application composition boundaries", () => {
   });
 
   it("separates outbound drain scheduling from single-reply delivery", () => {
-    const drain = readFileSync(new URL("../src/events/gateway-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const facade = readFileSync(new URL("../src/events/gateway-outbox-dispatcher.ts", import.meta.url), "utf8");
+    const drain = readFileSync(new URL("../src/events/outbound-lane-drain.ts", import.meta.url), "utf8");
     const delivery = readFileSync(new URL("../src/events/outbound-delivery-executor.ts", import.meta.url), "utf8");
-    expect(drain).toContain("new OutboundDeliveryExecutor(store, gateway, logger)");
-    expect(drain).not.toContain("outbound-intent-materializer");
-    expect(drain).not.toContain("outbound-target-validation");
-    expect(drain).not.toContain("delivery-error-classifier");
+    expect(facade).toContain("new OutboundDeliveryExecutor(store, gateway, logger)");
+    expect(facade).toContain("new OutboundLaneDrain({ store, delivery: this.delivery, logger })");
+    expect(facade).toContain("this.laneDrain.drain(force");
+    expect(facade).not.toContain("listOutboundLaneHeads");
+    expect(facade).not.toContain("MAX_CONCURRENT_DELIVERIES");
+    expect(facade).not.toContain("attemptedReplyIds");
+    expect(drain).toContain("OutboundScanStore");
+    expect(drain).toContain("listOutboundLaneHeads");
+    expect(drain).not.toContain("OutboundWorkNotifier");
+    expect(drain).not.toContain("setInterval");
+    expect(drain).not.toContain("scheduleRetry");
+    expect(delivery).toContain("OutboundDeliveryStore");
+    expect(delivery).not.toContain("OutboxStore");
     expect(delivery).toContain("prepareOutboundGatewayIntent");
     expect(delivery).toContain("GatewayDeliveryPort");
     expect(delivery).not.toContain("LarkPort");

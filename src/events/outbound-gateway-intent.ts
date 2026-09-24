@@ -1,4 +1,4 @@
-import type { OutboxStore } from "../domain/ports/outbox.js";
+import type { OutboundDeliveryStore } from "../domain/ports/outbox.js";
 import type { OutboundReply } from "../domain/types.js";
 import type { GatewayDeliveryIntent, GatewayDeliveryPurpose } from "../gateways/contract/plugin.js";
 import { isGatewayView, legacyGatewayView } from "../gateways/contract/view.js";
@@ -7,7 +7,7 @@ import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessa
 
 export interface PreparedOutboundGatewayIntent { intent: GatewayDeliveryIntent; streamMetadata: boolean; emptyStreamContent: boolean; }
 
-export function prepareOutboundGatewayIntent(store: OutboxStore, reply: OutboundReply): PreparedOutboundGatewayIntent {
+export function prepareOutboundGatewayIntent(store: OutboundDeliveryStore, reply: OutboundReply): PreparedOutboundGatewayIntent {
   const payload = materializeOutboundReply(reply);
   const purpose = deliveryPurpose(reply);
   if (reply.kind === "group_card_create") {
