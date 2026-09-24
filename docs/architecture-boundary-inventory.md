@@ -41,17 +41,14 @@ Each seam must satisfy all of the following before it is marked complete:
 | 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` lifecycle facade over `OutboundLaneDrain`, `OutboundDeliveryExecutor`, and `GatewayDeliveryPort` | Complete | The facade owns notifier subscription, safety/retry timers, dead-letter recovery, diagnostics, and shutdown. The drain engine owns bounded 3:1 lane scheduling, per-scan exclusion, same-reply protection, and fatal checkpoint convergence through `OutboundScanStore`; the executor owns one frozen claim-to-checkpoint attempt through `OutboundDeliveryStore`. |
 | 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` lifecycle facade over `BindingReconciliationPass` and `BindingRuntimeConverger` | Complete | The facade owns cooldown, priority coalescing, periodic lifecycle, diagnostics, and shutdown. The pass owns targeted/full authoritative observation, classification, discovery, failure isolation, and pruning; the converger retains generation-fenced per-Binding transitions and downstream effects. |
 | 9 | Command and control | Durable command intent or owning aggregate, with immutable resolved context | `SwarmCommandGateway` ingress facade over `CommandIntentDispatcher` and focused command workflows | Complete | Text, CardKit, Primary tool, and confirmed natural-language entry paths share context resolution and durable admission. The dispatcher owns same-lane FIFO claim, frozen-context revalidation, mutation routing, conservative uncertain settlement, accepted-only recovery, and shutdown; no path can bypass policy or replay possibly started work. |
-| 10 | Runtime lifecycle, health, and operations | User systemd plus fenced SQLite lease; health is observation only | `ManagedBridgeRuntime`, health snapshot providers, and lifecycle ledger | Needs audit | Startup/shutdown ordering is explicit. Verify every writer is registered, diagnostic failure is content-safe, and readiness reflects all required dependencies without becoming workflow authority. |
+| 10 | Runtime lifecycle, health, and operations | User systemd plus fenced SQLite lease; health is observation only | `ManagedBridgeRuntime`, `RuntimeLifecycleLedger`, `BridgeRuntimeShutdown`, and `HealthSnapshotCollector` | Complete | Possibly started resources register cleanup before or with start; write-capable shutdown failures retain the fence, lease, and store. The collector owns coherent fail-closed readiness, isolated bounded diagnostics, degradation policy, and single-flight caches, while the HTTP adapter owns only transport. Lifecycle and health tests cover partial startup, ordering, lease loss, stuck writers, provider failure, redaction, and cache behavior. |
 | 11 | SQLite capability graph and migrations | One fenced `SqliteContext` and ordered schema migration | Consumer-shaped store ports backed by `SqliteCapabilityGraph` | Substantially complete | Production no longer uses the broad compatibility kernel and architecture checks enforce inward imports. Remaining work is driven by individual seam audits, not repository/table splitting. |
 
 ## Execution order
 
-The next passes follow risk and dependency direction:
-
-1. Finish with runtime lifecycle, health, and operations.
-
-Each pass gets its own design record, implementation plan, focused verification,
-and completion audit. A pass must not opportunistically refactor the next seam.
+All prioritized seams are complete. Future work should be driven by a concrete
+behavioral requirement or observed operational failure rather than further
+horizontal module splitting.
 
 ## EventBus completion evidence
 

@@ -370,6 +370,7 @@ The production implementation uses the following modules and seams.
 | Module | Responsibility | Seam |
 | --- | --- | --- |
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
+| `HealthSnapshotCollector` / `startHealthServer` | Coherent readiness/status observation and the loopback HTTP transport | The collector owns provider reads, bounded failure isolation, degradation policy, and caches; the server owns only routes, methods, status codes, and JSON |
 | `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
 | `SwarmCommandGateway` / `CommandIntentDispatcher` | Unified command ingress/admission and durable mutation execution, including CardKit and Primary-tool Worker creation | The facade owns resolution, queries, admission, and result adaptation; the dispatcher hides lane FIFO claims, frozen-context revalidation, external-effect uncertainty, accepted-only recovery, and shutdown |
 | `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted transcript turn |
@@ -1760,6 +1761,12 @@ Health endpoints have separate meanings:
   Lark, and completion of the first multi-agent runtime reconciliation.
 - `/status` returns a sanitized operational snapshot even when dependencies are
   degraded.
+
+`HealthSnapshotCollector` is the sole owner of readiness and status aggregation.
+It shares bounded Herdr workspace probes, reads each volatile readiness provider
+once per response, isolates and redacts diagnostic failures, and applies the
+degradation policy. The HTTP server does not inspect stores or runtime providers;
+it maps the collector results to the stable endpoint contract.
 
 Diagnostics are observational and must not become a new availability hazard.
 Each provider is collected independently; a synchronous provider failure becomes

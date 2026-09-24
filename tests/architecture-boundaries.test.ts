@@ -1022,6 +1022,24 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("keeps health transport separate from snapshot and degradation policy", () => {
+    const server = readFileSync(new URL("../src/health/server.ts", import.meta.url), "utf8");
+    const collector = readFileSync(new URL("../src/health/health-snapshot-collector.ts", import.meta.url), "utf8");
+    expect(server).toContain("new HealthSnapshotCollector(options)");
+    expect(server).toContain("snapshots.readiness()");
+    expect(server).toContain("snapshots.status()");
+    expect(server).not.toContain("getOperationalSummary");
+    expect(server).not.toContain("validateProjectDirectories");
+    expect(server).not.toContain("assertWorkspace");
+    expect(server).not.toContain("diagnosticCollectionFailed");
+    expect(collector).toContain("getOperationalSummary");
+    expect(collector).toContain("validateProjectDirectories");
+    expect(collector).toContain("inspectHerdrReadiness");
+    expect(collector).toContain("diagnosticCollectionFailed");
+    expect(collector).not.toContain("createServer");
+    expect(collector).not.toContain("response.statusCode");
+  });
+
   it("keeps process entrypoint lifecycle-free beyond start and stop", () => {
     const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
     for (const implementation of ["BridgeRuntimeShutdown", "cleanupStartupFailure", "startHealthServer", "InstanceLeaseController", "openSqliteLeaseBootstrap", "createBridgeRuntime"]) {
