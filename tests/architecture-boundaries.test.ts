@@ -690,7 +690,10 @@ describe("application composition boundaries", () => {
     const port = readFileSync(new URL("../src/domain/ports/turn-control.ts", import.meta.url), "utf8");
     const implementation = readFileSync(new URL("../src/coordinator/turn-control-workflow.ts", import.meta.url), "utf8");
     expect(port).toContain("export interface TurnControlPort");
+    expect(port).toContain("export class TurnControlRequestError");
     expect(implementation).toContain("implements TurnControlPort");
+    expect(readFileSync(new URL("../src/coordinator/instance-messaging-workflow.ts", import.meta.url), "utf8"))
+      .not.toMatch(/no exact active runtime turn\|not active/);
     for (const path of [
       "src/coordinator/pane-control-workflow.ts",
       "src/coordinator/instance-messaging-workflow.ts",

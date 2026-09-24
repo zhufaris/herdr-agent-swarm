@@ -36,6 +36,15 @@ export interface TurnControlPort {
   recover(): Promise<{ resumed: TurnControlOperation[]; uncertain: TurnControlOperation[] }>;
 }
 
+export type TurnControlRequestErrorCode = "not-active" | "blocked" | "unsupported";
+
+export class TurnControlRequestError extends Error {
+  constructor(readonly code: TurnControlRequestErrorCode, message: string) {
+    super(message);
+    this.name = "TurnControlRequestError";
+  }
+}
+
 export interface TurnControlStore {
   getPrioritySteer(owner: TurnControlOwner, idempotencyKey: string): { logicalTurnId: string; text: string } | null;
   acceptTurnControlOperation(input: AcceptTurnControlOperationInput): { operation: TurnControlOperation; inserted: boolean };

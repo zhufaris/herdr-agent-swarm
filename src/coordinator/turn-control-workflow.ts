@@ -2,7 +2,7 @@ import type { ControlActor } from "../domain/commands.js";
 import type { InterruptReceipt, SteerReceipt } from "../domain/agent-runtime.js";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { PrimaryPresentation, WorkerPresentation } from "../domain/ports/presentation.js";
-import type { InterruptCommand, SteerCommand, SteerOutcome, TurnControlPort, TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
+import { TurnControlRequestError, type InterruptCommand, type SteerCommand, type SteerOutcome, type TurnControlPort, type TurnControlWorkflowStore } from "../domain/ports/turn-control.js";
 import type { Binding, HerdrAgentSession, HerdrPane } from "../domain/types.js";
 import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { TurnControlOperation, TurnTarget } from "../domain/turn-control.js";
@@ -82,14 +82,14 @@ export class TurnControlWorkflow implements TurnControlPort {
   private async resolveTarget(owner: SteerCommand["owner"], kind: "steer" | "interrupt"): Promise<{ kind: "active"; target: TurnTarget } | { kind: "idle"; binding: Binding } | { kind: "idle-instance"; instance: NonNullable<ReturnType<TurnControlWorkflowStore["getAgentInstance"]>> }> {
     if (owner.kind === "binding") {
       const binding = this.options.store.getBinding(owner.id);
-      if (!binding?.projectId || !binding.paneId) throw new Error("Primary binding has no active runtime");
+      if (!binding?.projectId || !binding.paneId) throw new TurnControlRequestError("not-active", "Primary binding has no active runtime");
       const turn = this.options.store.getActiveOrdinaryPrompt(binding.id, binding.generation);
       const session = bindingSession(binding);
-      if (!session) throw new Error("Primary binding has no native Agent session");
+      if (!session) throw new TurnControlRequestError("not-active", "Primary binding has no native Agent session");
       if (!turn) {
-        if (kind === "interrupt") throw new Error("Primary binding has no exact active runtime turn");
+        if (kind === "interrupt") throw new TurnControlRequestError("not-active", "Primary binding has no exact active runtime turn");
         const pane = await this.requireIdlePane(binding.paneId, session);
-        if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
+        if (pane.agentState === "blocked") throw new TurnControlRequestError("blocked", "Agent is blocked on a local approval or question");
         return { kind: "idle", binding };
       }
       if (!turn.transcriptTurnId) throw new Error("Primary active runtime turn identity is not established");
@@ -97,16 +97,16 @@ export class TurnControlWorkflow implements TurnControlPort {
       return { kind: "active", target: { owner, projectId: binding.projectId, paneId: binding.paneId, generation: binding.generation, agentSession: pane.agentSession!, logicalTurnId: turn.id, runtimeTurnId: turn.transcriptTurnId } };
     }
     const instance = this.options.store.getAgentInstance(owner.id);
-    if (!instance?.runtimeRef) throw new Error("Agent instance has no active runtime");
+    if (!instance?.runtimeRef) throw new TurnControlRequestError("not-active", "Agent instance has no active runtime");
     const turn = this.options.store.getActiveInstanceTurn(instance.id, instance.generation);
     if (!turn) {
-      if (kind === "interrupt") throw new Error("Agent instance has no exact active runtime turn");
+      if (kind === "interrupt") throw new TurnControlRequestError("not-active", "Agent instance has no exact active runtime turn");
       await this.requireIdlePane(instance.runtimeRef.paneId, null);
       return { kind: "idle-instance", instance };
     }
     if (!turn.runtimeTurnId) throw new Error("Agent active runtime turn identity is not established");
     const pane = await this.requireControllablePane(instance.runtimeRef.paneId, null, turn.runtimeTurnId);
-    if (!pane.agentSession || (instance.runtimeRef.nativeSessionId && pane.agentSession.value !== instance.runtimeRef.nativeSessionId)) throw new Error("Agent session identity changed");
+    if (!pane.agentSession || (instance.runtimeRef.nativeSessionId && pane.agentSession.value !== instance.runtimeRef.nativeSessionId)) throw new TurnControlRequestError("not-active", "Agent session identity changed");
     return { kind: "active", target: { owner, projectId: instance.projectId, paneId: instance.runtimeRef.paneId, generation: instance.generation, agentSession: pane.agentSession, logicalTurnId: turn.id, runtimeTurnId: turn.runtimeTurnId } };
   }
 
@@ -172,19 +172,19 @@ export class TurnControlWorkflow implements TurnControlPort {
   private async requireControllablePane(paneId: string, expectedSession: HerdrAgentSession | null, runtimeTurnId: string): Promise<HerdrPane> {
     const pane = await this.options.herdr.getPane(paneId);
     if (!pane) throw new Error("Herdr pane is no longer active");
-    if (!pane.agentSession) throw new Error("Herdr pane has no native Agent session");
-    if (expectedSession && !sameNativeTraexSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
-    if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
-    if (pane.activeTurnId !== runtimeTurnId) throw new Error("Runtime turn identity changed");
+    if (!pane.agentSession) throw new TurnControlRequestError("not-active", "Herdr pane has no native Agent session");
+    if (expectedSession && !sameNativeTraexSession(expectedSession, pane.agentSession)) throw new TurnControlRequestError("not-active", "Agent session identity changed");
+    if (pane.agentState === "blocked") throw new TurnControlRequestError("blocked", "Agent is blocked on a local approval or question");
+    if (pane.activeTurnId !== runtimeTurnId) throw new TurnControlRequestError("not-active", "Runtime turn identity changed");
     return pane;
   }
 
   private async requireIdlePane(paneId: string, expectedSession: HerdrAgentSession | null): Promise<HerdrPane> {
     const pane = await this.options.herdr.getPane(paneId);
-    if (!pane?.agentSession) throw new Error("Herdr pane has no native Agent session");
-    if (expectedSession && !sameNativeTraexSession(expectedSession, pane.agentSession)) throw new Error("Agent session identity changed");
-    if (pane.agentState === "blocked") throw new Error("Agent is blocked on a local approval or question");
-    if (pane.agentState !== "idle" && pane.agentState !== "done") throw new Error("Agent runtime state is not safely idle");
+    if (!pane?.agentSession) throw new TurnControlRequestError("not-active", "Herdr pane has no native Agent session");
+    if (expectedSession && !sameNativeTraexSession(expectedSession, pane.agentSession)) throw new TurnControlRequestError("not-active", "Agent session identity changed");
+    if (pane.agentState === "blocked") throw new TurnControlRequestError("blocked", "Agent is blocked on a local approval or question");
+    if (pane.agentState !== "idle" && pane.agentState !== "done") throw new TurnControlRequestError("not-active", "Agent runtime state is not safely idle");
     return pane;
   }
 

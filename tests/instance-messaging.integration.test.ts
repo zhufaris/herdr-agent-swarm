@@ -7,6 +7,7 @@ import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
 import { workerPresentation } from "./helpers/presentation.js";
+import { TurnControlRequestError } from "../src/domain/ports/turn-control.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { vi.useRealTimers(); store?.close(); store = undefined; });
@@ -109,7 +110,7 @@ describe("instance messaging", () => {
   it("steers only an active runtime and never falls back to a queued turn", async () => {
     const { create, workflow, driver, turnControl } = setup();
     const worker = create("worker");
-    turnControl.steer.mockRejectedValueOnce(new Error("Agent instance has no exact active runtime turn"));
+    turnControl.steer.mockRejectedValueOnce(new TurnControlRequestError("not-active", "runtime unavailable"));
     await expect(workflow.steer({ idempotencyKey: "s1", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" })).resolves.toMatchObject({ status: "not-active" });
     expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
     store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "working" });
@@ -117,6 +118,17 @@ describe("instance messaging", () => {
     expect(turnControl.steer).toHaveBeenCalledWith(expect.objectContaining({ owner: { kind: "instance", id: worker.id }, text: "change" }));
     expect(driver.steer).not.toHaveBeenCalled();
     expect(store!.listInstanceTurns(worker.id).items).toEqual([]);
+  });
+
+  it("classifies turn-control rejection by stable code rather than message text", async () => {
+    const { create, workflow, turnControl } = setup();
+    const worker = create("worker");
+    turnControl.steer.mockRejectedValueOnce(new TurnControlRequestError("blocked", "local interaction required"));
+    await expect(workflow.steer({ idempotencyKey: "blocked", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" }))
+      .resolves.toEqual({ status: "blocked", reason: "local interaction required" });
+    turnControl.steer.mockRejectedValueOnce(new Error("blocked text from an unknown failure"));
+    await expect(workflow.steer({ idempotencyKey: "unknown", actor: { kind: "human", userId: "u1" }, targetInstanceId: worker.id, text: "change" }))
+      .resolves.toEqual({ status: "failed", reason: "blocked text from an unknown failure" });
   });
 
   it("stops only through the shared exact-turn control workflow", async () => {

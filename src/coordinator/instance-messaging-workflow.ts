@@ -6,7 +6,7 @@ import type { InstanceEvent, InstanceTurn } from "../domain/instance-turn.js";
 import { createQueuedWorkerTurnCard, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import type { InstanceMessagingStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
-import type { TurnControlPort } from "../domain/ports/turn-control.js";
+import { TurnControlRequestError, type TurnControlPort } from "../domain/ports/turn-control.js";
 import { assertPromptInputSize } from "../domain/prompt-input-policy.js";
 import type { InstanceConversationView, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
 
@@ -50,9 +50,7 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const durable = input.resultTargetMessageId ? { durableResult: false as const } : {};
-      if (/no exact active runtime turn|not active/i.test(reason)) return { status: "not-active", reason, ...durable };
-      if (/unsupported/i.test(reason)) return { status: "unsupported", reason, ...durable };
-      if (/blocked/i.test(reason)) return { status: "blocked", reason, ...durable };
+      if (error instanceof TurnControlRequestError) return { status: error.code, reason, ...durable };
       return { status: "failed", reason, ...durable };
     }
   }
@@ -72,9 +70,7 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const durable = input.resultTargetMessageId ? { durableResult: false as const } : {};
-      if (/no exact active runtime turn|not active/i.test(reason)) return { status: "not-active", reason, ...durable };
-      if (/unsupported/i.test(reason)) return { status: "unsupported", reason, ...durable };
-      if (/blocked/i.test(reason)) return { status: "blocked", reason, ...durable };
+      if (error instanceof TurnControlRequestError) return { status: error.code, reason, ...durable };
       return { status: "failed", reason, ...durable };
     }
   }
