@@ -24,6 +24,7 @@ implemented. Current records:
 - [Inbound admission and routing implementation plan](plans/2026-09-24-inbound-admission-routing-plan.md)
 - [Swarm command runtime optimization design](specs/2026-09-24-swarm-command-runtime-optimization-design.md)
 - [Swarm command runtime optimization implementation plan](plans/2026-09-24-swarm-command-runtime-optimization-plan.md)
+- [Terminal-aligned Answer Cards design](specs/2026-09-24-terminal-aligned-answer-cards-design.md)
 
 The service's current maintainer, user, and operator documentation starts at the
 [maintainer documentation map](../README.md). Completed or superseded designs,
