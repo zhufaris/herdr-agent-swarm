@@ -4,7 +4,7 @@ import type { NaturalLanguageCommandResult } from "../domain/natural-language-co
 import type { NaturalLanguageCommandConfirmationStore } from "../domain/ports/natural-language-command-confirmation.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
-import { swarmCommandPolicy } from "../domain/swarm-command.js";
+import { swarmCommandPolicy, type SwarmCommandContext } from "../domain/swarm-command.js";
 import type { IncomingLarkCardAction, IncomingLarkMessage, InstanceCommand, LarkCardActionResult } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { InstanceInteractionWorkflowPort } from "./instance-interaction-workflow.js";
@@ -29,9 +29,16 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
       await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `natural-language-guidance:${message.messageId}`, this.options.presentation.naturalLanguageCommandGuidance({ title: result.outcome === "unsupported" ? "不支持的 Swarm 操作" : "需要补充信息", message: result.message, examples: result.examples, warning: true }));
       return;
     }
-    if (result.family === "swarm" && swarmCommandPolicy(result.command).mode === "query") { await this.options.swarmCommands.submit({ source: "natural-language", message, command: result.command }); return; }
+    let swarmContext: SwarmCommandContext | null = null;
+    if (result.family === "swarm") {
+      const receipt = await this.options.swarmCommands.submit({ source: "natural-language", message, command: result.command });
+      if (receipt.outcome === "query-completed" || receipt.outcome === "accepted") return;
+      if (receipt.outcome === "rejected") { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `natural-language-rejected:${message.messageId}`, this.options.presentation.requestRejected(receipt.message)); return; }
+      if (receipt.outcome === "conflict") throw new Error(`Natural-language command conflict: ${message.messageId}`);
+      swarmContext = receipt.context;
+    }
     if (result.family === "instance" && isInstanceQuery(result.command)) return this.options.instanceInteractions?.handleCommand(message, result.command);
-    const frozen = this.freeze(message, result);
+    const frozen = swarmContext ? frozenSwarmContext(swarmContext) : this.freeze(message, result);
     if (frozen.outcome === "rejected") {
       await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `natural-language-rejected:${message.messageId}`, this.options.presentation.requestRejected(frozen.message));
       return;
@@ -103,5 +110,8 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
 }
 
 function syntheticMessage(value: NaturalLanguageCommandConfirmation, actorOpenId: string): IncomingLarkMessage { return { eventId: `natural-language-confirmation:${value.id}`, messageId: `natural-language-confirmation:${value.id}`, parentMessageId: null, chatId: value.chatId, topicId: value.topicId, rootMessageId: value.rootMessageId, actorOpenId, text: "", mentionsBot: true, isRootMessage: false }; }
+function frozenSwarmContext(context: SwarmCommandContext): { outcome: "resolved"; bindingId: string | null; bindingGeneration: number | null; instanceId: null; instanceGeneration: null } {
+  return { outcome: "resolved", bindingId: context.primary?.bindingId ?? null, bindingGeneration: context.primary?.bindingGeneration ?? null, instanceId: null, instanceGeneration: null };
+}
 function isInstanceQuery(command: InstanceCommand): command is Extract<InstanceCommand, { kind: "projects" | "project" | "instances" | "instance" }> { return command.kind === "projects" || command.kind === "project" || command.kind === "instances" || command.kind === "instance"; }
 function stale(): LarkCardActionResult { return { toast: { type: "warning", content: "该确认已失效，请重新发送请求。" } }; }

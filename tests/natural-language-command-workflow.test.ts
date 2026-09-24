@@ -6,21 +6,24 @@ const message = { eventId: "event-1", messageId: "message-1", parentMessageId: n
 
 function harness() {
   const store = { stageNaturalLanguageCommandConfirmation: vi.fn(), getNaturalLanguageCommandConfirmation: vi.fn(), decideNaturalLanguageCommandConfirmation: vi.fn(), confirmNaturalLanguageSwarmCommand: vi.fn() };
-  const swarmCommands = { resolve: vi.fn(() => ({ outcome: "resolved", laneKey: "binding:b1", binding: null, context: { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "message-1", actorOpenId: "admin", projectId: "p1", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 2, paneId: "w1:p1", terminalId: null, nativeSession: null, activePromptId: "prompt-1" } } })), submit: vi.fn(), wakeAcceptedIntent: vi.fn() };
+  const context = { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "message-1", actorOpenId: "admin", projectId: "p1", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 2, paneId: "w1:p1", terminalId: null, nativeSession: null, activePromptId: "prompt-1" } };
+  const swarmCommands = { resolve: vi.fn(() => ({ outcome: "resolved", laneKey: "binding:b1", binding: null, context })), submit: vi.fn(async ({ command }) => command.kind === "status" ? { outcome: "query-completed", commandKind: command.kind } : command.kind === "stop" ? { outcome: "confirmation-required", commandKind: command.kind, context } : { outcome: "accepted", commandKind: command.kind, intent: { id: "intent-direct", state: "accepted" } }), wakeAcceptedIntent: vi.fn() };
   const workflow = new NaturalLanguageCommandWorkflow({ store: store as never, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake: vi.fn() }, presentation: cardKitApplicationPresentation, swarmCommands: swarmCommands as never, now: () => new Date("2026-09-19T00:00:00.000Z"), idFactory: () => "confirmation-1" });
   return { workflow, store, swarmCommands };
 }
 
 describe("natural-language command workflow", () => {
-  it("executes queries directly but stages mutations with frozen context", async () => {
+  it("executes queries and recoverable mutations directly but stages destructive mutations", async () => {
     const h = harness();
     await h.workflow.handle(message, { outcome: "command", source: "deterministic", family: "swarm", command: { kind: "status" } });
     expect(h.swarmCommands.submit).toHaveBeenCalledWith({ source: "natural-language", message, command: { kind: "status" } });
+    await h.workflow.handle(message, { outcome: "command", source: "deterministic", family: "swarm", command: { kind: "rename", title: "Next" } });
+    expect(h.store.stageNaturalLanguageCommandConfirmation).not.toHaveBeenCalled();
 
     h.store.stageNaturalLanguageCommandConfirmation.mockImplementation((input) => ({ outcome: "staged", confirmation: input.confirmation }));
     await h.workflow.handle(message, { outcome: "command", source: "deterministic", family: "swarm", command: { kind: "stop" } });
     expect(h.store.stageNaturalLanguageCommandConfirmation).toHaveBeenCalledWith(expect.objectContaining({ confirmation: expect.objectContaining({ id: "confirmation-1", expectedBindingId: "b1", expectedBindingGeneration: 2, state: "pending", expiresAt: "2026-09-19T00:10:00.000Z" }) }));
-    expect(h.swarmCommands.submit).toHaveBeenCalledOnce();
+    expect(h.swarmCommands.submit).toHaveBeenCalledTimes(3);
   });
 
   it("atomically accepts a confirmed Swarm intent and wakes that durable lane", async () => {

@@ -21,7 +21,7 @@ export class ProgrammaticWorkerCreation implements WorkerCreationGateway, Primar
     const receipt = await this.runtime.submit(request);
     if (receipt.outcome !== "accepted") {
       if (receipt.outcome === "rejected") throw new Error(receipt.message);
-      throw new Error("Idempotency key was already used for a different Worker creation request");
+      throw new Error(receipt.outcome === "confirmation-required" ? "Worker creation unexpectedly requires confirmation" : "Idempotency key was already used for a different Worker creation request");
     }
     const observation = await this.runtime.observe(receipt.intent.id, this.timeoutMs);
     if (observation.outcome === "succeeded" && observation.workerResult) return observation.workerResult;

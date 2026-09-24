@@ -6,7 +6,7 @@ import type { InstanceControlPort } from "../domain/ports/instance-workflows.js"
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
-import { swarmCommandPolicy } from "../domain/swarm-command.js";
+import { swarmCommandPolicy, swarmCommandSourceDecision, type SwarmCommandContext } from "../domain/swarm-command.js";
 import type { BridgeCommand, Binding, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import { CommandIntentDispatcher } from "./command-intent-dispatcher.js";
@@ -42,6 +42,7 @@ export type SwarmCommandRequest =
   | PrimaryToolCommandRequest;
 export type SwarmCommandReceipt =
   | { outcome: "query-completed"; commandKind: BridgeCommand["kind"] }
+  | { outcome: "confirmation-required"; commandKind: BridgeCommand["kind"]; context: SwarmCommandContext }
   | { outcome: "accepted"; commandKind: BridgeCommand["kind"]; intent: CommandIntent }
   | { outcome: "rejected"; commandKind: BridgeCommand["kind"]; code: string; message: string }
   | { outcome: "conflict"; commandKind: BridgeCommand["kind"]; intent: CommandIntent };
@@ -72,11 +73,14 @@ export class SwarmCommandGateway implements SwarmCommandRuntime {
     if (normalized.outcome === "rejected") return { outcome: "rejected", commandKind: request.command.kind, code: normalized.code, message: normalized.message };
     const { message, command, resolved, idempotencyKey } = normalized;
     const policy = swarmCommandPolicy(command);
+    const sourceDecision = swarmCommandSourceDecision(command, request.source);
+    if (sourceDecision === "unsupported") return { outcome: "rejected", commandKind: command.kind, code: "source_unsupported", message: "This command is not available from this source" };
     if (policy.mode === "query") {
       await this.executeQuery(message, command, resolved.binding);
       this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${command.kind}`, target: resolved.laneKey, outcome: "success" });
       return { outcome: "query-completed", commandKind: command.kind };
     }
+    if (sourceDecision === "confirm") return { outcome: "confirmation-required", commandKind: command.kind, context: resolved.context };
     if (!this.accepting) return { outcome: "rejected", commandKind: command.kind, code: "shutting_down", message: "Swarm command admission is stopping" };
     const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() }, request.source, this.options.presentation.commandStatus);
     if (accepted.outcome === "conflict") return { outcome: "conflict", commandKind: command.kind, intent: accepted.intent };

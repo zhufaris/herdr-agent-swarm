@@ -63,6 +63,19 @@ describe("SwarmCommandGateway", () => {
     fixture.store.close();
   });
 
+  it.each([
+    [{ kind: "stop" as const }, "confirmation-required"],
+    [{ kind: "skip" as const }, "confirmation-required"],
+    [{ kind: "pane_close_confirm" as const, code: "ABC123" }, "confirmation-required"],
+    [{ kind: "rename" as const, title: "Next" }, "accepted"]
+  ])("applies natural-language risk admission for %j", async (command, outcome) => {
+    const fixture = setup();
+    await expect(fixture.gateway.submit({ source: "natural-language", message: { ...message, messageId: `nl-${command.kind}` }, command })).resolves.toMatchObject({ outcome });
+    const count = fixture.store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get() as { count: number };
+    expect(count.count).toBe(outcome === "accepted" ? 1 : 0);
+    fixture.store.close();
+  });
+
   it("normalizes CardKit Worker admission without caller-owned lane or replay policy", async () => {
     const fixture = setup();
     const command = { kind: "worker_create" as const, name: "reviewer", agentKind: "traex" as const, model: null, start: false };
