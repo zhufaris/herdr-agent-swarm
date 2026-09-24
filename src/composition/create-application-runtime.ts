@@ -24,12 +24,14 @@ export function createApplicationRuntime(options: {
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   presentation?: { application: ApplicationPresentation; primary: PrimaryPresentation; pane: PanePresentation };
   naturalLanguageCommands: NaturalLanguageCommandRuntime;
+  runtimeEvents?: Pick<import("./runtime-event-integration.js").RuntimeEventIntegration, "onWork" | "wakeSwarmCommand">;
 }) {
   const { config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker } = options;
   const presentation = options.presentation ?? { application: feishuGatewayApplicationPresentation, primary: feishuGatewayPrimaryPresentation, pane: feishuGatewayPanePresentation };
   const shared = { config, stores, logger, scheduler, infrastructure, delivery, primary, worker, presentation };
   const bindingSession = createBindingSessionRuntime({ ...shared, bus });
-  const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession });
+  const runtimeCommandEvents = options.runtimeEvents ? { onWork: options.runtimeEvents.onWork.bind(options.runtimeEvents), wakeSwarmCommand: options.runtimeEvents.wakeSwarmCommand.bind(options.runtimeEvents) } : {};
+  const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession, ...runtimeCommandEvents });
   const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl, naturalLanguageCommands: options.naturalLanguageCommands });
   return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter, swarmCommands: commandControl.swarmCommands };
 }

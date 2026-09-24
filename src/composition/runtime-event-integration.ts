@@ -57,6 +57,7 @@ export class RuntimeEventIntegration {
   wakePrimary(bindingId: string): void { this.bus.publishWork({ kind: "primary-ready", bindingId }); }
   wakeInstance(instanceId: string): void { this.bus.publishWork({ kind: "worker-ready", instanceId }); }
   wakeTurnControl(ownerKind: "binding" | "instance", ownerId: string): void { this.bus.publishWork({ kind: "turn-control-ready", ownerKind, ownerId }); }
+  wakeSwarmCommand(intentId: string): void { this.bus.publishWork({ kind: "swarm-command-ready", intentId }); }
   onWork(name: string, listener: (hint: RuntimeWorkHint) => void | Promise<void>): () => void { return this.bus.subscribe("work", name, ({ payload }) => listener(payload)); }
 
   registerInstanceWakeup(handler: InstanceWakeup): void {

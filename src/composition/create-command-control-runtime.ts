@@ -32,6 +32,8 @@ export function createCommandControlRuntime(options: {
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; presentation: { application: ApplicationPresentation; pane: PanePresentation };
+  onWork?(name: string, listener: (hint: import("../events/runtime-event-bus.js").RuntimeWorkHint) => void | Promise<void>): () => void;
+  wakeSwarmCommand?(intentId: string): void;
 }) {
   const { config, stores, logger, turnControl, scheduler, infrastructure, delivery, primary, worker, bindingSession, presentation } = options;
   const { traexControl, agentDrivers } = infrastructure; const { outbound, outboundWork, mainCards } = delivery; const { promptRun, primaryState } = primary;
@@ -41,7 +43,9 @@ export function createCommandControlRuntime(options: {
   const sessionOperations = new SessionOperationWorkflow({ store: stores.sessionOperations, sessionAdministration, provisioning, paneControl, paneClosure, logger });
   const cardInteractions = new CardInteractionWorkflow({ store: stores.cardInteraction, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: presentation.application, logger });
   const commandResolver = new SwarmCommandContextResolver({ config, store: stores.inboundRouting, activeTurn: (bindingId) => primaryState.activeTurn(bindingId) });
-  const swarmCommands = new SwarmCommandGateway({ store: stores.commandIntents, primaryPrompts: stores.instance, resolver: commandResolver, outbound, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: worker.instanceControl, wakeCardContext: () => outboundWork.wake(), wakeOutbound: () => outboundWork.wake(), presentation: presentation.application });
+  const commandWake = options.wakeSwarmCommand ? { wakeCommand: options.wakeSwarmCommand } : {};
+  const swarmCommands = new SwarmCommandGateway({ store: stores.commandIntents, primaryPrompts: stores.instance, resolver: commandResolver, outbound, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: worker.instanceControl, wakeCardContext: () => outboundWork.wake(), wakeOutbound: () => outboundWork.wake(), ...commandWake, presentation: presentation.application });
+  options.onWork?.("swarm-command-dispatcher", (hint) => { if (hint.kind === "swarm-command-ready") swarmCommands.wakeAcceptedIntent({ id: hint.intentId }); });
   const workerSessionThreads = new WorkerSessionThreadWorkflow({ adminOpenIds: config.lark.adminOpenIds, store: stores.workerSessionThreads, messaging: worker.instanceMessaging, outbound, wakeOutbound: () => outboundWork.wake(), gatewayEffects: infrastructure.gatewayEffects, presentation: presentation.application });
   const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, adminOpenIds: config.lark.adminOpenIds, store: stores.instance, control: worker.instanceControl, messaging: worker.instanceMessaging, drivers: agentDrivers, outbound, wakeOutbound: () => outboundWork.wake(), workerCreation: swarmCommands, presentation: presentation.application, workerSessionThreads });
   return { modelSelection, paneControl, sessionOperations, cardInteractions, swarmCommands, instanceInteractions, workerSessionThreads, deliveryRecovery };

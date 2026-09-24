@@ -31,9 +31,21 @@ export class CommandIntentDispatcher {
   private readonly laneWorkers = new Map<string, Promise<void>>();
   private readonly workerResults = new Map<string, CreateWorkerResult>();
   private readonly awaitedWorkerResults = new Set<string>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private accepting = true;
   constructor(private readonly options: Options) {}
 
   async drain(intent: Pick<CommandIntent, "laneKey">): Promise<void> { await this.drainLane(intent.laneKey); }
+  wake(intentId: string): void {
+    if (!this.accepting) return;
+    const intent = this.options.store.getCommandIntent(intentId);
+    if (intent?.state === "accepted") void this.drainLane(intent.laneKey).catch((error) => this.options.logger.error({ event: "swarm-command-drain-failed", intentId, err: safeLogError(error), outcome: "deferred" }, "Swarm command drain failed; durable scan will retry"));
+  }
+  start(intervalMs: number): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => { void this.scanAccepted(); }, intervalMs);
+    this.timer.unref();
+  }
   async resultForWorkerCreate(intentId: string, laneKey: string): Promise<CreateWorkerResult> {
     this.awaitedWorkerResults.add(intentId);
     try { await this.drain({ laneKey }); } finally { this.awaitedWorkerResults.delete(intentId); }
@@ -56,12 +68,18 @@ export class CommandIntentDispatcher {
   async recover(): Promise<void> {
     const count = this.options.store.recoverExecutingCommandIntents(new Date().toISOString(), this.options.presentation.commandStatus);
     if (count) this.options.logger.warn({ event: "swarm-command-recovered", count, outcome: "uncertain" }, "terminalized interrupted swarm commands without replay");
-    const lanes = new Set(this.options.store.listRecoverableCommandIntents().filter(({ state }) => state === "accepted").map(({ laneKey }) => laneKey));
-    await Promise.all([...lanes].map((lane) => this.drainLane(lane)));
+    await this.scanAccepted();
   }
 
   async stop(): Promise<void> {
+    this.accepting = false;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
     while (this.laneWorkers.size > 0) await Promise.allSettled([...this.laneWorkers.values()]);
+  }
+
+  private async scanAccepted(): Promise<void> {
+    const lanes = new Set(this.options.store.listRecoverableCommandIntents().filter(({ state }) => state === "accepted").map(({ laneKey }) => laneKey));
+    await Promise.all([...lanes].map((lane) => this.drainLane(lane)));
   }
 
   private async drainLane(laneKey: string): Promise<void> {

@@ -9,7 +9,8 @@ export type RuntimeWorkHint =
   | { kind: "card-context-ready" }
   | { kind: "primary-ready"; bindingId: string; promptHint?: PromptWorkHint }
   | { kind: "worker-ready"; instanceId: string }
-  | { kind: "turn-control-ready"; ownerKind: "binding" | "instance"; ownerId: string };
+  | { kind: "turn-control-ready"; ownerKind: "binding" | "instance"; ownerId: string }
+  | { kind: "swarm-command-ready"; intentId: string };
 
 interface RuntimeEventPayloads {
   lifecycle: BridgeEvent;
@@ -173,6 +174,7 @@ function workKey(hint: RuntimeWorkHint): string {
   if (hint.kind === "primary-ready") return `${hint.kind}:${hint.bindingId}:${hint.promptHint?.kind === "detached-observer-ready" ? hint.promptHint.promptId : "binding"}`;
   if (hint.kind === "worker-ready") return `${hint.kind}:${hint.instanceId}`;
   if (hint.kind === "turn-control-ready") return `${hint.kind}:${hint.ownerKind}:${hint.ownerId}`;
+  if (hint.kind === "swarm-command-ready") return `${hint.kind}:${hint.intentId}`;
   return hint.kind;
 }
 function herdrKey(hint: HerdrRuntimeHint): string { return `${hint.kind}:${hint.scope}:${hint.workspaceIds.join(",")}:${hint.paneIds.join(",")}`; }

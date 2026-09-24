@@ -27,6 +27,7 @@ interface Options {
   promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">;
   wakeCardContext(): void;
   wakeOutbound?(): void;
+  wakeCommand?(intentId: string): void;
   presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult" | "commandStatus">;
 }
 
@@ -50,6 +51,8 @@ export interface SwarmCommandGatewayPort {
   handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void>;
   resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution;
   drainAcceptedIntent(intent: CommandIntent): Promise<void>;
+  wakeAcceptedIntent(intent: Pick<CommandIntent, "id">): void;
+  start(intervalMs: number): void;
   createWorkerFromCard(action: IncomingLarkCardAction, bindingId: string, command: Extract<BridgeCommand, { kind: "worker_create" }>): Promise<CreateWorkerResult>;
   createWorkerFromPrimaryTool(input: { bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: Extract<BridgeCommand, { kind: "worker_create" }> }): Promise<CreateWorkerResult>;
   recover(): Promise<void>;
@@ -58,10 +61,13 @@ export interface SwarmCommandGatewayPort {
 
 export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   private readonly dispatcher: CommandIntentDispatcher;
+  private accepting = true;
   constructor(private readonly options: Options) { this.dispatcher = new CommandIntentDispatcher(options); }
 
   resolve(message: IncomingLarkMessage, command: BridgeCommand): SwarmCommandContextResolution { return this.options.resolver.resolve(message, command); }
   async drainAcceptedIntent(intent: CommandIntent): Promise<void> { await this.dispatcher.drain(intent); }
+  wakeAcceptedIntent(intent: Pick<CommandIntent, "id">): void { this.dispatcher.wake(intent.id); }
+  start(intervalMs: number): void { this.dispatcher.start(intervalMs); }
 
   async handle(message: IncomingLarkMessage, command: BridgeCommand): Promise<void> {
     const receipt = await this.submit({ source: "literal", message, command });
@@ -79,12 +85,15 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
       this.options.store.audit({ actorOpenId: message.actorOpenId, action: `swarm.${command.kind}`, target: resolved.laneKey, outcome: "success" });
       return { outcome: "query-completed", commandKind: command.kind };
     }
+    if (!this.accepting) return { outcome: "rejected", commandKind: command.kind, code: "shutting_down", message: "Swarm command admission is stopping" };
     const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() }, request.source, this.options.presentation.commandStatus);
     if (accepted.outcome === "conflict") return { outcome: "conflict", commandKind: command.kind, intent: accepted.intent };
     this.options.wakeOutbound?.();
+    if (this.options.wakeCommand) this.options.wakeCommand(accepted.intent.id);
+    else this.dispatcher.wake(accepted.intent.id);
     const workerResult = command.kind === "worker_create" && (request.source === "card" || request.source === "primary-tool")
       ? await this.dispatcher.resultForWorkerCreate(accepted.intent.id, accepted.intent.laneKey)
-      : (await this.dispatcher.drain(accepted.intent), undefined);
+      : undefined;
     return { outcome: "accepted", commandKind: command.kind, intent: this.options.store.getCommandIntent(accepted.intent.id) ?? accepted.intent, ...(workerResult ? { workerResult } : {}) };
   }
 
@@ -103,7 +112,7 @@ export class SwarmCommandGateway implements SwarmCommandGatewayPort {
   }
 
   recover(): Promise<void> { return this.dispatcher.recover(); }
-  stop(): Promise<void> { return this.dispatcher.stop(); }
+  stop(): Promise<void> { this.accepting = false; return this.dispatcher.stop(); }
 
   private async executeQuery(message: IncomingLarkMessage, command: BridgeCommand, binding: Binding | null): Promise<void> {
     if (command.kind === "help") return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `swarm-query:${message.messageId}:help`, this.options.presentation.help());

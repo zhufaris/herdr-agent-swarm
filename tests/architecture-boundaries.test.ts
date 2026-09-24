@@ -937,7 +937,7 @@ describe("application composition boundaries", () => {
     expect(commandDispatcher).toContain("sessionAdministration.rename");
     expect(commandDispatcher).toContain("paneClosure.requestPaneClose");
     expect(commandDispatcher).not.toContain("sessionAdministration.archive");
-    expect(commands).toContain("stop(): Promise<void> { return this.dispatcher.stop(); }");
+    expect(commands).toContain("stop(): Promise<void> { this.accepting = false; return this.dispatcher.stop(); }");
     expect(commandDispatcher).toContain("async stop(): Promise<void>");
     expect(router).toContain("swarmCommands.stop()");
     expect(router).not.toContain("modelSelection");

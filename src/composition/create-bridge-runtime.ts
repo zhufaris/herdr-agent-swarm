@@ -49,7 +49,7 @@ export function createBridgeRuntime(config: BridgeConfig, stores: SqliteStoreBun
       context: { findBindingByLarkScope: (topicId, rootMessageId) => stores.inboundRouting.findBindingByLarkScope(topicId, rootMessageId), listAgentInstances: (projectId) => stores.instance.listAgentInstances(projectId) }
     } } : {})
   });
-  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter, swarmCommands } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation, naturalLanguageCommands });
+  const { coordinator, paneRetention, sessionOperations, reconciler, herdrEventRouter, swarmCommands } = createApplicationRuntime({ config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker, presentation, naturalLanguageCommands, runtimeEvents: events });
   primaryToolGateway.setWorkerCreation(swarmCommands);
   events.connectHerdrHints((hint, signal) => herdrEventRouter.handle(hint, signal));
   events.seal();

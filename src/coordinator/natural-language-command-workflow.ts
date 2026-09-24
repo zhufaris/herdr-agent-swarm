@@ -68,7 +68,8 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
       if (accepted.outcome === "unauthorized") return { toast: { type: "error", content: "只有原请求人可以确认或取消。" } };
       if (accepted.outcome !== "consumed") return stale();
       this.options.outboundWork.wake();
-      await this.options.swarmCommands.drainAcceptedIntent(accepted.commandIntent.intent);
+      if (this.options.swarmCommands.wakeAcceptedIntent) this.options.swarmCommands.wakeAcceptedIntent(accepted.commandIntent.intent);
+      else void this.options.swarmCommands.drainAcceptedIntent(accepted.commandIntent.intent);
       return { toast: { type: "success", content: "已确认，命令已提交。" } };
     }
     const result = this.options.store.decideNaturalLanguageCommandConfirmation({ id: confirmationId, decision, actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt });
