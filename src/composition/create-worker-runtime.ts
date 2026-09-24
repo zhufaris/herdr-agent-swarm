@@ -11,7 +11,7 @@ import { InstanceRuntimeReconciler } from "../coordinator/instance-runtime-recon
 import { InstanceTurnSupervisor } from "../coordinator/instance-turn-supervisor.js";
 import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import { WorkerTurnObserver } from "../coordinator/worker-turn-observer.js";
-import { InstanceWorkScheduler } from "../events/instance-work-scheduler.js";
+import { WorkerTurnDispatcher } from "../coordinator/worker-turn-dispatcher.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { PrimaryToolGateway } from "../runtime/primary-tool-gateway.js";
 import type { WorktreePort } from "../domain/ports/worktree.js";
@@ -36,11 +36,11 @@ export function createWorkerRuntime(options: {
   workerTurnCards: WorkerTurnCardConvergencePort;
 }) {
   const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, workerTurnCards, applicationPresentation } = options;
-  const instanceWorkLink = new RuntimeLink<InstanceWorkScheduler>("instance work scheduler");
+  const instanceWorkLink = new RuntimeLink<WorkerTurnDispatcher>("Worker turn dispatcher");
   const executionStore = stores.instanceExecution;
   const convergeWorkerTurn = (turnId: string) => { void workerTurnCards.converge(turnId).catch((error) => logger.warn({ event: "worker-turn-card-convergence-failed", turnId, err: safeLogError(error), outcome: "retry_on_checkpoint_or_recovery" }, "Worker Task Card convergence failed")); };
   const workerTurns = new WorkerTurnObserver({ store: executionStore, transcriptReader, wakeInstance: (instanceId) => instanceWorkLink.get().wake(instanceId), wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, pollIntervalMs: config.runtimeTuning.polling.workerTurnMs });
-  const instanceWork = new InstanceWorkScheduler({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, logger });
+  const instanceWork = new WorkerTurnDispatcher({ store: executionStore, drivers: agentDrivers, observer: workerTurns, wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, logger });
   instanceWorkLink.connect(instanceWork);
   const instanceTurns = new InstanceTurnSupervisor({ store: executionStore, paneHost, observer: workerTurns, wake: (instanceId) => instanceWork.wake(instanceId), wakeOutbound: () => outboundWork.wake(), convergeWorkerTurn, presentation: feishuGatewayWorkerPresentation, logger });
   const instanceRuntime = new InstanceRuntimeReconciler({ projects: config.projects, store: executionStore, paneHost, wake: (instanceId) => instanceWork.wake(instanceId), wakeCardContext: () => outboundWork.wake(), logger });

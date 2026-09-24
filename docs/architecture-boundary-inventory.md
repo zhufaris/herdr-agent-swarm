@@ -36,7 +36,7 @@ Each seam must satisfy all of the following before it is marked complete:
 | 2 | Exact-turn control and steering | SQLite operation state plus fresh exact Herdr turn identity | `TurnControlWorkflow` for validation/acceptance; `TurnControlDispatcher` for owner-serialized effects | Complete | Active control returns after durable acceptance; dispatcher revalidates and claims before effect. Same-owner order, cross-owner independence, and accepted-versus-dispatching recovery are covered by `turn-control-dispatcher.test.ts`. |
 | 3 | Inbound admission and routing | Durable inbound rows and frozen routing context | `DurableInboundPipeline`, `InboundMessageRoutingWorkflow`, and `PromptAdmissionWorkflow` | Complete | The pipeline owns authorization, compact durable admission, scope-FIFO claim/release, retry, recovery, shutdown settlement, and the sole completion log. Routing returns one structured disposition, while ordinary and initial Prompt acceptance share one atomic workflow. Runtime hints contain only `eventId` and are best-effort; SQLite scanning remains authoritative. |
 | 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact transcript identity | `PromptRunWorkflow` lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver` | Complete | The facade owns scheduling, safety, process-local exclusion, recovery controls, and shutdown. `drain(bindingId)` hides durable FIFO claim, fresh-pane preflight, fenced release, execution, and archive policy; `observe(prompt)` hides exact-turn reopening, ownership, polling, settlement, and uncertain no-replay recovery. |
-| 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | Instance control, turn supervisor, Worker observer, and instance scheduler interfaces | Needs audit | Consumer-shaped ports exist. Verify that card convergence, dispatch uncertainty, and instance lifecycle do not leak through shared implementation-shaped interfaces. |
+| 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` behind dispatch and observation ports | Complete | Durable FIFO execution now lives in coordinator rather than events and consumes `WorkerTurnDispatchStore`. Exact live/restart observation stays behind `WorkerTurnObservationPort`; process-local single flight and watches remain non-durable hints while uncertain delivery never replays. |
 | 6 | Card projection and convergence | Durable Run Card, Worker Turn Card, Main Card, page, and delivery-version state | Pure view reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` | Complete | Primary and Worker continuation share one handoff policy; frozen-page offsets, checkpoint-gated Main Card retargeting, direct-Herdr pagination, duplicate convergence, stale targets, and startup recovery are covered through domain, workflow, SQLite, renderer, and context-rebuild tests. |
 | 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` plus `OutboundDeliveryExecutor` and `GatewayDeliveryPort` | Needs audit | Retry/dead-letter/frozen intent behavior exists. Review the large dispatcher and recovery store for policy leakage and ensure the event wake-up migration removed all production-local scheduler ownership. |
 | 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` and owner-specific convergence modules | Needs deepening | Reconciliation is authoritative and tested, but the coordinator still combines scope planning, observation, binding convergence, and downstream wake decisions. |
@@ -48,10 +48,9 @@ Each seam must satisfy all of the following before it is marked complete:
 
 The next passes follow risk and dependency direction:
 
-1. Audit and deepen Worker execution/observation.
-2. Audit durable delivery and Herdr reconciliation after their producers expose
+1. Audit durable delivery and Herdr reconciliation now that their producers expose
    stable interfaces.
-3. Finish with command/control and runtime lifecycle/health.
+2. Finish with command/control and runtime lifecycle/health.
 
 Each pass gets its own design record, implementation plan, focused verification,
 and completion audit. A pass must not opportunistically refactor the next seam.
@@ -124,3 +123,19 @@ Verification on 2026-09-24 covers fresh busy-pane release, exact detached-turn
 settlement, attached-to-detached cursor continuity, startup recovery, safety
 scanning, FIFO concurrency, architecture dependency direction, and the full
 repository suite.
+
+## Worker execution and observation completion evidence
+
+The Worker pass is complete because durable FIFO execution now belongs to
+`WorkerTurnDispatcher` in the coordinator layer, behind a lifecycle interface
+and the consumer-shaped `WorkerTurnDispatchStore`. The dispatcher retains
+per-instance single flight, Agent receipt classification, exact watch handoff,
+uncertain no-replay behavior, and shutdown fencing as one deep module.
+`WorkerTurnObserver` remains the sole exact transcript owner for both live watch
+and restart recovery, while `InstanceTurnSupervisor` owns durable recovery scans
+and fresh Herdr Pane validation.
+
+Verification on 2026-09-24 covers exact-turn detachment after submission failure,
+FIFO dispatch, structured and unstructured Agents, observer ownership, recovery
+supervision, shutdown, composition, architecture dependency direction, and the
+full repository suite.

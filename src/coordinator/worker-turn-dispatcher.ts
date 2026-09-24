@@ -1,4 +1,4 @@
-import type { InstanceLifecycleStore, InstanceTurnStore } from "../domain/ports/instance.js";
+import type { WorkerTurnDispatchStore } from "../domain/ports/instance.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import type { Logger } from "pino";
@@ -7,7 +7,14 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnObservationPort, WorkerTurnWatch } from "../domain/ports/worker-turn-observation.js";
 
-export class InstanceWorkScheduler {
+export interface WorkerTurnDispatcherPort {
+  wake(instanceId: string): void;
+  drain(instanceId: string): Promise<void>;
+  snapshot(): { state: "idle" | "running" | "stopping"; activeDispatchWorkers: number; lastFailureAt: string | null; lastFailure: string | null };
+  stop(context?: ShutdownContext): Promise<void>;
+}
+
+export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
   private readonly active = new Set<string>();
   private readonly drains = new Set<Promise<void>>();
   private readonly inFlight = new Map<string, { turnId: string; generation: number; controller: AbortController }>();
@@ -16,7 +23,7 @@ export class InstanceWorkScheduler {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: InstanceLifecycleStore & InstanceTurnStore; drivers: AgentDriverCatalog; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: WorkerTurnDispatchStore; drivers: AgentDriverCatalog; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;
@@ -89,7 +96,7 @@ export class InstanceWorkScheduler {
     } catch (error) { this.recordFailure(error, instanceId, this.inFlight.get(instanceId)?.turnId); }
     finally { this.active.delete(instanceId); this.inFlight.delete(instanceId); }
   }
-  private transition(turnId: string, generation: number, state: Parameters<InstanceTurnStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<InstanceTurnStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
+  private transition(turnId: string, generation: number, state: Parameters<WorkerTurnDispatchStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<WorkerTurnDispatchStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
       const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn, renderHumanReviewNotification: this.options.presentation.workerHumanReviewNotification });
       if (projected && (projected.projectionChanged || projected.notification.outcome === "reserved")) { this.options.wakeOutbound?.(); this.options.convergeWorkerTurn?.(turnId); }

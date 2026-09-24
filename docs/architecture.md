@@ -374,7 +374,7 @@ The production implementation uses the following modules and seams.
 | `SwarmCommandGateway` | The single context boundary for every `/swarm` query and mutation, including CardKit Worker creation | Exhaustive policy, immutable command context, and `CommandIntentStore` |
 | `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted transcript turn |
 | `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
-| `InstanceMessagingWorkflow` / `InstanceWorkScheduler` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Generation-fenced instance lifecycle/turn capabilities and Agent driver hooks; Lark and Primary-tool submissions use server-owned topic roots |
+| `InstanceMessagingWorkflow` / `WorkerTurnDispatcher` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Messaging persists through its focused store; dispatch uses `WorkerTurnDispatchStore`, Agent driver hooks, and exact observation watches |
 | `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` | Authoritative pane/runtime convergence | Identity-fenced `RuntimeReconciliationStore` transitions |
@@ -739,6 +739,11 @@ the boundary; it is never interpreted as the task result. `WorkerTurnObserver`
 claims output ownership only when the instance generation, runtime turn ID, and
 canonical turn start time all match. Restart recovery reopens that transcript
 boundary for observation and never calls the submission boundary again.
+The wake target is `WorkerTurnDispatcher`, a coordinator module rather than event
+infrastructure. Its process-local per-instance single flight only schedules work;
+every attempt reloads the current instance generation and claims the next durable
+SQLite turn. Driver exceptions or uncertain receipts after possible delivery do
+not advance FIFO or submit again.
 
 One stable Worker Main Card and one paginated Worker Task Card aggregate are
 updated through independent durable lanes. `WorkerTurnCardWorkflow` is the sole

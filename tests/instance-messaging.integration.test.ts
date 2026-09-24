@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { InstanceMessagingWorkflow } from "../src/coordinator/instance-messaging-workflow.js";
-import { InstanceWorkScheduler } from "../src/events/instance-work-scheduler.js";
+import { WorkerTurnDispatcher } from "../src/coordinator/worker-turn-dispatcher.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
@@ -32,9 +32,9 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
     interrupt: vi.fn(async () => ({ operation: { state: "delivered", result: { status: "interrupted" } }, duplicate: false }))
   };
   const workflow = new InstanceMessagingWorkflow({ store, turnControl: turnControl as never, wake, wakeOutbound, idFactory: (() => { let n = 0; return () => `turn-${++n}`; })(), presentation: workerPresentation });
-  let scheduler!: InstanceWorkScheduler;
+  let scheduler!: WorkerTurnDispatcher;
   const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound, presentation: workerPresentation }) : undefined;
-  scheduler = new InstanceWorkScheduler({ store, drivers, observer, wakeOutbound, presentation: workerPresentation });
+  scheduler = new WorkerTurnDispatcher({ store, drivers, observer, wakeOutbound, presentation: workerPresentation });
   return { create, workflow, scheduler, observer, wake, wakeOutbound, submit, driver, turnControl };
 }
 

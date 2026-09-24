@@ -124,6 +124,12 @@ export type InstanceTurnStore = Pick<InstanceStore,
   "listInstanceEvents" | "countPendingInstanceTurns"
 >;
 
+export type WorkerTurnDispatchStore = Pick<InstanceStore,
+  "claimNextInstanceTurn" | "getAgentInstance" | "getInstanceTurn" |
+  "loadWorkerTurnCard" | "transitionInstanceTurnWithProjection" |
+  "updateAgentInstanceLifecycle" | "updateInstanceTurn"
+>;
+
 export type WorkerTurnCardStore = Pick<InstanceStore,
   "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" |
   "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |

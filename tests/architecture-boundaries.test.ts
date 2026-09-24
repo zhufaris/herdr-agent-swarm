@@ -177,7 +177,7 @@ describe("application composition boundaries", () => {
     const worker = readFileSync(new URL("../src/composition/create-worker-runtime.ts", import.meta.url), "utf8");
     expect(worker).toContain("instanceExecution: InstanceLifecycleStore & InstanceTurnStore");
     expect(worker).not.toContain("as InstanceLifecycleStore & InstanceTurnStore");
-    for (const component of ["WorkerTurnObserver", "InstanceWorkScheduler", "InstanceTurnSupervisor", "InstanceRuntimeReconciler"]) {
+    for (const component of ["WorkerTurnObserver", "WorkerTurnDispatcher", "InstanceTurnSupervisor", "InstanceRuntimeReconciler"]) {
       expect(worker).toMatch(new RegExp(`new ${component}\\(\\{[^\\n]*store: executionStore`));
     }
     expect(readFileSync(new URL("../src/composition/create-outbound-runtime.ts", import.meta.url), "utf8")).toContain("stores.outbox");
@@ -464,14 +464,26 @@ describe("application composition boundaries", () => {
   it("keeps Worker turn observation consumers behind a domain port", () => {
     const port = readFileSync(new URL("../src/domain/ports/worker-turn-observation.ts", import.meta.url), "utf8");
     const observer = readFileSync(new URL("../src/coordinator/worker-turn-observer.ts", import.meta.url), "utf8");
-    const scheduler = readFileSync(new URL("../src/events/instance-work-scheduler.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/coordinator/worker-turn-dispatcher.ts", import.meta.url), "utf8");
     const supervisor = readFileSync(new URL("../src/coordinator/instance-turn-supervisor.ts", import.meta.url), "utf8");
     expect(port).toContain("export interface WorkerTurnObservationPort");
     expect(observer).toContain("implements WorkerTurnObservationPort");
-    expect(scheduler).toContain('Pick<WorkerTurnObservationPort, "watch">');
-    expect(scheduler).not.toContain("WorkerTurnObserver");
+    expect(dispatcher).toContain('Pick<WorkerTurnObservationPort, "watch">');
+    expect(dispatcher).not.toContain("WorkerTurnObserver");
     expect(supervisor).toContain('Pick<WorkerTurnObservationPort, "recover">');
     expect(supervisor).not.toContain("WorkerTurnObserver");
+  });
+
+  it("keeps Worker dispatch behind a coordinator deep module and narrow store", () => {
+    const ports = readFileSync(new URL("../src/domain/ports/instance.ts", import.meta.url), "utf8");
+    const dispatcher = readFileSync(new URL("../src/coordinator/worker-turn-dispatcher.ts", import.meta.url), "utf8");
+    expect(ports).toContain("export type WorkerTurnDispatchStore");
+    expect(dispatcher).toContain("implements WorkerTurnDispatcherPort");
+    expect(dispatcher).toContain("store: WorkerTurnDispatchStore");
+    expect(dispatcher).not.toContain("InstanceLifecycleStore & InstanceTurnStore");
+    expect(existsSync(new URL("../src/events/instance-work-scheduler.ts", import.meta.url))).toBe(false);
+    expect(dispatcher).not.toMatch(/from .*\/(?:composition|store\/sqlite|cards|gateways)\//);
+    expect(dispatcher).not.toContain("LarkPort");
   });
 
   it("keeps Agent driver lookup behind a domain catalog", () => {
@@ -486,7 +498,7 @@ describe("application composition boundaries", () => {
       const source = readFileSync(new URL(`../src/coordinator/${file}`, import.meta.url), "utf8");
       expect(source).not.toContain("AgentDriverRegistry");
     }
-    expect(readFileSync(new URL("../src/events/instance-work-scheduler.ts", import.meta.url), "utf8")).not.toContain("AgentDriverRegistry");
+    expect(readFileSync(new URL("../src/coordinator/worker-turn-dispatcher.ts", import.meta.url), "utf8")).not.toContain("AgentDriverRegistry");
   });
 
   it("keeps Herdr pane operations behind a domain port", () => {
