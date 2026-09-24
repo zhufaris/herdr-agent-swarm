@@ -8,11 +8,11 @@ import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { PaneHost } from "../domain/ports/pane-host.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import type { WorktreeManager } from "../runtime/worktree-manager.js";
+import type { WorktreePort } from "../domain/ports/worktree.js";
 import { preferredRuntimeSessionId, requireMatchingRuntimeIdentity } from "./pane-runtime-identity.js";
 
 interface Options {
-  projects: readonly ProjectConfig[]; store: InstanceControlStore; paneHost: PaneHost; drivers: AgentDriverCatalog; worktrees: WorktreeManager; idFactory: () => string;
+  projects: readonly ProjectConfig[]; store: InstanceControlStore; paneHost: PaneHost; drivers: AgentDriverCatalog; worktrees: WorktreePort; idFactory: () => string;
 }
 
 export class InstanceControlWorkflow {

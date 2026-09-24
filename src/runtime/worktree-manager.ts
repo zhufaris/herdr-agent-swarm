@@ -1,36 +1,12 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { CommandRunner } from "../infra/command-runner.js";
-
-export type WorktreeRemovalReason = "clean" | "dirty" | "conflicted" | "ahead" | "uncertain";
-
-export interface PreparedWorktree { cwd: string; branch: string; baseCommit: string; headCommit: string }
-
-export interface WorktreeInspection {
-  registered: boolean;
-  cwd: string;
-  branch: string | null;
-  headCommit: string;
-  dirty: boolean;
-  conflicted: boolean;
-  aheadCount: number;
-  fingerprint: string;
-}
-
-export interface WorktreeRemovalPlan {
-  repositoryRoot: string;
-  targetPath: string;
-  baseCommit: string;
-  leaseGeneration: number;
-  safe: boolean;
-  reason: WorktreeRemovalReason;
-  fingerprint: string | null;
-  inspection: WorktreeInspection | null;
-}
+import type { PreparedWorktree, WorktreeInspection, WorktreePort, WorktreeRemovalPlan, WorktreeRemovalReason } from "../domain/ports/worktree.js";
+export type { PreparedWorktree, WorktreeInspection, WorktreeRemovalPlan, WorktreeRemovalReason } from "../domain/ports/worktree.js";
 
 interface WorktreeManagerOptions { managedRoot?: string; timeoutMs: number }
 
-export class WorktreeManager {
+export class WorktreeManager implements WorktreePort {
   constructor(private readonly runner: CommandRunner, private readonly options: WorktreeManagerOptions) {}
 
   async prepare(input: { repositoryRoot: string; targetPath: string; branch: string; baseRef: string }): Promise<PreparedWorktree> {

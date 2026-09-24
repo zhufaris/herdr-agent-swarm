@@ -5,7 +5,7 @@ import type { PaneHost } from "../src/runtime/herdr/pane-host.js";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { InstanceControlWorkflow } from "../src/coordinator/instance-control-workflow.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
-import type { WorktreeManager } from "../src/runtime/worktree-manager.js";
+import type { WorktreePort } from "../src/domain/ports/worktree.js";
 import { primaryPaneToken } from "../src/domain/pane-title.js";
 
 let store: SqliteBindingStore | undefined;
@@ -15,7 +15,7 @@ const project = { id: "project-a", displayName: "Project A", description: "A", w
 const pane = { paneId: "herdr-a:p1", workspaceId: "herdr-a", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term-1" };
 const primaryPane = { ...pane, paneId: "herdr-a:primary", label: "lark_ilcs" };
 
-function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManager["prepare"]; primaryTools?: { issue: ReturnType<typeof vi.fn>; configuration: ReturnType<typeof vi.fn> }; agentKind?: AgentKind; observedAgentKind?: string } = {}) {
+function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreePort["prepare"]; primaryTools?: { issue: ReturnType<typeof vi.fn>; configuration: ReturnType<typeof vi.fn> }; agentKind?: AgentKind; observedAgentKind?: string } = {}) {
   store = new SqliteBindingStore(":memory:");
   let allocatedPane = pane;
   const paneHost = {
@@ -29,7 +29,7 @@ function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreeManag
   const worktrees = {
     prepare: vi.fn(overrides.prepare ?? (async (input) => ({ cwd: input.targetPath, branch: input.branch, baseCommit: "base-sha", headCommit: "base-sha" }))),
     planRemoval: vi.fn(async (input) => ({ ...input, safe: true, reason: "clean" as const, fingerprint: "fingerprint-1", inspection: null })), release: vi.fn(async () => undefined)
-  } as unknown as WorktreeManager;
+  } as WorktreePort;
   store.createPendingBinding({ id: "binding-1", projectId: "project-a", workspaceId: "herdr-a", chatId: "chat-1", topicId: "topic-1", rootMessageId: "root-1", title: "Primary task" });
   store.updateBinding("binding-1", { paneId: primaryPane.paneId, traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached" });
   const workflow = new InstanceControlWorkflow({ projects: [project], store, paneHost, drivers: new AgentDriverRegistry([driver]), worktrees, idFactory: (() => { let n = 0; return () => `id-${++n}`; })(), ...(overrides.primaryTools ? { primaryTools: overrides.primaryTools } : {}) });

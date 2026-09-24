@@ -478,6 +478,16 @@ describe("application composition boundaries", () => {
     }
   });
 
+  it("keeps Git worktree operations behind a domain port", () => {
+    const port = readFileSync(new URL("../src/domain/ports/worktree.ts", import.meta.url), "utf8");
+    const adapter = readFileSync(new URL("../src/runtime/worktree-manager.ts", import.meta.url), "utf8");
+    const workflow = readFileSync(new URL("../src/coordinator/instance-control-workflow.ts", import.meta.url), "utf8");
+    expect(port).toContain("export interface WorktreePort");
+    expect(adapter).toContain("class WorktreeManager implements WorktreePort");
+    expect(workflow).toContain("worktrees: WorktreePort");
+    expect(workflow).not.toContain("WorktreeManager");
+  });
+
   it("composes startup projection workflows through explicit consumer stores", () => {
     const converger = readFileSync(new URL("../src/coordinator/startup-view-converger.ts", import.meta.url), "utf8");
     const composition = readFileSync(new URL("../src/composition/create-ingress-recovery-runtime.ts", import.meta.url), "utf8");
