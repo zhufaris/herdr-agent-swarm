@@ -4,6 +4,8 @@ import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
 import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems } from "./card-style.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
+import { renderAnswerTimeline } from "./answer-timeline.js";
+import type { FinalAnswerElement } from "./final-answer-content.js";
 
 const STATE = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -43,7 +45,13 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   if (firstPage) elements.push({ tag: "markdown", content: `${cardSection("💬", "请求")}\n\n${truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(view.requestText)), REQUEST_PREVIEW_LIMIT)}` });
   elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view, showOutput && Boolean(content)) });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
-  if (showOutput) elements.push({ tag: "markdown", element_id: elementId, content });
+  if (showOutput) {
+    const outputElements = view.timelineItems.length > 0 && options.initialContent === undefined
+      ? renderAnswerTimeline(view.timelineItems)
+      : [{ tag: "markdown", content }];
+    attachElementId(outputElements, elementId);
+    elements.push(...outputElements);
+  }
   const interaction = workerTaskInteraction(view.phase);
   elements.push({ tag: "markdown", content: options.snapshot ? "📸 这是只读状态快照；如需继续或补充任务，请使用原 Worker Task Card。" : interaction.guidance });
   if (!options.snapshot && interaction.actionLabel && actionMessageId) {
@@ -109,3 +117,12 @@ function callout(type: "orange" | "red", content: string): object {
 }
 
 function escapeCode(value: string): string { return value.replace(/`/g, "'"); }
+
+function attachElementId(elements: FinalAnswerElement[], elementId: string): boolean {
+  for (const element of elements) {
+    if (element.tag === "markdown") { element.element_id = elementId; return true; }
+    const nested = element.elements;
+    if (Array.isArray(nested) && attachElementId(nested as FinalAnswerElement[], elementId)) return true;
+  }
+  return false;
+}

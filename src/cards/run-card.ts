@@ -12,6 +12,7 @@ import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
 import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS } from "../domain/swarm-command.js";
+import { renderAnswerTimeline } from "./answer-timeline.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -223,7 +224,11 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
   if (firstPage && input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   if (firstPage) elements.push(...workerActivityElements(input));
   if (firstPage && isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
-  elements.push({ tag: "hr" }, { tag: "markdown", element_id: input.answerElementId, content });
+  const answerElements = input.phase === "completed" && input.timelineItems.length > 0 && options.initialContent === undefined
+    ? renderAnswerTimeline(input.timelineItems)
+    : [{ tag: "markdown", content }];
+  attachElementIdToFirstMarkdown(answerElements, input.answerElementId);
+  elements.push({ tag: "hr" }, ...answerElements);
   return {
     schema: "2.0", config: {
       update_multi: true, streaming_mode: streaming,
@@ -263,9 +268,11 @@ function effectiveProgressSummary(summary: RunProgressSummary, events: readonly 
 }
 
 export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string }, payloadLimit = 12_000): object | null {
-  const elements = foldFinalAnswerContent(options.initialContent, payloadLimit);
-  if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const pageNumber = options.pageNumber ?? 1;
+  const elements = input.timelineItems.length > 0 && pageNumber === 1 && input.answerPageIndex === 0
+    ? renderAnswerTimeline(input.timelineItems, payloadLimit)
+    : foldFinalAnswerContent(options.initialContent, payloadLimit);
+  if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const workerElements = pageNumber === 1 ? workerActivityElements(input) : [];
   return {
     schema: "2.0",

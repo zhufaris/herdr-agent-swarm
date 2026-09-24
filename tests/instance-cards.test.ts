@@ -190,6 +190,21 @@ describe("instance cards", () => {
     expect(text).toContain("✓ Read · literal");
     expect(text).not.toContain("📖 Read · literal");
   });
+
+  it("uses the shared canonical timeline in a completed Worker Task Card", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-timeline", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const completed = { ...reduceWorkerTurnCard(queued, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "legacy duplicate" }), timelineItems: [
+      { kind: "agent_message" as const, id: "message:one", sequence: 1, markdown: "Worker before" },
+      { kind: "tool" as const, id: "tool:one", sequence: 2, category: "edit" as const, label: "src/store.ts", resultPreview: "updated", state: "succeeded" as const },
+      { kind: "final_answer" as const, id: "final:one", sequence: 3, markdown: "Worker after" }
+    ] };
+    const text = JSON.stringify(renderWorkerTurnCard(completed));
+
+    expect(text).toContain("Worker before");
+    expect(text).toContain("✏️ Edit · src/store.ts · ✓ 完成");
+    expect(text).toContain("Worker after");
+    expect(text).not.toContain("legacy duplicate");
+  });
   it("renders the current thread as Primary and counts only Workers", () => {
     const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries: [{ instance, workspace, capabilities, queueDepth: 3 }], target: { kind: "instance", instanceId: "i1" }, primary });
     const text = JSON.stringify(card);

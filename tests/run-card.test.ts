@@ -562,6 +562,38 @@ describe("run card", () => {
     expect(createQueuedRunCard({ promptId: "3f0cea75-c8cd-41f0-8fca-87d402b2a2a1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" }).answerElementId).toBe("element_cbb6cb5f9c09");
   });
 
+  it("uses the shared canonical timeline in a Primary Answer Card", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Inspect", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const card = renderRequestAnswerCard({ ...view, phase: "completed", answer: "legacy duplicate", timelineItems: [
+      { kind: "agent_message", id: "message:one", sequence: 1, markdown: "Before tool" },
+      { kind: "tool", id: "tool:one", sequence: 2, category: "search", label: "timeline store", resultPreview: "found", state: "succeeded" },
+      { kind: "final_answer", id: "final:one", sequence: 3, markdown: "After tool" }
+    ] }) as { body: { elements: Array<{ tag: string; content?: string; expanded?: boolean }> } };
+    const answer = card.body.elements.slice(-4);
+
+    expect(answer.map((element) => element.tag)).toEqual(["hr", "markdown", "collapsible_panel", "markdown"]);
+    expect(JSON.stringify(answer)).toContain("Before tool");
+    expect(JSON.stringify(answer)).toContain("🔍 Search · timeline store · ✓ 完成");
+    expect(JSON.stringify(answer)).toContain("After tool");
+    expect(JSON.stringify(answer)).not.toContain("legacy duplicate");
+  });
+
+  it("keeps the shared Primary timeline when the first Answer Card is frozen", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Inspect", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const card = renderFinalAnswerCard({ ...view, phase: "completed", answer: "legacy duplicate", timelineItems: [
+      { kind: "agent_message", id: "message:one", sequence: 1, markdown: "Before command" },
+      { kind: "tool", id: "tool:one", sequence: 2, category: "command", label: "npm test", command: "npm test", resultPreview: "passed", state: "succeeded" },
+      { kind: "final_answer", id: "final:one", sequence: 3, markdown: "After command" }
+    ] }, { initialContent: "legacy page", answerElementId: "answer_element" }) as { body: { elements: Array<{ tag: string; element_id?: string }> } };
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("Before command");
+    expect(serialized).toContain("⚙️ Command · npm test · ✓ 完成");
+    expect(serialized).toContain("After command");
+    expect(serialized).not.toContain("legacy page");
+    expect(card.body.elements.some((element) => element.element_id === "answer_element")).toBe(true);
+  });
+
   it("shows relative freshness and live or final output state on request cards", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-27T12:03:00Z"));
