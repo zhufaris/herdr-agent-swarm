@@ -15,6 +15,9 @@ for (const file of files) {
     const imported = resolveImport(file, statement.moduleSpecifier.text);
     if (!imported) continue;
     const target = relative(root, imported);
+    if (target.startsWith("src/store/sqlite/") && !importer.startsWith("src/store/")) {
+      violations.push(`${importer} may not bypass the SQLite bundle to import ${target}`);
+    }
     if (target === "src/store/sqlite/capability-graph.ts" && importer !== "src/store/sqlite-store-bundle.ts") {
       violations.push(`${importer} may not bypass the SQLite bundle to import ${target}`);
     }

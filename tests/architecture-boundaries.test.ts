@@ -655,6 +655,7 @@ describe("application composition boundaries", () => {
   });
 
   it("keeps production composition off the broad SQLite compatibility facade", () => {
+    const architectureCheck = readFileSync(new URL("../scripts/check-architecture-imports.mjs", import.meta.url), "utf8");
     const productionFiles = [
       "../src/main.ts",
       "../src/composition/create-bridge-runtime.ts",
@@ -671,6 +672,7 @@ describe("application composition boundaries", () => {
     expect(productionFiles).not.toContain('from "../store/sqlite-store.js"');
     expect(existsSync(new URL("../src/store/sqlite-store.ts", import.meta.url))).toBe(false);
     expect(existsSync(new URL("../src/store/sqlite-store-kernel.ts", import.meta.url))).toBe(false);
+    expect(architectureCheck).toContain('target.startsWith("src/store/sqlite/") && !importer.startsWith("src/store/")');
     const compatibility = readFileSync(new URL("./helpers/sqlite-binding-store.ts", import.meta.url), "utf8");
     expect(compatibility).toContain("new SqliteStoreKernel(path)");
     expect(compatibility).not.toContain("extends SqliteStoreKernel");

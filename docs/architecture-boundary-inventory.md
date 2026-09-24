@@ -42,7 +42,7 @@ Each seam must satisfy all of the following before it is marked complete:
 | 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` lifecycle facade over `BindingReconciliationPass` and `BindingRuntimeConverger` | Complete | The facade owns cooldown, priority coalescing, periodic lifecycle, diagnostics, and shutdown. The pass owns targeted/full authoritative observation, classification, discovery, failure isolation, and pruning; the converger retains generation-fenced per-Binding transitions and downstream effects. |
 | 9 | Command and control | Durable command intent or owning aggregate, with immutable resolved context | `SwarmCommandGateway` ingress facade over `CommandIntentDispatcher` and focused command workflows | Complete | Text, CardKit, Primary tool, and confirmed natural-language entry paths share context resolution and durable admission. The dispatcher owns same-lane FIFO claim, frozen-context revalidation, mutation routing, conservative uncertain settlement, accepted-only recovery, and shutdown; no path can bypass policy or replay possibly started work. |
 | 10 | Runtime lifecycle, health, and operations | User systemd plus fenced SQLite lease; health is observation only | `ManagedBridgeRuntime`, `RuntimeLifecycleLedger`, `BridgeRuntimeShutdown`, and `HealthSnapshotCollector` | Complete | Possibly started resources register cleanup before or with start; write-capable shutdown failures retain the fence, lease, and store. The collector owns coherent fail-closed readiness, isolated bounded diagnostics, degradation policy, and single-flight caches, while the HTTP adapter owns only transport. Lifecycle and health tests cover partial startup, ordering, lease loss, stuck writers, provider failure, redaction, and cache behavior. |
-| 11 | SQLite capability graph and migrations | One fenced `SqliteContext` and ordered schema migration | Consumer-shaped store ports backed by `SqliteCapabilityGraph` | Substantially complete | Production no longer uses the broad compatibility kernel and architecture checks enforce inward imports. Remaining work is driven by individual seam audits, not repository/table splitting. |
+| 11 | SQLite capability graph and migrations | One fenced `SqliteContext` and ordered schema migration | Consumer-shaped store ports backed by `SqliteCapabilityGraph` | Complete | One graph owns context, migrations, concrete collaboration, and published capability aliases. Production consumers cannot import concrete SQLite modules; compatibility facades remain test-only. Construction links make cycles explicit and fail fast, while nested transactions and post-commit receipts preserve atomic workflow effects. |
 
 ## Execution order
 
@@ -180,3 +180,47 @@ targeted observation batching, scope priority and cooldown, unavailable and
 mismatched workspaces, discovery ambiguity, interrupted provisioning, bounded
 concurrency, recovery, exact external-turn observation, cache pruning, shutdown,
 and architecture dependency direction.
+
+## SQLite capability graph completion evidence
+
+The SQLite boundary is complete because `SqliteCapabilityGraph` creates or
+adopts one `SqliteContext`, runs the ordered migration runner before publishing
+stores, and exposes only consumer-shaped capabilities through
+`SqliteStoreBundle`. Concrete stores collaborate inside the adapter so
+multi-table transitions keep one transaction and write fence. Construction-only
+links represent the few dependency cycles without a partial aggregate or service
+locator and fail on early or duplicate resolution.
+
+Production source outside the store layer cannot import any concrete
+`store/sqlite` module. The broad compatibility kernel exists only under test
+helpers. Architecture checks also preserve inward dependency direction, central
+migration ordering, guarded foreign-key rebuilds, intentional capability aliases,
+and the absence of asserted or partial graph construction.
+
+Verification on 2026-09-24: focused capability graph, context, StoreLink,
+migration/store, and architecture tests passed (5 files, 385 tests). The final
+repository gate is recorded in the completion audit below.
+
+## Goal completion audit
+
+The user goal is complete when the principal workflow and infrastructure seams
+are identified, EventBus is completed first, every listed seam has a Clean
+Architecture implementation with explicit authority and recovery behavior, and
+the repository gates cover those claims. The following checklist maps each
+requirement to current artifacts and executable evidence.
+
+| Requirement | Artifact evidence | Verification evidence |
+| --- | --- | --- |
+| Identify the principal module boundaries | The Major seams table defines eleven ordered workflow and infrastructure seams, their authorities, target deep modules, and completion criteria. | Documentation audit validates the maintained architecture entry points. |
+| Complete EventBus first | `RuntimeEventBus` plus `RuntimeEventIntegration` provide one typed engine behind lifecycle, inbound, outbound, Prompt, instance, turn-control, and Herdr hint interfaces. SQLite or fresh Herdr state remains authoritative. | Runtime EventBus and integration tests cover closed channels, startup buffering, coalescing, subscriber isolation, diagnostics, and awaited shutdown; commit history places the unified EventBus work before later seam passes. |
+| Exact-turn control and steering | `TurnControlWorkflow` durably accepts and fences work; `TurnControlDispatcher` serializes effects by owner and revalidates exact runtime identity. | Turn-control workflow/dispatcher and steering integration tests cover ordering, stale identity, recovery, failure, and shutdown. |
+| Inbound admission and routing | `DurableInboundPipeline`, `InboundMessageRoutingWorkflow`, and `PromptAdmissionWorkflow` separate durable FIFO admission, routing, and atomic Prompt acceptance. | Inbound dispatcher/routing/admission and concurrency tests cover duplicate admission, retry, queue limits, recovery, and shutdown. |
+| Primary execution and observation | `PromptRunWorkflow` is a lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver`. | Primary dispatcher, observer, safety-scan, turn-supervisor, and concurrency suites verify FIFO, exact observation, detachment, recovery, and no replay. |
+| Worker execution and observation | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` expose consumer-shaped dispatch and observation seams. | Worker dispatcher/observer/supervisor and instance integration suites verify FIFO, identity fencing, uncertain delivery, recovery, and shutdown. |
+| Card projection and convergence | Pure reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` converge durable card state. | Card, page, context-rebuild, startup-view, and event integration tests cover continuation, frozen pages, checkpoints, duplication, and recovery. |
+| Durable outbound delivery | `GatewayOutboxDispatcher` delegates scan scheduling to `OutboundLaneDrain` and one attempt to `OutboundDeliveryExecutor`. | Outbound drain/dispatcher/store tests cover lane ordering, bounded concurrency, retries, dead letters, checkpoints, failure isolation, and shutdown. |
+| Herdr runtime reconciliation | `HerdrRuntimeReconciler` delegates authoritative passes to `BindingReconciliationPass` and fenced transitions to `BindingRuntimeConverger`. | Reconciliation pass, reconciler, snapshot, discovery, and event tests cover targeted/full convergence, ambiguity, failures, pruning, and shutdown. |
+| Command and control | `SwarmCommandGateway` owns ingress context/query/admission; `CommandIntentDispatcher` owns durable lane execution, revalidation, recovery, and settlement. | Gateway, dispatcher, natural-language, Card action, and Primary tool tests cover authorization convergence, FIFO, idempotency, stale context, uncertain no-replay recovery, and shutdown. |
+| Runtime lifecycle, health, and operations | `ManagedBridgeRuntime`, `RuntimeLifecycleLedger`, and `BridgeRuntimeShutdown` own fenced lifecycle; `HealthSnapshotCollector` owns readiness/status policy behind a transport-only server. | Lifecycle, shutdown, health collector/server, service lifecycle, and architecture tests cover partial startup, writer settlement, lease loss, redaction, fail-closed readiness, caching, and diagnostics. |
+| SQLite capability graph and migrations | `SqliteCapabilityGraph` and `SqliteStoreBundle` publish consumer ports over one context; migration modules execute through one ordered runner. | Capability graph, context, StoreLink, SQLite store/migration, and architecture tests cover aliases, fencing, atomic nesting, receipts, historical upgrades, and concrete-import prohibition. |
+| Repository-wide quality gates | Architecture records describe current implementations and the import checker enforces dependency direction. | `npm run typecheck`, `npm run build`, `npm run architecture:check`, `npm run docs:audit`, `npm test`, and `git diff --check` are the final required gates. |
