@@ -13,6 +13,8 @@ import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { BridgeEvent } from "../src/domain/events.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
+import { PiTranscriptReader } from "../src/runtime/pi-transcript.js";
+import { piTranscriptDescriptor } from "../src/runtime/agents/pi-transcript-identity.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -868,6 +870,68 @@ describe("coordinator concurrency controls", () => {
       await coordinator.handleMessage({ eventId: "drain-e1", messageId: "drain-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new B work", mentionsBot: false, isRootMessage: false });
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Owned B answer" }));
       expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)?.transcriptTurnId).toBe(turnB);
+      expect(runPrompt).toHaveBeenCalledOnce();
+    } finally {
+      await coordinator.stop(); await publisher.stop(); store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("projects a Pi JSONL turn into the durable Answer Card without terminal fallback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-answer-integration-"));
+    const descriptor = piTranscriptDescriptor(root, "b1", 1);
+    const path = join(descriptor.sessionDir, `2026-09-25T12-00-00_${descriptor.sessionId}.jsonl`);
+    const turnId = "7f6eef5c-887d-4d40-81f9-0068ba979a45";
+    const sources: Parameters<AgentTranscriptReaderPort["open"]>[0][] = [];
+    const reader = new PiTranscriptReader({ root });
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) { sources.push(source); return reader.open(source); },
+      async openActiveTurn(source) { return reader.openActiveTurn!(source); },
+      async openFirstTurn(source) { return reader.openFirstTurn!(source); },
+      async openAtTurn(source, id, startedAt) { return reader.openAtTurn!(source, id, startedAt); },
+      async openAfterTurn(source, id, startedAt) { return reader.openAfterTurn!(source, id, startedAt); }
+    };
+    const runPrompt = vi.fn(async (_paneId: string, text: string, _timeoutMs: number, onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await onDispatched?.();
+      await mkdir(descriptor.sessionDir, { recursive: true });
+      const startedAt = new Date().toISOString();
+      const completedAt = new Date(Date.now() + 1).toISOString();
+      const lines = [
+        { type: "session", id: descriptor.sessionId, timestamp: startedAt, cwd: "/repo" },
+        { type: "message", id: turnId, parentId: null, timestamp: startedAt, message: { role: "user", content: text, timestamp: Date.now() } },
+        { type: "message", id: "56d49143-881a-4563-aa93-8bf6539ecfac", parentId: turnId, timestamp: completedAt, message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "private chain of thought" }, { type: "text", text: "Pi durable answer" }],
+          stopReason: "stop",
+          usage: { totalTokens: 42 },
+          timestamp: Date.now() + 1
+        } }
+      ];
+      await writeFile(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+      await onObservation?.({ state: "working", stateSource: "herdr", output: "SECRET_TERMINAL_SENTINEL" });
+      return "done" as const;
+    });
+    const herdr: HerdrPort = {
+      ...emptyHerdr(),
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", agentKind: "pi", foregroundExecutables: ["pi"], agentState: "idle" }]; },
+      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", agentKind: "pi", foregroundExecutables: ["pi"], agentState: "idle" }; },
+      runPrompt
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader, false, undefined, root);
+    try {
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Pi task", agentKind: "pi" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+      await coordinator.start();
+      await coordinator.handleMessage({ eventId: "pi-jsonl-e1", messageId: "pi-jsonl-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "analyze CI", mentionsBot: false, isRootMessage: false });
+      await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Pi durable answer" }));
+
+      const card = store.listRunCards("b1")[0]!;
+      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, nativeSession: null });
+      expect(store.getPrompt(card.promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: expect.any(String) });
+      expect(card.answer).not.toMatch(/不支持结构化输出|private chain of thought|SECRET_TERMINAL_SENTINEL/);
       expect(runPrompt).toHaveBeenCalledOnce();
     } finally {
       await coordinator.stop(); await publisher.stop(); store.close(); await rm(root, { recursive: true, force: true });

@@ -62,7 +62,8 @@ export function createTestRouter(
   inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier(),
   transcriptReader?: AgentTranscriptReaderPort,
   observeExternalTurns = false,
-  traexControl: TraexControlPort = { async listModels() { throw new Error("TraeX model control is not configured"); }, async runModelPrompt() { throw new Error("TraeX model control is not configured"); } }
+  traexControl: TraexControlPort = { async listModels() { throw new Error("TraeX model control is not configured"); }, async runModelPrompt() { throw new Error("TraeX model control is not configured"); } },
+  piTranscriptRoot?: string
 ): InboundRouter {
   const promptHerdr: HerdrPort = {
     ...herdr,
@@ -74,7 +75,7 @@ export function createTestRouter(
     new TraexDriver(promptHerdr, config.traex.executable, config.turnTimeoutMs),
     new CodexDriver(promptHerdr, config.agents?.codex ?? "codex", config.turnTimeoutMs, true),
     new ClaudeCodeDriver(promptHerdr, config.agents?.claudeCode ?? "claude", config.turnTimeoutMs, true),
-    new PiDriver(promptHerdr, config.agents?.pi ?? "pi", config.turnTimeoutMs, true)
+    new PiDriver(promptHerdr, config.agents?.pi ?? "pi", config.turnTimeoutMs, true, piTranscriptRoot)
   ]);
   const outboundWork = new InProcessOutboundWorkNotifier(logger);
   const gatewayEffects = new GatewayEffectClient(createFeishuCompatibilityDelivery(lark, config.gateway?.id ?? "feishu:primary"));
