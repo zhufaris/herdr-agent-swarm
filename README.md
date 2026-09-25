@@ -22,18 +22,70 @@ former compatibility plugin is not an installation or operation surface.
 
 ## System architecture
 
-![Herdr Agent Swarm system architecture](docs/herdr-agent-swarm-architecture.svg)
-
-The request path is:
+The service coordinates four authority boundaries. Arrows marked `-->` carry
+persisted workflow or authoritative observations; `~~~>` carries only a
+best-effort wake-up hint.
 
 ~~~text
-Lark message or card action
-  -> validated, authorized inbound record
-  -> durable workflow acceptance and FIFO claim
-  -> fenced Herdr / Agent effect
-  -> authoritative runtime observation
-  -> durable view and outbox intent
-  -> ordered CardKit delivery
+                          user systemd
+                 owns process lifecycle only
+              +-------------------------------+
+              | standalone herdr-agent-swarm  |
+              |                               |
++-------------+--+  inbound   +-------------+ |   fenced effect   +------------------+
+| Feishu / Lark | ----------> | coordinator |----------------->| Herdr            |
+|                | <---------- | + projectors|<-----------------| + real Agent pane|
+| visible cards  |  CardKit    +------+------+  fresh snapshot  | + local approval |
+| and messages   |  delivery          |         and transcript +---------+--------+
++----------------+                    |                                    |
+                                      | durable transitions                |
+                                      v                                    |
+                             +------------------+                          |
+                             | SQLite           |                          |
+                             | workflow, FIFO,  |                          |
+                             | views, outbox,   |                          |
+                             | audit, lease     |                          |
+                             +--------+---------+                          |
+                                      ^                                    |
+                                      | scan/checkpoint                    |
+                                      +------------------------------------+
+
+Herdr socket events ~~~> RuntimeEventBus ~~~> reconciliation wake-up
+~~~
+
+The normal request and delivery interaction is:
+
+~~~text
+Lark                Service / SQLite                  Herdr / Agent
+ |                          |                               |
+ | message or card action   |                               |
+ |------------------------->| validate and authorize        |
+ |                          | persist inbound intent        |
+ |                          | claim FIFO or exact-turn work |
+ |                          |------------------------------>| fenced effect
+ |                          |<------------------------------| observe runtime
+ |                          | project lifecycle, timeline,  | and transcript
+ |                          | and card views durably         |
+ |                          | enqueue and claim outbox       |
+ |<-------------------------| ordered Gateway/CardKit send  |
+ | delivery result          |                               |
+ |------------------------->| checkpoint success or retry   |
+~~~
+
+Recovery converges from durable state and fresh observation, not from a stale
+card or an in-memory event:
+
+~~~text
+socket/EventBus hint or periodic scan
+                 |
+                 v
+SQLite durable state + fresh Herdr snapshot + exact transcript
+                 |
+                 +--> work never started: remains eligible for FIFO dispatch
+                 |
+                 +--> Agent effect uncertain: detach and observe; never replay
+                 |
+                 +--> Lark delivery failed: retry only the durable outbox effect
 ~~~
 
 The system deliberately splits authority:
@@ -41,13 +93,13 @@ The system deliberately splits authority:
 | Authority | Owns |
 | --- | --- |
 | Herdr | Live pane identity, terminal identity, foreground process, and Agent state |
-| SQLite | Bindings, prompt FIFO, Worker turns, delivery intent, audit data, and the fenced instance lease |
+| SQLite | Bindings, prompt FIFO, Worker turns, Answer timelines and checkpoints, projections, delivery intent and outbox, audit data, and the fenced instance lease |
 | Lark | Visible cards and messages only |
 | user systemd | The standalone service process |
 
-Socket events and process-local notifications reduce latency, but reconciliation
-against fresh Herdr state is the convergence path. Workflow intent is persisted
-before Lark delivery, so a delivery retry never repeats an Agent prompt.
+High-risk Agent approval remains local to the Herdr pane. The bridge can stop an
+identity-fenced exact turn, but it cannot remotely approve or deny a request,
+send arbitrary terminal input, or kill a process or pane.
 
 Open the [interactive architecture diagram](docs/herdr-agent-swarm-architecture.html)
 for an explorable view. See [Architecture](docs/architecture.md) for lifecycle,
