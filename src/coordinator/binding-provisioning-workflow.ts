@@ -24,6 +24,7 @@ import { ProjectCatalog } from "./project-catalog.js";
 import { agentKindFromHerdr, matchesAgentKind, type AgentKind } from "../domain/agent-instance.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import { contentIdempotencyKey } from "../domain/content-idempotency-key.js";
+import { primaryManagedAgentName } from "../domain/managed-agent-name.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null, agentKind?: AgentKind): Promise<void>;
@@ -261,7 +262,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       return;
     }
     if (!driver.describe().available) throw new Error(`Agent adapter is unavailable: ${binding.agentKind}`);
-    await driver.start({ herdrWorkspaceId: binding.workspaceId, paneId: pane.paneId, nativeSessionId: null, generation: binding.generation }, { ...(binding.projectId ? { projectId: binding.projectId } : {}), name: "primary", model: null, ...(binding.agentKind === "traex" ? { primaryTools: tools } : {}) });
+    await driver.start({ herdrWorkspaceId: binding.workspaceId, paneId: pane.paneId, nativeSessionId: null, generation: binding.generation }, { ...(binding.projectId ? { projectId: binding.projectId } : {}), name: "primary", managedName: primaryManagedAgentName(binding.projectId, binding.id, binding.generation), model: null, ...(binding.agentKind === "traex" ? { primaryTools: tools } : {}) });
   }
 
   private primaryToolConfiguration(binding: Pick<Binding, "id" | "generation" | "agentKind">, issue: boolean): PrimaryToolConfiguration {

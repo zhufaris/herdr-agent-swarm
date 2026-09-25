@@ -24,6 +24,7 @@ describe("DeterministicNaturalLanguageCommandInterpreter", () => {
     ["当前状态怎么样", { family: "swarm", command: { kind: "status" } }],
     ["选择项目 DataSage", { family: "instance", command: { kind: "project", projectId: "datasage" } }],
     ["创建新任务：修复登录", { family: "swarm", command: { kind: "new", title: "修复登录", agentKind: "traex" } }],
+    ["创建 primary 任务 分析 CI 失败 --agent pi", { family: "swarm", command: { kind: "new", title: "分析 CI 失败", agentKind: "pi" } }],
     ["创建 reviewer worker 并启动", { family: "swarm", command: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: true } }],
     ["发送给 worker reviewer: run tests", { family: "instance", command: { kind: "to", name: "reviewer", text: "run tests" } }],
     ["停止当前任务", { family: "swarm", command: { kind: "stop" } }],

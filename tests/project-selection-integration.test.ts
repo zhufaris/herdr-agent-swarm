@@ -9,6 +9,7 @@ import { TestConversationViewProjector as ConversationViewProjector } from "./he
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
+import { primaryManagedAgentName } from "../src/domain/managed-agent-name.js";
 
 describe("project selection flow", () => {
   for (const command of ["/swarm new", "/swarm projects"] as const) {
@@ -110,8 +111,8 @@ describe("project selection flow", () => {
     await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
-    expect(startAgent).toHaveBeenCalledWith("w1:pi", { name: "alpha-primary", kind: "pi", executable: "pi", args: [] });
     const piBinding = store.findBindingByPane("w1:pi")!;
+    expect(startAgent).toHaveBeenCalledWith("w1:pi", { name: primaryManagedAgentName("alpha", piBinding.id, piBinding.generation), kind: "pi", executable: "pi", args: [] });
     expect(piBinding).toMatchObject({ agentKind: "pi", state: "active" });
     expect(store.hasBindingPrimaryToolCapability(piBinding.id, piBinding.generation)).toBe(false);
     await vi.waitFor(() => expect(store.loadTopicView(piBinding.id)).toMatchObject({ agentKind: "pi", primaryToolsAvailable: false, primaryToolsNotice: expect.stringContaining("pi Primary") }));

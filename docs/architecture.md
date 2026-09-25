@@ -346,6 +346,11 @@ creator and generation checks remain additional fences for stateful operations.
 | Runtime event integration | `RuntimeEventIntegration` with four explicit reliability classes | It composes lifecycle fan-out and wake-up channels without making them one delivery or replay contract. |
 | Herdr socket events | bounded wake-up hints | Events improve latency but do not create a second event log. |
 
+Managed Primary Agent names derive from the durable Binding identity and
+generation. The derivation is deterministic across checkpoint retries, retains a
+bounded unique suffix under Herdr's 32-character limit, and never probes, reuses,
+or stops an unrelated live Agent to resolve a name collision.
+
 When these sources disagree, do not repair SQLite from a Lark card or infer a
 pane state from a card. Reconcile against Herdr, then let the normal projection
 and durable Lark outbox converge the visible state.

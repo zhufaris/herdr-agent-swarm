@@ -3,7 +3,8 @@ import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, Dispatc
 import type { HerdrPort } from "../../domain/ports/external.js";
 import { classifyPromptSubmissionFailure } from "../../domain/prompt-submission.js";
 import { safeLogError } from "../safe-error.js";
-import { managedAgentName, primaryToolMcpArguments } from "./agent-startup.js";
+import { managedAgentName, normalizeManagedAgentName } from "../../domain/managed-agent-name.js";
+import { primaryToolMcpArguments } from "./agent-startup.js";
 
 export class TraexDriver implements AgentRuntimeDriver {
   readonly kind = "traex" as const;
@@ -27,7 +28,8 @@ export class TraexDriver implements AgentRuntimeDriver {
       ...(options?.model ? ["--model", options.model] : []),
       ...(options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...primaryToolMcpArguments(options.primaryTools)] : [])
     ];
-    if (this.herdr.startAgent) await this.herdr.startAgent(runtime.paneId, { name: managedAgentName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
+    const name = options?.managedName ? normalizeManagedAgentName(options.managedName) : managedAgentName(options?.projectId, options?.name ?? this.kind);
+    if (this.herdr.startAgent) await this.herdr.startAgent(runtime.paneId, { name, kind: "traex", executable: this.executable, args });
     else await this.herdr.startTraex(runtime.paneId, this.executable, args);
   }
 

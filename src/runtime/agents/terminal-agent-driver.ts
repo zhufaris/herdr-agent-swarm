@@ -2,7 +2,8 @@ import type { AgentKind, AgentRuntimeRef } from "../../domain/agent-instance.js"
 import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
 import type { HerdrPort } from "../../domain/ports/external.js";
 import { safeLogError } from "../safe-error.js";
-import { managedAgentName, primaryToolMcpArguments } from "./agent-startup.js";
+import { managedAgentName, normalizeManagedAgentName } from "../../domain/managed-agent-name.js";
+import { primaryToolMcpArguments } from "./agent-startup.js";
 
 export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
   abstract readonly kind: AgentKind;
@@ -16,7 +17,8 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
     if (!this.herdr.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
     const args = options?.model && this.describe().modelSelection !== "unsupported" ? ["--model", options.model] : [];
     if (options?.primaryTools && this.kind === "codex") args.push(...(options.primaryTools.agentArgs ?? []), ...primaryToolMcpArguments(options.primaryTools));
-    await this.herdr.startAgent(runtime.paneId, { name: managedAgentName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: this.herdrKind, executable: this.executable, args });
+    const name = options?.managedName ? normalizeManagedAgentName(options.managedName) : managedAgentName(options?.projectId, options?.name ?? this.kind);
+    await this.herdr.startAgent(runtime.paneId, { name, kind: this.herdrKind, executable: this.executable, args });
   }
 
   async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt> {

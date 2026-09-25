@@ -71,10 +71,18 @@ function projectAndPrimaryRule({ text, projects }: InterpretationContext): Natur
     const resolved = projectId(project[1]!, projects);
     return resolved ? instance({ kind: "project", projectId: resolved }) : clarify("没有找到这个已配置项目。", ["查看项目", "选择项目 <project-id>"]);
   }
-  const primary = /^(?:在\s+(.+?)\s+)?(?:(?:创建|新建)(?:一个)?(?:新)?(?:primary)?(?:任务|会话)|(?:create|start)\s+(?:(?:a|one)\s+)?(?:new\s+)?(?:primary\s+)?(?:task|session))(?:\s*[:：-]\s*|\s+)?(.*)$/i.exec(text);
+  const primary = /^(?:在\s+(.+?)\s+)?(?:(?:创建|新建)\s*(?:一个)?\s*(?:新)?\s*(?:primary\s*)?(?:任务|会话)|(?:create|start)\s+(?:(?:a|one)\s+)?(?:new\s+)?(?:primary\s+)?(?:task|session))(?:\s*[:：-]\s*|\s+)?(.*)$/i.exec(text);
   if (!primary) return null;
   if (primary[1] && !projectId(primary[1], projects)) return clarify("没有找到目标项目。", ["查看项目", "在 <project-id> 创建新任务：<标题>"]);
-  return swarm({ kind: "new", title: primary[2]?.trim() || null, agentKind: "traex" });
+  const options = extractAgentOption(primary[2] ?? "");
+  return swarm({ kind: "new", title: options.text || null, agentKind: options.agentKind });
+}
+
+function extractAgentOption(value: string): { text: string; agentKind: AgentKind } {
+  const option = /(?:^|\s)--agent\s+(traex|pi|codex|claude-code)(?=\s|$)/i.exec(value);
+  if (!option) return { text: value.trim(), agentKind: "traex" };
+  const agentKind = option[1]!.toLowerCase() as AgentKind;
+  return { text: `${value.slice(0, option.index)} ${value.slice(option.index + option[0].length)}`.replace(/\s+/g, " ").trim(), agentKind };
 }
 
 function workerRule({ text }: InterpretationContext): NaturalLanguageCommandResult | null {

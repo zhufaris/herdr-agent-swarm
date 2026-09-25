@@ -36,6 +36,17 @@ describe("agent driver contract", () => {
     expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ name: "yy1r-test" }));
   });
 
+  it("does not truncate an already-valid 32-character managed name twice", async () => {
+    const startAgent = vi.fn(async () => undefined);
+    const driver = new TraexDriver({ startAgent } as unknown as HerdrPort, "/bin/traex", 1_000);
+    const managedName = "herdr-agent-swarm-pri-1234567890";
+
+    await driver.start(runtime, { name: "primary", managedName, model: null });
+
+    expect(managedName).toHaveLength(32);
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ name: managedName }));
+  });
+
   it("injects the scoped MCP server into capable Primary drivers only", async () => {
     const startAgent = vi.fn(async () => undefined);
     const traex = new TraexDriver({ startAgent } as unknown as HerdrPort, "traex", 1_000);
