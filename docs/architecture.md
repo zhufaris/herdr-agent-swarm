@@ -220,6 +220,15 @@ transaction. The read-only integrity worker is the deliberate separate-connectio
 exception. New capability modules share the existing context; they do not create
 their own connection or emulate a transaction across repositories.
 
+Worker Task persistence follows this rule through `SqliteWorkerTurnStore`, the
+only published Worker-turn SQLite facade. The facade owns use-case transaction
+boundaries and composes internal acceptance, transition, projection, FIFO, Human
+Review, and recovery participants over that same context. Those participants are
+implementation roles, not public repositories: coordinators continue to consume
+the existing domain ports, while cross-record ordering and rollback stay hidden
+inside the SQLite capability. Pure admission, exact-turn, route-fence, and queue
+position policies live in the domain and perform no I/O.
+
 ### External effects are fenced and never guessed
 
 Ordinary Prompt and Worker-turn queues are durable FIFO queues with one active

@@ -1059,4 +1059,27 @@ describe("application composition boundaries", () => {
     expect(main).toContain("await runtime.start()");
     expect(main).toContain("await runtime.stop(signal)");
   });
+
+  it("keeps Worker turn persistence behind one transaction facade", () => {
+    const facade = readFileSync(new URL("../src/store/sqlite/worker-turn-store.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    const directory = new URL("../src/store/sqlite/worker-turn/", import.meta.url);
+    const internals = readdirSync(directory).filter((file) => file.endsWith(".ts")).map((file) => readFileSync(new URL(file, directory), "utf8"));
+    for (const participant of ["WorkerTurnAcceptance", "WorkerTurnTransition", "WorkerTurnProjection", "WorkerTurnQueue", "WorkerHumanReview", "WorkerTurnRecovery"]) expect(facade).toContain("new " + participant);
+    expect(graph).toContain("new SqliteWorkerTurnStore(context");
+    expect(graph).not.toMatch(/WorkerTurn(?:Acceptance|Transition|Projection|Queue|Recovery)|WorkerHumanReview/);
+    for (const internalSource of internals) {
+      expect(internalSource).not.toMatch(/from ".*\/(?:coordinator|events|composition)\//);
+      expect(internalSource).not.toContain("new SqliteContext");
+      expect(internalSource).not.toContain(".transaction(");
+    }
+    const srcDir = fileURLToPath(new URL("../src", import.meta.url));
+    for (const entry of readdirSync(srcDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const path = join(entry.parentPath, entry.name);
+      const relativePath = relative(srcDir, path);
+      if (relativePath === "store/sqlite/worker-turn-store.ts" || relativePath.startsWith("store/sqlite/worker-turn/")) continue;
+      expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/store\/sqlite\/worker-turn\/[^"]+\.js/);
+    }
+  });
 });
