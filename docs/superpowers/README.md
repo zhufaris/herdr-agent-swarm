@@ -14,6 +14,7 @@ implemented. Current records:
 - [Worker execution and observation design](specs/2026-09-24-worker-execution-observation-design.md)
 - [Worker execution and observation implementation plan](plans/2026-09-24-worker-execution-observation-plan.md)
 - [Worker Task persistence decomposition design](specs/2026-09-25-worker-task-persistence-decomposition-design.md)
+- [Worker Task persistence decomposition implementation plan](plans/2026-09-25-worker-task-persistence-decomposition-plan.md)
 - [Durable outbound delivery design](specs/2026-09-24-durable-outbound-delivery-design.md)
 - [Durable outbound delivery implementation plan](plans/2026-09-24-durable-outbound-delivery-plan.md)
 - [Herdr runtime reconciliation design](specs/2026-09-24-herdr-runtime-reconciliation-design.md)
