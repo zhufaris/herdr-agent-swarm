@@ -1082,4 +1082,34 @@ describe("application composition boundaries", () => {
       expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/store\/sqlite\/worker-turn\/[^"]+\.js/);
     }
   });
+
+  it("keeps Outbox recovery behind one transaction facade", () => {
+    const facade = readFileSync(new URL("../src/store/sqlite/outbox-recovery-store.ts", import.meta.url), "utf8");
+    const graph = readFileSync(new URL("../src/store/sqlite/capability-graph.ts", import.meta.url), "utf8");
+    const directory = new URL("../src/store/sqlite/outbox-recovery/", import.meta.url);
+    const internals = readdirSync(directory)
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => readFileSync(new URL(file, directory), "utf8"));
+    for (const participant of [
+      "AnswerStreamRecovery",
+      "DeadLetterAction",
+      "OutboundFailureTransitionProtocol",
+      "ImmutableEffectRecovery",
+      "ReplaceableCardRecovery",
+    ]) expect(facade).toContain("new " + participant);
+    expect(graph).not.toMatch(/AnswerStreamRecovery|DeadLetterAction|OutboundFailureTransitionProtocol|ImmutableEffectRecovery|ReplaceableCardRecovery/);
+    for (const internalSource of internals) {
+      expect(internalSource).not.toMatch(/from ".*\/(?:adapters|coordinator|events|composition)\//);
+      expect(internalSource).not.toContain("new SqliteContext");
+      expect(internalSource).not.toContain(".transaction(");
+    }
+    const srcDir = fileURLToPath(new URL("../src", import.meta.url));
+    for (const entry of readdirSync(srcDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const path = join(entry.parentPath, entry.name);
+      const relativePath = relative(srcDir, path);
+      if (relativePath === "store/sqlite/outbox-recovery-store.ts" || relativePath.startsWith("store/sqlite/outbox-recovery/")) continue;
+      expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/outbox-recovery\/[^"]+\.js/);
+    }
+  });
 });

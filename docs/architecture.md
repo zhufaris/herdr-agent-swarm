@@ -229,6 +229,15 @@ the existing domain ports, while cross-record ordering and rollback stay hidden
 inside the SQLite capability. Pure admission, exact-turn, route-fence, and queue
 position policies live in the domain and perform no I/O.
 
+Outbound recovery follows the same deep-module shape through
+`SqliteOutboxRecoveryStore`. It is the only published recovery facade and owns
+the outer transaction for failure transitions, startup convergence, and manual
+dead-letter actions. Internal failure-transition, Answer-stream, replaceable-card,
+immutable-effect, and manual-action protocols share the facade's SQLite context.
+They preserve exact effect-certainty and replacement proofs while keeping
+quarantine release, recovery settlement, replacement intent, and lane-head
+refresh in one atomic operation.
+
 ### External effects are fenced and never guessed
 
 Ordinary Prompt and Worker-turn queues are durable FIFO queues with one active
