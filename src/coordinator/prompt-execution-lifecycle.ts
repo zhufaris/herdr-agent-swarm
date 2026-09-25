@@ -1,4 +1,4 @@
-import type { TraexTranscriptObservation } from "../domain/ports/external.js";
+import type { AgentTranscriptObservation } from "../domain/ports/external.js";
 import type { PromptJob } from "../domain/types.js";
 import { classifyPromptSubmissionFailure } from "../domain/prompt-submission.js";
 
@@ -41,7 +41,7 @@ export function decidePromptExecutionFailure(input: {
 /** Returns a terminal outcome only for the transcript turn durably owned by the prompt. */
 export function decideDetachedTurnTerminalOutcome(
   prompt: PromptJob,
-  observation: TraexTranscriptObservation,
+  observation: AgentTranscriptObservation,
   traexProcessPresent: boolean
 ): DetachedTurnTerminalOutcome {
   const lifecycle = observation.turnLifecycle;
@@ -61,7 +61,7 @@ export function decideDetachedTurnTerminalOutcome(
 }
 
 /** A distinct later transcript turn cannot be attributed to this detached prompt. */
-export function isLaterConflictingTranscriptTurn(prompt: PromptJob, observation: TraexTranscriptObservation): boolean {
+export function isLaterConflictingTranscriptTurn(prompt: PromptJob, observation: AgentTranscriptObservation): boolean {
   if (!prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt || !observation.turnId || observation.turnId === prompt.transcriptTurnId) return false;
   const observedStartedAt = observation.turnLifecycle?.startedAt;
   if (!observedStartedAt) return false;

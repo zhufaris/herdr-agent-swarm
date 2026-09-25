@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, TraexControlPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexControlPort, AgentTranscriptObservation, AgentTranscriptReaderPort } from "../domain/ports/external.js";
 import type { DetachedPromptSkipResult } from "../domain/ports/prompt-acceptance.js";
 import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../domain/ports/prompt-run.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
@@ -46,11 +46,11 @@ interface PromptRunWorkflowOptions {
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
   staleClaimGraceMs?: number;
-  transcriptReader?: TraexTranscriptReaderPort;
+  transcriptReader?: AgentTranscriptReaderPort;
   adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;
   transcriptPolling?: { identityMs: number; attachedMs: number };
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
-  observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
+  observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: AgentTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
   recoverExternalTurns?: (binding: Binding, prompt: PromptJob) => Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }>;
   mainCards?: Pick<MainCardConvergencePort, "converge">;
 }

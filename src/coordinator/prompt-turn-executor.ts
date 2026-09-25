@@ -34,7 +34,8 @@ export class PromptTurnExecutor {
   constructor(private readonly options: PromptTurnExecutorOptions) {}
 
   async execute(claimed: ClaimedPrompt, abortController: AbortController): Promise<{ observerDetached: boolean; dispatchDeferred?: boolean }> {
-    if (claimed.binding.agentKind !== "traex") return this.executeWithoutTranscript(claimed, abortController);
+    const capabilities = this.options.agentDrivers?.describe(claimed.binding.agentKind);
+    if (claimed.binding.agentKind !== "traex" && !capabilities?.structuredEvents) return this.executeWithoutTranscript(claimed, abortController);
     let { binding, prompt, model } = claimed;
     const bindingId = binding.id;
     const paneId = binding.paneId!;
@@ -54,7 +55,7 @@ export class PromptTurnExecutor {
       this.options.logger.info({
         event: "turn-started", bindingId, promptId: prompt.id, workspaceId: binding.workspaceId, paneId, queueDepth,
         outputMode: outputSource.mode, ...(outputSource.mode === "unavailable" ? { unavailableReason: outputSource.reason } : {}), outcome: "running"
-      }, "TraeX turn started");
+      }, "Agent turn started");
       const dispatchAttemptedAt = new Date().toISOString();
       const confirmDispatched = (): void => {
         if (dispatched) return;

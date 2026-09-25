@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { TraexTranscriptObservation } from "../../domain/ports/external.js";
+import type { AgentTranscriptObservation } from "../../domain/ports/external.js";
+import { AGENT_SESSION_ID, boundTranscriptMarkdown } from "../agent-transcript-codec.js";
 import { redactSecrets } from "../redact-secrets.js";
 
-export const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const MAX_EPOCH_SECONDS = 10_000_000_000;
 
 export const envelopeSchema = z.object({
@@ -25,25 +25,25 @@ export const tokenCountEventSchema = z.object({
 
 export const taskStartedEventSchema = z.object({
   type: z.literal("task_started"),
-  turn_id: z.string().regex(SESSION_ID),
+  turn_id: z.string().regex(AGENT_SESSION_ID),
   started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS),
 }).passthrough();
 
 export const taskCompleteEventSchema = z.object({
   type: z.literal("task_complete"),
-  turn_id: z.string().regex(SESSION_ID),
+  turn_id: z.string().regex(AGENT_SESSION_ID),
   started_at: z.number().int().nonnegative().max(MAX_EPOCH_SECONDS),
   last_agent_message: z.string().nullable().optional(),
 }).passthrough();
 
 export const turnAbortedEventSchema = z.object({
   type: z.literal("turn_aborted"),
-  turn_id: z.string().regex(SESSION_ID),
+  turn_id: z.string().regex(AGENT_SESSION_ID),
   reason: z.string().min(1).optional(),
 }).passthrough();
 
 export type TraexTranscriptEnvelope = z.infer<typeof envelopeSchema>;
-export type TraexTurnLifecycle = TraexTranscriptObservation["turnLifecycle"];
+export type TraexTurnLifecycle = AgentTranscriptObservation["turnLifecycle"];
 
 const BASELINE_EVENT_MARKERS = ["task_started", "task_complete", "turn_aborted", "token_count"]
   .map((value) => Buffer.from(value));
@@ -75,7 +75,7 @@ export function reduceTurnLifecycle(
   if (completed.success) {
     if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current;
     const finalAnswer = completed.data.last_agent_message
-      ? boundMarkdown(redactSecrets(completed.data.last_agent_message.trim()), maxRenderedDeltaChars)
+      ? boundTranscriptMarkdown(redactSecrets(completed.data.last_agent_message.trim()), maxRenderedDeltaChars)
       : "";
     return {
       turnId: completed.data.turn_id,
@@ -91,7 +91,7 @@ export function reduceTurnLifecycle(
     state: "aborted",
     startedAt: current.startedAt,
     ...(aborted.data.reason
-      ? { reason: boundMarkdown(redactSecrets(aborted.data.reason), maxRenderedDeltaChars) }
+      ? { reason: boundTranscriptMarkdown(redactSecrets(aborted.data.reason), maxRenderedDeltaChars) }
       : {}),
   };
 }
@@ -102,13 +102,4 @@ export function eventTime(epochSeconds: number): string {
 
 export function isBaselineEventRecord(record: Buffer): boolean {
   return BASELINE_EVENT_MARKERS.some((marker) => record.includes(marker));
-}
-
-export function boundMarkdown(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  const suffix = "\n\n… output truncated";
-  const room = Math.max(0, maxLength - suffix.length - 4);
-  let prefix = value.slice(0, room).trimEnd();
-  if ((prefix.match(/```/g)?.length ?? 0) % 2 === 1) prefix += "\n```";
-  return `${prefix}${suffix}`.slice(0, maxLength);
 }

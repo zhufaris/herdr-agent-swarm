@@ -1,11 +1,11 @@
 import { open, stat } from "node:fs/promises";
-import type { TraexTranscriptCursorPort, TraexTranscriptObservation } from "../../domain/ports/external.js";
+import type { AgentTranscriptCursorPort, AgentTranscriptObservation } from "../../domain/ports/external.js";
 import { TraexTranscriptProjector } from "../traex-transcript-projector.js";
 import { parseEnvelope, taskCompleteEventSchema, taskStartedEventSchema, turnAbortedEventSchema } from "./record-codec.js";
 
 export const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 
-export class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
+export class FileTraexTranscriptCursor implements AgentTranscriptCursorPort {
   private readonly projector = new TraexTranscriptProjector();
   private pendingLines: string[] = [];
   private skippingOversizedRecord = false;
@@ -16,14 +16,14 @@ export class FileTraexTranscriptCursor implements TraexTranscriptCursorPort {
     private readonly maxReadBytes: number,
     private readonly maxRenderedDeltaChars: number,
     private readonly tokenBaseline: number | null,
-    private turnLifecycle: TraexTranscriptObservation["turnLifecycle"],
+    private turnLifecycle: AgentTranscriptObservation["turnLifecycle"],
   ) {}
 
   async readDelta(): Promise<string> {
     return (await this.readObservation()).answerDelta;
   }
 
-  async readObservation(): Promise<TraexTranscriptObservation> {
+  async readObservation(): Promise<AgentTranscriptObservation> {
     while (this.pendingLines.length === 0) {
       const file = await stat(this.path);
       if (file.size < this.offset) throw new Error("TraeX transcript was truncated");

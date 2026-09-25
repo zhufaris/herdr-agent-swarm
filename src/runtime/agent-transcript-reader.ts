@@ -1,0 +1,25 @@
+import type { AgentTranscriptOpenResult, AgentTranscriptReaderPort, AgentTranscriptSource } from "../domain/ports/external.js";
+
+export class AgentTranscriptReader implements AgentTranscriptReaderPort {
+  constructor(private readonly readers: ReadonlyMap<AgentTranscriptSource["agentKind"], AgentTranscriptReaderPort>) {}
+
+  open(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult> { return this.reader(source)?.open(source) ?? Promise.resolve(unavailable()); }
+  openActiveTurn(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult> {
+    const reader = this.reader(source);
+    return reader ? reader.openActiveTurn?.(source) ?? reader.open(source) : Promise.resolve(unavailable());
+  }
+  openFirstTurn(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult> {
+    const reader = this.reader(source);
+    return reader?.openFirstTurn?.(source) ?? Promise.resolve(unavailable());
+  }
+  openAtTurn(source: AgentTranscriptSource, turnId: string, startedAt: string): Promise<AgentTranscriptOpenResult> {
+    return this.reader(source)?.openAtTurn?.(source, turnId, startedAt) ?? Promise.resolve(unavailable());
+  }
+  openAfterTurn(source: AgentTranscriptSource, turnId: string, startedAt: string): Promise<AgentTranscriptOpenResult> {
+    return this.reader(source)?.openAfterTurn?.(source, turnId, startedAt) ?? Promise.resolve(unavailable());
+  }
+
+  private reader(source: AgentTranscriptSource): AgentTranscriptReaderPort | undefined { return this.readers.get(source.agentKind); }
+}
+
+function unavailable(): AgentTranscriptOpenResult { return { mode: "unavailable", reason: "unsupported_session_identity" }; }

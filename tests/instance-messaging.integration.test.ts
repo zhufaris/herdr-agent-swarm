@@ -5,14 +5,14 @@ import { WorkerTurnDispatcher } from "../src/coordinator/worker-turn-dispatcher.
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
-import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptReaderPort } from "../src/domain/ports.js";
 import { workerPresentation } from "./helpers/presentation.js";
 import { TurnControlRequestError } from "../src/domain/ports/turn-control.js";
 
 let store: SqliteBindingStore | undefined;
 afterEach(() => { vi.useRealTimers(); store?.close(); store = undefined; });
 
-function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}, options: { nativeSessionId?: string | null; transcriptReader?: TraexTranscriptReaderPort } = {}) {
+function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}, options: { nativeSessionId?: string | null; transcriptReader?: AgentTranscriptReaderPort } = {}) {
   store = new SqliteBindingStore(":memory:");
   const runtime = { herdrWorkspaceId: "w", paneId: "w:p1", nativeSessionId: null, generation: 2 };
   const create = (id: string, projectId = "p1", role: "primary" | "worker" = "worker") => {
@@ -280,7 +280,7 @@ describe("instance messaging", () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
     let read = false;
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -303,7 +303,7 @@ describe("instance messaging", () => {
 
   it("does not overwrite an exact transcript completion when the driver observer disconnects", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -326,7 +326,7 @@ describe("instance messaging", () => {
 
   it("does not overwrite an exact transcript completion with a late not-delivered receipt", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -353,7 +353,7 @@ describe("instance messaging", () => {
   it("keeps observing an exact-owned running turn after a late not-delivered receipt", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -385,7 +385,7 @@ describe("instance messaging", () => {
   it("keeps observing an exact-owned running turn after a late uncertain receipt", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -421,7 +421,7 @@ describe("instance messaging", () => {
       turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "",
       turnLifecycle: { turnId: runtimeTurnId, state: "active" as const, startedAt }
     }];
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() { return observations.shift() ?? { answerDelta: "" }; }
@@ -454,7 +454,7 @@ describe("instance messaging", () => {
   it("keeps observing an exact-owned running turn when the driver throws late", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {

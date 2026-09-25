@@ -1,3 +1,4 @@
+import type { AgentKind } from "../agent-instance.js";
 import type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, RuntimeObservation, RuntimeTurnObservation } from "../types.js";
 import type { RunProgressEvent } from "../run-card-view.js";
 import type { ModelDispatch, TraexModelSummary } from "../model-selection.js";
@@ -52,41 +53,47 @@ export interface HerdrPort {
   closePane(paneId: string): Promise<void>;
 }
 
-export interface TraexTranscriptCursorPort {
+export interface AgentTranscriptCursorPort {
   readDelta(): Promise<string>;
-  readObservation?(): Promise<TraexTranscriptObservation>;
+  readObservation?(): Promise<AgentTranscriptObservation>;
 }
 
-export interface TraexTranscriptPlanStep {
+export interface AgentTranscriptPlanStep {
   key: string;
   label: string;
   state: "pending" | "active" | "done";
 }
 
-export interface TraexTranscriptMainStatus {
+export interface AgentTranscriptMainStatus {
   statusTitle?: string;
-  planSteps?: TraexTranscriptPlanStep[];
+  planSteps?: AgentTranscriptPlanStep[];
   tokenCount?: number;
 }
 
-export interface TraexTranscriptObservation {
+export interface AgentTranscriptObservation {
   turnId?: string;
   freshTurnStart?: boolean;
   requestText?: string;
   answerDelta: string;
   timelineDeltas?: AnswerTimelineDelta[];
   toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
-  mainStatus?: TraexTranscriptMainStatus;
+  mainStatus?: AgentTranscriptMainStatus;
   turnLifecycle?: { turnId: string; state: "active" | "completed" | "aborted"; startedAt: string; finalAnswer?: string; reason?: string };
 }
 
-export type TraexTranscriptUnavailableReason = "missing_session_identity" | "unsupported_session_identity" | "transcript_not_found" | "ambiguous_transcript" | "turn_boundary_not_found" | "turn_boundary_incomplete" | "transcript_validation_failed";
-export type TraexTranscriptOpenResult = { mode: "typed"; cursor: TraexTranscriptCursorPort } | { mode: "unavailable"; reason: TraexTranscriptUnavailableReason };
+export type AgentTranscriptUnavailableReason = "missing_session_identity" | "unsupported_session_identity" | "transcript_not_found" | "ambiguous_transcript" | "turn_boundary_not_found" | "turn_boundary_incomplete" | "transcript_validation_failed";
+export type AgentTranscriptOpenResult = { mode: "typed"; cursor: AgentTranscriptCursorPort } | { mode: "unavailable"; reason: AgentTranscriptUnavailableReason };
+export interface AgentTranscriptSource {
+  agentKind: AgentKind;
+  bindingId: string;
+  generation: number;
+  nativeSession: HerdrAgentSession | null;
+}
 
-export interface TraexTranscriptReaderPort {
-  open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
-  openActiveTurn?(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
-  openFirstTurn?(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult>;
-  openAtTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
-  openAfterTurn?(session: HerdrAgentSession | null | undefined, turnId: string, startedAt: string): Promise<TraexTranscriptOpenResult>;
+export interface AgentTranscriptReaderPort {
+  open(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult>;
+  openActiveTurn?(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult>;
+  openFirstTurn?(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult>;
+  openAtTurn?(source: AgentTranscriptSource, turnId: string, startedAt: string): Promise<AgentTranscriptOpenResult>;
+  openAfterTurn?(source: AgentTranscriptSource, turnId: string, startedAt: string): Promise<AgentTranscriptOpenResult>;
 }

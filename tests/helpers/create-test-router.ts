@@ -28,7 +28,7 @@ import { SwarmCommandContextResolver } from "../../src/coordinator/swarm-command
 import { SwarmCommandGateway } from "../../src/coordinator/swarm-command-gateway.js";
 import { MainCardWorkflow } from "../../src/coordinator/main-card-workflow.js";
 import { AnswerPageWorkflow } from "../../src/coordinator/answer-page-workflow.js";
-import type { HerdrPort, LarkPort, TraexControlPort, TraexTranscriptReaderPort } from "../../src/domain/ports.js";
+import type { HerdrPort, LarkPort, TraexControlPort, AgentTranscriptReaderPort } from "../../src/domain/ports.js";
 import { cardKitPanePresentation } from "../../src/cards/cardkit-pane-presentation.js";
 import { cardKitPrimaryPresentation } from "../../src/cards/cardkit-primary-presentation.js";
 import { cardKitApplicationPresentation } from "../../src/cards/cardkit-application-presentation.js";
@@ -60,7 +60,7 @@ export function createTestRouter(
   shutdownGraceMs = 30_000,
   scheduler: PromptWorkScheduler = new InProcessPromptWorkScheduler(logger),
   inboundWork: InboundWorkNotifier = new InProcessInboundWorkNotifier(),
-  transcriptReader?: TraexTranscriptReaderPort,
+  transcriptReader?: AgentTranscriptReaderPort,
   observeExternalTurns = false,
   traexControl: TraexControlPort = { async listModels() { throw new Error("TraeX model control is not configured"); }, async runModelPrompt() { throw new Error("TraeX model control is not configured"); } }
 ): InboundRouter {

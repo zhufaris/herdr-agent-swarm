@@ -1,6 +1,6 @@
 import type { WorkerTurnObservationStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
-import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { AgentTranscriptObservation, AgentTranscriptReaderPort } from "../domain/ports/external.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
@@ -8,7 +8,7 @@ import type { WorkerTurnObservationPort, WorkerTurnWatch } from "../domain/ports
 
 interface Options {
   store: WorkerTurnObservationStore;
-  transcriptReader: TraexTranscriptReaderPort;
+  transcriptReader: AgentTranscriptReaderPort;
   wakeInstance(instanceId: string): void;
   wakeOutbound(): void;
   convergeWorkerTurn?(turnId: string): void;
@@ -23,7 +23,7 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
   private readonly exactTurns: ExactTurnObserver;
   constructor(private readonly options: Options) { this.exactTurns = new ExactTurnObserver(options.transcriptReader); }
 
-  async observe(turnId: string, observation: TraexTranscriptObservation): Promise<void> {
+  async observe(turnId: string, observation: AgentTranscriptObservation): Promise<void> {
     let turn = this.options.store.getInstanceTurn(turnId);
     if (!turn || ["completed", "failed", "cancelled"].includes(turn.state)) { this.headlessOutput.delete(turnId); return; }
     const lifecycle = observation.turnLifecycle;
@@ -81,9 +81,9 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
     const turn = this.options.store.getInstanceTurn(turnId);
     if (!turn) return null;
     const instance = this.options.store.getAgentInstance(turn.instanceId);
-    const session = sessionFor(instance, turn.instanceGeneration);
-    if (!session) return null;
-    const opened = await this.exactTurns.open({ session, boundary: { kind: "latest" } });
+    const source = transcriptSourceForInstance(instance, turn.instanceGeneration);
+    if (!source) return null;
+    const opened = await this.exactTurns.open({ source, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") return null;
     let stopping = false;
     let timer: NodeJS.Timeout | null = null;
@@ -126,10 +126,10 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
     const turn = this.options.store.getInstanceTurn(turnId);
     if (!turn?.runtimeTurnId || !turn.runtimeTurnStartedAt) return;
     const instance = this.options.store.getAgentInstance(turn.instanceId);
-    const session = sessionFor(instance, turn.instanceGeneration);
-    if (!session) return;
+    const source = transcriptSourceForInstance(instance, turn.instanceGeneration);
+    if (!source) return;
     const opened = await this.exactTurns.open({
-      session,
+      source,
       boundary: { kind: "at", turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt },
       expected: { turnId: turn.runtimeTurnId, startedAt: turn.runtimeTurnStartedAt }
     });
@@ -145,13 +145,15 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
   }
   private safeOutput(value: string): string { return this.options.presentation.safeWorkerOutput(value); }
 }
-function observedProgress(observation: TraexTranscriptObservation, occurredAt: string, safeOutput: (value: string) => string): RunProgressEvent[] {
+function observedProgress(observation: AgentTranscriptObservation, occurredAt: string, safeOutput: (value: string) => string): RunProgressEvent[] {
   const tools = (observation.toolActivities ?? []).map((event) => ({ ...event, label: safeOutput(event.label), occurredAt }));
   const plans = (observation.mainStatus?.planSteps ?? []).map((step) => ({ key: `plan:${step.key}`, kind: "step" as const, label: safeOutput(step.label), state: step.state, occurredAt }));
   return [...tools, ...plans];
 }
-function sessionFor(instance: ReturnType<WorkerTurnObservationStore["getAgentInstance"]>, generation: number) {
-  return instance?.runtimeRef?.nativeSessionId && instance.generation === generation && instance.agentKind === "traex"
+function transcriptSourceForInstance(instance: ReturnType<WorkerTurnObservationStore["getAgentInstance"]>, generation: number) {
+  if (!instance || instance.generation !== generation) return null;
+  const nativeSession = instance.runtimeRef?.nativeSessionId && instance.agentKind === "traex"
     ? { source: "herdr:traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId }
     : null;
+  return { agentKind: instance.agentKind, bindingId: instance.id, generation, nativeSession };
 }

@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
 import { formatPromptTitle } from "../domain/prompt-title.js";
-import { transcriptObserverIdentity, transcriptSessionFor } from "../domain/transcript-observer-identity.js";
+import { transcriptObserverIdentity, transcriptSourceFor } from "../domain/transcript-observer-identity.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
-import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { AgentTranscriptObservation, AgentTranscriptReaderPort } from "../domain/ports/external.js";
 import { createQueuedRunCard } from "../domain/run-card-view.js";
-import type { Binding, EventOrigin, ExternalTurnSupersessionFence, PromptJob } from "../domain/types.js";
+import type { Binding, EventOrigin, ExternalTurnSupersessionFence, HerdrAgentSession, PromptJob } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import { outputFingerprint } from "../domain/output-fingerprint.js";
@@ -20,7 +20,7 @@ type ExternalTurnStore = ExternalTurnObservationStore;
 
 interface ExternalTurnObserverOptions {
   store: ExternalTurnStore;
-  transcriptReader: TraexTranscriptReaderPort;
+  transcriptReader: AgentTranscriptReaderPort;
   bus: LifecycleEventPublisher;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
@@ -94,7 +94,7 @@ export class ExternalTurnObserver {
     });
   }
 
-  observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
+  observeSupersedingTurn(binding: Binding, prompt: PromptJob, observation: AgentTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
     if (this.stopping || binding.agentKind !== "traex") return Promise.resolve("ignored");
     return this.track(async () => {
       this.handedOffInFlight.add(binding.id);
@@ -103,8 +103,9 @@ export class ExternalTurnObserver {
     });
   }
 
-  private async observeSupersedingTurnInLifecycle(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
-    const session = transcriptSessionFor(binding);
+  private async observeSupersedingTurnInLifecycle(binding: Binding, prompt: PromptJob, observation: AgentTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed"> {
+    const source = transcriptSourceFor(binding);
+    const session = source.nativeSession;
     const identity = transcriptObserverIdentity(binding);
     if (!session || !identity || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return "ignored";
     let handedOff = this.handedOffBindings.get(binding.id);
@@ -124,10 +125,11 @@ export class ExternalTurnObserver {
   }
 
   private async recoverAfterDetachedTurnInLifecycle(binding: Binding, prompt: PromptJob): Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }> {
-    const session = transcriptSessionFor(binding);
+    const source = transcriptSourceFor(binding);
+    const session = source.nativeSession;
     if (!session || !binding.paneId || !prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt) return { outcome: "unavailable", reason: "missing_exact_turn_identity" };
     const opened = await this.exactTurns.open({
-      session,
+      source,
       boundary: { kind: "after", turnId: prompt.transcriptTurnId, startedAt: prompt.transcriptTurnStartedAt }
     });
     if (opened.mode !== "typed") return { outcome: "unavailable", reason: opened.reason };
@@ -177,14 +179,15 @@ export class ExternalTurnObserver {
 
   private async observeBinding(binding: Binding, force = false): Promise<void> {
     if (this.stopping) return;
-    const session = transcriptSessionFor(binding);
+    const source = transcriptSourceFor(binding);
+    const session = source.nativeSession;
     const identity = transcriptObserverIdentity(binding);
     if (!session || !identity || !binding.paneId) { this.bindings.delete(binding.id); return; }
     let observed = this.bindings.get(binding.id);
     if (!observed || observed.identity !== identity) {
       const durable = this.options.store.getActiveExternalPrompt(binding.id, binding.generation);
       const opened = await this.exactTurns.open({
-        session,
+        source,
         boundary: durable?.transcriptTurnId && durable.transcriptTurnStartedAt
           ? { kind: "at", turnId: durable.transcriptTurnId, startedAt: durable.transcriptTurnStartedAt }
           : { kind: "active" }
@@ -258,7 +261,7 @@ export class ExternalTurnObserver {
     return tracked;
   }
 
-  private async apply(binding: Binding, session: NonNullable<ReturnType<typeof transcriptSessionFor>>, observed: TurnProjectionState, observation: TraexTranscriptObservation, supersede?: ExternalTurnSupersessionFence): Promise<"ignored" | "pending" | "observing" | "completed"> {
+  private async apply(binding: Binding, session: HerdrAgentSession, observed: TurnProjectionState, observation: AgentTranscriptObservation, supersede?: ExternalTurnSupersessionFence): Promise<"ignored" | "pending" | "observing" | "completed"> {
     const lifecycle = observation.turnLifecycle;
     if (observation.freshTurnStart && lifecycle) observed.pendingStarts.set(lifecycle.turnId, lifecycle.startedAt);
     const turnId = observation.turnId ?? lifecycle?.turnId;

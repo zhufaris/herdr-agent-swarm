@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { BridgeConfig } from "../config.js";
-import type { HerdrPort, TraexControlPort, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, TraexControlPort, AgentTranscriptReaderPort } from "../domain/ports/external.js";
 import { feishuGatewayPrimaryPresentation } from "../gateways/feishu/presentation.js";
 import { ExternalTurnObserver } from "../coordinator/external-turn-observer.js";
 import type { MainCardConvergencePort } from "../domain/ports/card-convergence.js";
@@ -23,7 +23,7 @@ export interface PrimaryRuntimeStores {
 
 export function createPrimaryRuntime(options: {
   config: BridgeConfig; stores: PrimaryRuntimeStores; logger: Logger; herdr: HerdrPort; traexControl: TraexControlPort; bus: LifecycleEventPublisher;
-  scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: TraexTranscriptReaderPort;
+  scheduler: PromptWorkScheduler; outboundWork: OutboundWorkNotifier; transcriptReader: AgentTranscriptReaderPort;
   mainCards: Pick<MainCardConvergencePort, "converge">;
   agentDrivers: AgentDriverCatalog;
   presentation?: PrimaryPresentation;

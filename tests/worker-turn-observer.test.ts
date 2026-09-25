@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
-import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptReaderPort } from "../src/domain/ports.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { workerPresentation } from "./helpers/presentation.js";
 import { MAX_TURN_OUTPUT_CHARS, TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
@@ -22,7 +22,7 @@ function setup() {
   store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "lark:turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "message-1", view, render: renderWorkerTurnCard });
   store.claimNextInstanceTurn(worker.id, worker.generation);
   store.updateInstanceTurn({ turnId: "turn-1", expectedGeneration: worker.generation, state: "running", eventKind: "turn.running" });
-  const transcriptReader: TraexTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" as const })) };
+  const transcriptReader: AgentTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" as const })) };
   const observer = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: vi.fn(), wakeOutbound: vi.fn(), presentation: workerPresentation });
   return { worker, observer, transcriptReader };
 }
@@ -150,7 +150,7 @@ describe("WorkerTurnObserver", () => {
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
+    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }), runtimeTurnId, startedAt);
     expect(submit).not.toHaveBeenCalled();
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "recovered" });
   });
@@ -178,7 +178,7 @@ describe("WorkerTurnObserver", () => {
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId }, runtimeTurnId, startedAt);
+    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }), runtimeTurnId, startedAt);
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "full recovered answer" });
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "full recovered answer", resultCapture: "captured" });
   });

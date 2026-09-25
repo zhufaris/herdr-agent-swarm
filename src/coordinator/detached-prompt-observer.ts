@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import type { BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, TraexTranscriptObservation } from "../domain/ports/external.js";
+import type { HerdrPort, AgentTranscriptObservation } from "../domain/ports/external.js";
 import type { PromptRecoveryStore } from "../domain/ports/prompt-run.js";
 import type { Binding, EventOrigin, PromptJob } from "../domain/types.js";
 import { outputFingerprint } from "../domain/output-fingerprint.js";
@@ -21,7 +21,7 @@ interface Options {
   logger: Pick<Logger, "info" | "warn">;
   isBindingActive(bindingId: string): boolean;
   isStopping(): boolean;
-  observeSupersedingExternalTurn?(binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed">;
+  observeSupersedingExternalTurn?(binding: Binding, prompt: PromptJob, observation: AgentTranscriptObservation): Promise<"ignored" | "pending" | "observing" | "completed">;
   publish<T extends BridgeEvent["type"]>(bindingId: string, type: T, origin: EventOrigin, payload: BridgeEventOf<T>["payload"]): Promise<void>;
 }
 

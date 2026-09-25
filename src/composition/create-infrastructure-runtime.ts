@@ -17,10 +17,14 @@ import type { HerdrRuntimeHint } from "../runtime/herdr-event-hint.js";
 import { HerdrPaneHost } from "../runtime/herdr/pane-host.js";
 import { HerdrSocketSubscriber } from "../runtime/herdr-socket-subscriber.js";
 import { TraexTranscriptReader } from "../runtime/traex-transcript.js";
+import { PiTranscriptReader } from "../runtime/pi-transcript.js";
+import { AgentTranscriptReader } from "../runtime/agent-transcript-reader.js";
 import { WorkspaceSnapshotCache } from "../runtime/workspace-snapshot-cache.js";
 import { WorktreeManager } from "../runtime/worktree-manager.js";
 import { WorktreeNameResolver } from "../runtime/worktree-name-resolver.js";
 import { RuntimeLink } from "./runtime-link.js";
+import type { AgentKind } from "../domain/agent-instance.js";
+import type { AgentTranscriptReaderPort } from "../domain/ports/external.js";
 
 export interface AgentRuntimeAvailability { codex: boolean; claude: boolean; pi: boolean; }
 
@@ -50,16 +54,20 @@ export function createInfrastructureRuntime(
     { threads: true, richViews: true, mutableSurfaces: true, interactions: true, orderedStreaming: true }
   );
   const gatewayEffects = new GatewayEffectClient(gateway.delivery);
+  const piTranscriptRoot = resolve(dirname(config.databasePath), "pi-sessions");
   const agentDrivers = new AgentDriverRegistry([
     new TraexDriver(herdr, config.traex.executable, config.turnTimeoutMs),
     new CodexDriver(herdr, config.agents.codex, config.turnTimeoutMs, availability.codex),
     new ClaudeCodeDriver(herdr, config.agents.claudeCode, config.turnTimeoutMs, availability.claude),
-    new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, availability.pi)
+    new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, availability.pi, piTranscriptRoot)
   ]);
   return {
     runner, worktreeNameResolver, herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers,
     worktrees: new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs }),
     gateway, gatewayEffects,
-    transcriptReader: new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot })
+    transcriptReader: new AgentTranscriptReader(new Map<AgentKind, AgentTranscriptReaderPort>([
+      ["traex", new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot })],
+      ["pi", new PiTranscriptReader({ root: piTranscriptRoot })]
+    ]))
   };
 }

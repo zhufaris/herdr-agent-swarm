@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { TraexDriver } from "../src/runtime/agents/traex-driver.js";
 import { CodexDriver } from "../src/runtime/agents/codex-driver.js";
@@ -163,6 +166,17 @@ describe("agent driver contract", () => {
   it("reports unsupported steering explicitly for Pi", async () => {
     const driver = new PiDriver({} as HerdrPort, "pi", 1_000, true);
     await expect(driver.steer(runtime, "change course")).resolves.toEqual({ status: "unsupported" });
+  });
+
+  it("starts managed Pi with a deterministic private transcript session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-driver-"));
+    try {
+      const startAgent = vi.fn(async () => undefined);
+      const driver = new PiDriver({ startAgent } as unknown as HerdrPort, "pi", 1_000, true, root);
+      expect(driver.describe()).toMatchObject({ structuredEvents: true, usageReporting: true });
+      await driver.start(runtime, { name: "primary", model: null, transcriptOwnerId: "binding-1" });
+      expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["--session-id", expect.stringMatching(/^[0-9a-f-]{36}$/), "--session-dir", expect.stringContaining("binding-1")] }));
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("detects all configured Agent runtimes with one Herdr capability probe", async () => {

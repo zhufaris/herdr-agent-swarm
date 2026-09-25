@@ -1123,7 +1123,7 @@ describe("application composition boundaries", () => {
       "findCompletedTurnBoundary",
       "findTurnStartBoundary",
     ]) expect(facade).toContain(participant);
-    expect(facade).toContain("implements TraexTranscriptReaderPort");
+    expect(facade).toContain("implements AgentTranscriptReaderPort");
     expect(facade).toContain('export { scanTranscriptPaths } from "./traex-transcript/locator.js"');
 
     const srcDir = fileURLToPath(new URL("../src", import.meta.url));

@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import type { TraexTranscriptOpenResult, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { AgentTranscriptOpenResult, AgentTranscriptReaderPort, AgentTranscriptSource } from "../domain/ports/external.js";
 import type { HerdrAgentSession } from "../domain/types.js";
 import { MAX_TURN_OUTPUT_CHARS } from "./bounded-turn-output.js";
 import { latestActiveTranscriptBaseline, latestTranscriptBaseline } from "./traex-transcript/baseline-reader.js";
@@ -7,7 +7,7 @@ import { findCompletedTurnBoundary, findTurnStartBoundary, MAX_RECOVERY_SCAN_BYT
 import { DEFAULT_MAX_READ_BYTES, FileTraexTranscriptCursor } from "./traex-transcript/file-cursor.js";
 import { TranscriptLocator } from "./traex-transcript/locator.js";
 import type { TranscriptDiscoveryResult, TranscriptPathIndex } from "./traex-transcript/locator.js";
-import { SESSION_ID } from "./traex-transcript/record-codec.js";
+import { AGENT_SESSION_ID } from "./agent-transcript-codec.js";
 
 const DEFAULT_MAX_RENDERED_DELTA_CHARS = MAX_TURN_OUTPUT_CHARS;
 
@@ -27,7 +27,7 @@ export interface TraexTranscriptReaderOptions {
   scan?: (root: string, maxEntries: number) => Promise<TranscriptPathIndex>;
 }
 
-export class TraexTranscriptReader implements TraexTranscriptReaderPort {
+export class TraexTranscriptReader implements AgentTranscriptReaderPort {
   private readonly locator: TranscriptLocator;
   private readonly maxReadBytes: number;
   private readonly maxRenderedDeltaChars: number;
@@ -38,8 +38,8 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? DEFAULT_MAX_RENDERED_DELTA_CHARS;
   }
 
-  async open(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
-    const identity = validateSession(session);
+  async open(source: AgentTranscriptSource | HerdrAgentSession | null | undefined): Promise<AgentTranscriptOpenResult> {
+    const identity = validateSession(source);
     if (typeof identity !== "string") return identity;
     try {
       const sessionId = identity;
@@ -62,8 +62,8 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     }
   }
 
-  async openActiveTurn(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
-    const identity = validateSession(session);
+  async openActiveTurn(source: AgentTranscriptSource | HerdrAgentSession | null | undefined): Promise<AgentTranscriptOpenResult> {
+    const identity = validateSession(source);
     if (typeof identity !== "string") return identity;
     try {
       const path = await this.locator.resolveTranscriptPath(identity);
@@ -81,8 +81,8 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     }
   }
 
-  async openFirstTurn(session: HerdrAgentSession | null | undefined): Promise<TraexTranscriptOpenResult> {
-    const identity = validateSession(session);
+  async openFirstTurn(source: AgentTranscriptSource | HerdrAgentSession | null | undefined): Promise<AgentTranscriptOpenResult> {
+    const identity = validateSession(source);
     if (typeof identity !== "string") return identity;
     try {
       const path = await this.locator.resolveTranscriptPath(identity);
@@ -96,11 +96,11 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   }
 
   async openAfterTurn(
-    session: HerdrAgentSession | null | undefined,
+    source: AgentTranscriptSource | HerdrAgentSession | null | undefined,
     turnId: string,
     startedAt: string,
-  ): Promise<TraexTranscriptOpenResult> {
-    const identity = validateSessionAndTurn(session, turnId);
+  ): Promise<AgentTranscriptOpenResult> {
+    const identity = validateSessionAndTurn(source, turnId);
     if (typeof identity !== "string") return identity;
     try {
       const path = await this.locator.resolveTranscriptPath(identity);
@@ -122,11 +122,11 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   }
 
   async openAtTurn(
-    session: HerdrAgentSession | null | undefined,
+    source: AgentTranscriptSource | HerdrAgentSession | null | undefined,
     turnId: string,
     startedAt: string,
-  ): Promise<TraexTranscriptOpenResult> {
-    const identity = validateSessionAndTurn(session, turnId);
+  ): Promise<AgentTranscriptOpenResult> {
+    const identity = validateSessionAndTurn(source, turnId);
     if (typeof identity !== "string") return identity;
     try {
       const path = await this.locator.resolveTranscriptPath(identity);
@@ -147,7 +147,7 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
     }
   }
 
-  private async openAtEnd(path: string): Promise<TraexTranscriptOpenResult> {
+  private async openAtEnd(path: string): Promise<AgentTranscriptOpenResult> {
     const file = await stat(path);
     const baseline = await latestTranscriptBaseline(
       path, file.size, this.maxReadBytes, this.maxRenderedDeltaChars,
@@ -159,29 +159,25 @@ export class TraexTranscriptReader implements TraexTranscriptReaderPort {
   }
 }
 
-function validateSession(
-  session: HerdrAgentSession | null | undefined,
-): string | TraexTranscriptOpenResult {
+function validateSession(source: AgentTranscriptSource | HerdrAgentSession | null | undefined): string | AgentTranscriptOpenResult {
+  const session = source && "nativeSession" in source ? source.nativeSession : source;
   if (!session) return unavailable("missing_session_identity");
-  if (session.agent !== "traex" || session.kind !== "id" || !SESSION_ID.test(session.value)) {
+  if (session.agent !== "traex" || session.kind !== "id" || !AGENT_SESSION_ID.test(session.value)) {
     return unavailable("unsupported_session_identity");
   }
   return session.value;
 }
 
-function validateSessionAndTurn(
-  session: HerdrAgentSession | null | undefined,
-  turnId: string,
-): string | TraexTranscriptOpenResult {
-  const identity = validateSession(session);
+function validateSessionAndTurn(source: AgentTranscriptSource | HerdrAgentSession | null | undefined, turnId: string): string | AgentTranscriptOpenResult {
+  const identity = validateSession(source);
   if (typeof identity !== "string") return identity;
-  return SESSION_ID.test(turnId) ? identity : unavailable("unsupported_session_identity");
+  return AGENT_SESSION_ID.test(turnId) ? identity : unavailable("unsupported_session_identity");
 }
 
-function unavailable(reason: Extract<TraexTranscriptOpenResult, { mode: "unavailable" }>["reason"]): TraexTranscriptOpenResult {
+function unavailable(reason: Extract<AgentTranscriptOpenResult, { mode: "unavailable" }>["reason"]): AgentTranscriptOpenResult {
   return { mode: "unavailable", reason };
 }
 
-function typed(cursor: FileTraexTranscriptCursor): TraexTranscriptOpenResult {
+function typed(cursor: FileTraexTranscriptCursor): AgentTranscriptOpenResult {
   return { mode: "typed", cursor };
 }

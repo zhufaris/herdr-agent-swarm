@@ -81,7 +81,7 @@ export class InstanceControlWorkflow implements InstanceControlPort {
       const pending = instance.pendingRuntimeRef;
       if (!pending) throw new Error("Provisioning pane checkpoint is missing");
       if (instance.provisioningCheckpoint === "pane-allocated") {
-        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, managedName: workerAgentName(instance), model: instance.model });
+        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, managedName: workerAgentName(instance), model: instance.model, transcriptOwnerId: instance.id });
         instance = this.requireCheckpoint(instance, "runtime-started", "starting");
       }
       if (instance.provisioningCheckpoint === "runtime-started") {

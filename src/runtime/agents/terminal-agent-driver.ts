@@ -12,14 +12,17 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
   constructor(protected readonly herdr: HerdrPort, protected readonly executable: string, protected readonly turnTimeoutMs: number, protected readonly available: boolean) {}
   abstract describe(): AgentCapabilities;
 
-  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
+  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; transcriptOwnerId?: string; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
     if (!this.available) throw new Error(`Agent adapter is unavailable: ${this.kind}`);
     if (!this.herdr.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
     const args = options?.model && this.describe().modelSelection !== "unsupported" ? ["--model", options.model] : [];
+    await this.extendStartupArgs(args, runtime, options);
     if (options?.primaryTools && this.kind === "codex") args.push(...(options.primaryTools.agentArgs ?? []), ...primaryToolMcpArguments(options.primaryTools));
     const name = options?.managedName ? normalizeManagedAgentName(options.managedName) : managedAgentName(options?.projectId, options?.name ?? this.kind);
     await this.herdr.startAgent(runtime.paneId, { name, kind: this.herdrKind, executable: this.executable, args });
   }
+
+  protected async extendStartupArgs(_args: string[], _runtime: AgentRuntimeRef, _options?: { transcriptOwnerId?: string }): Promise<void> {}
 
   async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt> {
     if (!this.available) return { status: "not-delivered", reason: `Agent adapter is unavailable: ${this.kind}` };

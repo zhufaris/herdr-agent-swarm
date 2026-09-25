@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HerdrAgentSession } from "../src/domain/types.js";
-import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult } from "../src/domain/ports.js";
+import type { AgentTranscriptCursorPort, AgentTranscriptOpenResult } from "../src/domain/ports.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
 
 const sessionId = "01a03eb1-c193-7531-83c0-e6c6f70143d4";
@@ -44,7 +44,7 @@ function eventMessage(payload: unknown): string {
   return `${JSON.stringify({ type: "event_msg", payload })}\n`;
 }
 
-async function expectTyped(result: TraexTranscriptOpenResult): Promise<TraexTranscriptCursorPort> {
+async function expectTyped(result: AgentTranscriptOpenResult): Promise<AgentTranscriptCursorPort> {
   expect(result.mode).toBe("typed");
   if (result.mode !== "typed") throw new Error(`Expected typed transcript, received ${result.reason}`);
   return result.cursor;

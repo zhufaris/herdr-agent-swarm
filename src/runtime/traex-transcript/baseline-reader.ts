@@ -1,5 +1,5 @@
 import { open } from "node:fs/promises";
-import type { TraexTranscriptObservation } from "../../domain/ports/external.js";
+import type { AgentTranscriptObservation } from "../../domain/ports/external.js";
 import {
   MAX_RECOVERY_RECORD_BYTES,
   RECOVERY_SCAN_CHUNK_BYTES,
@@ -18,7 +18,7 @@ import {
 
 export interface TranscriptBaseline {
   tokenCount: number | null;
-  turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
+  turnLifecycle: AgentTranscriptObservation["turnLifecycle"];
   replayOffset: number | null;
 }
 
@@ -34,7 +34,7 @@ export async function latestTranscriptBaseline(
   const handle = await open(path, "r");
   try {
     let tokenCount: number | null = null;
-    let turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
+    let turnLifecycle: AgentTranscriptObservation["turnLifecycle"];
     let activeTurnOffset: number | null = null;
     let activeTurnTokenBaseline: number | null = null;
     let readOffset = start;
@@ -116,7 +116,7 @@ export async function latestActiveTranscriptBaseline(
   let activeTurnTokenBaseline: number | null | undefined;
   let latestStartOffset: number | null = null;
   const laterLifecycle: TraexTranscriptEnvelope[] = [];
-  let turnLifecycle: TraexTranscriptObservation["turnLifecycle"];
+  let turnLifecycle: AgentTranscriptObservation["turnLifecycle"];
   try {
     await scanRecordsBackward(handle, lowerBound, end, (record, offset) => {
       if (!isBaselineEventRecord(record)) return false;

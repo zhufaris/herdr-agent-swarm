@@ -17,7 +17,7 @@ import { PrimaryToolGateway } from "../runtime/primary-tool-gateway.js";
 import type { WorktreePort } from "../domain/ports/worktree.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { PaneHost } from "../domain/ports/pane-host.js";
-import type { TraexTranscriptReader } from "../runtime/traex-transcript.js";
+import type { AgentTranscriptReaderPort } from "../domain/ports/external.js";
 import { RuntimeLink } from "./runtime-link.js";
 import { feishuGatewayWorkerPresentation } from "../gateways/feishu/presentation.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
@@ -32,7 +32,7 @@ export interface WorkerRuntimeStores {
 export function createWorkerRuntime(options: {
   config: BridgeConfig; stores: WorkerRuntimeStores; logger: Logger; turnControl: TurnControlPort;
   paneHost: PaneHost; agentDrivers: AgentDriverCatalog; worktrees: WorktreePort;
-  transcriptReader: TraexTranscriptReader; outboundWork: OutboundWorkNotifier; applicationPresentation: ApplicationPresentation;
+  transcriptReader: AgentTranscriptReaderPort; outboundWork: OutboundWorkNotifier; applicationPresentation: ApplicationPresentation;
   workerTurnCards: WorkerTurnCardConvergencePort;
 }) {
   const { config, stores, logger, turnControl, paneHost, agentDrivers, worktrees, transcriptReader, outboundWork, workerTurnCards, applicationPresentation } = options;

@@ -555,7 +555,7 @@ describe("pane/thread lifecycle integration", () => {
     store.markPromptDispatched("old", "2026-08-30T00:00:01.000Z");
     expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5501", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
     store.markPromptObservationDetached("old", "interrupted");
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", requestText: "new request", answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "new answer", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
@@ -596,7 +596,7 @@ describe("pane/thread lifecycle integration", () => {
     store.markPromptDispatched("old", "2026-08-30T00:00:01.000Z");
     expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5501", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
     store.markPromptObservationDetached("old", "restart recovery");
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, requestText: "external one", answerDelta: "answer one", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "answer one" } },
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", freshTurnStart: true, requestText: "external two", answerDelta: "answer two", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", state: "completed", startedAt: "2026-08-30T00:00:03.000Z", finalAnswer: "answer two" } }
     ];
@@ -677,7 +677,7 @@ function message(index: number, text: string) {
   return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
 }
 
-function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort, logger = pino({ enabled: false }), observeExternalTurns = false) {
+function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").AgentTranscriptReaderPort, logger = pino({ enabled: false }), observeExternalTurns = false) {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();

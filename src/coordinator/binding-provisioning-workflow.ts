@@ -262,7 +262,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       return;
     }
     if (!driver.describe().available) throw new Error(`Agent adapter is unavailable: ${binding.agentKind}`);
-    await driver.start({ herdrWorkspaceId: binding.workspaceId, paneId: pane.paneId, nativeSessionId: null, generation: binding.generation }, { ...(binding.projectId ? { projectId: binding.projectId } : {}), name: "primary", managedName: primaryManagedAgentName(binding.projectId, binding.id, binding.generation), model: null, ...(binding.agentKind === "traex" ? { primaryTools: tools } : {}) });
+    await driver.start({ herdrWorkspaceId: binding.workspaceId, paneId: pane.paneId, nativeSessionId: null, generation: binding.generation }, { ...(binding.projectId ? { projectId: binding.projectId } : {}), name: "primary", managedName: primaryManagedAgentName(binding.projectId, binding.id, binding.generation), model: null, transcriptOwnerId: binding.id, ...(binding.agentKind === "traex" ? { primaryTools: tools } : {}) });
   }
 
   private primaryToolConfiguration(binding: Pick<Binding, "id" | "generation" | "agentKind">, issue: boolean): PrimaryToolConfiguration {

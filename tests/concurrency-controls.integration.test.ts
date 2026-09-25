@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
-import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { HerdrPort, LarkPort, AgentTranscriptReaderPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
@@ -405,9 +405,9 @@ describe("coordinator concurrency controls", () => {
       "```bash\nnpm test\n```\n\n```text\n12 tests passed\n```",
       "```diff\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n```"
     ];
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
-        expect(session).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        expect(source.nativeSession).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
         return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
           return { turnId, freshTurnStart: true, answerDelta: deltas.shift() ?? "", turnLifecycle: { turnId, state: "active", startedAt: new Date().toISOString() } };
         } } };
@@ -452,7 +452,7 @@ describe("coordinator concurrency controls", () => {
   it("routes one typed observation to independent Answer and Main Card projections", async () => {
     let reads = 0;
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -498,7 +498,7 @@ describe("coordinator concurrency controls", () => {
     const turnA = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     const turnB = "01a052d3-9c14-70e1-a375-397e2ecb55ea";
     let reads = 0;
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -547,7 +547,7 @@ describe("coordinator concurrency controls", () => {
     let reads = 0;
     let releasePrompt!: () => void;
     const promptCompletion = new Promise<void>((resolve) => { releasePrompt = resolve; });
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -615,7 +615,7 @@ describe("coordinator concurrency controls", () => {
         return { turnId, answerDelta: "", turnLifecycle: { turnId, state: "completed" as const, startedAt, finalAnswer: "First commentary after stall" } };
       }
     } }));
-    const transcriptReader: TraexTranscriptReaderPort = { open };
+    const transcriptReader: AgentTranscriptReaderPort = { open };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       await onDispatched?.();
       await new Promise((resolve) => setTimeout(resolve, 350));
@@ -658,7 +658,7 @@ describe("coordinator concurrency controls", () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let startedAt = "";
     let reads = 0;
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -699,7 +699,7 @@ describe("coordinator concurrency controls", () => {
 
   it("does not recover an old transcript turn after Herdr reports stalled", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
         return { turnId, freshTurnStart: true, answerDelta: "Old answer", turnLifecycle: { turnId, state: "completed" as const, startedAt: "2020-01-01T00:00:00.000Z", finalAnswer: "Old answer" } };
       } } }; }
@@ -766,7 +766,7 @@ describe("coordinator concurrency controls", () => {
 
   it("rejects transcript output whose lifecycle predates dispatch tolerance", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() { return { turnId, freshTurnStart: true, answerDelta: "baseline answer", turnLifecycle: { turnId, state: "active" as const, startedAt: "2020-01-01T00:00:00.000Z" } }; }
@@ -800,7 +800,7 @@ describe("coordinator concurrency controls", () => {
 
   it("does not claim an inherited baseline lifecycle near the dispatch boundary", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() { return { turnId, answerDelta: "baseline answer", turnLifecycle: { turnId, state: "active" as const, startedAt: new Date(Date.now() - 500).toISOString() } }; }
@@ -878,7 +878,7 @@ describe("coordinator concurrency controls", () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let reads = 0;
     const repeated = { turnId, freshTurnStart: true, answerDelta: "Owned once", turnLifecycle: { turnId, state: "active" as const, startedAt: new Date().toISOString() } };
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() { reads += 1; return repeated; } } }; }
     };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
@@ -906,9 +906,9 @@ describe("coordinator concurrency controls", () => {
   });
 
   it("keeps terminal text out of the Answer when no session identity exists", async () => {
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
-        expect(session).toBeNull();
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        expect(source.nativeSession).toBeNull();
         return { mode: "unavailable", reason: "missing_session_identity" };
       }
     };
@@ -940,8 +940,9 @@ describe("coordinator concurrency controls", () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let store!: SqliteBindingStore;
     const opens: Array<string | null> = [];
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        const session = source.nativeSession;
         opens.push(session?.value ?? null);
         if (!session) {
           store.updateBindingMetadata("b1", { agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: sessionId });
@@ -991,8 +992,9 @@ describe("coordinator concurrency controls", () => {
     let dispatched = false;
     let transcriptAvailable = false;
     const opens: Array<string | null> = [];
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        const session = source.nativeSession;
         opens.push(session?.value ?? null);
         if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
         if (!transcriptAvailable) return { mode: "unavailable", reason: "transcript_not_found" };
@@ -1003,7 +1005,7 @@ describe("coordinator concurrency controls", () => {
           return { turnId, freshTurnStart: true, requestText: "first native turn", answerDelta: "authoritative first-turn answer", turnLifecycle: { turnId, state: "completed", startedAt, finalAnswer: "authoritative first-turn answer" } };
         } } };
       },
-      async openFirstTurn(session) { return this.open(session); }
+      async openFirstTurn(source) { return this.open(source); }
     };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       dispatched = true;
@@ -1045,9 +1047,10 @@ describe("coordinator concurrency controls", () => {
     const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let opens = 0;
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
         opens += 1;
+        const session = source.nativeSession;
         expect(session).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId });
         if (opens === 1) return { mode: "unavailable", reason: "transcript_not_found" };
         let read = false;
@@ -1087,7 +1090,7 @@ describe("coordinator concurrency controls", () => {
   });
 
   it("keeps terminal output out of the Answer when typed transcript reading fails", async () => {
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { throw new Error("transcript unavailable"); } } }; }
     };
     const herdr: HerdrPort = {
@@ -1118,7 +1121,7 @@ describe("coordinator concurrency controls", () => {
   });
 
   it("ignores terminal redraws when structured output is unavailable", async () => {
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; }
     };
     const herdr: HerdrPort = {
@@ -1152,7 +1155,7 @@ describe("coordinator concurrency controls", () => {
   it("does not mix terminal text into an answer after typed output was established", async () => {
     let reads = 0;
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
         reads += 1;
         if (reads === 1) return { turnId, freshTurnStart: true, answerDelta: "authoritative typed answer", turnLifecycle: { turnId, state: "active" as const, startedAt: new Date().toISOString() } };

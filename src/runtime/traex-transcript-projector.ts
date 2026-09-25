@@ -1,6 +1,7 @@
 import { z } from "zod";
-import type { TraexTranscriptMainStatus, TraexTranscriptObservation, TraexTranscriptPlanStep } from "../domain/ports/external.js";
+import type { AgentTranscriptMainStatus, AgentTranscriptObservation, AgentTranscriptPlanStep } from "../domain/ports/external.js";
 import type { AnswerTimelineDelta, AnswerTimelineToolCategory } from "../domain/answer-timeline.js";
+import { boundTranscriptMarkdown } from "./agent-transcript-codec.js";
 import { normalizeToolOutput, projectToolCall, projectToolResult, projectToolResultState, type ToolActivityDescriptor } from "./tool-activity-projector.js";
 import { redactSecrets } from "./redact-secrets.js";
 
@@ -28,9 +29,9 @@ export class TraexTranscriptProjector {
   private readonly callsById = new Map<string, { descriptor: ToolActivityDescriptor; sequence: number }>();
   private nextTimelineSequence = 1;
 
-  project(input: { lines: readonly string[]; initialLifecycle: TraexTranscriptObservation["turnLifecycle"]; tokenBaseline: number | null; maxRenderedDeltaChars: number }): { observation: TraexTranscriptObservation; lifecycle: TraexTranscriptObservation["turnLifecycle"] } {
-    const blocks: string[] = []; const toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]> = []; const timelineDeltas: AnswerTimelineDelta[] = [];
-    let statusTitle: string | undefined; let planSteps: TraexTranscriptPlanStep[] | undefined; let tokenCount: number | undefined;
+  project(input: { lines: readonly string[]; initialLifecycle: AgentTranscriptObservation["turnLifecycle"]; tokenBaseline: number | null; maxRenderedDeltaChars: number }): { observation: AgentTranscriptObservation; lifecycle: AgentTranscriptObservation["turnLifecycle"] } {
+    const blocks: string[] = []; const toolActivities: NonNullable<AgentTranscriptObservation["toolActivities"]> = []; const timelineDeltas: AnswerTimelineDelta[] = [];
+    let statusTitle: string | undefined; let planSteps: AgentTranscriptPlanStep[] | undefined; let tokenCount: number | undefined;
     let lifecycle = input.initialLifecycle; let observationTurnId = lifecycle?.state === "active" ? lifecycle.turnId : undefined; let freshTurnStart = false; let requestText: string | undefined;
     for (const line of input.lines) {
       const envelope = parseEnvelope(line); if (!envelope) continue;
@@ -40,7 +41,7 @@ export class TraexTranscriptProjector {
         if (started.success) { observationTurnId = started.data.turn_id; freshTurnStart = true; this.callsById.clear(); this.emittedItemIds.clear(); this.emittedUserMessageIds.clear(); this.nextTimelineSequence = 1; }
         lifecycle = reduceTurnLifecycle(lifecycle, envelope, input.maxRenderedDeltaChars);
         const userMessage = userMessageEventSchema.safeParse(envelope.payload);
-        if (userMessage.success && observationTurnId && lifecycle?.turnId === observationTurnId) requestText = boundMarkdown(redactSecrets(userMessage.data.message), input.maxRenderedDeltaChars);
+        if (userMessage.success && observationTurnId && lifecycle?.turnId === observationTurnId) requestText = boundTranscriptMarkdown(redactSecrets(userMessage.data.message), input.maxRenderedDeltaChars);
         const completedUserMessage = completedUserMessageEventSchema.safeParse(envelope.payload);
         if (completedUserMessage.success && observationTurnId && completedUserMessage.data.turn_id === observationTurnId && lifecycle?.turnId === observationTurnId) {
           const text = this.userMessageText(completedUserMessage.data.item, input.maxRenderedDeltaChars);
@@ -69,8 +70,8 @@ export class TraexTranscriptProjector {
         const rendered = this.renderItem(item, toolActivities, timelineDeltas, timelineEnabled, input.maxRenderedDeltaChars); if (rendered) blocks.push(rendered);
       }
     }
-    const mainStatus: TraexTranscriptMainStatus = { ...(statusTitle ? { statusTitle } : {}), ...(planSteps ? { planSteps } : {}), ...(tokenCount !== undefined ? { tokenCount } : {}) };
-    const observation: TraexTranscriptObservation = { ...(observationTurnId ? { turnId: observationTurnId } : {}), ...(freshTurnStart ? { freshTurnStart: true } : {}), ...(requestText !== undefined ? { requestText } : {}), answerDelta: boundMarkdown(redactSecrets(blocks.join("\n\n")), input.maxRenderedDeltaChars), ...(timelineDeltas.length ? { timelineDeltas } : {}), ...(toolActivities.length ? { toolActivities } : {}), ...(Object.keys(mainStatus).length ? { mainStatus } : {}), ...(observationTurnId && lifecycle?.turnId === observationTurnId ? { turnLifecycle: lifecycle } : {}) };
+    const mainStatus: AgentTranscriptMainStatus = { ...(statusTitle ? { statusTitle } : {}), ...(planSteps ? { planSteps } : {}), ...(tokenCount !== undefined ? { tokenCount } : {}) };
+    const observation: AgentTranscriptObservation = { ...(observationTurnId ? { turnId: observationTurnId } : {}), ...(freshTurnStart ? { freshTurnStart: true } : {}), ...(requestText !== undefined ? { requestText } : {}), answerDelta: boundTranscriptMarkdown(redactSecrets(blocks.join("\n\n")), input.maxRenderedDeltaChars), ...(timelineDeltas.length ? { timelineDeltas } : {}), ...(toolActivities.length ? { toolActivities } : {}), ...(Object.keys(mainStatus).length ? { mainStatus } : {}), ...(observationTurnId && lifecycle?.turnId === observationTurnId ? { turnLifecycle: lifecycle } : {}) };
     if (lifecycle?.state === "completed" || lifecycle?.state === "aborted") this.callsById.clear();
     return { observation, lifecycle };
   }
@@ -80,10 +81,10 @@ export class TraexTranscriptProjector {
     const text = message.content.filter((part) => part.type === "input_text" || part.type === "text").map((part) => part.text?.trim() ?? "").filter(Boolean).join("\n\n");
     if (!text) return null;
     this.emittedUserMessageIds.add(message.id);
-    return boundMarkdown(redactSecrets(text), max);
+    return boundTranscriptMarkdown(redactSecrets(text), max);
   }
 
-  private renderItem(item: unknown, toolActivities: NonNullable<TraexTranscriptObservation["toolActivities"]>, timelineDeltas: AnswerTimelineDelta[], timelineEnabled: boolean, max: number): string {
+  private renderItem(item: unknown, toolActivities: NonNullable<AgentTranscriptObservation["toolActivities"]>, timelineDeltas: AnswerTimelineDelta[], timelineEnabled: boolean, max: number): string {
     const message = messageItemSchema.safeParse(item);
     if (message.success) {
       if (message.data.role !== "assistant" || this.emittedItemIds.has(message.data.id)) return "";
@@ -129,14 +130,13 @@ function toolCategory(descriptor: ToolActivityDescriptor): AnswerTimelineToolCat
 }
 
 function safeTimelineText(value: string, max: number): string {
-  return boundMarkdown(redactSecrets(value.replace(/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, "")), max);
+  return boundTranscriptMarkdown(redactSecrets(value.replace(/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, "")), max);
 }
 
 function parseEnvelope(line: string): z.infer<typeof envelopeSchema> | null { try { const parsed = envelopeSchema.safeParse(JSON.parse(line)); return parsed.success ? parsed.data : null; } catch { return null; } }
-function projectActivity(callId: string, descriptor: ToolActivityDescriptor, state: "active" | "done" | "failed"): NonNullable<TraexTranscriptObservation["toolActivities"]>[number] | null { if (descriptor.category === "Command" && !descriptor.target) return null; const kind = descriptor.category === "Read" ? "read" : descriptor.category === "Search" ? "search" : descriptor.category === "Edit" ? "edit" : descriptor.category === "Command" && /(?:^|\s)(?:npm|npx|pnpm|yarn|bun|uv|pytest|cargo|go)\b.*\btest(?:s|ing)?\b|\b(?:vitest|jest|pytest)\b/i.test(descriptor.target) ? "test" : "step"; return { key: `tool:${callId}`, kind, label: `${descriptor.category} · ${descriptor.target}`, state }; }
-function reduceTurnLifecycle(current: TraexTranscriptObservation["turnLifecycle"], envelope: z.infer<typeof envelopeSchema>, max: number): TraexTranscriptObservation["turnLifecycle"] { if (envelope.type !== "event_msg") return current; const started = taskStartedEventSchema.safeParse(envelope.payload); if (started.success) return { turnId: started.data.turn_id, state: "active", startedAt: eventTime(started.data.started_at) }; const completed = taskCompleteEventSchema.safeParse(envelope.payload); if (completed.success) { if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current; const finalAnswer = completed.data.last_agent_message ? boundMarkdown(redactSecrets(completed.data.last_agent_message.trim()), max) : ""; return { turnId: completed.data.turn_id, state: "completed", startedAt: current.startedAt, ...(finalAnswer ? { finalAnswer } : {}) }; } const aborted = turnAbortedEventSchema.safeParse(envelope.payload); if (!aborted.success || current?.state !== "active" || current.turnId !== aborted.data.turn_id) return current; return { turnId: aborted.data.turn_id, state: "aborted", startedAt: current.startedAt, ...(aborted.data.reason ? { reason: boundMarkdown(redactSecrets(aborted.data.reason), max) } : {}) }; }
+function projectActivity(callId: string, descriptor: ToolActivityDescriptor, state: "active" | "done" | "failed"): NonNullable<AgentTranscriptObservation["toolActivities"]>[number] | null { if (descriptor.category === "Command" && !descriptor.target) return null; const kind = descriptor.category === "Read" ? "read" : descriptor.category === "Search" ? "search" : descriptor.category === "Edit" ? "edit" : descriptor.category === "Command" && /(?:^|\s)(?:npm|npx|pnpm|yarn|bun|uv|pytest|cargo|go)\b.*\btest(?:s|ing)?\b|\b(?:vitest|jest|pytest)\b/i.test(descriptor.target) ? "test" : "step"; return { key: `tool:${callId}`, kind, label: `${descriptor.category} · ${descriptor.target}`, state }; }
+function reduceTurnLifecycle(current: AgentTranscriptObservation["turnLifecycle"], envelope: z.infer<typeof envelopeSchema>, max: number): AgentTranscriptObservation["turnLifecycle"] { if (envelope.type !== "event_msg") return current; const started = taskStartedEventSchema.safeParse(envelope.payload); if (started.success) return { turnId: started.data.turn_id, state: "active", startedAt: eventTime(started.data.started_at) }; const completed = taskCompleteEventSchema.safeParse(envelope.payload); if (completed.success) { if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current; const finalAnswer = completed.data.last_agent_message ? boundTranscriptMarkdown(redactSecrets(completed.data.last_agent_message.trim()), max) : ""; return { turnId: completed.data.turn_id, state: "completed", startedAt: current.startedAt, ...(finalAnswer ? { finalAnswer } : {}) }; } const aborted = turnAbortedEventSchema.safeParse(envelope.payload); if (!aborted.success || current?.state !== "active" || current.turnId !== aborted.data.turn_id) return current; return { turnId: aborted.data.turn_id, state: "aborted", startedAt: current.startedAt, ...(aborted.data.reason ? { reason: boundTranscriptMarkdown(redactSecrets(aborted.data.reason), max) } : {}) }; }
 function eventTime(seconds: number): string { return new Date(seconds * 1_000).toISOString(); }
 function extractStatusTitle(text: string): string | null { const match = /^\s*\*\*([^*\n]+)\*\*/.exec(text); const title = match?.[1]?.replace(/\s+/g, " " ).trim(); return title ? title.slice(0, 160) : null; }
-function parsePlanSnapshot(item: unknown): TraexTranscriptPlanStep[] | null { const call = functionCallSchema.safeParse(item); if (!call.success) return null; try { const outer = JSON.parse(call.data.arguments) as unknown; const parsed = call.data.name === "update_plan" ? planArgumentsSchema.safeParse(outer) : call.data.name === "exec" ? parseWrappedPlan(outer) : null; if (!parsed?.success) return null; const states = { pending: "pending", in_progress: "active", completed: "done" } as const; return parsed.data.plan.map((step, index) => ({ key: `plan:${index}`, label: step.step.replace(/\s+/g, " " ).trim().slice(0, 300) || "未命名步骤", state: states[step.status] })); } catch { return null; } }
+function parsePlanSnapshot(item: unknown): AgentTranscriptPlanStep[] | null { const call = functionCallSchema.safeParse(item); if (!call.success) return null; try { const outer = JSON.parse(call.data.arguments) as unknown; const parsed = call.data.name === "update_plan" ? planArgumentsSchema.safeParse(outer) : call.data.name === "exec" ? parseWrappedPlan(outer) : null; if (!parsed?.success) return null; const states = { pending: "pending", in_progress: "active", completed: "done" } as const; return parsed.data.plan.map((step, index) => ({ key: `plan:${index}`, label: step.step.replace(/\s+/g, " " ).trim().slice(0, 300) || "未命名步骤", state: states[step.status] })); } catch { return null; } }
 function parseWrappedPlan(value: unknown): ReturnType<typeof planArgumentsSchema.safeParse> | null { if (!value || typeof value !== "object" || Array.isArray(value)) return null; const input = (value as Record<string, unknown>).input; if (typeof input !== "string" || !/tools\.update_plan\s*\(/.test(input)) return null; const steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> = []; const pattern = /"?step"?\s*:\s*("(?:\\.|[^"\\])*")\s*,\s*"?status"?\s*:\s*"(pending|in_progress|completed)"/g; for (const match of input.matchAll(pattern)) { try { steps.push({ step: JSON.parse(match[1]!) as string, status: match[2]! as "pending" | "in_progress" | "completed" }); } catch { return null; } } return steps.length ? planArgumentsSchema.safeParse({ plan: steps }) : null; }
-function boundMarkdown(value: string, maxLength: number): string { if (value.length <= maxLength) return value; const suffix = "\n\n… output truncated"; const room = Math.max(0, maxLength - suffix.length - 4); let prefix = value.slice(0, room).trimEnd(); if ((prefix.match(/```/g)?.length ?? 0) % 2 === 1) prefix += "\n```"; return `${prefix}${suffix}`.slice(0, maxLength); }

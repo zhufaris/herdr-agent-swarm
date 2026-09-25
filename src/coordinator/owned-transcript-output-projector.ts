@@ -1,11 +1,11 @@
 import type { TurnOutputObservation } from "../domain/events.js";
-import type { TraexTranscriptObservation } from "../domain/ports/external.js";
+import type { AgentTranscriptObservation } from "../domain/ports/external.js";
 import { appendTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 
 export interface OwnedTranscriptOutputState {
   emitted: boolean;
   output: BoundedTurnOutput;
-  terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]>;
+  terminalLifecycle?: NonNullable<AgentTranscriptObservation["turnLifecycle"]>;
 }
 
 export interface OwnedTranscriptOutputProjection {
@@ -20,7 +20,7 @@ export interface OwnedTranscriptOutputProjection {
  */
 export function projectOwnedTranscriptOutput(input: {
   state: OwnedTranscriptOutputState;
-  observation: TraexTranscriptObservation;
+  observation: AgentTranscriptObservation;
   elapsedSeconds?: number;
 }): OwnedTranscriptOutputProjection {
   const lifecycle = input.observation.turnLifecycle;

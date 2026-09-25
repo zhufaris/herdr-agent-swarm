@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { ExternalTurnObserver } from "../src/coordinator/external-turn-observer.js";
-import type { TraexTranscriptObservation } from "../src/domain/ports.js";
+import type { AgentTranscriptObservation } from "../src/domain/ports.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { TestConversationViewProjector as ConversationViewProjector } from "./helpers/create-test-conversation-view-projector.js";
@@ -20,7 +20,7 @@ describe("ExternalTurnObserver", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", statusMessageId: "main-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", spaceName: "repo", paneId: "w1:p1", phase: "ready", agentState: "idle" });
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "turn-1", freshTurnStart: true, requestText: "direct request", answerDelta: "direct answer", mainStatus: { statusTitle: "Working directly", tokenCount: 42 }, turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-09-12T00:00:00.000Z" } },
       { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-09-12T00:00:00.000Z", finalAnswer: "direct answer" } },
       { answerDelta: "" }
@@ -79,7 +79,7 @@ describe("ExternalTurnObserver", () => {
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", statusMessageId: "main-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", spaceName: "repo", paneId: "w1:p1", phase: "ready", agentState: "idle" });
     const answer = Array.from({ length: 1_500 }, (_, index) => `Herdr direct answer segment ${index}`).join("\n");
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "turn-long", freshTurnStart: true, requestText: "direct long request", answerDelta: answer, turnLifecycle: { turnId: "turn-long", state: "active", startedAt: "2026-09-24T00:00:00.000Z" } },
       { turnId: "turn-long", answerDelta: "", turnLifecycle: { turnId: "turn-long", state: "completed", startedAt: "2026-09-24T00:00:00.000Z", finalAnswer: answer } },
       { answerDelta: "" }
@@ -142,7 +142,7 @@ describe("ExternalTurnObserver", () => {
     await observer.observeByPane(["w1:p2"]);
 
     expect(open).toHaveBeenCalledOnce();
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ value: "session-b2" }));
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: expect.objectContaining({ value: "session-b2" }) }));
     await observer.stop();
     store.close();
   });
@@ -151,7 +151,7 @@ describe("ExternalTurnObserver", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "turn-1", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
       { turnId: "turn-1", requestText: "direct task", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
       { turnId: "turn-1", answerDelta: "answer", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
@@ -189,7 +189,7 @@ describe("ExternalTurnObserver", () => {
       turnId: "turn-1", startedAt, requestText: "direct task", externalPromptId: "external-1",
       externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
     });
-    const completed: TraexTranscriptObservation = {
+    const completed: AgentTranscriptObservation = {
       turnId: "turn-1", answerDelta: "",
       turnLifecycle: { turnId: "turn-1", state: "completed", startedAt, finalAnswer: "recovered answer" }
     };
@@ -208,7 +208,7 @@ describe("ExternalTurnObserver", () => {
     expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", observationState: "completed" });
     expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "recovered answer" });
     expect(open).not.toHaveBeenCalled();
-    expect(openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ value: "session-1" }), "turn-1", startedAt);
+    expect(openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: expect.objectContaining({ value: "session-1" }) }), "turn-1", startedAt);
     expect(wakePrompt).toHaveBeenCalledWith("b1");
     await observer.stop();
     store.close();
@@ -263,7 +263,7 @@ describe("ExternalTurnObserver", () => {
     const startedAt = "2026-08-31T10:00:00.000Z";
     const view = createQueuedRunCard({ promptId: "external-1", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: startedAt });
     store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "turn-1", startedAt, requestText: "direct", externalPromptId: "external-1", externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({}) });
-    const observations: TraexTranscriptObservation[] = [{ answerDelta: "" }, { turnId: "turn-1", answerDelta: "late output", turnLifecycle: { turnId: "turn-1", state: "active", startedAt } }, { answerDelta: "" }];
+    const observations: AgentTranscriptObservation[] = [{ answerDelta: "" }, { turnId: "turn-1", answerDelta: "late output", turnLifecycle: { turnId: "turn-1", state: "active", startedAt } }, { answerDelta: "" }];
     const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }), openAtTurn: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }) }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
 
     await observer.observe(store.getBinding("b1")!);
@@ -308,7 +308,7 @@ describe("ExternalTurnObserver", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const turnId = "turn-aborted";
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId, freshTurnStart: true, requestText: "direct task", answerDelta: "", turnLifecycle: { turnId, state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
       { turnId, answerDelta: "", turnLifecycle: { turnId, state: "aborted", startedAt: "2026-08-31T10:00:00.000Z", reason: "interrupted" } },
       { answerDelta: "" }
@@ -355,7 +355,7 @@ describe("ExternalTurnObserver", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "turn-1", freshTurnStart: true, requestText: "direct task", answerDelta: "answer", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-08-31T10:00:00.000Z", finalAnswer: "answer" } },
       { answerDelta: "" }
     ];
@@ -441,7 +441,7 @@ describe("ExternalTurnObserver", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const startedAt = "2026-09-11T00:00:00.000Z";
-    const observations: TraexTranscriptObservation[] = [
+    const observations: AgentTranscriptObservation[] = [
       { turnId: "turn-large", freshTurnStart: true, requestText: "large", answerDelta: "x".repeat(200_000), turnLifecycle: { turnId: "turn-large", state: "active", startedAt } },
       { turnId: "turn-large", answerDelta: "y".repeat(200_000) },
       { turnId: "turn-large", answerDelta: "z".repeat(200_000) },
@@ -470,7 +470,7 @@ describe("ExternalTurnObserver", () => {
     const existing = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "Old", workspaceId: "w1", paneId: "w1:p1", requestText: "old", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "u1", body: "old" }, view: existing, rootMessageId: "root", answerCard: {} });
     store.database.prepare("UPDATE prompt_jobs SET state='running', observation_state='detached', dispatched_at='2026-08-31T10:00:01.000Z', transcript_turn_id='old-turn', transcript_turn_started_at='2026-08-31T10:00:01.000Z' WHERE id='old'").run();
-    const replay: TraexTranscriptObservation[] = [
+    const replay: AgentTranscriptObservation[] = [
       { turnId: "new-turn", freshTurnStart: true, requestText: "new", answerDelta: "answer", turnLifecycle: { turnId: "new-turn", state: "completed", startedAt: "2026-08-31T10:00:02.000Z", finalAnswer: "answer" } }, { answerDelta: "" }
     ];
     const bus = new BridgeEventBus(); const events: string[] = []; bus.onBridgeEvent("capture", (event) => events.push(event.type));

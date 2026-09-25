@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { ExactTurnObserver } from "../src/runtime/exact-turn-observer.js";
-import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptObservation, AgentTranscriptReaderPort } from "../src/domain/ports.js";
 
 const session = { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" };
 const exact = { turnId: "turn-1", startedAt: "2026-09-07T00:00:00.000Z" };
 
-function reader(observations: TraexTranscriptObservation[]): TraexTranscriptReaderPort {
+function reader(observations: AgentTranscriptObservation[]): AgentTranscriptReaderPort {
   const readObservation = vi.fn(async () => observations.shift() ?? { answerDelta: "" });
   const opened = { mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } };
   return {
@@ -58,7 +58,7 @@ describe("ExactTurnObserver", () => {
     const source = reader([active, completed, { turnId: exact.turnId, answerDelta: "late" }]);
     const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "after", ...exact }, expected: exact });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
-    const observed: TraexTranscriptObservation[] = [];
+    const observed: AgentTranscriptObservation[] = [];
 
     const result = await opened.cursor.drain({ limit: 8, onObservation: async (value) => { observed.push(value); return value.turnLifecycle?.state === "completed" ? "stop" : "continue"; } });
 
@@ -71,7 +71,7 @@ describe("ExactTurnObserver", () => {
     const source = reader([active, active, { turnId: exact.turnId, answerDelta: "must not be reached" }]);
     const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
-    const observed: TraexTranscriptObservation[] = [];
+    const observed: AgentTranscriptObservation[] = [];
 
     const result = await opened.cursor.drain({ limit: 8, onObservation: async (value) => { observed.push(value); return "continue"; } });
 
@@ -99,7 +99,7 @@ describe("ExactTurnObserver", () => {
   });
 
   it("reports an unsupported recovery cursor without falling back to latest", async () => {
-    const source: TraexTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
+    const source: AgentTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
 
     await expect(new ExactTurnObserver(source).open({ session, boundary: { kind: "first" } }))
       .resolves.toEqual({ mode: "unavailable", reason: "recovery_cursor_unavailable" });

@@ -3,7 +3,7 @@ import pino from "pino";
 import { TranscriptObserver } from "../src/coordinator/transcript-observer.js";
 import { TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
 import type { Binding, PromptJob } from "../src/domain/types.js";
-import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptReaderPort } from "../src/domain/ports.js";
 
 const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
 const startedAt = "2026-09-13T00:00:00.000Z";
@@ -14,7 +14,7 @@ describe("TranscriptObserver detached output recovery", () => {
     const persisted = `${prefix}${TURN_OUTPUT_TRUNCATION_MARKER}`;
     const replayed = `${prefix}\n\ncontinued after the old boundary`;
     let read = false;
-    const reader: TraexTranscriptReaderPort = {
+    const reader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
       async openAtTurn() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
@@ -46,7 +46,7 @@ describe("TranscriptObserver detached output recovery", () => {
   it("keeps a legacy-truncated snapshot when exact replay does not match its prefix", async () => {
     const persisted = `${"x".repeat(64 * 1024 - TURN_OUTPUT_TRUNCATION_MARKER.length)}${TURN_OUTPUT_TRUNCATION_MARKER}`;
     let read = false;
-    const reader: TraexTranscriptReaderPort = {
+    const reader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
       async openAtTurn() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
@@ -76,7 +76,7 @@ describe("TranscriptObserver detached output recovery", () => {
   it("replays a durable timeline even when legacy answer text is unchanged", async () => {
     let read = false;
     const timelineDeltas = [{ kind: "agent_message" as const, id: "message:1", sequence: 1, markdown: "Recovered" }];
-    const reader: TraexTranscriptReaderPort = {
+    const reader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
       async openAtTurn() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
