@@ -365,6 +365,18 @@ its Run Card and outbox intent, records an audit entry, and then wakes the FIFO.
 The prior runtime outcome remains explicitly uncertain; skip never sends terminal
 input, interrupts TraeX, or replays the prompt.
 
+### TraeX transcript reader boundary
+
+`TraexTranscriptReader` is the stable runtime facade used by coordinators. It
+validates session and turn identities, selects an opening strategy, maps failures
+to the public unavailable reasons, and assembles a cursor. Its private runtime
+participants separate path discovery and trust validation, exact turn-boundary
+scanning, baseline recovery, record decoding, and incremental file reads. These
+participants are not application ports and must not be imported around the
+facade. Canonical byte offsets, bounded recovery windows, cache policy, and the
+exact `turnId + startedAt` fence remain one reader protocol; the decomposition
+does not introduce another persistence or replay authority.
+
 ## Architecture and dependency direction
 
 Dependencies point inward: domain contracts define the language and capabilities

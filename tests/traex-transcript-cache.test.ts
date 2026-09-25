@@ -48,6 +48,17 @@ describe("Traex transcript path cache", () => {
     ]);
   });
 
+  it("uses one injected discovery result when opening an existing transcript", async () => {
+    const root = await mkdtemp(join(tmpdir(), "traex-transcript-success-")); roots.push(root);
+    await writeTranscript(root, "primary", sessionIds[0]!);
+    const path = join(root, "primary", `rollout-${sessionIds[0]}.jsonl`);
+    const discover = vi.fn(async () => ({ paths: [path], exhausted: false }));
+    const reader = new TraexTranscriptReader({ sessionsRoot: root, discover });
+
+    await expect(reader.open(session(sessionIds[0]!))).resolves.toMatchObject({ mode: "typed" });
+    expect(discover).toHaveBeenCalledOnce();
+  });
+
   it("coalesces concurrent default discovery across different sessions", async () => {
     const root = await mkdtemp(join(tmpdir(), "traex-transcript-shared-index-")); roots.push(root);
     for (const id of sessionIds.slice(0, 2)) await writeTranscript(root, "primary", id!);

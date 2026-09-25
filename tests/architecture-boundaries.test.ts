@@ -1112,4 +1112,27 @@ describe("application composition boundaries", () => {
       expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/outbox-recovery\/[^"]+\.js/);
     }
   });
+
+  it("keeps transcript mechanics behind the stable reader facade", () => {
+    const facade = readFileSync(new URL("../src/runtime/traex-transcript.ts", import.meta.url), "utf8");
+    for (const participant of [
+      "TranscriptLocator",
+      "FileTraexTranscriptCursor",
+      "latestTranscriptBaseline",
+      "latestActiveTranscriptBaseline",
+      "findCompletedTurnBoundary",
+      "findTurnStartBoundary",
+    ]) expect(facade).toContain(participant);
+    expect(facade).toContain("implements TraexTranscriptReaderPort");
+    expect(facade).toContain('export { scanTranscriptPaths } from "./traex-transcript/locator.js"');
+
+    const srcDir = fileURLToPath(new URL("../src", import.meta.url));
+    for (const entry of readdirSync(srcDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const path = join(entry.parentPath, entry.name);
+      const relativePath = relative(srcDir, path);
+      if (relativePath === "runtime/traex-transcript.ts" || relativePath.startsWith("runtime/traex-transcript/")) continue;
+      expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/runtime\/traex-transcript\/[^"]+\.js/);
+    }
+  });
 });
