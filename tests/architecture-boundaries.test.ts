@@ -1153,4 +1153,14 @@ describe("application composition boundaries", () => {
       expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/cli\/service-lifecycle\/[^"]+\.js/);
     }
   });
+
+  it("keeps release activation behind the service lifecycle facade", () => {
+    const facade = readFileSync(new URL("../src/cli/service-lifecycle.ts", import.meta.url), "utf8");
+    const activator = readFileSync(new URL("../src/cli/service-lifecycle/release-activator.ts", import.meta.url), "utf8");
+    expect(facade).toContain("new ReleaseActivator()");
+    expect(facade).toContain("releaseActivator.activate({");
+    expect(facade).not.toMatch(/function (?:activateRelease|validateReleaseCandidate|restoreActivation|pruneReleases)\b/);
+    expect(activator).toContain("activate(input: ReleaseActivationInput): number");
+    expect(activator).not.toMatch(/from ".*\/(?:adapters|coordinator|events|store)\//);
+  });
 });

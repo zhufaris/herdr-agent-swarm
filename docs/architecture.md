@@ -1732,17 +1732,21 @@ The outbound dispatcher emits one debug summary for each non-empty scan, with
 attempt, success, failure, provider-call, and durable-checkpoint timing. Delivery
 failures carry the same phase timing at warn or error level without including
 message or card payloads.
-Staging creates an inactive candidate and does not change `current`. The install
-lifecycle validates that candidate, snapshots the prior unit and enabled state,
-reloads and enables the candidate-pinned unit, and atomically switches `current`
-only as the final activation commit. A caught pre-commit failure restores the old
-unit and enabled state. An interrupted activation or failed compensation leaves a
-private `.release-activation.json` marker; later install, start, and restart
-commands fail closed until the operator reconciles that evidence. Release pruning
-runs only after activation and retains the current release, the previous `current`
-target, and any valid release directory referenced by the previously installed
-unit's `WorkingDirectory`. This protects a still-running old process when multiple
-candidates are installed before the normal safety-gated restart.
+Staging creates an inactive candidate and does not change `current`. The lifecycle
+facade detects the candidate and delegates once to its private `ReleaseActivator`.
+That deep module exclusively owns candidate validation, prior-state capture, the
+durable preparation marker, unit installation, systemd reload and enable, the
+atomic `current` commit, compensation, evidence cleanup, and safe pruning. It
+atomically switches `current` only as the final activation commit. A caught
+pre-commit failure restores the old unit and enabled state. An interrupted
+activation or failed compensation leaves a private `.release-activation.json`
+marker; later install, start, and restart commands fail closed until the operator
+reconciles that evidence. Release pruning runs only after activation and retains
+the current release, the previous `current` target, and any valid release directory
+referenced by the previously installed unit's `WorkingDirectory`. This protects a
+still-running old process when multiple candidates are installed before the normal
+safety-gated restart. No other source module sequences activation phases or imports
+the private activator.
 Source installs cache the locked production dependency tree under the private
 state directory. The cache key fences the package manifests, Node/ABI/N-API and
 npm version and effective configuration, platform and architecture, kernel and
