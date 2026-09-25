@@ -1135,4 +1135,22 @@ describe("application composition boundaries", () => {
       expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/runtime\/traex-transcript\/[^"]+\.js/);
     }
   });
+
+  it("keeps restart policy behind the service lifecycle facade", () => {
+    const facade = readFileSync(new URL("../src/cli/service-lifecycle.ts", import.meta.url), "utf8");
+    const evaluator = readFileSync(new URL("../src/cli/service-lifecycle/restart-safety-evaluator.ts", import.meta.url), "utf8");
+    expect(facade).toContain("new RestartSafetyEvaluator()");
+    expect(facade).toContain("restartSafety.evaluate(status, { force })");
+    expect(evaluator).not.toMatch(/from ".*\/(?:adapters|coordinator|events|store)\//);
+    expect(evaluator).not.toMatch(/node:(?:fs|http|child_process)/);
+
+    const srcDir = fileURLToPath(new URL("../src", import.meta.url));
+    for (const entry of readdirSync(srcDir, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      const path = join(entry.parentPath, entry.name);
+      const relativePath = relative(srcDir, path);
+      if (relativePath === "cli/service-lifecycle.ts" || relativePath.startsWith("cli/service-lifecycle/")) continue;
+      expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/cli\/service-lifecycle\/[^"]+\.js/);
+    }
+  });
 });

@@ -8,9 +8,11 @@ import { loadConfig, validateProjectDirectories } from "../config.js";
 import { readEnvironmentFile } from "../runtime/environment-file.js";
 import { AGENT_SWARM_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
 import type { SetupLifecyclePort } from "../setup/setup-types.js";
+import { RestartSafetyEvaluator } from "./service-lifecycle/restart-safety-evaluator.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs" | "rotate-logs";
 const SERVICE_NAME = "herdr-agent-swarm.service";
+const restartSafety = new RestartSafetyEvaluator();
 export interface LifecycleOptions {
   force?: boolean;
   requireReady?: boolean;
@@ -171,53 +173,14 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, f
   } catch (error) {
     throw new Error(`restart blocked: active service status is unreachable (${safeMessage(error)}); verify the running unit or retry with --force`);
   }
-  const record = asRecord(status);
-  const identity = asRecord(record?.identity);
-  if (identity?.serviceId !== AGENT_SWARM_SERVICE_ID) throw new Error(`restart blocked: active service identity is ${typeof identity?.serviceId === "string" ? identity.serviceId : "missing"}, expected ${AGENT_SWARM_SERVICE_ID}; verify the endpoint or retry with --force`);
-  const operational = asRecord(record?.operational);
-  const prompts = asRecord(operational?.prompts);
-  const promptWorker = asRecord(record?.promptWorker);
-  const running = nonNegativeInteger(prompts?.running);
-  const queued = nonNegativeInteger(prompts?.queued);
-  const activeWorkers = nonNegativeInteger(promptWorker?.activeTurnWorkers);
-  const instanceWorker = asRecord(record?.instanceWorker);
-  const instanceDispatchers = nonNegativeInteger(instanceWorker?.activeDispatchWorkers);
-  const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers);
-  const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns);
-  const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns);
-  const outboxWork = asRecord(operational?.outboxWork);
-  const readyOutbox = nonNegativeInteger(outboxWork?.ready);
-  const inFlightOutbox = nonNegativeInteger(outboxWork?.inFlight);
-  const retryWaitOutbox = nonNegativeInteger(outboxWork?.retryWait);
-  const cooldownWaitOutbox = nonNegativeInteger(outboxWork?.cooldownWait);
-  const waitingBehindLaneOutbox = nonNegativeInteger(outboxWork?.waitingBehindLane);
-  const outboxDispatcher = asRecord(record?.outboxDispatcher);
-  const activeDeliveries = nonNegativeInteger(outboxDispatcher?.activeDeliveries);
-  const startupRecovery = asRecord(record?.startupRecovery);
-  const startupRecoveryState = typeof startupRecovery?.state === "string" ? startupRecovery.state : null;
-  const sqliteIntegrity = asRecord(record?.sqliteIntegrity);
-  const sqliteIntegrityState = typeof sqliteIntegrity?.state === "string" ? sqliteIntegrity.state : null;
-  const sqliteQuickCheck = typeof sqliteIntegrity?.quickCheck === "string" ? sqliteIntegrity.quickCheck : null;
-  if (!force) {
-    if (running! > 0 || queued! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
-    if (readyOutbox! > 0 || inFlightOutbox! > 0 || retryWaitOutbox! > 0 || cooldownWaitOutbox! > 0) throw new Error(`restart blocked: outbox work has ${metric(readyOutbox)} ready, ${metric(inFlightOutbox)} in-flight, ${metric(retryWaitOutbox)} retry-wait, ${metric(cooldownWaitOutbox)} cooldown-wait, ${metric(waitingBehindLaneOutbox)} waiting behind lanes; wait for actionable delivery work to drain or retry with --force`);
-    if (activeDeliveries! > 0) throw new Error(`restart blocked: ${activeDeliveries} active deliveries; wait for delivery to drain or retry with --force`);
-  }
-  if (startupRecoveryState !== null && startupRecoveryState !== "completed") throw new Error(`restart blocked: startup recovery is ${startupRecoveryState}, expected completed; wait for recovery or retry with --force`);
-  if (sqliteIntegrityState !== null && sqliteIntegrityState !== "healthy" || sqliteQuickCheck !== null && sqliteQuickCheck !== "ok") throw new Error(`restart blocked: SQLite integrity is ${sqliteIntegrityState ?? "missing"} with quickCheck ${sqliteQuickCheck ?? "missing"}; repair integrity or retry with --force`);
-  const workloadIncomplete = !force && [running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, readyOutbox, inFlightOutbox, retryWaitOutbox, cooldownWaitOutbox, waitingBehindLaneOutbox, activeDeliveries].some((value) => value === null);
-  if (workloadIncomplete || startupRecoveryState === null || sqliteIntegrityState === null || sqliteQuickCheck === null) throw new Error("restart blocked: active service status has incomplete restart safety metrics; verify the running unit or retry with --force");
+  restartSafety.evaluate(status, { force });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
-
-function nonNegativeInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
-}
-
-function metric(value: number | null): number | "unknown" { return value ?? "unknown"; }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const root = requiredDirectory(environment.SWARM_ROOT, "SWARM_ROOT");

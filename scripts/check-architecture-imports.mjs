@@ -41,6 +41,11 @@ for (const file of files) {
       && !importer.startsWith("src/runtime/traex-transcript/")) {
       violations.push(`${importer} may not bypass the TraexTranscriptReader facade to import ${target}`);
     }
+    if (target.startsWith("src/cli/service-lifecycle/")
+      && importer !== "src/cli/service-lifecycle.ts"
+      && !importer.startsWith("src/cli/service-lifecycle/")) {
+      violations.push(`${importer} may not bypass the service lifecycle facade to import ${target}`);
+    }
   }
   const text = readFileSync(file, "utf8");
   if (importer !== "src/adapters/lark-adapter.ts" && text.includes("@larksuiteoapi")) violations.push(`${importer} may not import the Feishu SDK`);

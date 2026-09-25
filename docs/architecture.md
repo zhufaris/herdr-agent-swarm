@@ -1708,6 +1708,13 @@ configuration is valid, `./install.sh` builds and stages the immutable release
 and enables the unit without starting it; `npm run swarm:start` performs the
 explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
 `npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
+The lifecycle facade observes user-systemd state and the configured loopback
+`/status` endpoint before a restart. A private `RestartSafetyEvaluator` decodes
+that untrusted status document and applies the ordered active-work, delivery,
+startup-recovery, and SQLite-integrity gates. Force mode bypasses only workload
+and delivery activity; identity, recovery, integrity, and status completeness
+for those non-exempt gates remain fail-closed. No other source module consumes
+the evaluator or its decoded shape.
 The generated unit permits at most five starts in 60 seconds while retaining a
 five-second restart delay, so permanent startup failures converge to a failed
 unit instead of producing an unbounded restart loop. Explicit `swarm:start` and
