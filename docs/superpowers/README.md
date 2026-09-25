@@ -23,6 +23,7 @@ implemented. Current records:
 - [Restart Safety Evaluator implementation plan](plans/2026-09-25-restart-safety-evaluator-plan.md)
 - [Release Activator design](specs/2026-09-25-release-activator-design.md)
 - [Release Activator implementation plan](plans/2026-09-25-release-activator-plan.md)
+- [Agent transcript adapters design](specs/2026-09-25-agent-transcript-adapters-design.md)
 - [Durable outbound delivery design](specs/2026-09-24-durable-outbound-delivery-design.md)
 - [Durable outbound delivery implementation plan](plans/2026-09-24-durable-outbound-delivery-plan.md)
 - [Herdr runtime reconciliation design](specs/2026-09-24-herdr-runtime-reconciliation-design.md)
