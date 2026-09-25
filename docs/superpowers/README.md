@@ -20,6 +20,7 @@ implemented. Current records:
 - [TraeX transcript reader decomposition design](specs/2026-09-25-traex-transcript-reader-decomposition-design.md)
 - [TraeX transcript reader decomposition implementation plan](plans/2026-09-25-traex-transcript-reader-decomposition-plan.md)
 - [Restart Safety Evaluator design](specs/2026-09-25-restart-safety-evaluator-design.md)
+- [Restart Safety Evaluator implementation plan](plans/2026-09-25-restart-safety-evaluator-plan.md)
 - [Durable outbound delivery design](specs/2026-09-24-durable-outbound-delivery-design.md)
 - [Durable outbound delivery implementation plan](plans/2026-09-24-durable-outbound-delivery-plan.md)
 - [Herdr runtime reconciliation design](specs/2026-09-24-herdr-runtime-reconciliation-design.md)
