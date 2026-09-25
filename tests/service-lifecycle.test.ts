@@ -939,10 +939,27 @@ describe("service lifecycle", () => {
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
+  it("allows a forced restart when only the business-integrity audit is degraded", async () => {
+    let statusRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
+      statusRequests += 1;
+      response.end(JSON.stringify(completedStartupStatus({ sqliteIntegrity: { state: "degraded", quickCheck: "ok" } })));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" }, { force: true })).resolves.toBe(0);
+      expect(statusRequests).toBeGreaterThanOrEqual(2);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it.each([
     ["foreign identity", { identity: { serviceId: "another-service", buildId: "sha256:test-build" } }, /identity.*another-service/i],
     ["incomplete recovery", { startupRecovery: { state: "running" } }, /startup recovery.*running/i],
-    ["unhealthy SQLite", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /SQLite integrity/i]
+    ["failed SQLite quick check", { sqliteIntegrity: { state: "degraded", quickCheck: "failed" } }, /SQLite integrity/i]
   ])("does not let force bypass %s validation", async (_name, override, expected) => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");

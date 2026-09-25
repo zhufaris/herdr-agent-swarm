@@ -46,11 +46,16 @@ describe("RestartSafetyEvaluator", () => {
     }), { force: true })).not.toThrow();
   });
 
+  it("lets force bypass a degraded business-integrity audit when SQLite quick check is healthy", () => {
+    expect(() => evaluator.evaluate(status({
+      sqliteIntegrity: { state: "degraded", quickCheck: "ok" },
+    }), { force: true })).not.toThrow();
+  });
+
   it.each([
     ["foreign identity", { identity: { serviceId: "another-service" } }, /identity is another-service/],
     ["missing identity", { identity: {} }, /identity is missing/],
     ["startup recovery", { startupRecovery: { state: "running" } }, /startup recovery is running/],
-    ["SQLite state", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /SQLite integrity is degraded/],
     ["SQLite quick check", { sqliteIntegrity: { state: "healthy", quickCheck: "failed" } }, /quickCheck failed/],
   ])("does not let force bypass %s", (_name, override, expected) => {
     expect(() => evaluator.evaluate(status(override), { force: true })).toThrow(expected);

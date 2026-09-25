@@ -78,5 +78,5 @@ git diff --check
 ```
 
 Commit with hooks disabled if necessary and verify the final commit body contains
-no `Co-authored-by: TRAE CLI` trailer. Installation, restart, real Pi/Feishu
+no automated co-author trailer. Installation, restart, real Pi/Feishu
 verification, and push remain separate operator actions.

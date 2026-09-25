@@ -3049,7 +3049,7 @@ describe("SQLite store", () => {
   it("detects dangling business references and contradictory outbox lane state without exposing identifiers", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "sensitive-binding", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Secret title" });
-    store.enqueueOutboundReply({ id: "sensitive-reply", idempotencyKey: "integrity-reply", bindingId: "sensitive-binding", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "private-card", kind: "text", payload: "private payload" });
+    store.enqueueOutboundReply({ id: "sensitive-reply", idempotencyKey: "integrity-reply", bindingId: "sensitive-binding", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "private-card", kind: "card_reply", payload: "private payload" });
     store.database.prepare("DELETE FROM outbox_lane_heads").run();
 
     const inspection = store.inspectIntegrity(20);
@@ -3063,9 +3063,19 @@ describe("SQLite store", () => {
     expect(JSON.stringify(inspection)).not.toMatch(/sensitive|missing-prompt|missing-selection|private/);
   });
 
+  it("does not treat the Worker progress stream discriminator as a project selection reference", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({
+      id: "worker-progress-reply", idempotencyKey: "worker-progress", selectionId: "worker-progress",
+      rootMessageId: "worker-card", kind: "stream_content", payload: "progress",
+    });
+
+    expect(store.inspectIntegrity(20).issues).not.toContainEqual(expect.objectContaining({ rule: "outbound_selection_reference" }));
+  });
+
   it("caps integrity issue records while preserving a truncated signal", () => {
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "reply", idempotencyKey: "integrity", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "card", kind: "text", payload: "hidden" });
+    store.enqueueOutboundReply({ id: "reply", idempotencyKey: "integrity", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "card", kind: "card_reply", payload: "hidden" });
 
     expect(store.inspectIntegrity(1)).toEqual({ quickCheck: "ok", truncated: true, issues: [
       { rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }

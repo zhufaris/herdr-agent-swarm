@@ -24,8 +24,8 @@ export class RestartSafetyEvaluator {
     if (metrics.startupRecoveryState !== null && metrics.startupRecoveryState !== "completed") {
       throw new Error(`restart blocked: startup recovery is ${metrics.startupRecoveryState}, expected completed; wait for recovery or retry with --force`);
     }
-    if (metrics.sqliteIntegrityState !== null && metrics.sqliteIntegrityState !== "healthy"
-      || metrics.sqliteQuickCheck !== null && metrics.sqliteQuickCheck !== "ok") {
+    if ((!options.force && metrics.sqliteIntegrityState !== null && metrics.sqliteIntegrityState !== "healthy")
+      || (metrics.sqliteQuickCheck !== null && metrics.sqliteQuickCheck !== "ok")) {
       throw new Error(`restart blocked: SQLite integrity is ${metrics.sqliteIntegrityState ?? "missing"} with quickCheck ${metrics.sqliteQuickCheck ?? "missing"}; repair integrity or retry with --force`);
     }
     if (hasIncompleteRequiredMetrics(metrics, options.force)) {
