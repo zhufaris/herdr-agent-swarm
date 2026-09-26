@@ -45,6 +45,29 @@ describe("AnswerPageWorkflow", () => {
     } finally { store.close(); }
   });
 
+  it("revises a timeline delivery when rendering changes without a view-version change", () => {
+    const store = readyStore();
+    try {
+      const view = store.loadRunCard("p1")!;
+      const items = [{ kind: "agent_message" as const, id: "message:one", sequence: 1, markdown: "visible" }];
+      store.saveRunCard({ ...view, phase: "running", timelineItems: items, viewVersion: view.viewVersion + 1 });
+      expect(store.reserveAnswerTimelineCard({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "before" }, cursor: null, items })).toBe("reserved");
+      const first = store.listPendingOutboundReplies()[0]!;
+      store.markOutboundReplyDelivered(first.id, "answer-1");
+
+      const changedItems = [{ ...items[0]!, markdown: "visible after sanitization" }];
+      expect(store.reserveAnswerTimelineCard({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "after" }, cursor: null, items: changedItems })).toBe("reserved");
+
+      expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
+        idempotencyKey: `${first.idempotencyKey}:revision:2`,
+        payload: JSON.stringify({ content: "after" })
+      })]);
+      expect(store.database.prepare("SELECT projection_key, snapshot_revision FROM outbound_replies WHERE idempotency_key = ?").get(`${first.idempotencyKey}:revision:2`)).toEqual({
+        projection_key: "answer-timeline:p1:0", snapshot_revision: 2
+      });
+    } finally { store.close(); }
+  });
+
   it("continues a timeline at an item cursor without splitting its Tool panel", async () => {
     const store = readyStore();
     try {

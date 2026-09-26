@@ -285,8 +285,15 @@ export class SqliteProjectionStore {
       if (!page || !view || page.state !== "active" || page.message_id !== input.messageId) return "stale";
       this.timelinePages.ensure("primary-run", input.promptId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
       if (this.timelinePages.load("primary-run", input.promptId, input.pageIndex).pending || this.timelinePages.isDelivered("primary-run", input.promptId, input.pageIndex, input.cursor, input.items)) return "waiting";
+      const baseKey = `answer-timeline:${input.promptId}:${input.pageIndex}:${view.viewVersion}`;
+      const payload = JSON.stringify(input.card);
+      const existing = this.context.database.prepare(`SELECT payload, snapshot_revision FROM outbound_replies
+        WHERE idempotency_key = ? OR idempotency_key LIKE ?
+        ORDER BY snapshot_revision DESC, delivery_order DESC LIMIT 1`).get(baseKey, `${baseKey}:revision:%`) as { payload: string; snapshot_revision: number } | undefined;
+      if (existing?.payload === payload) return "waiting";
+      const revision = (existing?.snapshot_revision ?? 0) + 1;
       const id = randomUUID();
-      const reply = this.dependencies.enqueueOutboundReply({ id, idempotencyKey: `answer-timeline:${input.promptId}:${input.pageIndex}:${view.viewVersion}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `answer:${input.promptId}` }) as OutboundReply;
+      const reply = this.dependencies.enqueueOutboundReply({ id, idempotencyKey: revision === 1 ? baseKey : `${baseKey}:revision:${revision}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.messageId, kind: "card_update", payload, projectionKey: `answer-timeline:${input.promptId}:${input.pageIndex}`, snapshotRevision: revision, laneKeyOverride: `answer:${input.promptId}` }) as OutboundReply;
       this.timelinePages.reserve("primary-run", input.promptId, input.pageIndex, reply.id, input.cursor, input.items);
       return "reserved";
     });
