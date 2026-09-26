@@ -15,7 +15,6 @@ import { KeyedSerialWorkQueue } from "../runtime/keyed-serial-work-queue.js";
 const ANSWER_STREAM_INTERVAL_MS = 500;
 const ANSWER_UPDATE_BUDGET_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 80;
-const MAIN_CARD_UPDATE_INTERVAL_MS = 2_500;
 const ANSWER_LENGTH_CACHE_CAPACITY = 512;
 
 export class ConversationViewProjector {
@@ -42,7 +41,7 @@ export class ConversationViewProjector {
     options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}
   ) {
     this.answerUpdateDelayMs = Math.min(options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, ANSWER_UPDATE_BUDGET_MS);
-    this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? MAIN_CARD_UPDATE_INTERVAL_MS;
+    this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? this.answerUpdateDelayMs;
     this.scheduler = new CardUpdateScheduler(async (cardKey) => {
       const [family, id] = splitCardKey(cardKey);
       if (family === "main") {

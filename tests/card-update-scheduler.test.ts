@@ -74,6 +74,25 @@ describe("card update scheduler", () => {
     scheduler.stop();
   });
 
+  it("coalesces an ordinary same-version request during an in-flight delivery", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const delivered: number[] = [];
+    const scheduler = new CardUpdateScheduler(async (_cardKey, version) => {
+      delivered.push(version);
+      await gate;
+    }, 100);
+
+    scheduler.schedule("main:b1", 3, true);
+    await vi.waitFor(() => expect(delivered).toEqual([3]));
+    scheduler.schedule("main:b1", 3, false);
+    release();
+    await vi.waitFor(() => expect(scheduler.diagnostics().pending).toBe(0));
+
+    expect(delivered).toEqual([3]);
+    scheduler.stop();
+  });
+
   it("reports a failed flush and retries the latest desired version", async () => {
     vi.useFakeTimers();
     const delivered: number[] = [];

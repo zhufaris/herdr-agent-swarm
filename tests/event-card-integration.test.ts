@@ -58,6 +58,25 @@ describe("event-driven card projection", () => {
     await projector.stop(); store.close(); vi.useRealTimers();
   });
 
+  it("uses the configured Answer visibility budget for ordinary Main updates", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const bus = new BridgeEventBus();
+    const mainConverge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { cardUpdateDebounceMs: 500 });
+    projector.start();
+
+    await bus.publish({ eventId: "rename", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-09-26T00:00:00.000Z", payload: { title: "Fresh" } });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(mainConverge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mainConverge).toHaveBeenCalledOnce();
+
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
   it("keeps Topic Views out of process memory through active and terminal projection", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });

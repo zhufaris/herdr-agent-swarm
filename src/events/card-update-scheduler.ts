@@ -36,7 +36,7 @@ export class CardUpdateScheduler {
     const existing = this.pending.get(cardKey);
     const item = existing ?? { desiredVersion: version, timer: null, dueAt: now + delayMs, requestedAt: now, inFlight: false, requestedWhileInFlight: false, priority, consecutiveFailures: 0 };
     if (existing) this.coalesced += 1;
-    if (item.inFlight) item.requestedWhileInFlight = true;
+    if (item.inFlight && (version > item.desiredVersion || priority === "terminal")) item.requestedWhileInFlight = true;
     item.desiredVersion = Math.max(item.desiredVersion, version);
     if (priorityRank(priority) > priorityRank(item.priority)) item.priority = priority;
     item.dueAt = Math.min(item.dueAt, now + delayMs);

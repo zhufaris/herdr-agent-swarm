@@ -32,7 +32,10 @@ export function createOutboundRuntime(config: BridgeConfig, stores: OutboundRunt
   const mainCards = new MainCardWorkflow(stores.mainCards, () => outboundWork.wake(), presentation.primary, logger);
   const workerTurnCards = new WorkerTurnCardWorkflow(stores.workerTurns, () => outboundWork.wake(), presentation.application, config.runtimeTuning.cards.answerPageLimitChars, logger);
   channelPublisher.onWorkerTurnCheckpoint((turnId) => { void workerTurnCards.converge(turnId); });
-  const projector = new ConversationViewProjector(bus, stores.projection, outbound, channelPublisher, logger, presentation.primary, answerPages, mainCards, { cardUpdateDebounceMs: config.runtimeTuning.cards.updateDebounceMs });
+  const projector = new ConversationViewProjector(bus, stores.projection, outbound, channelPublisher, logger, presentation.primary, answerPages, mainCards, {
+    cardUpdateDebounceMs: config.runtimeTuning.cards.updateDebounceMs,
+    mainCardUpdateDebounceMs: config.runtimeTuning.cards.updateDebounceMs
+  });
   const queueFeedbackProjector = new QueueFeedbackProjector({ store: stores.queueFeedback, outboundWork, logger, presentation: presentation.primary });
   const cardContextRebuilder = new CardContextRebuilder(stores.cardContext, () => outboundWork.wake(), logger, presentation.application, outboundWork);
   const outboxRetention = new OutboxRetentionMaintainer(stores.retention, { retentionDays: config.outboxRetention.days, batchSize: config.outboxRetention.batchSize, maxBatches: config.outboxRetention.maxBatches }, logger);
