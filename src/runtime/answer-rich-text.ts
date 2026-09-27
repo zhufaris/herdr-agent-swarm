@@ -9,8 +9,9 @@ import { redactSecrets } from "./redact-secrets.js";
 export const ANSWER_RICH_TEXT_PAGE_LIMIT = 9_000;
 export const ANSWER_TYPEWRITER_CURSOR = "💭";
 export const ANSWER_PLACEHOLDER = `正在生成… ${ANSWER_TYPEWRITER_CURSOR}`;
-export const ANSWER_RICH_TEXT_MIN_INTERVAL_MS = 750;
-export const ANSWER_RICH_TEXT_MIN_DELTA = 16;
+export const ANSWER_RICH_TEXT_MIN_INTERVAL_MS = 500;
+export const ANSWER_RICH_TEXT_MIN_DELTA = 8;
+export const ANSWER_RICH_TEXT_MAX_LATENCY_MS = 1_200;
 
 const TOOL_LABEL_LIMIT = 160;
 const TOOL_COMMAND_LIMIT = 1_000;
@@ -120,19 +121,29 @@ export function safeStreamingMarkdown(source: string): string {
 }
 
 export function shouldRefreshRichText(previousPayload: string, next: RichTextDocument, previousUpdatedAt: string, nowMs = Date.now()): boolean {
-  if (nowMs - Date.parse(previousUpdatedAt) < ANSWER_RICH_TEXT_MIN_INTERVAL_MS) return false;
+  const elapsedMs = nowMs - Date.parse(previousUpdatedAt);
+  if (Number.isFinite(elapsedMs) && elapsedMs < ANSWER_RICH_TEXT_MIN_INTERVAL_MS) return false;
   let previous = "";
   try {
     const decoded = JSON.parse(previousPayload) as { document?: { markdown?: unknown } };
     if (typeof decoded.document?.markdown === "string") previous = withoutCursor(decoded.document.markdown);
   } catch { return true; }
   const current = withoutCursor(next.markdown);
-  const delta = current.startsWith(previous) ? current.slice(previous.length) : current;
-  return delta.length >= ANSWER_RICH_TEXT_MIN_DELTA || /\n\s*$/.test(delta);
+  if (current === previous) return false;
+  if (!Number.isFinite(elapsedMs)) return true;
+  if (!current.startsWith(previous)) return true;
+  const delta = current.slice(previous.length);
+  return delta.length >= ANSWER_RICH_TEXT_MIN_DELTA
+    || hasSemanticBoundary(delta)
+    || (Number.isFinite(elapsedMs) && elapsedMs >= ANSWER_RICH_TEXT_MAX_LATENCY_MS && delta.length > 0);
 }
 
 function withoutCursor(markdown: string): string {
   return markdown.replace(/\s*💭·{0,3}\s*$/u, "");
+}
+
+function hasSemanticBoundary(delta: string): boolean {
+  return delta.includes("\n") || /[.!?。！？；;：:]\s*$/u.test(delta);
 }
 
 function answerActivityMarker(frame: number): string {

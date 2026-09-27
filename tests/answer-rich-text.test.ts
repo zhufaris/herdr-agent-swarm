@@ -2,11 +2,35 @@ import { describe, expect, it } from "vitest";
 import { planRichTextAnswerPage, richTextAnswerTitle, safeStreamingMarkdown, shouldRefreshRichText } from "../src/runtime/answer-rich-text.js";
 
 describe("safe rich-text Answer streaming", () => {
-  it("throttles small rapid snapshots but admits a useful later chunk", () => {
+  it("uses a 500ms floor and admits an eight-character content delta", () => {
     const previous = JSON.stringify({ document: { markdown: "hello\n\n💭" } });
-    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(16)}\n\n💭·` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.749Z"))).toBe(false);
-    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(16)}\n\n💭·` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.750Z"))).toBe(true);
-    expect(shouldRefreshRichText(previous, { markdown: "hello\n\n💭··" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.000Z"))).toBe(false);
+    expect(shouldRefreshRichText(previous, { markdown: "hello12345678\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.499Z"))).toBe(false);
+    expect(shouldRefreshRichText(previous, { markdown: "hello12345678\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(true);
+  });
+
+  it("refreshes small semantic boundaries after the floor", () => {
+    const previous = JSON.stringify({ document: { markdown: "hello\n\n💭" } });
+    expect(shouldRefreshRichText(previous, { markdown: "hello.\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(true);
+    expect(shouldRefreshRichText(previous, { markdown: "hello\nnext\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(true);
+  });
+
+  it("eventually refreshes a small real delta but never a cursor-only change", () => {
+    const previous = JSON.stringify({ document: { markdown: "hello\n\n💭" } });
+    expect(shouldRefreshRichText(previous, { markdown: "hello+\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.199Z"))).toBe(false);
+    expect(shouldRefreshRichText(previous, { markdown: "hello+\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.200Z"))).toBe(true);
+    expect(shouldRefreshRichText(previous, { markdown: "hello\n\n💭··" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:02.000Z"))).toBe(false);
+  });
+
+  it("refreshes non-append tool or task mutations after the floor", () => {
+    const previous = JSON.stringify({ document: { markdown: "⚙️ Ran · …\n\n💭" } });
+    expect(shouldRefreshRichText(previous, { markdown: "⚙️ Ran · ✓\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.499Z"))).toBe(false);
+    expect(shouldRefreshRichText(previous, { markdown: "⚙️ Ran · ✓\n\n💭·" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(true);
+  });
+
+  it("fails open for changed content when the previous update timestamp is invalid", () => {
+    const previous = JSON.stringify({ document: { markdown: "hello\n\n💭" } });
+    expect(shouldRefreshRichText(previous, { markdown: "hello+\n\n💭·" }, "not-a-time", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(true);
+    expect(shouldRefreshRichText(previous, { markdown: "hello\n\n💭·" }, "not-a-time", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(false);
   });
   it("withholds an incomplete fenced block until it closes", () => {
     expect(safeStreamingMarkdown("Before\n\n```ts\nconst value = 1;")).toBe("Before");
