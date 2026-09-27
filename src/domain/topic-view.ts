@@ -12,7 +12,7 @@ const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "degraded" | "draining" | "archived" | "orphaned";
 export interface TopicModelPreference { model: string; revision: number; state: ModelPreferenceState; }
 export interface TopicViewState {
-  bindingId: string; bindingGeneration: number; title: string; agentKind: AgentKind; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; paneToken?: string | null; worktreeName: string | null; phase: TopicViewPhase;
+  bindingId: string; bindingGeneration: number; title: string; agentKind: AgentKind; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; paneToken?: string | null; paneName?: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; progressSummary: RunProgressSummary; model: string | null; context: string | null;
   modelPreference: TopicModelPreference | null;
   liveStatus: MainCardLiveStatus | null;
@@ -24,7 +24,7 @@ export interface TopicViewState {
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
-  return { bindingId, bindingGeneration: 1, title: "Agent task", agentKind: "traex", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, paneToken: null, worktreeName: null, phase: "provisioning",
+  return { bindingId, bindingGeneration: 1, title: "Agent task", agentKind: "traex", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, paneToken: null, paneName: null, worktreeName: null, phase: "provisioning",
     agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, currentAnswer: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
@@ -57,8 +57,8 @@ export function updateTopicView(state: TopicViewState, patch: Partial<TopicViewS
 function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): TopicViewState {
   const base = { ...state, lastEventId: event.eventId };
   switch (event.type) {
-    case "BindingCreated": return { ...base, title: event.payload.title, agentKind: event.payload.agentKind ?? base.agentKind, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, paneToken: event.payload.paneToken ?? base.paneToken ?? null, phase: "provisioning" };
-    case "BindingActivated": return { ...base, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, paneToken: event.payload.paneToken ?? base.paneToken ?? null, phase: "ready", notice: null };
+    case "BindingCreated": return { ...base, title: event.payload.title, agentKind: event.payload.agentKind ?? base.agentKind, workspaceId: event.payload.workspaceId, spaceName: event.payload.spaceName ?? base.spaceName, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, paneToken: event.payload.paneToken ?? base.paneToken ?? null, paneName: event.payload.paneName?.trim() || base.paneName || null, phase: "provisioning" };
+    case "BindingActivated": return { ...base, tabId: event.payload.tabId ?? base.tabId, paneId: event.payload.paneId, paneToken: event.payload.paneToken ?? base.paneToken ?? null, paneName: event.payload.paneName?.trim() || base.paneName || null, phase: "ready", notice: null };
     case "PrimaryToolAvailabilityChanged": return { ...base, primaryToolsAvailable: event.payload.available, primaryToolsNotice: event.payload.reason };
     case "BindingRenamed": return { ...base, title: event.payload.title };
     case "BindingDraining": return { ...base, phase: "draining", notice: event.payload.reason };
@@ -94,12 +94,13 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
       const context = observation?.main.context ?? event.payload.context ?? state.context;
       const tabId = event.payload.tabId ?? state.tabId;
       const paneToken = event.payload.paneToken ?? state.paneToken ?? null;
+      const paneName = event.payload.paneName?.trim() || state.paneName || null;
       const worktreeName = event.payload.worktreeName ?? state.worktreeName;
-      if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId && paneToken === state.paneToken && worktreeName === state.worktreeName) return state;
+      if (answer === state.answer && model === state.model && context === state.context && tabId === state.tabId && paneToken === state.paneToken && paneName === state.paneName && worktreeName === state.worktreeName) return state;
       if (observedAnswer !== undefined && state.activePromptId === null && state.phase !== "running" && state.phase !== "blocked") {
-        return { ...base, phase: "done", agentState: "done", answer, model, context, tabId, paneToken, worktreeName, notice: null };
+        return { ...base, phase: "done", agentState: "done", answer, model, context, tabId, paneToken, paneName, worktreeName, notice: null };
       }
-      return { ...base, answer, model, context, tabId, paneToken, worktreeName };
+      return { ...base, answer, model, context, tabId, paneToken, paneName, worktreeName };
     }
     case "AgentStateChanged":
       if (event.payload.promptId && base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
@@ -136,7 +137,7 @@ function sameVisibleProgress(left: RunProgressEvent[], right: RunProgressEvent[]
 
 function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boolean {
   return left.bindingGeneration === right.bindingGeneration && left.title === right.title && left.agentKind === right.agentKind && left.workspaceId === right.workspaceId && left.spaceName === right.spaceName
-    && left.tabId === right.tabId && left.paneId === right.paneId && left.paneToken === right.paneToken && left.worktreeName === right.worktreeName
+    && left.tabId === right.tabId && left.paneId === right.paneId && left.paneToken === right.paneToken && left.paneName === right.paneName && left.worktreeName === right.worktreeName
     && left.phase === right.phase && left.agentState === right.agentState && left.queueDepth === right.queueDepth
     && left.answer === right.answer && left.notice === right.notice && left.activePromptId === right.activePromptId
     && sameCardTargetRef(left.currentAnswer, right.currentAnswer)

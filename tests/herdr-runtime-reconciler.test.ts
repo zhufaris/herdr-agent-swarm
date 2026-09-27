@@ -673,6 +673,22 @@ describe("HerdrRuntimeReconciler", () => {
     store.close();
   });
 
+  it("backfills a stable pane name into the main-card projection", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    binding = store.updateBinding(binding.id, { paneId: "w1:p1", traexSessionId: "term-1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated" });
+    const bus = new BridgeEventBus();
+    const observed: Array<{ type: string; payload: unknown }> = [];
+    bus.onBridgeEvent("pane-name-test", (event) => { observed.push(event); });
+    const pane = { paneId: "w1:p1", paneName: "nxmz", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const reconciler = fixture(store, { async listPanes() { return [pane]; } } as unknown as HerdrPort, undefined, pino({ enabled: false }), bus);
+
+    await reconciler.reconcile();
+
+    expect(observed.find((event) => event.type === "PaneOutputObserved")?.payload).toMatchObject({ paneName: "nxmz" });
+    store.close();
+  });
+
   it("projects the resolved Git worktree directory name for the main card", async () => {
     const store = new SqliteBindingStore(":memory:");
     let binding = store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });

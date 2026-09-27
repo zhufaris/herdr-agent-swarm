@@ -102,6 +102,16 @@ describe("topic view reducer", () => {
     expect(observed).toMatchObject({ phase: "running", activePromptId: "p1", worktreeName: "feat-main-card" });
   });
 
+  it("persists a stable pane name and does not erase it when an observation omits the name", () => {
+    const activated = reduceTopicView(initialTopicView("b1"), event("BindingActivated", { paneId: "w1:p1", paneToken: "yx0c", paneName: " nxmz ", topicId: "t1" }));
+    const omitted = reduceTopicView(activated, event("PaneOutputObserved", { tabId: "w1:t1" }));
+    const renamed = reduceTopicView(omitted, event("PaneOutputObserved", { paneName: "next" }));
+
+    expect(activated).toMatchObject({ paneName: "nxmz" });
+    expect(omitted).toMatchObject({ paneName: "nxmz" });
+    expect(renamed).toMatchObject({ paneName: "next", viewVersion: omitted.viewVersion + 1 });
+  });
+
   it("does not update the project card for an identical visible snapshot", () => {
     const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     const first = reduceTopicView(running, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active" }] }));

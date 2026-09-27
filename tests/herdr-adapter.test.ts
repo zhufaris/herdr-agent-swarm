@@ -28,6 +28,29 @@ describe("Herdr adapter structured control", () => {
     ]);
   });
 
+  it("resolves a stable pane name from the pane label or managed tab label", async () => {
+    const native = { async request() { return { snapshot: {
+      panes: [
+        { pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", label: " pane-name " },
+        { pane_id: "w1:p2", tab_id: "w1:t2", workspace_id: "w1" },
+        { pane_id: "w1:p3", tab_id: "w1:t3", workspace_id: "w1" }
+      ],
+      agents: [],
+      tabs: [
+        { tab_id: "w1:t1", label: "lark_ignored" },
+        { tab_id: "w1:t2", label: "lark_nxmz" },
+        { tab_id: "w1:t3", label: "shell" }
+      ]
+    } }; } };
+    const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).listAllPanes()).resolves.toMatchObject([
+      { paneId: "w1:p1", label: " pane-name ", paneName: "pane-name" },
+      { paneId: "w1:p2", label: null, paneName: "nxmz" },
+      { paneId: "w1:p3", label: null, paneName: null }
+    ]);
+  });
+
   it("passes prompt cancellation to the command runner", async () => {
     const controller = new AbortController();
     const signals: Array<AbortSignal | undefined> = [];

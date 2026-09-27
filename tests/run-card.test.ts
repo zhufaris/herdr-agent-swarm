@@ -164,17 +164,17 @@ describe("run card", () => {
 
 
   it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
-    const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
+    const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", paneToken: "yx0c", paneName: "nxmz", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
     const runCard = renderRunCard(input) as { body: { elements: Array<{ tag: string; content?: string }> } };
     const projectCard = renderProjectEntryCard(input) as { body: { elements: Array<{ tag: string; content?: string }> } };
 
     expect(runCard.body.elements[0]).toMatchObject({
       tag: "markdown",
-      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**AGENT**  `TraeX`   **MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
+      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `nxmz · yx0c`\n**AGENT**  `TraeX`   **MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
     });
     expect(projectCard.body.elements.at(-1)).toMatchObject({
       tag: "markdown",
-      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `w5:p3G`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `yx0c`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
     });
     expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
   });

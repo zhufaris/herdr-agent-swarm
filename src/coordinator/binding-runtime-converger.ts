@@ -60,12 +60,14 @@ export class BindingRuntimeConverger {
     if (observation.nativeSessionMismatch) this.options.logger.warn({ event: "binding-agent-session-mismatch", bindingId: existing.id, paneId: pane.paneId, outcome: "preserved_persisted_identity" }, "Herdr reported a different native Agent session for the existing terminal identity");
     if (existing.state !== "active") return;
     const tabId = pane.tabId ?? null; const priorTabId = this.observedTabIds.get(pane.paneId);
+    const paneName = pane.paneName?.trim() || null; const priorPaneName = this.options.store.loadTopicView(existing.id)?.paneName ?? null;
     const worktreeName = await this.options.worktreeNameFor?.(pane.foregroundCwd ?? pane.cwd) ?? null; const priorWorktreeName = this.observedWorktreeNames.get(pane.paneId);
     const tabChanged = (tabId !== null && priorTabId !== tabId) || (tabId === null && priorTabId !== undefined && priorTabId !== null);
     const worktreeChanged = (worktreeName !== null && priorWorktreeName !== worktreeName) || (worktreeName === null && priorWorktreeName !== undefined && priorWorktreeName !== null);
     const paneTokenChanged = Boolean(pane.paneToken && pane.paneToken !== previousPaneToken);
+    const paneNameChanged = Boolean(paneName && paneName !== priorPaneName);
     this.observedTabIds.set(pane.paneId, tabId); this.observedWorktreeNames.set(pane.paneId, worktreeName);
-    if (tabChanged || worktreeChanged || paneTokenChanged) await this.publish(existing.id, "PaneOutputObserved", { ...(tabChanged ? { tabId } : {}), ...(paneTokenChanged ? { paneToken: pane.paneToken } : {}), ...(worktreeChanged ? { worktreeName } : {}) });
+    if (tabChanged || worktreeChanged || paneTokenChanged || paneNameChanged) await this.publish(existing.id, "PaneOutputObserved", { ...(tabChanged ? { tabId } : {}), ...(paneTokenChanged ? { paneToken: pane.paneToken } : {}), ...(paneNameChanged ? { paneName } : {}), ...(worktreeChanged ? { worktreeName } : {}) });
     if (existing.agentKind === "traex") await this.options.externalTurnObserver?.observe(existing);
     if (this.options.isBindingBusy(existing.id)) return;
     if (previous !== pane.agentState) { const queueDepth = this.options.store.countPendingPrompts(existing.id); await this.publish(existing.id, "AgentStateChanged", { state: pane.agentState, queueDepth }); this.options.scheduler.wake({ kind: "binding-runtime-changed", bindingId: existing.id }); if ((previous === "blocked" || previous === "unknown") && (pane.agentState === "idle" || pane.agentState === "done") && queueDepth > 0) this.options.scheduler.wake({ kind: "prompt-ready", bindingId: existing.id }); }
@@ -81,7 +83,7 @@ export class BindingRuntimeConverger {
   private withMonotonicAgentState(pane: HerdrPane): HerdrPane { const result = applyMonotonicAgentState(pane, this.observedAgentStates.get(pane.paneId)); if (result.observation) this.observedAgentStates.set(pane.paneId, result.observation); return result.pane; }
   private async recover(binding: Binding, pane: HerdrPane): Promise<Binding | null> {
     const current = this.options.store.loadTopicView(binding.id) ?? { ...initialTopicView(binding.id), title: binding.title, workspaceId: binding.workspaceId, spaceName: this.projects.spaceNameForBinding(binding), paneId: binding.paneId, paneToken: binding.paneToken };
-    const event = createBridgeEvent(binding.id, "BindingActivated", "herdr", { paneId: pane.paneId, paneToken: pane.paneToken ?? binding.paneToken, tabId: pane.tabId ?? null, topicId: binding.topicId ?? "unknown" }); const view = reduceTopicView(current, event);
+    const event = createBridgeEvent(binding.id, "BindingActivated", "herdr", { paneId: pane.paneId, paneToken: pane.paneToken ?? binding.paneToken, paneName: pane.paneName ?? null, tabId: pane.tabId ?? null, topicId: binding.topicId ?? "unknown" }); const view = reduceTopicView(current, event);
     const result = this.options.store.recoverOrphanBindingWithProjection({ bindingId: binding.id, expectedPaneId: pane.paneId, expectedGeneration: binding.generation, pane, view, rootMessageId: binding.rootMessageId, mainCard: this.options.presentation.mainCard(view), paneEntryCard: this.options.presentation.paneEntryCard(view) });
     if (result.outcome !== "recovered" || !result.binding) { this.options.logger.warn({ event: "binding-orphan-recovery-skipped", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: pane.paneId, outcome: result.outcome, reason: "runtime_identity_not_proven" }, "kept orphaned binding because the live runtime identity did not match"); return null; }
     if (result.outboxReserved) this.options.wakeOutbound?.(); await this.options.lifecycleEvents.publish(event); this.options.logger.info({ event: "binding-orphan-recovered", bindingId: binding.id, workspaceId: binding.workspaceId, paneId: pane.paneId, outcome: "recovered" }, "restored an orphaned binding from unchanged authoritative runtime identity"); return result.binding;

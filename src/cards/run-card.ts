@@ -2,7 +2,7 @@ import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
 import { summarizeProgress, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentKind } from "../domain/agent-instance.js";
-import { displayPaneIdentity } from "../domain/pane-display-identity.js";
+import { displayNamedPaneIdentity, displayPaneIdentity } from "../domain/pane-display-identity.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
@@ -411,11 +411,11 @@ export function renderMessageRejectedCard(message: string): object {
   };
 }
 
-function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" | "tabId" | "paneId" | "paneToken" | "worktreeName" | "model" | "context" | "queueDepth">): string {
+function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" | "tabId" | "paneId" | "paneToken" | "paneName" | "worktreeName" | "model" | "context" | "queueDepth">): string {
   const entries: Array<[label: string, value: string]> = [
     ["SPACE", input.spaceName],
     ["TAB", input.tabId ?? "—"],
-    ["PANE", displayPaneIdentity(input)]
+    ["PANE", displayNamedPaneIdentity(input)]
   ];
   const identity = entries.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
   const metrics: Array<[label: string, value: string]> = [

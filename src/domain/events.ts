@@ -52,8 +52,8 @@ export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObse
 }
 
 export type BridgeEvent =
-  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; tabId?: string | null; paneId: string | null; paneToken?: string | null; agentKind?: AgentKind }>
-  | EventBase<"BindingActivated", { paneId: string; paneToken?: string | null; tabId?: string | null; topicId: string }>
+  | EventBase<"BindingCreated", { title: string; workspaceId: string; spaceName?: string; tabId?: string | null; paneId: string | null; paneToken?: string | null; paneName?: string | null; agentKind?: AgentKind }>
+  | EventBase<"BindingActivated", { paneId: string; paneToken?: string | null; paneName?: string | null; tabId?: string | null; topicId: string }>
   | EventBase<"PrimaryToolAvailabilityChanged", { available: boolean; reason: string | null }>
   | EventBase<"BindingRenamed", { title: string }>
   | EventBase<"BindingDraining", { reason: string }>
@@ -66,7 +66,7 @@ export type BridgeEvent =
   | EventBase<"TurnStarted", { promptId: string; queueDepth: number }>
   | EventBase<"AgentStateChanged", { state: AgentState; queueDepth: number; promptId?: string }>
   | EventBase<"TurnOutputObserved", { promptId: string; observation: TurnOutputObservation }>
-  | EventBase<"PaneOutputObserved", { observation?: TurnOutputObservation; answer?: string; model?: string; context?: string; tabId?: string | null; paneToken?: string | null; worktreeName?: string | null }>
+  | EventBase<"PaneOutputObserved", { observation?: TurnOutputObservation; answer?: string; model?: string; context?: string; tabId?: string | null; paneToken?: string | null; paneName?: string | null; worktreeName?: string | null }>
   | EventBase<"TurnCompleted", { promptId: string; answer: string; queueDepth: number }>
   | EventBase<"TurnFailed", { promptId: string; error: string; queueDepth: number }>;
 

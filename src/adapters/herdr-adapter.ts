@@ -31,7 +31,7 @@ const snapshotPaneSchema = paneSchema.extend({
   active_turn_id: z.string().nullish()
 });
 const snapshotSchema = z.object({
-  snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]) }).passthrough()
+  snapshot: z.object({ panes: z.array(snapshotPaneSchema), agents: z.array(snapshotPaneSchema).default([]), tabs: z.array(tabSchema).default([]) }).passthrough()
 });
 const PROCESS_INFO_CONCURRENCY = 4;
 
@@ -90,7 +90,8 @@ export class HerdrCliAdapter implements HerdrPort {
     } else parsed = snapshotSchema.parse(await this.json(["api", "snapshot"]));
     const result = parsed.snapshot;
     const agents = new Map(result.agents.map((agent) => [agent.pane_id, agent]));
-    return result.panes.map((pane) => this.fromSnapshot(pane, agents.get(pane.pane_id)));
+    const tabLabels = new Map(result.tabs.map((tab) => [tab.tab_id, tab.label]));
+    return result.panes.map((pane) => this.fromSnapshot(pane, agents.get(pane.pane_id), pane.tab_id ? tabLabels.get(pane.tab_id) : null));
   }
 
   async getPane(paneId: string): Promise<HerdrPane | null> {
@@ -318,7 +319,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const foregroundExecutables = await this.foregroundExecutables(raw.pane_id);
     return {
       paneId: raw.pane_id, paneToken: normalizePaneToken(raw.token), tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
-      ...(raw.foreground_cwd !== null && raw.foreground_cwd !== undefined ? { foregroundCwd: raw.foreground_cwd } : {}), label: raw.label ?? null,
+      ...(raw.foreground_cwd !== null && raw.foreground_cwd !== undefined ? { foregroundCwd: raw.foreground_cwd } : {}), label: raw.label ?? null, paneName: stablePaneName(raw.label),
       agentState: raw.agent_status ?? "unknown", foregroundExecutables: [...new Set(foregroundExecutables)]
     };
   }
@@ -362,14 +363,14 @@ export class HerdrCliAdapter implements HerdrPort {
     }
   }
 
-  private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>): HerdrPane {
+  private fromSnapshot(raw: z.infer<typeof snapshotPaneSchema>, agent?: z.infer<typeof snapshotPaneSchema>, tabLabel?: string | null): HerdrPane {
     const kind = agent?.agent ?? raw.agent ?? null;
     const agentSession = agent?.agent_session ?? raw.agent_session ?? null;
     const foregroundCwd = raw.foreground_cwd ?? agent?.foreground_cwd ?? null;
     const foregroundExecutables = kind ? [kind] : [];
     return {
       paneId: raw.pane_id, paneToken: normalizePaneToken(raw.token) ?? normalizePaneToken(agent?.token), tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
-      ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,
+      ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null, paneName: stablePaneName(raw.label, tabLabel),
       agentKind: kind, agentSession, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       steeringCapability: agent?.steering_capability ?? raw.steering_capability ?? "unsupported",
       activeTurnId: agent?.active_turn_id ?? raw.active_turn_id ?? null,
@@ -477,6 +478,13 @@ function larkTabTitle(title: string | undefined): string {
 
 function paneCreationTitle(options: HerdrPaneCreationOptions): string {
   return options.titlePolicy === "complete" ? normalizePaneTitle(options.title) : larkTabTitle(options.title);
+}
+
+function stablePaneName(paneLabel: string | null | undefined, tabLabel?: string | null): string | null {
+  const label = paneLabel?.trim();
+  if (label) return label;
+  const managedTab = tabLabel?.trim().match(/^lark_(.+)$/i)?.[1]?.trim();
+  return managedTab || null;
 }
 
 function normalizePaneTitle(title: string | undefined): string {
