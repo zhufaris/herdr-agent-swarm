@@ -26,7 +26,7 @@ describe("HerdrEventsReader", () => {
       { type: "agent_events_batch", events: [
         event("c1", "turn-1", "2026-09-26T00:00:00Z", { type: "turn_started" }),
         event("c2", "turn-1", "2026-09-26T00:00:01Z", { type: "message", message_id: "m1", channel: "commentary", text: "**Checking**\n\n`code`", truncated: false }),
-        event("c3", "turn-1", "2026-09-26T00:00:02Z", { type: "tool_call", call_id: "call-1", name: "exec_command", arguments: '{"cmd":"npm test"}', truncated: false }),
+        event("c3", "turn-1", "2026-09-26T00:00:02Z", { type: "tool_call", call_id: "call-1", name: "exec", arguments: 'const r = await tools.exec_command({cmd:"npm test"}); text(r.output);', truncated: false }),
         event("c4", "turn-1", "2026-09-26T00:00:03Z", { type: "tool_result", call_id: "call-1", text: "2 passed", is_error: false, truncated: false })
       ], next_cursor: "c4", earliest_cursor: "c0", latest_cursor: "c4" },
       { type: "agent_events_batch", events: [
@@ -49,7 +49,7 @@ describe("HerdrEventsReader", () => {
   it("projects update_plan without exposing it as tool activity", async () => {
     const { reader } = harness([{ type: "agent_events_batch", events: [
       event("c1", "turn-1", "2026-09-26T00:00:00Z", { type: "turn_started" }),
-      event("c2", "turn-1", "2026-09-26T00:00:01Z", { type: "tool_call", call_id: "plan-1", name: "update_plan", arguments: '{"plan":[{"step":"Inspect","status":"completed"},{"step":"Fix","status":"in_progress"}]}', truncated: false }),
+      event("c2", "turn-1", "2026-09-26T00:00:01Z", { type: "tool_call", call_id: "plan-1", name: "exec", arguments: 'const r = await tools.update_plan({plan:[{step:"Inspect",status:"completed"},{step:"Fix",status:"in_progress"}]}); text(r);', truncated: false }),
       event("c3", "turn-1", "2026-09-26T00:00:02Z", { type: "tool_result", call_id: "plan-1", text: "{}", is_error: false, truncated: false })
     ], next_cursor: "c3", earliest_cursor: "c0", latest_cursor: "c3" }]);
     const opened = await reader.open(source);
@@ -113,6 +113,28 @@ describe("HerdrEventsReader", () => {
       turnLifecycle: { turnId: "turn-2", startedAt: "2026-09-26T00:00:04.250Z" }
     });
     expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers an active turn from the previous Core source after a live handoff", async () => {
+    const run = vi.fn<CommandRunner["run"]>(async (_executable, args) => {
+      if (args.includes("attach")) return response({ type: "agent_events_attached", source_id: "source-current", attach_offset: 72_000_000, sources: [
+        { source_id: "source-old", terminal_id: "terminal-old", agent_kind: "traex", session_id: "session-1", state: "error", checkpoint_offset: 69_000_000, earliest_cursor: "old:0", latest_cursor: "old:900" },
+        { source_id: "source-current", terminal_id: "terminal-1", agent_kind: "traex", session_id: "session-1", state: "active", checkpoint_offset: 72_000_000, earliest_cursor: "current:0", latest_cursor: "current:0" }
+      ] });
+      if (args.includes("locate")) {
+        const sourceId = args[args.indexOf("--source") + 1];
+        return response({ type: "agent_events_turn_cursor", source_id: sourceId, found: sourceId === "source-old", after_cursor: sourceId === "source-old" ? "old:700" : "current:0" });
+      }
+      expect(args[args.indexOf("--source") + 1]).toBe("source-old");
+      expect(args[args.indexOf("--after") + 1]).toBe("old:700");
+      return response({ type: "agent_events_batch", events: [{ ...event("old:701", "turn-1", "2026-09-26T00:00:01Z", { type: "message", message_id: "m1", channel: "commentary", text: "recovered", truncated: false }), source_id: "source-old" }], next_cursor: "old:701", earliest_cursor: "old:0", latest_cursor: "old:900" });
+    });
+    const reader = new HerdrEventsReader({ run }, { async listAllPanes() { return [pane]; } }, "herdr", async () => ({ sessionId: "session-1", path: "/tmp/session.jsonl" }));
+
+    const opened = await reader.openActiveTurn(source);
+    if (opened.mode !== "typed" || !opened.cursor.readObservation) throw new Error("reader unavailable");
+    await expect(opened.cursor.readObservation()).resolves.toMatchObject({ answerDelta: "recovered" });
+    expect(run.mock.calls.filter(([, args]) => args.includes("locate")).map(([, args]) => args[args.indexOf("--source") + 1])).toEqual(["source-current", "source-old"]);
   });
 
   it.each([

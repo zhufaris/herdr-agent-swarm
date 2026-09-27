@@ -20,7 +20,8 @@ const FAILURE_LINE_LIMIT = 20;
 const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s"']+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
 export function projectToolCall(name: string, argumentsJson: string): ProjectedToolCall {
-  const parsed = parseArguments(argumentsJson);
+  const decoded = parseArguments(argumentsJson);
+  const parsed = name.toLowerCase() === "exec" && !asRecord(decoded) ? { input: argumentsJson } : decoded;
   const skillNames = skillNamesFromArguments(parsed);
   if (skillNames.length > 0) {
     return { descriptor: { category: "Skill", target: skillNames.join(", "), skillNames }, entry: "" };

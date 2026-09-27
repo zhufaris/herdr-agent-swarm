@@ -14,7 +14,7 @@ describe("parsePlanToolCall", () => {
 
   it("parses exec-wrapped tools.update_plan calls with quoted or bare keys", () => {
     const input = `const r = await tools.update_plan({plan:[{step:"One",status:"pending"},{"step":"Two","status":"completed"}]});`;
-    expect(parsePlanToolCall("functions.exec", JSON.stringify({ input }))).toEqual([
+    expect(parsePlanToolCall("exec", input)).toEqual([
       { key: "plan:0", label: "One", state: "pending" },
       { key: "plan:1", label: "Two", state: "done" }
     ]);
@@ -24,6 +24,6 @@ describe("parsePlanToolCall", () => {
     expect(parsePlanToolCall("update_plan", "{")) .toBeNull();
     expect(parsePlanToolCall("update_plan", JSON.stringify({ plan: [{ step: "  ", status: "pending" }] }))).toBeNull();
     expect(parsePlanToolCall("update_plan", JSON.stringify({ plan: Array.from({ length: 101 }, () => ({ step: "x", status: "pending" })) }))).toBeNull();
-    expect(parsePlanToolCall("exec_command", JSON.stringify({ input: "tools.update_plan({plan:[" }))).toBeNull();
+    expect(parsePlanToolCall("exec", "tools.update_plan({plan:[")).toBeNull();
   });
 });

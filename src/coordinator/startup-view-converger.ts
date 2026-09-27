@@ -92,20 +92,27 @@ export class StartupViewConverger implements StartupViewConvergerPort {
       };
       const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId, paneToken: binding.paneToken });
       const runCards = this.store.listActionableStartupRunCards(binding.id);
+      const answerFailures: unknown[] = [];
       for (const view of runCards) {
-        const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title || view.paneToken !== binding.paneToken;
-        const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, paneToken: binding.paneToken, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
-        if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current), "history"); this.outboundWork.wake(); }
-        const answerPage = this.store.listAnswerPages(current.promptId).find(({ pageIndex }) => pageIndex === current.answerPageIndex);
-        if (answerPage?.deliveryMode === "rich_post") await this.answerPages.converge(current.promptId, "history");
-        else if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
-        else if (current.answerCardId) await this.answerPages.converge(current.promptId, "history");
+        try {
+          const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title || view.paneToken !== binding.paneToken;
+          const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, paneToken: binding.paneToken, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
+          if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current), "history"); this.outboundWork.wake(); }
+          const answerPage = this.store.listAnswerPages(current.promptId).find(({ pageIndex }) => pageIndex === current.answerPageIndex);
+          if (answerPage?.deliveryMode === "rich_post") await this.answerPages.converge(current.promptId, "history");
+          else if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
+          else if (current.answerCardId) await this.answerPages.converge(current.promptId, "history");
+        } catch (error) {
+          answerFailures.push(error);
+          this.logger?.warn({ event: "startup-answer-view-failed", err: safeLogError(error), bindingId: binding.id, promptId: view.promptId, outcome: "deferred" }, "failed to converge one Answer view; continuing with Main Card convergence");
+        }
       }
       const withConversation = updateTopicView(reconciledTopicView, { recentConversation: projectRecentConversation(reconciledTopicView.recentConversation, this.store.listRecentRunCards(binding.id)) });
       const latestRun = this.store.loadStartupMainRunCard(binding.id, reconciledTopicView.activePromptId);
       const terminal = binding.lifecycle === "draining" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed";
       const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(withConversation, latestRun) : withConversation;
       await this.mainCards.project(finalTopic, "history");
+      if (answerFailures.length > 0) throw answerFailures[0];
   }
 
   private spaceNameFor(binding: Binding): string { return this.projectRoutes.spaceNameForBinding(binding); }

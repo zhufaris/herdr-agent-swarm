@@ -132,12 +132,11 @@ export class HerdrEventsReader implements AgentTranscriptReaderPort {
         && candidate.session_id === descriptor.sessionId);
       const match = matches.length === 1 ? matches[0] : undefined;
       if (match?.state === "active" && match.checkpoint_offset >= attached.attach_offset) {
-        const historical = candidates.filter((candidate) => candidate.state === "active"
-          && candidate.terminal_id === match.terminal_id
-          && candidate.agent_kind === source.agentKind
+        const historical = candidates.filter((candidate) => candidate.agent_kind === source.agentKind
           && candidate.session_id === descriptor.sessionId
-          && candidate.source_id !== match.source_id);
-        return { source: match, recoverySources: [match, ...historical.reverse()] };
+          && candidate.source_id !== match.source_id)
+          .sort((left, right) => right.checkpoint_offset - left.checkpoint_offset);
+        return { source: match, recoverySources: [match, ...historical] };
       }
       if (attempt < 7) {
         await wait(125);

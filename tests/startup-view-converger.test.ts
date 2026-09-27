@@ -128,6 +128,26 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
+  it("still converges the Main Card when an Answer view is deferred", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "task", workspaceId: "wH", paneId: "wH:p1", requestText: "request", queuePosition: 0, occurredAt: "2026-09-27T00:00:00Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "message", actorOpenId: "u1", body: "request" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const created = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(created.id, "answer", null);
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "running", viewVersion: 2, answerDeliveredVersion: 0 });
+    const answerPages = { converge: vi.fn(async () => { throw new Error("answer deferred"); }) };
+    const mainCards = { project: vi.fn(async () => undefined) };
+    const logger = { warn: vi.fn() };
+
+    await expect(createConverger(store, { answerPages, mainCards, logger }).converge()).resolves.toEqual(["b1"]);
+    expect(answerPages.converge).toHaveBeenCalledWith("p1", "history");
+    expect(mainCards.project).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "startup-answer-view-failed", bindingId: "b1", promptId: "p1" }), expect.any(String));
+    store.close();
+  });
+
   it("reprojects an existing root card using the durable binding title", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({

@@ -20,7 +20,7 @@ describe("tool activity projector", () => {
 
   it("recognizes nested exec commands and keeps the target bounded", () => {
     const command = "const r = await tools.exec_command({cmd: '" + "x".repeat(300) + "'}); text(r.output);";
-    const projected = projectToolCall("exec", JSON.stringify({ input: command }));
+    const projected = projectToolCall("exec", command);
 
     expect(projected.entry).toBe("");
     expect(projected.descriptor.category).toBe("Command");
@@ -65,7 +65,7 @@ describe("tool activity projector", () => {
   });
 
   it("suppresses an exec wrapper when its command cannot be inspected", () => {
-    const { descriptor } = projectToolCall("exec", JSON.stringify({ input: "opaque orchestration" }));
+    const { descriptor } = projectToolCall("exec", "opaque orchestration");
 
     expect(projectToolResult(descriptor, "Script completed")).toBe("");
   });

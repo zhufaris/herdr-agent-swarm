@@ -10,11 +10,10 @@ const planArgumentsSchema = z.object({
 
 export function parsePlanToolCall(name: string, argumentsJson: string): AgentTranscriptPlanStep[] | null {
   try {
-    const outer = JSON.parse(argumentsJson) as unknown;
     const parsed = name === "update_plan"
-      ? planArgumentsSchema.safeParse(outer)
+      ? planArgumentsSchema.safeParse(JSON.parse(argumentsJson) as unknown)
       : isExecTool(name)
-        ? parseWrappedPlan(outer)
+        ? parseExecPlan(argumentsJson)
         : null;
     if (!parsed?.success) return null;
     const states = { pending: "pending", in_progress: "active", completed: "done" } as const;
@@ -33,9 +32,20 @@ function isExecTool(name: string): boolean {
   return name === "exec" || name === "functions.exec" || name === "exec_command";
 }
 
-function parseWrappedPlan(value: unknown): ReturnType<typeof planArgumentsSchema.safeParse> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const input = (value as Record<string, unknown>).input;
+function parseExecPlan(value: string): ReturnType<typeof planArgumentsSchema.safeParse> | null {
+  try {
+    const decoded = JSON.parse(value) as unknown;
+    if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+      const input = (decoded as Record<string, unknown>).input;
+      if (typeof input === "string") return parseWrappedPlan(input);
+    }
+  } catch {
+    // Core Agent Events expose custom_tool_call.input as the raw argument string.
+  }
+  return parseWrappedPlan(value);
+}
+
+function parseWrappedPlan(input: string): ReturnType<typeof planArgumentsSchema.safeParse> | null {
   if (typeof input !== "string" || !/tools\.update_plan\s*\(/.test(input)) return null;
   const steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> = [];
   const pattern = /"?step"?\s*:\s*("(?:\\.|[^"\\])*")\s*,\s*"?status"?\s*:\s*"(pending|in_progress|completed)"/g;
