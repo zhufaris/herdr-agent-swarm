@@ -81,14 +81,14 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   private async publishUnsupported(binding: Binding, messageId: string, operationId: string): Promise<void> {
     if (!binding.paneId) return;
     await this.publish(binding, { kind: "card", messageId }, `model:${operationId}:unsupported`, this.options.presentation.modelResult({
-      bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
+      bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, paneToken: binding.paneToken, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
     }));
   }
 
   private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, replyTarget: ModelReplyTarget): Promise<boolean> {
     if (binding.agentKind !== "traex") {
       await this.publish(binding, replyTarget, "unsupported-agent", this.options.presentation.modelResult({
-        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
+        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
       }));
       this.options.store.audit({ actorOpenId, action: "model.run", target: requested ?? "list", outcome: "unsupported_agent_kind" });
       return false;
@@ -96,7 +96,7 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
     if (!isNativeTraexSession(session)) {
-      await this.publish(binding, replyTarget, "unavailable", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
+      await this.publish(binding, replyTarget, "unavailable", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, output: "当前 Session 不支持结构化模型切换。", switched: false }));
       return false;
     }
     try {
@@ -118,10 +118,10 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
         }
       }
       const preference = this.options.store.getModelPreference(binding.id);
-      await this.publish(binding, replyTarget, `${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, models, preference, ...(notice ? { notice } : {}) }));
+      await this.publish(binding, replyTarget, `${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, models, preference, ...(notice ? { notice } : {}) }));
       return selected;
     } catch (error) {
-      await this.publish(binding, replyTarget, "failed", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
+      await this.publish(binding, replyTarget, "failed", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
       return false;
     }
   }

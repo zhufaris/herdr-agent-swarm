@@ -1,7 +1,7 @@
 export interface PanePresentation {
-  paneCloseConfirmation(input: { spaceName: string; paneId: string; agentState: string; workerPaneCount: number; code: string; expiresAt: string }): object;
-  paneCloseResult(input: { paneId: string; workerPaneCount?: number; workerPaneSucceededCount?: number; workerPaneRetainedCount?: number; workerPaneUncertainCount?: number }): object;
-  paneRetentionWarning(input: { paneId: string; warningAt: string; closeAt: string }): object;
+  paneCloseConfirmation(input: { spaceName: string; paneId: string; paneToken?: string | null; agentState: string; workerPaneCount: number; code: string; expiresAt: string }): object;
+  paneCloseResult(input: { paneId: string; paneToken?: string | null; workerPaneCount?: number; workerPaneSucceededCount?: number; workerPaneRetainedCount?: number; workerPaneUncertainCount?: number }): object;
+  paneRetentionWarning(input: { paneId: string; paneToken?: string | null; warningAt: string; closeAt: string }): object;
   requestRejected(message: string): object;
 }
 
@@ -44,11 +44,11 @@ export interface WorkerPresentation {
 }
 
 export interface SpaceDirectoryPane {
-  paneId: string; name: string; agentState: import("../types.js").AgentState; foregroundExecutables: string[]; bindingId?: string; claimProjectId?: string;
+  paneId: string; paneToken?: string | null; name: string; agentState: import("../types.js").AgentState; foregroundExecutables: string[]; bindingId?: string; claimProjectId?: string;
 }
 export interface SpaceDirectoryGroup { spaceName: string; workspaceId: string; directories: string[]; panes: SpaceDirectoryPane[]; error?: string; unregistered?: boolean; }
-export interface TopicPaneDirectoryWorker { workerId: string; runtimeGeneration: number; workerSessionGeneration: number; workerName: string; paneId: string | null; state: import("../agent-instance.js").ObservedInstanceState; }
-export interface TopicPaneDirectoryEntry { bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string; title: string; spaceName: string; agentState: import("../runtime-observation.js").AgentState; workers: TopicPaneDirectoryWorker[]; }
+export interface TopicPaneDirectoryWorker { workerId: string; runtimeGeneration: number; workerSessionGeneration: number; workerName: string; paneId: string | null; paneToken?: string | null; state: import("../agent-instance.js").ObservedInstanceState; }
+export interface TopicPaneDirectoryEntry { bindingId: string; bindingGeneration: number; paneId: string; paneToken?: string | null; sourceMainMessageId: string; title: string; spaceName: string; agentState: import("../runtime-observation.js").AgentState; workers: TopicPaneDirectoryWorker[]; }
 export interface InstanceDirectoryEntry { instance: AgentInstance; workspace: WorkspaceLease; capabilities: AgentCapabilities; queueDepth: number; approvalCount?: number; }
 export interface ThreadPrimaryView { bindingId: string; generation: number; paneId: string | null; state: Binding["state"]; }
 export type InteractionToast = { toast: { type: "success" | "warning" | "error"; content: string } };
@@ -60,13 +60,13 @@ export interface ApplicationPresentation extends PrimaryPresentation, WorkerPres
   commandResult(input: { title: string; text: string }): object;
   projectDirectory(input: { projects: readonly ProjectConfig[]; selectedProjectId?: string }): object;
   projectSelector(input: { selectionId: string; projects: ProjectConfig[] }): object;
-  projectSelectionStatus(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; bindingId?: string; message?: string }): object;
-  attachStatus(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object;
+  projectSelectionStatus(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; paneToken?: string | null; bindingId?: string; message?: string }): object;
+  attachStatus(input: { spaceName: string; paneId: string; paneToken?: string | null; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object;
   help(): object;
   awakeStatus(message: string, recovered?: boolean): object;
   skipStatus(message: string, outcome: "skipped" | "none" | "stale"): object;
-  modelSelection(input: { bindingId: string; spaceName: string; paneId: string; models: readonly TraexModelSummary[]; preference: ModelPreference | null; notice?: string }): object;
-  modelResult(input: { bindingId: string; spaceName: string; paneId: string; output: string; switched: boolean }): object;
+  modelSelection(input: { bindingId: string; spaceName: string; paneId: string; paneToken?: string | null; models: readonly TraexModelSummary[]; preference: ModelPreference | null; notice?: string }): object;
+  modelResult(input: { bindingId: string; spaceName: string; paneId: string; paneToken?: string | null; output: string; switched: boolean }): object;
   sessions(page: SessionPage): object[];
   failures(failures: FailureSummary[], notice?: string): object[];
   spaces(groups: SpaceDirectoryGroup[]): object[];

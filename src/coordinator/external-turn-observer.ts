@@ -274,7 +274,7 @@ export class ExternalTurnObserver {
       const externalPromptId = this.idFactory();
       const externalView = createQueuedRunCard({
         promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(observation.requestText),
-        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: observation.requestText, queuePosition: 0, occurredAt: startedAt
+        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, paneToken: binding.paneToken, requestText: observation.requestText, queuePosition: 0, occurredAt: startedAt
       });
       const result = this.options.store.adoptExternalTurn({
         bindingId: binding.id, expectedGeneration: binding.generation, expectedPaneId: binding.paneId!, expectedSession: session,

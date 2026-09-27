@@ -48,9 +48,9 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
         const view = this.options.store.loadTopicView(binding.id);
         if (!view || !binding.statusMessageId) return [];
         const workers = this.options.store.listWorkerInstancesByParent({ bindingId: binding.id, paneId: binding.paneId! }).map((worker) => {
-          return { workerId: worker.id, runtimeGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, paneId: worker.runtimeRef?.paneId ?? worker.pendingRuntimeRef?.paneId ?? null, state: worker.observedState };
+          return { workerId: worker.id, runtimeGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, paneId: worker.runtimeRef?.paneId ?? worker.pendingRuntimeRef?.paneId ?? null, paneToken: worker.runtimeRef?.paneToken ?? worker.pendingRuntimeRef?.paneToken ?? null, state: worker.observedState };
         });
-        return [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState, workers }];
+        return [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, paneToken: binding.paneToken, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState, workers }];
       })
       .sort((left, right) => left.spaceName.localeCompare(right.spaceName) || left.title.localeCompare(right.title) || left.paneId.localeCompare(right.paneId));
     await this.publishCards(message, "panes", [this.options.presentation.topicPanes(entries)]);
@@ -96,7 +96,7 @@ export function buildSpaceDirectoryGroups(projects: readonly ProjectConfig[], pa
     const unmatched = [];
     for (const pane of panes) {
       const group = pane.cwd === null ? undefined : groupsByRoute.get(`${workspaceId}\0${pane.cwd}`);
-      const view = { paneId: pane.paneId, name: pane.label ?? pane.paneId, agentState: pane.agentState, foregroundExecutables: pane.foregroundExecutables };
+      const view = { paneId: pane.paneId, paneToken: pane.paneToken ?? null, name: pane.label ?? "", agentState: pane.agentState, foregroundExecutables: pane.foregroundExecutables };
       if (group) group.panes.push(view);
       else unmatched.push(view);
     }

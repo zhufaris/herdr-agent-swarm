@@ -108,7 +108,7 @@ export class InstanceRuntimeReconciler {
         || !pendingPane.agentSession?.value || !matchesHerdrAgentKind(instance.agentKind, pendingPane.agentSession.agent)) return;
       const attached = this.options.store.attachAgentInstanceRuntime({
         instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: pending.herdrWorkspaceId,
-        paneId: pending.paneId, nativeSessionId: pendingPane.agentSession.value
+        paneId: pending.paneId, paneToken: pendingPane.paneToken ?? null, nativeSessionId: pendingPane.agentSession.value
       });
       if (!attached?.runtimeRef) return;
       instance = attached;
@@ -131,7 +131,7 @@ export class InstanceRuntimeReconciler {
       this.options.wakeCardContext?.();
     }
     const observedState = normalizeState(pane);
-    const updated = this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState, lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });
+    const updated = this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState, ...(pane.paneToken ? { paneToken: pane.paneToken } : {}), lastError: observedState === "detached" ? "Herdr runtime state is uncertain" : null });
     if (updated) this.options.wakeCardContext?.();
     if (updated && observedState === "idle" && this.options.store.countPendingInstanceTurns(instance.id, instance.generation) > 0) this.options.wake(instance.id);
   }

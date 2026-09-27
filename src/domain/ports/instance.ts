@@ -36,11 +36,11 @@ export interface InstanceStore {
   listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[];
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
-  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
+  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; paneToken?: string | null; nativeSessionId: string | null }): AgentInstance | null;
   refreshAgentInstanceRuntimeSession(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string }): AgentInstance | null;
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
-  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null;
+  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; paneToken?: string | null; lastError?: string | null }): AgentInstance | null;
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
   reserveWorkerPaneClose(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null;

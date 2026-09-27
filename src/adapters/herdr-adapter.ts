@@ -7,10 +7,11 @@ import type { CommandRunner } from "../infra/command-runner.js";
 import type { HerdrAgentSession } from "../domain/types.js";
 import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import { mapWithConcurrency } from "../runtime/map-with-concurrency.js";
+import { normalizePaneToken } from "../domain/pane-display-identity.js";
 
 const envelopeSchema = z.object({ id: z.string(), result: z.unknown() });
 const paneSchema = z.object({
-  pane_id: z.string(), tab_id: z.string().nullish(), workspace_id: z.string(), cwd: z.string().nullish(), foreground_cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
+  pane_id: z.string(), token: z.string().nullish(), tab_id: z.string().nullish(), workspace_id: z.string(), cwd: z.string().nullish(), foreground_cwd: z.string().nullish(), label: z.string().nullish(), terminal_id: z.string().nullish(),
   agent_status: z.enum(["idle", "working", "blocked", "done", "unknown"]).optional()
 }).passthrough();
 const tabSchema = z.object({ tab_id: z.string(), label: z.string() }).passthrough();
@@ -316,7 +317,7 @@ export class HerdrCliAdapter implements HerdrPort {
   private async enrichPane(raw: z.infer<typeof paneSchema>): Promise<HerdrPane> {
     const foregroundExecutables = await this.foregroundExecutables(raw.pane_id);
     return {
-      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
+      paneId: raw.pane_id, paneToken: normalizePaneToken(raw.token), tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
       ...(raw.foreground_cwd !== null && raw.foreground_cwd !== undefined ? { foregroundCwd: raw.foreground_cwd } : {}), label: raw.label ?? null,
       agentState: raw.agent_status ?? "unknown", foregroundExecutables: [...new Set(foregroundExecutables)]
     };
@@ -367,7 +368,7 @@ export class HerdrCliAdapter implements HerdrPort {
     const foregroundCwd = raw.foreground_cwd ?? agent?.foreground_cwd ?? null;
     const foregroundExecutables = kind ? [kind] : [];
     return {
-      paneId: raw.pane_id, tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
+      paneId: raw.pane_id, paneToken: normalizePaneToken(raw.token) ?? normalizePaneToken(agent?.token), tabId: raw.tab_id ?? null, terminalId: raw.terminal_id ?? null, workspaceId: raw.workspace_id, cwd: raw.cwd ?? null,
       ...(foregroundCwd ? { foregroundCwd } : {}), label: raw.label ?? null,
       agentKind: kind, agentSession, outputRevision: raw.revision ?? agent?.revision ?? null, stateChangeSeq: agent?.state_change_seq ?? raw.state_change_seq ?? null,
       steeringCapability: agent?.steering_capability ?? raw.steering_capability ?? "unsupported",

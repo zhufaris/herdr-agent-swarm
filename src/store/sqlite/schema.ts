@@ -21,7 +21,7 @@ export function createLatestSchema(context: SqliteContext): void {
   CREATE INDEX IF NOT EXISTS answer_timeline_items_order ON answer_timeline_items(aggregate_kind, aggregate_id, sequence, item_id);
   CREATE TABLE IF NOT EXISTS bindings(
     id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL DEFAULT 'feishu:primary', creator_open_id TEXT, project_id TEXT, workspace_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT UNIQUE,
-    root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
+    root_message_id TEXT, retired_topic_id TEXT, retired_root_message_id TEXT, replaces_binding_id TEXT REFERENCES bindings(id), reserved_topic_id TEXT, reserved_root_message_id TEXT, reset_message_id TEXT, pane_id TEXT UNIQUE, pane_token TEXT, traex_session_id TEXT, agent_session_source TEXT, agent_session_agent TEXT, agent_session_kind TEXT CHECK(agent_session_kind IN ('id','path')), agent_session_value TEXT, title TEXT NOT NULL,
     runtime TEXT NOT NULL CHECK(runtime = 'traex'), agent_kind TEXT NOT NULL DEFAULT 'traex' CHECK(agent_kind IN ('pi','claude-code','codex','traex')),
     state TEXT NOT NULL CHECK(state IN ('pending','active','archived','orphaned','failed')),
     status_message_id TEXT, status_card_sequence INTEGER NOT NULL DEFAULT 0,
@@ -39,7 +39,7 @@ export function createLatestSchema(context: SqliteContext): void {
     agent_kind TEXT NOT NULL CHECK(agent_kind IN ('pi','claude-code','codex','traex')), model TEXT, source_primary_pane_label TEXT, parent_binding_id TEXT, parent_binding_generation INTEGER, parent_pane_id TEXT, parent_native_session_id TEXT, worker_session_lifecycle TEXT CHECK(worker_session_lifecycle IN ('active','legacy','terminated')), worker_session_generation INTEGER NOT NULL DEFAULT 1,
     desired_state TEXT NOT NULL CHECK(desired_state IN ('running','stopped')),
     observed_state TEXT NOT NULL CHECK(observed_state IN ('unprovisioned','starting','idle','working','blocked','detached','stopped','failed')),
-    workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, native_session_id TEXT,
+    workspace_lease_id TEXT NOT NULL UNIQUE, generation INTEGER NOT NULL DEFAULT 1, herdr_workspace_id TEXT, pane_id TEXT UNIQUE, pane_token TEXT, native_session_id TEXT,
     provisioning_checkpoint TEXT NOT NULL DEFAULT 'recorded', last_error TEXT, pending_herdr_workspace_id TEXT, pending_pane_id TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );

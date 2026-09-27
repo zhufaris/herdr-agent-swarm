@@ -4,6 +4,11 @@ import { runForeignKeySafeRebuild } from "./foreign-key-safe-rebuild.js";
 export class WorkerMigrations {
   constructor(private readonly context: SqliteContext) {}
 
+  ensureWorkerPaneTokenColumn(): void {
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("pane_token")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN pane_token TEXT");
+  }
+
   ensureWorkerSessionThreads(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 35").get();
     const table = this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_session_threads'").get();

@@ -70,6 +70,7 @@ export class SqliteMigrations {
     this.binding.ensureProjectSelectionColumns();
     this.binding.ensurePrimaryAgentKindColumns();
     this.binding.ensureBindingLifecycleColumns();
+    this.binding.ensureBindingPaneTokenColumn();
     this.binding.ensureBindingPrimaryToolCapabilities();
     this.binding.ensureBindingCreatorColumn();
     this.binding.ensureSessionOperations();
@@ -95,6 +96,7 @@ export class SqliteMigrations {
     this.cards.ensureOutboundDismissedState();
     this.cards.ensureOutboundDeliveryOrder();
     this.worker.ensureWorkerTurnCards();
+    this.worker.ensureWorkerPaneTokenColumn();
     this.worker.ensureWorkerTurnCardPageStates();
     this.worker.ensureWorkerTurnCardProgress();
     this.worker.ensureWorkerTurnProgressSequence();

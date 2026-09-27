@@ -137,9 +137,9 @@ describe("card context boundaries", () => {
   it("converges the three visible card aggregates, freezes Answer context, and keeps late Worker state in its owning boundary", async () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding", projectId: "project", workspaceId: "herdr", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
-    store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane", lastAgentState: "working" });
-    store.saveTopicView({ ...initialTopicView("binding"), title: "Primary", workspaceId: "herdr", paneId: "primary:pane", phase: "running", viewVersion: 1 });
-    const answer = createQueuedRunCard({ promptId: "primary-prompt", bindingId: "binding", bindingGeneration: 1, title: "Coordinate", workspaceId: "herdr", paneId: "primary:pane", requestText: "delegate", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane", paneToken: "prim", lastAgentState: "working" });
+    store.saveTopicView({ ...initialTopicView("binding"), title: "Primary", workspaceId: "herdr", paneId: "primary:pane", paneToken: "prim", phase: "running", viewVersion: 1 });
+    const answer = createQueuedRunCard({ promptId: "primary-prompt", bindingId: "binding", bindingGeneration: 1, title: "Coordinate", workspaceId: "herdr", paneId: "primary:pane", paneToken: "prim", requestText: "delegate", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: answer.promptId, bindingId: "binding", larkMessageId: "request-message", actorOpenId: "operator", body: "delegate" }, view: answer, rootMessageId: "root", answerCard: renderRequestAnswerCard(answer) });
     const answerCreate = store.listPendingOutboundReplies().find(({ promptId }) => promptId === answer.promptId)!;
     store.markOutboundReplyDelivered(answerCreate.id, "answer-message", "answer-card");
@@ -149,7 +149,7 @@ describe("card context boundaries", () => {
       parent: { bindingId: "binding", bindingGeneration: 1, paneId: "primary:pane", nativeSessionId: "primary-session" },
       workspace: { id: "worker-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
-    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "herdr", paneId: "worker:pane", nativeSessionId: "worker-session" })!;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "herdr", paneId: "worker:pane", paneToken: "work", nativeSessionId: "worker-session" })!;
     const task = createQueuedWorkerTurnCard({
       turnId: "worker-turn", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "Review durable boundary\nsecret body", queuePosition: 1,
       primaryAnswer: { aggregateKind: "primary-turn", aggregateId: answer.promptId, generation: 1, messageId: null }, occurredAt: "2026-09-05T00:00:01.000Z"
@@ -159,7 +159,7 @@ describe("card context boundaries", () => {
     const rebuilder = new CardContextRebuilder(store, () => wakeOutbound.push("wake"), { debug() {}, error() {} } as never, applicationPresentation);
     await rebuilder.requestScan();
     expect(store.loadTopicView("binding")).toMatchObject({ currentAnswer: { aggregateKind: "primary-turn", aggregateId: answer.promptId, generation: 1, messageId: "answer-message" } });
-    expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ currentTask: { turnId: task.turnId, title: "Review durable boundary", requestText: task.requestText, taskCard: { messageId: null } }, queueCount: 1, frozenAt: null });
+    expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ paneId: "worker:pane", paneToken: "work", parentPaneId: "primary:pane", parentPaneToken: "prim", currentTask: { turnId: task.turnId, title: "Review durable boundary", requestText: task.requestText, taskCard: { messageId: null } }, queueCount: 1, frozenAt: null });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerId: worker.id, currentTaskTitle: "Review durable boundary" }] });
     expect(store.loadRunCard(answer.promptId)).toMatchObject({ workerActivity: [{ workerId: worker.id, taskCount: 1, latestTaskCard: { messageId: null } }], workerContextFrozenAt: null });
     const workerMainCreate = store.listPendingOutboundReplies().find(({ workerId }) => workerId === worker.id)!;

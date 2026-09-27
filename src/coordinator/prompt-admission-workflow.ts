@@ -54,7 +54,7 @@ export class PromptAdmissionWorkflow implements PromptAdmissionWorkflowPort {
     const capturedParentPromptId = this.options.primaryState.activeTurn(binding.id)?.promptId ?? null;
     const view = createQueuedRunCard({
       promptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(body), sessionTitle: binding.title, agentKind: binding.agentKind,
-      workspaceId: binding.workspaceId, paneId: binding.paneId, spaceName: this.projects.spaceNameForBinding(binding), requestText: body, occurredAt: acceptedAt,
+      workspaceId: binding.workspaceId, paneId: binding.paneId, paneToken: binding.paneToken, spaceName: this.projects.spaceNameForBinding(binding), requestText: body, occurredAt: acceptedAt,
       conversionParentPromptId: capturedParentPromptId, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1
     });
     let receipt;

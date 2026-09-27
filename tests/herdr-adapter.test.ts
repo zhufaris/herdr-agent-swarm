@@ -11,6 +11,23 @@ describe("Herdr adapter structured control", () => {
     expect(Array.from({ length: 8 }, (_, attempt) => herdrRetryDelay(attempt))).toEqual([100, 200, 400, 800, 1000, 1000, 1000, 1000]);
   });
 
+  it("parses native pane tokens and ignores malformed values", async () => {
+    const native = { async request() { return { snapshot: { panes: [
+      { pane_id: "w1:p1", token: "VDFN", workspace_id: "w1" },
+      { pane_id: "w1:p2", token: "not-a-token", workspace_id: "w1" },
+      { pane_id: "w1:p3", workspace_id: "w1" },
+      { pane_id: "w1:p4", token: "invalid", workspace_id: "w1" }
+    ], agents: [{ pane_id: "w1:p4", token: "a1b2", workspace_id: "w1", agent: "traex" }] } }; } };
+    const runner: CommandRunner = { async run() { throw new Error("CLI must not be used"); } };
+
+    await expect(new HerdrCliAdapter(runner, "herdr", 1000, "auto", native).listAllPanes()).resolves.toMatchObject([
+      { paneId: "w1:p1", paneToken: "vdfn" },
+      { paneId: "w1:p2", paneToken: null },
+      { paneId: "w1:p3", paneToken: null },
+      { paneId: "w1:p4", paneToken: "a1b2" }
+    ]);
+  });
+
   it("passes prompt cancellation to the command runner", async () => {
     const controller = new AbortController();
     const signals: Array<AbortSignal | undefined> = [];

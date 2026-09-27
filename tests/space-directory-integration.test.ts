@@ -63,9 +63,9 @@ describe("space directory command", () => {
     expect(rendered).toContain("space\\\\-empty");
     expect(rendered).toContain("space\\\\-failed");
     expect(rendered).toContain("未注册");
-    expect(rendered).toContain("`p1`");
-    expect(rendered).toContain("`p2`");
-    expect(rendered).toContain("`p3`");
+    expect(rendered).toContain("`w1:p1`");
+    expect(rendered).toContain("`w1:p2`");
+    expect(rendered).toContain("`w1:p3`");
     expect(rendered).toContain("workspace unavailable");
     expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(["w1", "w2"]);
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "space-directory-workspace-failed", workspaceId: "w2" }), expect.any(String));

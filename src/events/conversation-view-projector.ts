@@ -96,6 +96,13 @@ export class ConversationViewProjector {
 
   private async onEvent(event: BridgeEvent): Promise<void> {
     if (this.stopping) return;
+    if (event.type === "PaneOutputObserved" && event.payload.paneToken) {
+      for (const view of this.store.listRunCardsByPhases(event.bindingId, ["queued", "running", "blocked"])) {
+        if (view.paneToken === event.payload.paneToken) continue;
+        const next = this.store.saveRunCard({ ...view, paneToken: event.payload.paneToken, viewVersion: view.viewVersion + 1, updatedAt: event.occurredAt });
+        this.scheduler.schedule(answerCardKey(next.promptId), next.viewVersion, { priority: "interactive", delayMs: this.answerUpdateDelayMs });
+      }
+    }
     const promptId = promptIdOf(event);
     const runCard = promptId ? this.store.loadRunCard(promptId) : null;
     if (promptId && runCard) {

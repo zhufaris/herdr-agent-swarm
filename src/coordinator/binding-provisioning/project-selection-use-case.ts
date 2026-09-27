@@ -102,7 +102,7 @@ export class ProjectSelectionUseCase {
     }
   }
 
-  success(selectionId: string, messageId: string, project: ProjectConfig, binding: Binding): Promise<void> { return this.status(messageId, selectionId, { status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId } : {}) }); }
+  success(selectionId: string, messageId: string, project: ProjectConfig, binding: Binding): Promise<void> { return this.status(messageId, selectionId, { status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId, paneToken: binding.paneToken } : {}) }); }
   private status(messageId: string, selectionId: string, input: StatusInput): Promise<void> { return this.options.outbound.enqueueCardUpdate(null, messageId, `selection:${selectionId}:${input.status}`, this.options.presentation.projectSelectionStatus(input)); }
 }
 

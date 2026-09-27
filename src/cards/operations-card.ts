@@ -1,6 +1,7 @@
 import type { AgentState, Binding, FailureSummary, SessionSummary } from "../domain/types.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 import { callbackButton } from "./cardkit-button.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 const LIFECYCLE_LABEL: Record<Binding["lifecycle"], string> = {
   provisioning: "创建中", active: "活跃", draining: "归档中", archived: "已归档", closed: "已关闭", failed: "失败"
@@ -15,7 +16,7 @@ export function renderSessionCards(sessions: SessionSummary[], payloadLimit = 12
     const scope = spaceName ?? binding.projectId ?? binding.workspaceId;
     const content = [
       `**${escape(binding.title)}**`,
-      `Space: \`${escape(scope)}\` · Pane: \`${escape(binding.paneId ?? "-")}\``,
+      `Space: \`${escape(scope)}\` · Pane: \`${escape(displayPaneIdentity(binding, "-"))}\``,
       `${LIFECYCLE_LABEL[binding.lifecycle]} · ${ATTACHMENT_LABEL[binding.attachment]} · ${AGENT_LABEL[binding.lastAgentState]} · 第 ${binding.generation} 代 · 队列 ${queueDepth} · ${relativeTime(binding.lastActivityAt)}`
     ].join("\n");
     return [{ tag: "markdown", content }, ...(binding.rootMessageId ? [button("发送话题入口", { action: "open_project_thread", bindingId: binding.id })] : [])];
@@ -28,7 +29,7 @@ export function renderFailureCards(failures: FailureSummary[], notice?: string, 
   const rows = failures.map((failure) => {
     const heading = failure.kind === "outbound" ? "消息发送失败" : failure.kind === "prompt" ? "任务未完成（不可自动重试）" : "会话需要处理";
     const stage = failure.kind === "outbound" ? "发送阶段" : failure.kind === "prompt" ? "任务阶段" : "会话阶段";
-    const context = [failure.spaceName ? `Space: \`${escape(failure.spaceName)}\`` : null, failure.paneId ? `Pane: \`${escape(failure.paneId)}\`` : null].filter(Boolean).join(" · " );
+    const context = [failure.spaceName ? `Space: \`${escape(failure.spaceName)}\`` : null, failure.paneId ? `Pane: \`${escape(displayPaneIdentity(failure))}\`` : null].filter(Boolean).join(" · " );
     const content = [
       `**${heading}** · ${stage} · \`${escape(shortId(failure.id))}\``,
       failure.title ? escape(failure.title) : null,

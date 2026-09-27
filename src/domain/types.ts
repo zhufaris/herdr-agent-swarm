@@ -85,9 +85,9 @@ export interface SessionSummary {
 export interface SessionPage { sessions: SessionSummary[]; nextCursor: string | null; }
 
 export type FailureSummary =
-  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
-  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
-  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string };
+  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; paneToken?: string | null; title?: string }
+  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; paneToken?: string | null; title?: string }
+  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; paneToken?: string | null; title?: string };
 
 
 export interface ProjectConfig {

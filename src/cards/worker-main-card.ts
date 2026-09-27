@@ -7,6 +7,7 @@ import { renderProgressTimeline } from "./progress-timeline.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 import { currentMainCardActivity } from "../domain/main-card-activity.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 const PHASE_LABEL: Record<WorkerMainTaskSummary["phase"], string> = { queued: "排队", preparing: "准备中", running: "执行中", blocked: "阻塞", completed: "完成", failed: "失败", cancelled: "取消", "dispatch-uncertain": "派发不确定" };
 const RUNTIME_LABEL: Record<WorkerMainView["runtimeState"], string> = { unprovisioned: "未配置", starting: "启动中", idle: "空闲", working: "工作中", blocked: "阻塞", detached: "已脱离", stopped: "已停止", failed: "失败", terminated: "已终止" };
@@ -147,14 +148,14 @@ function runtimeDetails(view: WorkerMainView, projectDisplayName?: string): stri
     : `Project ${safe(view.projectId ?? view.parentBindingId ?? "未关联项目")}`;
   return [
     cardSection("🖥️", "运行环境"),
-    compactMetadata([project, `Primary ${primaryPaneLabel(view)} (\`${safe(view.parentPaneId)}\`)`, `Worker \`${workerPaneLabel(view)}\``]),
+    compactMetadata([project, `Primary \`${primaryPaneLabel(view)}\``, `Worker \`${workerPaneLabel(view)}\``]),
     compactMetadata([`Owner ${safe(view.ownerName)}`, `Session \`${view.workerSessionGeneration}\``, `Runtime \`${view.runtimeGeneration}\``]),
     `Workspace  ${safe(view.workspace)}${view.branch ? `\nBranch  \`${safe(view.branch)}\`` : ""}`
   ].join("\n");
 }
 
-function primaryPaneLabel(view: WorkerMainView): string { return safe(view.primaryPaneName ?? view.parentPaneId); }
-function workerPaneLabel(view: WorkerMainView): string { return safe(view.paneId ?? "未绑定"); }
+function primaryPaneLabel(view: WorkerMainView): string { return safe(displayPaneIdentity({ paneId: view.parentPaneId, paneToken: view.parentPaneToken })); }
+function workerPaneLabel(view: WorkerMainView): string { return safe(displayPaneIdentity({ paneId: view.paneId, paneToken: view.paneToken }, "未绑定")); }
 function runtimeTemplate(state: WorkerMainView["runtimeState"]): string {
   if (state === "failed") return "red";
   if (state === "blocked" || state === "detached") return "orange";

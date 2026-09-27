@@ -620,7 +620,11 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
 
     expect(store.database.prepare("PRAGMA table_info(agent_instances)").all()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "worker_session_generation", notnull: 1, dflt_value: "1" })
+      expect.objectContaining({ name: "worker_session_generation", notnull: 1, dflt_value: "1" }),
+      expect.objectContaining({ name: "pane_token" })
+    ]));
+    expect(store.database.prepare("PRAGMA table_info(bindings)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "pane_token" })
     ]));
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('worker_main_views','card_context_invalidations') ORDER BY name").all()).toEqual([
       { name: "card_context_invalidations" }, { name: "worker_main_views" }
@@ -2452,8 +2456,12 @@ describe("SQLite store", () => {
 
     expect(store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 2, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1" })).toBeNull();
     expect(store.getAgentInstance("i1")).toMatchObject({ generation: 1, runtimeRef: null, observedState: "unprovisioned" });
-    expect(store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1" })).toMatchObject({
-      generation: 2, observedState: "idle", runtimeRef: { paneId: "w1:p1", generation: 2 }
+    const attached = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", paneToken: "vdfn", nativeSessionId: "s1" });
+    expect(attached).toMatchObject({
+      generation: 2, observedState: "idle", runtimeRef: { paneId: "w1:p1", paneToken: "vdfn", generation: 2 }
+    });
+    expect(store.updateAgentInstanceObservation({ instanceId: "i1", expectedGeneration: 2, observedState: "working" })).toMatchObject({
+      runtimeRef: { paneId: "w1:p1", paneToken: "vdfn" }
     });
   });
 
@@ -3414,17 +3422,17 @@ describe("SQLite store", () => {
 
     const applied = store.applyRuntimeObservation({
       bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1,
-      pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
+      pane: { paneId: "w1:p1", paneToken: "vdfn", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
     });
 
     expect(applied).toMatchObject({ outcome: "applied", terminalIdentityRefreshed: true, nativeSessionMismatch: false });
-    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working", attachment: "attached", degradationCount: 0, agentSessionValue: "session-1" });
+    expect(store.getBinding("b1")).toMatchObject({ paneToken: "vdfn", traexSessionId: "term-2", lastAgentState: "working", attachment: "attached", degradationCount: 0, agentSessionValue: "session-1" });
 
     expect(store.applyRuntimeObservation({
       bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 0,
       pane: { paneId: "w1:p1", terminalId: "term-3", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }
     })).toEqual({ outcome: "stale_binding" });
-    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
+    expect(store.getBinding("b1")).toMatchObject({ paneToken: "vdfn", traexSessionId: "term-2", lastAgentState: "working" });
   });
 
   it("rejects native Herdr TraeX observation for a legacy binding session", () => {

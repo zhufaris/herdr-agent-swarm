@@ -6,7 +6,9 @@ export interface WorkerHumanReviewNotificationInput {
   taskTitle: string;
   primaryName: string;
   parentPaneId: string;
+  parentPaneToken?: string | null;
   workerPaneId: string;
+  workerPaneToken?: string | null;
   notice: string;
   creatorOpenId: string | null;
   workerMainMessageId: string | null;

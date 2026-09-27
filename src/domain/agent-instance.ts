@@ -31,6 +31,7 @@ export interface WorkerParentIdentity {
 export interface AgentRuntimeRef {
   herdrWorkspaceId: string;
   paneId: string;
+  paneToken?: string | null;
   nativeSessionId: string | null;
   generation: number;
 }

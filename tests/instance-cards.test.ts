@@ -143,9 +143,9 @@ describe("instance cards", () => {
     };
     const rendered = JSON.stringify(renderWorkerMainCard(view, { projectDisplayName: "Herdr Agent Swarm" }));
     expect(rendered).toContain("🧭 Worker · reviewer");
-    expect(rendered).toContain("HERDR WORKER · PRIMARY primary-review · ✅ 空闲");
+    expect(rendered).toContain("HERDR WORKER · PRIMARY w1:p0 · ✅ 空闲");
     expect(rendered).toContain("Project Herdr Agent Swarm (`swarm`)");
-    expect(rendered).toContain("Primary primary-review (`w1:p0`)");
+    expect(rendered).toContain("Primary `w1:p0`");
   });
 
   it("never binds continuation-card actions to an earlier page message", () => {

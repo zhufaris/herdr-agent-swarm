@@ -25,6 +25,7 @@ import { agentKindFromHerdr, matchesAgentKind, type AgentKind } from "../domain/
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import { contentIdempotencyKey } from "../domain/content-idempotency-key.js";
 import { primaryManagedAgentName } from "../domain/managed-agent-name.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 export interface BindingProvisioningWorkflowPort {
   selectProject(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText?: string | null, agentKind?: AgentKind): Promise<void>;
@@ -113,7 +114,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     binding = store.updateBindingMetadata(binding.id, paneIdentityPatch(pane));
     binding = store.transitionBinding(binding.id, { type: "pane_created" });
     binding = store.transitionBinding(binding.id, { type: "runtime_started" });
-    const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId });
+    const createdEvent = createBridgeEvent(binding.id, "BindingCreated", "herdr", { title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId, paneToken: pane.paneToken ?? null });
     const availabilityEvent = createBridgeEvent(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
     const initialView = reduceTopicView(reduceTopicView(initialTopicView(binding.id), createdEvent), availabilityEvent);
     store.saveTopicView(initialView);
@@ -125,7 +126,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
     binding = store.transitionBinding(binding.id, { type: "activate" });
     await lifecycleEvents.publish(createdEvent);
     await lifecycleEvents.publish(availabilityEvent);
-    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: topic.threadId });
+    await this.publish(binding.id, "BindingActivated", "bridge", { paneId: pane.paneId, paneToken: pane.paneToken ?? null, tabId: pane.tabId ?? null, topicId: topic.threadId });
     return binding;
   }
 
@@ -167,10 +168,10 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
       replacement = handoff.replacement;
       this.options.wakeRetiredPaneCleanup?.();
       scheduler.wake({ kind: "binding-runtime-changed", bindingId: binding.id });
-      await this.publish(replacement.id, "BindingCreated", "lark", { title, agentKind: replacement.agentKind, workspaceId: replacement.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId });
-      await this.publish(replacement.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: replacement.topicId! });
+      await this.publish(replacement.id, "BindingCreated", "lark", { title, agentKind: replacement.agentKind, workspaceId: replacement.workspaceId, spaceName: projectSpaceName(project), tabId: pane.tabId ?? null, paneId: pane.paneId, paneToken: pane.paneToken ?? null });
+      await this.publish(replacement.id, "BindingActivated", "bridge", { paneId: pane.paneId, paneToken: pane.paneToken ?? null, tabId: pane.tabId ?? null, topicId: replacement.topicId! });
       await this.publishPrimaryToolAvailability(replacement);
-      await this.reply(replacement.rootMessageId!, this.options.presentation.requestRejected(`已开启新会话：${pane.paneId}。旧 Herdr pane ${handoff.previous.paneId ?? "(unknown)"} 将在确认空闲后安全关闭。`));
+      await this.reply(replacement.rootMessageId!, this.options.presentation.requestRejected(`已开启新会话：${displayPaneIdentity(pane)}。旧 Herdr pane ${displayPaneIdentity(handoff.previous, "(unknown)")} 将在确认空闲后安全关闭。`));
       logger.info({ event: "binding-reset-completed", previousBindingId: handoff.previous.id, bindingId: replacement.id, paneId: pane.paneId, outcome: "active" }, "reset Lark topic to a new Herdr session");
       return true;
     } catch (error) {
@@ -244,12 +245,12 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
         current = store.updateBindingMetadata(current.id, paneIdentityPatch(pane));
         current = store.transitionBinding(current.id, { type: "runtime_started", runtime: pane.agentState });
       }
-      const activatedEvent = createBridgeEvent(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: "pending" });
+      const activatedEvent = createBridgeEvent(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, paneToken: pane.paneToken ?? null, tabId: pane.tabId ?? null, topicId: "pending" });
       let activeView = reduceTopicView(store.loadTopicView(current.id) ?? { ...initialTopicView(current.id), title: current.title, agentKind: current.agentKind, workspaceId: current.workspaceId, spaceName: projectSpaceName(project), paneId: pane.paneId }, activatedEvent);
       if (current.agentKind !== "traex") activeView = reduceTopicView(activeView, createBridgeEvent(current.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: `${current.agentKind} Primary 当前不支持 Bridge Primary 工具；请直接通过飞书命令管理 Worker。` }));
       if (current.provisioningCheckpoint === "runtime_started") { const topic = await this.options.gatewayEffects.createConversation({ conversationId: config.lark.chatId, view: this.options.presentation.mainCard(activeView), idempotencyKey: current.id, purpose: "primary-main" }); store.recordBridgeMessage(topic.rootMessageId); store.saveTopicView({ ...activeView, deliveredVersion: activeView.viewVersion }); current = store.updateBindingMetadata(current.id, { topicId: topic.threadId, rootMessageId: topic.rootMessageId, statusMessageId: topic.rootMessageId }); current = store.transitionBinding(current.id, { type: "thread_created" }); }
       if (current.provisioningCheckpoint === "thread_created") current = store.transitionBinding(current.id, { type: "activate" });
-      await this.publish(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: current.topicId! });
+      await this.publish(current.id, "BindingActivated", "bridge", { paneId: pane.paneId, paneToken: pane.paneToken ?? null, tabId: pane.tabId ?? null, topicId: current.topicId! });
       await this.publishPrimaryToolAvailability(current); return current;
     } catch (error) { logger.warn({ event: "project-provisioning-paused", err: safeLogError(error), selectionId: selection.id, bindingId: current.id, checkpoint: current.provisioningCheckpoint, outcome: "retry_on_restart" }, "project provisioning paused at a durable checkpoint"); throw error; }
   }
@@ -289,7 +290,7 @@ export class BindingProvisioningWorkflow implements BindingProvisioningWorkflowP
   private async publishAttachSuccess(message: IncomingLarkMessage, binding: Binding, spaceName: string, alreadyAttached: boolean, resumeRequired = false, toolsUnavailable = !this.options.store.hasBindingPrimaryToolCapability(binding.id, binding.generation)): Promise<void> {
     if (!binding.paneId) return;
     if (toolsUnavailable) await this.publish(binding.id, "PrimaryToolAvailabilityChanged", "bridge", { available: false, reason: PRIMARY_TOOLS_UNAVAILABLE_NOTICE });
-    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`, this.options.presentation.attachStatus({ spaceName, paneId: binding.paneId, ...(binding.rootMessageId ? { bindingId: binding.id } : {}), alreadyAttached, resumeRequired }));
+    await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `attach:${message.messageId}:${alreadyAttached ? "existing" : "created"}`, this.options.presentation.attachStatus({ spaceName, paneId: binding.paneId, paneToken: binding.paneToken, ...(binding.rootMessageId ? { bindingId: binding.id } : {}), alreadyAttached, resumeRequired }));
   }
   private async reject(message: IncomingLarkMessage, reason: string): Promise<void> { await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
   private async reply(rootMessageId: string, card: object): Promise<void> { await this.options.outbound.enqueueCard(rootMessageId, contentIdempotencyKey(`standalone:${rootMessageId}`, card), card); }
@@ -308,9 +309,9 @@ function matchesPaneAgentKind(kind: AgentKind, pane: HerdrPane): boolean {
   return kind === "traex" ? pane.foregroundExecutables.includes("traex") || pane.agentKind === "traex" : matchesAgentKind(kind, pane.agentKind);
 }
 
-function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "traexSessionId" | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"> {
+function paneIdentityPatch(pane: HerdrPane): Pick<Binding, "paneId" | "paneToken" | "traexSessionId" | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"> {
   return {
-    paneId: pane.paneId, traexSessionId: pane.terminalId ?? null,
+    paneId: pane.paneId, paneToken: pane.paneToken ?? null, traexSessionId: pane.terminalId ?? null,
     agentSessionSource: pane.agentSession?.source ?? null, agentSessionAgent: pane.agentSession?.agent ?? null,
     agentSessionKind: pane.agentSession?.kind ?? null, agentSessionValue: pane.agentSession?.value ?? null
   };

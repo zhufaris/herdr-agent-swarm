@@ -46,6 +46,7 @@ export interface RunCardView {
   workspaceId: string;
   spaceName: string;
   paneId: string | null;
+  paneToken?: string | null;
   answer: string;
   answerSegments: string[];
   answerDraft: string;
@@ -79,12 +80,12 @@ export type RunCardChange =
   | { type: "failed"; occurredAt: string; notice: string };
 
 export function createQueuedRunCard(input: {
-  promptId: string; bindingId: string; title: string; sessionTitle?: string; agentKind?: AgentKind; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
+  promptId: string; bindingId: string; title: string; sessionTitle?: string; agentKind?: AgentKind; workspaceId: string; spaceName?: string; paneId: string | null; paneToken?: string | null; requestText: string;
   queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null;
 }): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
-    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, timelineItems: [],
+    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, paneToken: input.paneToken ?? null, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, timelineItems: [],
     progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };

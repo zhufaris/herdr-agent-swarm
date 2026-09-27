@@ -6,7 +6,7 @@ export type BindingState = "pending" | "active" | "archived" | "orphaned" | "fai
 export interface Binding {
   id: string; gatewayId: string; creatorOpenId: string | null; projectId: string | null; workspaceId: string; chatId: string; topicId: string | null;
   rootMessageId: string | null; retiredTopicId: string | null; retiredRootMessageId: string | null; replacesBindingId: string | null;
-  reservedTopicId: string | null; reservedRootMessageId: string | null; resetMessageId: string | null; paneId: string | null; traexSessionId: string | null;
+  reservedTopicId: string | null; reservedRootMessageId: string | null; resetMessageId: string | null; paneId: string | null; paneToken: string | null; traexSessionId: string | null;
   agentSessionSource?: string | null; agentSessionAgent?: string | null; agentSessionKind?: "id" | "path" | null; agentSessionValue?: string | null;
   title: string; agentKind: AgentKind; state: BindingState; statusMessageId: string | null; statusCardSequence: number; lastAgentState: AgentState;
   lastOutputFingerprint: string | null; lifecycle: SessionLifecycle; attachment: AttachmentState; generation: number; provisioningCheckpoint: ProvisioningCheckpoint;
@@ -14,7 +14,7 @@ export interface Binding {
 }
 export type BindingMetadataPatch = Partial<Pick<Binding,
   | "gatewayId" | "projectId" | "topicId" | "rootMessageId" | "retiredTopicId" | "retiredRootMessageId"
-  | "reservedTopicId" | "reservedRootMessageId" | "resetMessageId" | "paneId" | "traexSessionId"
+  | "reservedTopicId" | "reservedRootMessageId" | "resetMessageId" | "paneId" | "paneToken" | "traexSessionId"
   | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue"
   | "title" | "statusMessageId" | "lastOutputFingerprint" | "lastActivityAt"
 >>;

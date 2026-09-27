@@ -87,13 +87,14 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         agentKind: binding.agentKind,
         workspaceId: binding.workspaceId,
         spaceName,
-        paneId: binding.paneId
+        paneId: binding.paneId,
+        paneToken: binding.paneToken
       };
-      const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId });
+      const reconciledTopicView = updateTopicView(currentTopicView, { title: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, spaceName, paneId: binding.paneId, paneToken: binding.paneToken });
       const runCards = this.store.listActionableStartupRunCards(binding.id);
       for (const view of runCards) {
-        const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title;
-        const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
+        const identityChanged = view.spaceName !== spaceName || view.sessionTitle !== binding.title || view.paneToken !== binding.paneToken;
+        const current = identityChanged ? this.store.saveRunCard({ ...view, spaceName, sessionTitle: binding.title, paneToken: binding.paneToken, viewVersion: view.viewVersion + 1, updatedAt: new Date().toISOString() }) : view;
         if (!current.answerMessageId && binding.rootMessageId) { this.store.ensureAnswerCard(current.promptId, binding.rootMessageId, this.presentation.answerCard(current), "history"); this.outboundWork.wake(); }
         if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
         else if (current.answerCardId) await this.answerPages.converge(current.promptId, "history");

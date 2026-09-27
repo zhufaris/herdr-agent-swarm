@@ -3,6 +3,7 @@ import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
 import { actionRow, cardSection, compactMetadata } from "./card-style.js";
 import { canMentionFeishuOpenId, type WorkerHumanReviewNotificationInput } from "../domain/worker-human-review.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 export function renderWorkerHumanReviewNotification(input: WorkerHumanReviewNotificationInput): object {
   const mention = canMentionFeishuOpenId(input.creatorOpenId)
@@ -13,7 +14,7 @@ export function renderWorkerHumanReviewNotification(input: WorkerHumanReviewNoti
     : null;
   const elements: object[] = [
     { tag: "markdown", content: mention + "Worker **" + safe(input.workerName) + "** 正在等待用户处理。" },
-    { tag: "markdown", content: cardSection("🎯", "任务") + "\n" + safe(input.taskTitle, 1_500) + "\n\n" + compactMetadata(["Turn `" + safe(input.turnId) + "`", "Primary `" + safe(input.parentPaneId) + "`", "Worker `" + safe(input.workerPaneId) + "`"]) },
+    { tag: "markdown", content: cardSection("🎯", "任务") + "\n" + safe(input.taskTitle, 1_500) + "\n\n" + compactMetadata(["Turn `" + safe(input.turnId) + "`", "Primary `" + safe(displayPaneIdentity({ paneId: input.parentPaneId, paneToken: input.parentPaneToken })) + "`", "Worker `" + safe(displayPaneIdentity({ paneId: input.workerPaneId, paneToken: input.workerPaneToken })) + "`"]) },
     { tag: "collapsible_panel", expanded: true, border: { color: "orange", corner_radius: "6px" }, header: { title: { tag: "plain_text", content: "需要处理" } }, elements: [{ tag: "markdown", content: safe(input.notice, 1_500) }] },
     { tag: "markdown", content: "审批和本地操作仍须在对应 Herdr Pane 完成；此通知不提供远程审批或输入能力。" }
   ];

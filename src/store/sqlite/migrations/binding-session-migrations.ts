@@ -10,6 +10,11 @@ export class BindingSessionMigrations {
     if (!columns.has("retired_root_message_id")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN retired_root_message_id TEXT");
   }
 
+  ensureBindingPaneTokenColumn(): void {
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("pane_token")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN pane_token TEXT");
+  }
+
   ensureInboundMessageIdempotency(): void {
     this.context.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id)");
   }

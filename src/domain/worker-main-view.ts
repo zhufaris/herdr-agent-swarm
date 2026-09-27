@@ -29,6 +29,7 @@ export interface WorkerMainView {
   parentBindingId: string;
   parentBindingGeneration: number;
   parentPaneId: string;
+  parentPaneToken: string | null;
   primaryPaneName?: string;
   projectId?: string;
   workerName: string;
@@ -39,6 +40,7 @@ export interface WorkerMainView {
   desiredState: "running" | "stopped";
   parentActive: boolean;
   paneId: string | null;
+  paneToken: string | null;
   workspace: string;
   branch: string | null;
   model: string | null;
@@ -62,17 +64,17 @@ export function canSubmitWorkerMainTask(view: Pick<WorkerMainView, "frozenAt" | 
 }
 
 export type WorkerMainChange =
-  | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId: string | null; occurredAt: string }
+  | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId: string | null; paneToken?: string | null; occurredAt: string }
   | { type: "tasks"; currentTask: WorkerMainTaskSummary | null; queueCount: number; nextTaskTitle: string | null; recentTasks: readonly WorkerMainTaskSummary[]; occurredAt: string; dependencyRevision?: number }
   | { type: "terminated"; occurredAt: string };
 
 export function createWorkerMainView(input: {
-  workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string;
-    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null; primaryPaneName?: string; projectId?: string;
+  workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; parentPaneToken?: string | null;
+    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null; paneToken?: string | null; primaryPaneName?: string; projectId?: string;
   workspace: string; branch: string | null; model: string | null; occurredAt: string;
 }): WorkerMainView {
   return {
-    ...input, paneId: input.paneId ?? null, currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [],
+    ...input, parentPaneToken: input.parentPaneToken ?? null, paneId: input.paneId ?? null, paneToken: input.paneToken ?? null, currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [],
     messageId: null, cardId: null, frozenAt: null, dependencyRevision: 0, viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
@@ -81,11 +83,12 @@ export function reduceWorkerMainView(state: WorkerMainView, change: WorkerMainCh
   if (state.frozenAt !== null) return state;
   let patch: Partial<WorkerMainView>;
   if (change.type === "runtime") {
+    const paneToken = change.paneToken === undefined ? state.paneToken : change.paneToken;
     if (state.runtimeGeneration === change.runtimeGeneration && state.runtimeState === change.runtimeState && state.runtimeAttached === change.runtimeAttached
-      && state.desiredState === change.desiredState && state.parentActive === change.parentActive && state.paneId === change.paneId) return state;
-    patch = { runtimeGeneration: change.runtimeGeneration, runtimeState: change.runtimeState, runtimeAttached: change.runtimeAttached, desiredState: change.desiredState, parentActive: change.parentActive, paneId: change.paneId };
+      && state.desiredState === change.desiredState && state.parentActive === change.parentActive && state.paneId === change.paneId && state.paneToken === paneToken) return state;
+    patch = { runtimeGeneration: change.runtimeGeneration, runtimeState: change.runtimeState, runtimeAttached: change.runtimeAttached, desiredState: change.desiredState, parentActive: change.parentActive, paneId: change.paneId, paneToken };
   } else if (change.type === "terminated") {
-    patch = { runtimeState: "terminated", paneId: null, frozenAt: change.occurredAt };
+    patch = { runtimeState: "terminated", paneId: null, paneToken: null, frozenAt: change.occurredAt };
   } else {
     const recentTasks = boundedTerminalTasks(change.recentTasks);
     const revision = change.dependencyRevision ?? state.dependencyRevision;

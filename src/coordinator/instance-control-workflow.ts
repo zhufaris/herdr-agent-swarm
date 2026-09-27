@@ -88,7 +88,7 @@ export class InstanceControlWorkflow implements InstanceControlPort {
         const observed = await this.options.paneHost.inspectPane(pending.paneId);
         if (!observed || observed.workspaceId !== project.workspaceId || observed.cwd !== workspace.cwd) throw new Error("Started agent pane could not be verified");
         if (observed.agentKind && !matchesHerdrAgentKind(instance.agentKind, observed.agentKind)) throw new Error(`Started pane reported unexpected agent: ${observed.agentKind}`);
-        const attached = this.options.store.attachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: project.workspaceId, paneId: pending.paneId, nativeSessionId: observed.agentSession?.value ?? observed.terminalId ?? null });
+        const attached = this.options.store.attachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: project.workspaceId, paneId: pending.paneId, paneToken: observed.paneToken ?? null, nativeSessionId: observed.agentSession?.value ?? observed.terminalId ?? null });
         if (!attached) throw new Error("Instance generation changed during runtime attachment");
         return attached;
       }

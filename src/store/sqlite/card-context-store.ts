@@ -230,10 +230,11 @@ export class SqliteCardContextStore {
       const card = mapWorkerTurnCard(currentRow);
       return card ? { ...summary(currentRow as unknown as WorkerTaskSummaryRow), requestText: card.requestText, answer: card.answer, statusTitle: card.statusTitle, tokenCount: card.tokenCount, progressEvents: card.progressEvents, notice: card.notice, resultCapture: card.resultCapture } : null;
     })() : null;
+    const parentBinding = this.dependencies.getBinding(instance.parent.bindingId);
     return {
-      workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
-      runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: (() => { const parent = this.dependencies.getBinding(instance.parent.bindingId); return parent?.generation === instance.parent!.bindingGeneration && parent.paneId === instance.parent!.paneId && parent.state === "active" && parent.lifecycle === "active" && parent.attachment === "attached"; })(),
-      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, primaryPaneName: instance.sourcePrimaryPaneLabel ?? instance.parent.paneId, projectId: instance.projectId, ownerName: this.dependencies.getBinding(instance.parent.bindingId)?.title ?? "Primary",
+      workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null, paneToken: instance.runtimeRef?.paneToken ?? null,
+      runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: parentBinding?.generation === instance.parent.bindingGeneration && parentBinding.paneId === instance.parent.paneId && parentBinding.state === "active" && parentBinding.lifecycle === "active" && parentBinding.attachment === "attached",
+      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, parentPaneToken: parentBinding?.paneToken ?? null, primaryPaneName: instance.sourcePrimaryPaneLabel ?? instance.parent.paneId, projectId: instance.projectId, ownerName: parentBinding?.title ?? "Primary",
       workspace: lease.cwd, branch: lease.branch, currentTask, queueCount: Number(queue.count), nextTaskTitle: nextQueued ? summarizeTaskTitle(nextQueued.request_text) : null,
       recentTasks: recent.map(summary), createdAt: first.created_at ?? now()
     };

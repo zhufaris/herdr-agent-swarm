@@ -28,6 +28,7 @@ export interface MainCardStore {
   getBinding(id: string): Binding | null;
   getModelPreference(bindingId: string): ModelPreference | null;
   loadTopicView(bindingId: string): TopicViewState | null;
+  listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
   reserveMainCard(view: TopicViewState, rootMessageId: string, card: object, workClass?: OutboundWorkClass, paneEntryCard?: object): MainCardReservationOutcome;
   saveTopicView(view: TopicViewState): void;
 }
@@ -35,6 +36,7 @@ export interface MainCardStore {
 export interface ProjectionStore {
   getBinding(id: string): Binding | null;
   loadRunCard(promptId: string): RunCardView | null;
+  listRunCardsByPhases(bindingId: string, phases: readonly RunCardView["phase"][]): RunCardView[];
   loadTopicView(bindingId: string): TopicViewState | null;
   saveRunCard(view: RunCardView): RunCardView;
   saveTopicView(view: TopicViewState): void;
