@@ -113,6 +113,7 @@ export class SqliteProjectionStore {
     return {
       ...view,
       recentProgress: Array.isArray(view.recentProgress) ? view.recentProgress : [],
+      recentConversation: Array.isArray(view.recentConversation) ? view.recentConversation : [],
       liveStatus: normalizeLiveStatus(view.liveStatus),
       viewVersion: Number.isInteger(stored.viewVersion) ? stored.viewVersion! : 1,
       deliveredVersion: Number.isInteger(stored.deliveredVersion) ? stored.deliveredVersion! : 0
@@ -222,6 +223,18 @@ export class SqliteProjectionStore {
       ORDER BY card.created_at, card.prompt_id
     `).all(bindingId) as Array<{ state_json: string }>;
     return rows.map((row) => this.hydrateRunCard(row.state_json));
+  }
+
+  listRecentRunCards(bindingId: string): RunCardView[] {
+    const rows = this.context.database.prepare(`
+      SELECT view.state_json
+      FROM run_cards AS card
+      JOIN run_cards_view AS view ON view.prompt_id = card.prompt_id
+      WHERE card.binding_id = ?
+      ORDER BY card.created_at DESC, card.prompt_id DESC
+      LIMIT 5
+    `).all(bindingId) as Array<{ state_json: string }>;
+    return rows.reverse().map((row) => this.hydrateRunCard(row.state_json));
   }
 
   loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null {

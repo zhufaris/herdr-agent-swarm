@@ -170,12 +170,20 @@ describe("event-driven card projection", () => {
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "短首段", answerUpdate: "replace", progressEvents: [] } });
     await Promise.resolve();
     expect(converge).toHaveBeenCalledTimes(1);
+    expect(store.loadTopicView("b1")?.recentConversation).toEqual([
+      expect.objectContaining({ key: "p1:user", content: "work" }),
+      expect.objectContaining({ key: "p1:agent", content: "短首段" })
+    ]);
 
     await bus.publish({ eventId: "small", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "小增量", answerUpdate: "append", progressEvents: [] } });
     await vi.advanceTimersByTimeAsync(499);
     expect(converge).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     await vi.waitFor(() => expect(converge).toHaveBeenCalledTimes(2));
+    expect(store.loadTopicView("b1")?.recentConversation).toEqual([
+      expect.objectContaining({ key: "p1:user", content: "work" }),
+      expect.objectContaining({ key: "p1:agent", content: "短首段\n\n小增量" })
+    ]);
 
     await projector.stop(); store.close(); vi.useRealTimers();
   });

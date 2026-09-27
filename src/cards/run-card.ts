@@ -3,7 +3,7 @@ import { summarizeProgress, type RunCardView, type RunProgressEvent, type RunPro
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentKind } from "../domain/agent-instance.js";
 import { displayNamedPaneIdentity, displayPaneIdentity } from "../domain/pane-display-identity.js";
-import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
+import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle, truncateLarkMarkdownTail } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { appendWithinCardLimit } from "./card-payload.js";
@@ -144,13 +144,16 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const progress = input.recentProgress ?? [];
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
   const preview = actionable ? null : latestLines(visibleAnswer, PROJECT_ENTRY_PREVIEW_LINE_LIMIT);
+  const conversationHeading = cardSection("💬", "最近对话");
+  const conversationPreview = actionable ? null : renderRecentConversation(input.recentConversation ?? [], Math.max(0, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT - conversationHeading.length - 2));
   const elements: object[] = [];
   if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
-  if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
+  if (conversationPreview) elements.push({ tag: "markdown", content: `${conversationHeading}\n\n${conversationPreview}` });
+  else if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
   if (input.currentAnswer?.messageId) elements.push(callbackButton(currentPageActionLabel("answer"), { action: "card_target_open", ...input.currentAnswer }, "primary"));
   const createWorker = { tag: "form", name: "primary_worker_create_form", elements: [
     { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "Worker name，例如 reviewer" } },
@@ -435,6 +438,39 @@ function runtimeFooter(input: TopicViewState): string {
   const updated = relativeTime(input.activityAt);
   const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
   return [cardSection("🖥️", "Runtime"), identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
+}
+
+function renderRecentConversation(messages: TopicViewState["recentConversation"], limit: number): string | null {
+  const visible = messages.slice(-5)
+    .map((message) => ({ ...message, content: message.role === "agent" ? stripNativeTraexStatus(message.content) : message.content }))
+    .filter((message) => message.content.trim());
+  if (!visible.length) return null;
+  const labels = visible.map((message) => message.role === "user" ? "**用户**" : "**Agent**");
+  const separatorLength = Math.max(0, visible.length - 1) * 2;
+  const labelLength = labels.reduce((total, label) => total + label.length + 1, 0);
+  const budgets = allocateConversationBudgets(visible.map((message) => normalizeLarkPreview(message.content).length), Math.max(0, limit - separatorLength - labelLength));
+  return visible.map((message, index) => `${labels[index]}\n${truncateLarkMarkdownTail(message.content, budgets[index]!)}`).join("\n\n");
+}
+
+function allocateConversationBudgets(lengths: readonly number[], total: number): number[] {
+  const budgets = Array(lengths.length).fill(0) as number[];
+  const pending = new Set(lengths.map((_, index) => index));
+  let remaining = total;
+  while (pending.size > 0) {
+    const share = Math.floor(remaining / pending.size);
+    const complete = [...pending].filter((index) => lengths[index]! <= share);
+    if (complete.length === 0) {
+      const ordered = [...pending];
+      for (const [offset, index] of ordered.entries()) budgets[index] = share + (offset >= ordered.length - remaining % ordered.length ? 1 : 0);
+      break;
+    }
+    for (const index of complete) {
+      budgets[index] = lengths[index]!;
+      remaining -= budgets[index]!;
+      pending.delete(index);
+    }
+  }
+  return budgets;
 }
 
 function modelPreferenceHint(input: TopicViewState): string | null {

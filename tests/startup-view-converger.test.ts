@@ -204,6 +204,36 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
+  it("backfills the latest five conversation messages from durable run cards idempotently", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
+    store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "task", workspaceId: "wH", spaceName: "herdr-lark-bridge", paneId: "wH:p1", phase: "done" });
+    for (let index = 1; index <= 3; index += 1) {
+      const promptId = `p${index}`;
+      const occurredAt = `2026-08-27T12:0${index}:00Z`;
+      const queued = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "wH", paneId: "wH:p1", requestText: `request-${index}`, queuePosition: 0, occurredAt });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${index}`, actorOpenId: "u1", body: queued.requestText }, view: queued, rootMessageId: "root", answerCard: {} });
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, phase: "completed", answer: `answer-${index}`, answerSegments: [`answer-${index}`], finishedAt: `2026-08-27T12:0${index}:30Z`, updatedAt: `2026-08-27T12:0${index}:30Z` });
+    }
+
+    const converger = createConverger(store);
+    await converger.converge();
+    const first = store.loadTopicView("b1")!;
+    expect(first.recentConversation.map(({ key, content }) => ({ key, content }))).toEqual([
+      { key: "p1:agent", content: "answer-1" },
+      { key: "p2:user", content: "request-2" },
+      { key: "p2:agent", content: "answer-2" },
+      { key: "p3:user", content: "request-3" },
+      { key: "p3:agent", content: "answer-3" }
+    ]);
+
+    await converger.converge();
+    expect(store.loadTopicView("b1")?.viewVersion).toBe(first.viewVersion);
+    expect(store.loadTopicView("b1")?.recentConversation).toEqual(first.recentConversation);
+    store.close();
+  });
+
   it("does not visit a terminal binding whose Main and Answer views are fully delivered", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "historical", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "history" });

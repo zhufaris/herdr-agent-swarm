@@ -385,6 +385,55 @@ describe("run card", () => {
     expect(serialized).not.toContain("**项目任务**");
   });
 
+  it("renders the latest five user and Agent messages in chronological order", () => {
+    const recentConversation = Array.from({ length: 7 }, (_, index) => ({
+      key: `p${index}:${index % 2 === 0 ? "user" : "agent"}`,
+      promptId: `p${index}`,
+      role: index % 2 === 0 ? "user" as const : "agent" as const,
+      content: `conversation-${index}`,
+      occurredAt: `2026-08-27T12:0${index}:00Z`
+    }));
+    const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", answer: "legacy answer", recentConversation });
+    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+
+    expect(preview).not.toContain("最新消息");
+    expect(preview).not.toContain("legacy answer");
+    expect(preview).not.toContain("conversation-1");
+    expect(preview).toContain("**用户**\nconversation-2");
+    expect(preview).toContain("**Agent**\nconversation-3");
+    expect([...preview.matchAll(/conversation-(\d)/g)].map((match) => Number(match[1]))).toEqual([2, 3, 4, 5, 6]);
+  });
+
+  it("bounds the five-message conversation preview while retaining each message tail", () => {
+    const recentConversation = Array.from({ length: 5 }, (_, index) => ({
+      key: `p${index}:user`, promptId: `p${index}`, role: "user" as const,
+      content: `head-${index} ${"x".repeat(1_500)} tail-${index}`,
+      occurredAt: `2026-08-27T12:0${index}:00Z`
+    }));
+    const card = renderProjectEntryCard({ ...initialTopicView("b1"), recentConversation });
+    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+
+    expect(preview.length).toBeLessThanOrEqual(3_000);
+    for (let index = 0; index < 5; index += 1) expect(preview).toContain(`tail-${index}`);
+  });
+
+  it("keeps native Agent console status out of the recent conversation preview", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running",
+      recentConversation: [
+        { key: "p1:user", promptId: "p1", role: "user", content: "check", occurredAt: "one" },
+        { key: "p1:agent", promptId: "p1", role: "agent", content: "◆ Reviewing changes\n5 agents running… · /ps to manage\n◆ Review complete", occurredAt: "two" }
+      ]
+    });
+    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+
+    expect(preview).toContain("Review complete");
+    expect(preview).not.toContain("agents running");
+  });
+
   it("keeps only the newest activity summary on the project card", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",

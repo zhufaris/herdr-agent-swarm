@@ -3,7 +3,7 @@ import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { StartupViewStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageConvergencePort, MainCardConvergencePort } from "../domain/ports/card-convergence.js";
-import { initialTopicView, mirrorRunCardToTopic, updateTopicView } from "../domain/topic-view.js";
+import { initialTopicView, mirrorRunCardToTopic, projectRecentConversation, updateTopicView } from "../domain/topic-view.js";
 import type { Binding } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { Logger } from "pino";
@@ -101,9 +101,10 @@ export class StartupViewConverger implements StartupViewConvergerPort {
         else if (!current.answerCardId && current.answerMessageId && (identityChanged || current.viewVersion > current.answerDeliveredVersion)) await this.outbound.enqueueRunCardUpdate(current.bindingId, current.promptId, current.answerMessageId, current.viewVersion, "answer", this.presentation.answerCard(current), "history");
         else if (current.answerCardId) await this.answerPages.converge(current.promptId, "history");
       }
+      const withConversation = updateTopicView(reconciledTopicView, { recentConversation: projectRecentConversation(reconciledTopicView.recentConversation, this.store.listRecentRunCards(binding.id)) });
       const latestRun = this.store.loadStartupMainRunCard(binding.id, reconciledTopicView.activePromptId);
       const terminal = binding.lifecycle === "draining" || binding.lifecycle === "archived" || binding.lifecycle === "closed" || binding.lifecycle === "failed";
-      const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(reconciledTopicView, latestRun) : reconciledTopicView;
+      const finalTopic = !terminal && latestRun ? mirrorRunCardToTopic(withConversation, latestRun) : withConversation;
       await this.mainCards.project(finalTopic, "history");
   }
 

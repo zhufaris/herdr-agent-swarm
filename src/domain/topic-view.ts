@@ -8,9 +8,12 @@ import type { AgentKind } from "./agent-instance.js";
 import { sameCardTargetRef, type CardTargetRef } from "./card-target-ref.js";
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
+const RECENT_CONVERSATION_LIMIT = 5;
+const RECENT_CONVERSATION_MESSAGE_LIMIT = 2_000;
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "degraded" | "draining" | "archived" | "orphaned";
 export interface TopicModelPreference { model: string; revision: number; state: ModelPreferenceState; }
+export interface RecentConversationMessage { key: string; promptId: string; role: "user" | "agent"; content: string; occurredAt: string; }
 export interface TopicViewState {
   bindingId: string; bindingGeneration: number; title: string; agentKind: AgentKind; workspaceId: string; spaceName: string; tabId: string | null; paneId: string | null; paneToken?: string | null; paneName?: string | null; worktreeName: string | null; phase: TopicViewPhase;
   agentState: AgentState; queueDepth: number; answer: string | null; notice: string | null; lastEventId: string | null; activePromptId: string | null; recentProgress: RunProgressEvent[]; progressSummary: RunProgressSummary; model: string | null; context: string | null;
@@ -19,13 +22,14 @@ export interface TopicViewState {
   currentAnswer: CardTargetRef | null;
   primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
   workers: PrimaryWorkerSummary[]; workerOverflowCount: number; workerDependencyRevision: number;
+  recentConversation: RecentConversationMessage[];
   activityAt: string | null;
   viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, bindingGeneration: 1, title: "Agent task", agentKind: "traex", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, paneToken: null, paneName: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, currentAnswer: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, currentAnswer: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, recentConversation: [], activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function updateTopicCurrentAnswer(state: TopicViewState, currentAnswer: CardTargetRef | null): TopicViewState {
@@ -120,8 +124,34 @@ export function mirrorRunCardToTopic(state: TopicViewState, run: RunCardView): T
     ...state, phase, queueDepth: run.queuePosition, answer: run.answer ? keepAnswerTail(run.answer) : null, notice: run.notice,
     activePromptId: run.phase === "running" || run.phase === "blocked" ? run.promptId : null,
     agentState: run.phase === "running" ? "working" : run.phase === "blocked" ? "blocked" : run.phase === "completed" ? "done" : state.agentState,
-    recentProgress: run.progressEvents, progressSummary: run.progressSummary, activityAt: run.updatedAt
+    recentProgress: run.progressEvents, progressSummary: run.progressSummary, recentConversation: projectRecentConversation(state.recentConversation, [run]), activityAt: run.updatedAt
   });
+}
+
+export function projectRecentConversation(current: readonly RecentConversationMessage[], runs: readonly RunCardView[]): RecentConversationMessage[] {
+  const byKey = new Map(current.map((message) => [message.key, message]));
+  for (const run of runs) {
+    upsertConversationMessage(byKey, run, "user", run.requestText, run.createdAt);
+    if (run.answer.trim()) upsertConversationMessage(byKey, run, "agent", run.answer, run.finishedAt ?? run.updatedAt);
+  }
+  return [...byKey.values()].sort(compareConversationMessages).slice(-RECENT_CONVERSATION_LIMIT);
+}
+
+function upsertConversationMessage(messages: Map<string, RecentConversationMessage>, run: RunCardView, role: RecentConversationMessage["role"], content: string, occurredAt: string): void {
+  const normalized = boundConversationContent(content);
+  if (!normalized) return;
+  const key = `${run.promptId}:${role}`;
+  messages.set(key, { key, promptId: run.promptId, role, content: normalized, occurredAt });
+}
+
+function boundConversationContent(content: string): string {
+  const normalized = content.trim();
+  return normalized.length <= RECENT_CONVERSATION_MESSAGE_LIMIT ? normalized : normalized.slice(-RECENT_CONVERSATION_MESSAGE_LIMIT);
+}
+
+function compareConversationMessages(left: RecentConversationMessage, right: RecentConversationMessage): number {
+  if (left.promptId === right.promptId && left.role !== right.role) return left.role === "user" ? -1 : 1;
+  return left.occurredAt.localeCompare(right.occurredAt) || left.key.localeCompare(right.key);
 }
 
 function stampProgress(updates: Omit<RunProgressEvent, "occurredAt">[], occurredAt: string): RunProgressEvent[] {
@@ -145,6 +175,7 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && sameTopicModelPreference(left.modelPreference, right.modelPreference)
     && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice
     && left.workerOverflowCount === right.workerOverflowCount && sameWorkerSummaries(left.workers, right.workers)
+    && sameRecentConversation(left.recentConversation, right.recentConversation)
     && sameLiveStatus(left.liveStatus, right.liveStatus)
     && sameVisibleProgress(left.recentProgress, right.recentProgress) && sameProgressSummary(left.progressSummary, right.progressSummary);
 }
@@ -152,6 +183,12 @@ function sameTopicModelPreference(left: TopicModelPreference | null, right: Topi
   return left === right || Boolean(left && right && left.model === right.model && left.revision === right.revision && left.state === right.state);
 }
 function sameWorkerSummaries(left: readonly PrimaryWorkerSummary[], right: readonly PrimaryWorkerSummary[]): boolean { return JSON.stringify(left) === JSON.stringify(right); }
+function sameRecentConversation(left: readonly RecentConversationMessage[], right: readonly RecentConversationMessage[]): boolean {
+  return left.length === right.length && left.every((message, index) => {
+    const other = right[index];
+    return other !== undefined && message.key === other.key && message.promptId === other.promptId && message.role === other.role && message.content === other.content && message.occurredAt === other.occurredAt;
+  });
+}
 function sameProgressSummary(left: RunProgressSummary, right: RunProgressSummary): boolean { return left.total === right.total && left.stepTotal === right.stepTotal && left.stepDone === right.stepDone; }
 
 function mergeLiveStatus(current: MainCardLiveStatus | null, update: Extract<BridgeEvent, { type: "TurnOutputObserved" }>["payload"]["observation"]["main"]["status"], occurredAt: string): MainCardLiveStatus | null {

@@ -5,7 +5,7 @@ import type { ProjectionStore } from "../domain/ports/projection.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageConvergencePort, MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
-import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
+import { initialTopicView, mirrorRunCardToTopic, reduceTopicView } from "../domain/topic-view.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler, type CardUpdateSchedulerDiagnostics } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
@@ -100,10 +100,12 @@ export class ConversationViewProjector {
     }
     const promptId = promptIdOf(event);
     const runCard = promptId ? this.store.loadRunCard(promptId) : null;
+    let projectedRunCard = runCard;
     if (promptId && runCard) {
       const change = runCardChange(event);
       if (change) {
         const next = reduceRunCard(runCard, change);
+        projectedRunCard = next;
         if (next !== runCard) {
           this.store.saveRunCard(next);
           const terminal = ["blocked", "completed", "failed"].includes(next.phase);
@@ -124,7 +126,8 @@ export class ConversationViewProjector {
       }
     }
     const current = this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
-    const next = reduceTopicView(current, event);
+    const reduced = reduceTopicView(current, event);
+    const next = projectedRunCard ? mirrorRunCardToTopic(reduced, projectedRunCard) : reduced;
     if (next === current) return;
     this.store.saveTopicView(next);
 

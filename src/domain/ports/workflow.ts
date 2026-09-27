@@ -34,6 +34,7 @@ export interface StartupViewStore {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void;
   listStartupViewBindings(bindingIds?: readonly string[]): Binding[];
   listActionableStartupRunCards(bindingId: string): RunCardView[];
+  listRecentRunCards(bindingId: string): RunCardView[];
   loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null;
   loadTopicView(bindingId: string): TopicViewState | null;
   listAnswerPages(promptId: string): import("../types.js").AnswerPage[];

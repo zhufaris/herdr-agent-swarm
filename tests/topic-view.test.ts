@@ -206,8 +206,34 @@ describe("topic view reducer", () => {
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "done", answer: "finished" });
 
     expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(9_100), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
-      phase: "done", answer: "x".repeat(9_000), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
+      phase: "done", answer: "x".repeat(9_000), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })),
+      recentConversation: [
+        { key: "p1:user", promptId: "p1", role: "user", content: "do it", occurredAt: "start" },
+        { key: "p1:agent", promptId: "p1", role: "agent", content: "x".repeat(2_000), occurredAt: "done" }
+      ],
+      viewVersion: 1
     });
+  });
+
+  it("upserts one streaming Agent message and retains the newest five conversation messages", () => {
+    let topic = initialTopicView("b1");
+    for (let index = 1; index <= 3; index += 1) {
+      const queued = createQueuedRunCard({ promptId: `p${index}`, bindingId: "b1", title: `Task ${index}`, workspaceId: "w1", paneId: "w1:p1", requestText: `request-${index}`, queuePosition: 0, occurredAt: `2026-08-22T00:0${index}:00Z` });
+      topic = mirrorRunCardToTopic(topic, queued);
+      const first = reduceRunCard(queued, { type: "output", occurredAt: `2026-08-22T00:0${index}:01Z`, answerSnapshot: `draft-${index}`, progressEvents: [] });
+      topic = mirrorRunCardToTopic(topic, first);
+      const updated = reduceRunCard(first, { type: "output", occurredAt: `2026-08-22T00:0${index}:02Z`, answerSnapshot: `answer-${index}`, progressEvents: [] });
+      topic = mirrorRunCardToTopic(topic, updated);
+    }
+
+    expect(topic.recentConversation).toEqual([
+      expect.objectContaining({ key: "p1:agent", content: "answer-1" }),
+      expect.objectContaining({ key: "p2:user", content: "request-2" }),
+      expect.objectContaining({ key: "p2:agent", content: "answer-2" }),
+      expect.objectContaining({ key: "p3:user", content: "request-3" }),
+      expect.objectContaining({ key: "p3:agent", content: "answer-3" })
+    ]);
+    expect(topic.recentConversation.filter((message) => message.key === "p3:agent")).toHaveLength(1);
   });
 
   it("upserts answer timeline items by stable identity and canonical sequence", () => {

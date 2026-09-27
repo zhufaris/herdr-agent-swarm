@@ -1395,6 +1395,48 @@ and delivery checkpoint live in `TopicViewState`; no in-memory counter is a
 delivery authority. Live lifecycle projection and startup repair both call
 `MainCardWorkflow`, which serializes convergence per binding.
 
+The Primary Main Card header is runtime identity, not task identity. It combines
+the selected Agent label, configured project or space name, and the stable Herdr
+pane display identity. The display identity prefers the pane name and appends
+the native four-character token when both exist and differ; it falls back to the
+token, pane ID, or provisioning label as data becomes available. A terminal
+title is not used as the pane name. The same named identity appears in the
+compact pane metric, while the task title remains in the body and card summary.
+
+The normal-state conversation preview follows this durable projection path:
+
+~~~text
+Run Card request + streamed/final answer
+                  |
+                  v
+recent conversation reducer in TopicViewState
+  key = <promptId>:<user|agent>, latest five messages
+                  |
+                  v
+Primary Main Card renderer, 3,000-character shared budget
+                  |
+                  v
+versioned session_status outbox intent -> Lark CardKit update
+~~~
+
+User and Agent messages are separate entries. Entries are ordered by their
+durable occurrence time, with the user entry before the Agent entry for the same
+prompt. A streaming answer repeatedly replaces the same `<promptId>:agent`
+entry, so partial observations cannot create duplicate messages. The reducer
+keeps at most five individual messages across both roles and bounds each stored
+message to its newest 2,000 characters. At render time the five entries share a
+3,000-character budget, including role labels and separators; truncation again
+preserves the newest content. Native Agent console-status text is removed from
+Agent previews before display.
+
+The live projector mirrors every changed Run Card into the Topic View before it
+schedules Main Card convergence. On startup, the view converger reads the five
+newest durable Run Cards for each binding and idempotently reconstructs the same
+conversation projection. Legacy Topic Views without the field hydrate with an
+empty list; until history is available, the renderer can use the previous
+single latest-output fallback. Neither path reads terminal scrollback or the
+visible Lark card as history.
+
 SQLite saves the desired TopicView and reserves its `session_status` outbox row
 in one transaction. Initial creation uses `status-card:<bindingId>`; subsequent
 updates use `main-card:update:<bindingId>:<viewVersion>`. A pending or
@@ -1405,13 +1447,16 @@ monotonically. The resulting checkpoint hint immediately asks the workflow to
 check whether a newer persisted version arrived while the prior card was in
 flight.
 
-Primary and Worker Main Cards deliberately do not duplicate the Answer timeline.
-Both use the same compact `当前活动` selection: the active non-plan activity when
-one exists, otherwise the newest non-plan activity. The full ordered Agent/Tool
-history stays in the Answer or Worker Task Card. Blocked state remains an orange
-Human Review notice, while Command Status cards remain a separate command
-admission/execution projection; neither surface adds remote approval or arbitrary
-terminal input.
+The Primary preview is intentionally not a second Answer timeline: it is a
+bounded five-message window without the full Agent/Tool event history. Worker
+Main Cards do not add this conversation window. Both Main Card families use the
+same compact `当前活动` selection: the active non-plan activity when one exists,
+otherwise the newest non-plan activity. The full ordered Agent/Tool history
+stays in the Answer or Worker Task Card. Blocked, error, degraded, orphaned,
+draining, and archived states suppress the conversation preview so the recovery
+notice remains the primary content. Command Status cards remain a separate
+command admission/execution projection; neither surface adds remote approval or
+arbitrary terminal input.
 
 Startup compares `viewVersion` with `deliveredVersion` and recreates only missing
 intent. It does not re-read terminal scrollback or replay a TraeX prompt to

@@ -17,6 +17,8 @@ former compatibility plugin is not an installation or operation surface.
 - Restart recovery that observes uncertain work without automatically replaying
   prompts that may already have reached an Agent.
 - Durable CardKit projections and an idempotent SQLite outbox for Lark delivery.
+- A stable Primary Main Card identity plus a bounded five-message conversation
+  preview that survives service restarts.
 - Multiple configured projects with strict workspace and working-directory routes.
 - Loopback health, readiness, and safe operational status endpoints.
 
@@ -100,6 +102,34 @@ The system deliberately splits authority:
 High-risk Agent approval remains local to the Herdr pane. The bridge can stop an
 identity-fenced exact turn, but it cannot remotely approve or deny a request,
 send arbitrary terminal input, or kill a process or pane.
+
+## Primary Main Card
+
+Each Primary binding has one durable Main Card that summarizes the pane without
+turning Lark into a workflow authority. Its header uses this shape:
+
+~~~text
+<Agent> · <project or space> / <stable pane name> · <four-character pane token>
+~~~
+
+The stable Herdr pane name is preferred over a transient terminal title. If the
+name or native token is unavailable, the card falls back to the remaining pane
+identity. The task title remains in the card body and notification summary, so
+changing task text does not hide which pane the card controls.
+
+When the binding is in a normal working state, **最近对话** shows the latest five
+individual messages across both roles in chronological order. A user request
+and its Agent response count separately. Streaming output updates the same Agent
+message instead of appending duplicates. The section is capped at 3,000
+characters, preserves the newest portion of long messages, and removes native
+Agent status text from the preview. The complete ordered output remains in the
+Answer Card.
+
+Blocked, degraded, orphaned, draining, archived, and error states replace the
+conversation preview with the recovery notice that needs attention. After a
+service restart, the Main Card rebuilds its preview from durable recent Run
+Cards before normal CardKit convergence resumes; it never reconstructs history
+from the visible Lark card or terminal scrollback.
 
 Open the [interactive architecture diagram](docs/herdr-agent-swarm-architecture.html)
 for an explorable view. See [Architecture](docs/architecture.md) for lifecycle,
