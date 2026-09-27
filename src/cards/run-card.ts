@@ -170,7 +170,8 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     ...(input.liveStatus?.planSteps.filter((step) => step.state === "active").map((step) => step.label) ?? [])
   ]);
   if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前操作", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
-  elements.push({ tag: "hr" }, renderWorkersPanel(input, createWorker, canCreateWorker));
+  elements.push({ tag: "hr" }, renderWorkersPanel(input));
+  if (canCreateWorker) elements.push(createWorker);
   elements.push({ tag: "hr" }, renderRuntimePanel(input));
   return {
     schema: "2.0",
@@ -430,7 +431,7 @@ function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" |
   return [identity, runtime, `**WORKTREE**  \`${escapeCode(truncate(input.worktreeName ?? "—", 64))}\``].join("\n");
 }
 
-function renderWorkersPanel(input: TopicViewState, createWorker: object, canCreateWorker: boolean): object {
+function renderWorkersPanel(input: TopicViewState): object {
   const count = input.workers.length + input.workerOverflowCount;
   const content = input.workers.length
     ? input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n") + (input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : "")
@@ -440,7 +441,7 @@ function renderWorkersPanel(input: TopicViewState, createWorker: object, canCrea
   return {
     tag: "collapsible_panel", expanded: input.workers.length > 0, border: { color: "grey", corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: `🤖 Workers · ${count}` } },
-    elements: [{ tag: "markdown", content }, ...(row ? [row] : []), ...(canCreateWorker ? [createWorker] : [])]
+    elements: [{ tag: "markdown", content }, ...(row ? [row] : [])]
   };
 }
 

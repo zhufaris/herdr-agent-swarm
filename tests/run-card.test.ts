@@ -328,7 +328,7 @@ describe("run card", () => {
     expect(serialized).toContain("worktree `feat/query-log`");
   });
 
-  it("collapses empty Workers and expands populated Workers without losing creation controls", () => {
+  it("collapses empty Workers and expands populated Workers while keeping creation controls valid", () => {
     const empty = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "ready" });
     const populated = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",
@@ -338,7 +338,8 @@ describe("run card", () => {
     const populatedPanel = findTaggedNodes(populated, "collapsible_panel").find((panel) => JSON.stringify(panel.header).includes("Workers"));
 
     expect(emptyPanel).toMatchObject({ expanded: false, header: { title: { content: "🤖 Workers · 0" } } });
-    expect(findTaggedNodes(emptyPanel, "form")).toHaveLength(1);
+    expect(findTaggedNodes(emptyPanel, "form")).toHaveLength(0);
+    expect(findTaggedNodes(empty, "form")).toHaveLength(1);
     expect(populatedPanel).toMatchObject({ expanded: true, header: { title: { content: "🤖 Workers · 1" } } });
     expect(JSON.stringify(populatedPanel)).toContain("Review cards");
   });
