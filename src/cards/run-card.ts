@@ -145,7 +145,6 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
-  if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
   if (input.currentAnswer?.messageId) elements.push(callbackButton(mainAnswerActionLabel(input.phase), { action: "card_target_open", ...input.currentAnswer }, "primary"));
   if (!actionable) elements.push(...renderRecentAgentMessages(input.recentAgentMessages ?? [], PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT));
   const createWorker = { tag: "form", name: "primary_worker_create_form", elements: [
@@ -311,16 +310,7 @@ function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, pha
   const lines = status.planSteps.map((step) => `- ${{ pending: "◻", active: "■", done: "✔", failed: "✕" }[step.state]} ${escapeMarkdown(truncate(step.label, 300))}`);
   const done = status.planSteps.filter((step) => step.state === "done").length;
   const content: object[] = [{ tag: "markdown", content: [title, metadata].filter(Boolean).join(" · ") }];
-  if (lines.length && lines.length <= 5) content.push({ tag: "markdown", content: lines.join("\n") });
-  if (lines.length > 5) {
-    const active = status.planSteps.findIndex((step) => step.state === "active");
-    if (active >= 0) content.push({ tag: "markdown", content: lines[active]! });
-    content.push({
-      tag: "collapsible_panel", expanded: false,
-      header: { title: { tag: "plain_text", content: `完整计划 · ${done}/${lines.length}` } },
-      elements: [{ tag: "markdown", content: lines.join("\n") }]
-    });
-  }
+  if (lines.length) content.push({ tag: "markdown", content: lines.join("\n") });
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: phase === "done" ? "green" : phase === "error" || phase === "blocked" ? "orange" : "blue", corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: lines.length ? `🎯 当前任务 · ${done}/${lines.length}` : "🎯 当前任务" } },

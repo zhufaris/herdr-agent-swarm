@@ -287,7 +287,7 @@ describe("run card", () => {
     expect(serialized).toContain("- ◻ 核验发布结果");
   });
 
-  it("keeps the active step visible when a long plan is collapsed", () => {
+  it("renders every step in a long plan without a nested collapsed panel", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running", liveStatus: {
         statusTitle: "Implementing card polish", elapsedSeconds: 10, tokenCount: 100,
@@ -300,8 +300,11 @@ describe("run card", () => {
     const currentTask = (card as { body: { elements: Array<{ header?: { title?: { content?: string } }; elements?: Array<{ tag?: string; content?: string }> }> } }).body.elements
       .find((element) => element.header?.title?.content === "🎯 当前任务 · 5/7")!;
 
-    expect(currentTask.elements?.some((element) => element.tag === "markdown" && element.content?.includes("■ Current visible step"))).toBe(true);
-    expect(currentTask.elements?.some((element) => element.header?.title?.content === "完整计划 · 5/7")).toBe(true);
+    const plan = currentTask.elements?.find((element) => element.tag === "markdown" && element.content?.includes("■ Current visible step"));
+    expect(plan?.content).toContain("- ✔ Step 1");
+    expect(plan?.content).toContain("- ■ Current visible step");
+    expect(plan?.content).toContain("- ◻ Step 7");
+    expect(currentTask.elements?.some((element) => element.header?.title?.content === "完整计划 · 5/7")).toBe(false);
   });
 
   it("omits current activity when it duplicates live status or the active plan step", () => {

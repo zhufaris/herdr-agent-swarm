@@ -19,11 +19,11 @@ describe("topic view reducer", () => {
     expect(pending).toMatchObject({ model: "GPT-5.4", modelPreference: { model: "GPT-5.6-Sol", state: "pending", revision: 2 } });
     expect(updateTopicModelPreference(pending, null)).toMatchObject({ model: "GPT-5.4", modelPreference: null, viewVersion: pending.viewVersion + 1 });
   });
-  it("persists Primary tool unavailability independently from binding health", () => {
+  it("persists Primary tool unavailability without rendering its recovery notice", () => {
     const initial = initialTopicView("b1");
     const unavailable = reduceTopicView(initial, { eventId: "e1", bindingId: "b1", type: "PrimaryToolAvailabilityChanged", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { available: false, reason: "Primary tools unavailable; use reset or replace" } });
     expect(unavailable).toMatchObject({ phase: "provisioning", primaryToolsAvailable: false, primaryToolsNotice: "Primary tools unavailable; use reset or replace" });
-    expect(JSON.stringify(renderProjectEntryCard(unavailable))).toContain("Primary tools unavailable; use reset or replace");
+    expect(JSON.stringify(renderProjectEntryCard(unavailable))).not.toContain("Primary tools unavailable; use reset or replace");
   });
   it("projects lifecycle and turn events deterministically", () => {
     const events: BridgeEvent[] = [
