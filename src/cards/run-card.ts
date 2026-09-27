@@ -308,8 +308,8 @@ function attachElementIdToFirstMarkdown(elements: FinalAnswerElement[], elementI
 function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, phase: TopicViewPhase): object[] {
   const metadata = [formatElapsed(status.elapsedSeconds), formatTokenCount(status.tokenCount)].filter(Boolean).join(" · " );
   const title = status.statusTitle ? `◈ **${escapeMarkdown(truncate(status.statusTitle, 160))}**` : "◈ **TraeX 正在处理**";
-  const lines = status.planSteps.map((step) => `${{ pending: "◻", active: "■", done: "✔", failed: "✕" }[step.state]} ${escapeMarkdown(truncate(step.label, 300))}`);
-  const done = lines.filter((line) => line.startsWith("✔")).length;
+  const lines = status.planSteps.map((step) => `- ${{ pending: "◻", active: "■", done: "✔", failed: "✕" }[step.state]} ${escapeMarkdown(truncate(step.label, 300))}`);
+  const done = status.planSteps.filter((step) => step.state === "done").length;
   const content: object[] = [{ tag: "markdown", content: [title, metadata].filter(Boolean).join(" · ") }];
   if (lines.length && lines.length <= 5) content.push({ tag: "markdown", content: lines.join("\n") });
   if (lines.length > 5) {

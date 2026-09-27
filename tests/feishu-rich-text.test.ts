@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { materializeFeishuRichText } from "../src/gateways/feishu/rich-text.js";
 import { initialRichTextAnswerPayload } from "../src/domain/rich-text.js";
+import { planRichTextAnswerPage } from "../src/runtime/answer-rich-text.js";
 
 describe("Feishu rich-text materialization", () => {
   it("wraps canonical Markdown in an ordinary post md element", () => {
@@ -66,6 +67,21 @@ describe("Feishu rich-text materialization", () => {
           [{ tag: "code_block", language: "PYTHON", text: "print(42)" }],
           [{ tag: "md", text: "After code" }]
         ]
+      }
+    });
+  });
+
+  it("materializes generated Answer command Markdown as a highlighted Bash block", () => {
+    const page = planRichTextAnswerPage([
+      { kind: "tool", id: "command-1", sequence: 1, category: "command", label: "npm test", command: "npm test", state: "succeeded" }
+    ], null, { active: false, pageIndex: 0 });
+
+    expect(materializeFeishuRichText(page.document)).toMatchObject({
+      zh_cn: {
+        content: expect.arrayContaining([
+          [{ tag: "md", text: "⚙️ Ran · ✓" }],
+          [{ tag: "code_block", language: "BASH", text: "npm test" }]
+        ])
       }
     });
   });

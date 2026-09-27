@@ -282,9 +282,9 @@ describe("run card", () => {
     expect(serialized).toContain("当前任务 · 1/3");
     expect(serialized).toContain("Considering package installation");
     expect(serialized).toContain("2m 57s · ↑ 4.57K tokens");
-    expect(serialized).toContain("✔ 确认部署版本");
-    expect(serialized).toContain("■ 重试失败 run");
-    expect(serialized).toContain("◻ 核验发布结果");
+    expect(serialized).toContain("- ✔ 确认部署版本");
+    expect(serialized).toContain("- ■ 重试失败 run");
+    expect(serialized).toContain("- ◻ 核验发布结果");
   });
 
   it("keeps the active step visible when a long plan is collapsed", () => {
