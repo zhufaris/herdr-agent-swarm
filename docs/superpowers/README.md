@@ -52,6 +52,8 @@ implemented. Current records:
 - [Rich-text Answer single-title and activity rendering implementation plan](plans/2026-09-27-rich-text-answer-single-title-and-activity-plan.md)
 - [Main Card focus and Answer motion design](specs/2026-09-27-main-card-focus-and-answer-motion-design.md)
 - [Main Card focus and Answer motion implementation plan](plans/2026-09-27-main-card-focus-and-answer-motion-plan.md)
+- [Main Card density and Answer state design](specs/2026-09-27-main-card-density-and-answer-state-design.md)
+- [Main Card density and Answer state implementation plan](plans/2026-09-27-main-card-density-and-answer-state-plan.md)
 
 The service's current maintainer, user, and operator documentation starts at the
 [maintainer documentation map](../README.md). Completed or superseded designs,
