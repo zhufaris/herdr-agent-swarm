@@ -103,7 +103,14 @@ export class HerdrEventsReader implements AgentTranscriptReaderPort {
       for (const candidate of attached.recoverySources) {
         try {
           const located = await this.locate(candidate, boundary);
-          if (located.found) return typed(new HerdrEventCursor(this.readFor(candidate), candidate.source_id, located.afterCursor));
+          if (located.found) {
+            const successor = candidate.source_id === attached.source.source_id ? undefined : {
+              readBatch: liveRead,
+              sourceId: attached.source.source_id,
+              after: attached.source.latest_cursor
+            };
+            return typed(new HerdrEventCursor(this.readFor(candidate), candidate.source_id, located.afterCursor, [], successor));
+          }
         } catch {
           continue;
         }
@@ -187,10 +194,15 @@ class HerdrEventCursor implements AgentTranscriptCursorPort {
   private finalAnswer: string | undefined;
 
   constructor(
-    private readonly readBatch: (sourceId: string, after: string) => Promise<{ events: AgentEvent[]; nextCursor: string; latestCursor: string }>,
-    private readonly sourceId: string,
+    private readBatch: (sourceId: string, after: string) => Promise<{ events: AgentEvent[]; nextCursor: string; latestCursor: string }>,
+    private sourceId: string,
     private after: string,
-    initial: AgentEvent[] = []
+    initial: AgentEvent[] = [],
+    private successor?: {
+      readBatch: (sourceId: string, after: string) => Promise<{ events: AgentEvent[]; nextCursor: string; latestCursor: string }>;
+      sourceId: string;
+      after: string;
+    }
   ) { this.pending = initial; }
 
   async readDelta(): Promise<string> { return (await this.readObservation()).answerDelta; }
@@ -201,6 +213,13 @@ class HerdrEventCursor implements AgentTranscriptCursorPort {
       const batch = await this.readBatch(this.sourceId, this.after);
       this.after = batch.nextCursor;
       events = batch.events;
+      if (this.successor && batch.nextCursor === batch.latestCursor) {
+        events = events.filter((event) => event.payload.type !== "source_error" || event.payload.code !== "runtime_identity_changed");
+        this.readBatch = this.successor.readBatch;
+        this.sourceId = this.successor.sourceId;
+        this.after = this.successor.after;
+        this.successor = undefined;
+      }
     }
     const nextTurn = events.findIndex((event, index) => index > 0 && event.payload.type === "turn_started");
     if (nextTurn > 0) {

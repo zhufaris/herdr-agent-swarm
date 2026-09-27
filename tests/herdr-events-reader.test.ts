@@ -125,16 +125,31 @@ describe("HerdrEventsReader", () => {
         const sourceId = args[args.indexOf("--source") + 1];
         return response({ type: "agent_events_turn_cursor", source_id: sourceId, found: sourceId === "source-old", after_cursor: sourceId === "source-old" ? "old:700" : "current:0" });
       }
-      expect(args[args.indexOf("--source") + 1]).toBe("source-old");
-      expect(args[args.indexOf("--after") + 1]).toBe("old:700");
-      return response({ type: "agent_events_batch", events: [{ ...event("old:701", "turn-1", "2026-09-26T00:00:01Z", { type: "message", message_id: "m1", channel: "commentary", text: "recovered", truncated: false }), source_id: "source-old" }], next_cursor: "old:701", earliest_cursor: "old:0", latest_cursor: "old:900" });
+      const sourceId = args[args.indexOf("--source") + 1];
+      const after = args[args.indexOf("--after") + 1];
+      if (sourceId === "source-old") {
+        expect(after).toBe("old:700");
+        return response({ type: "agent_events_batch", events: [
+          { ...event("old:701", "turn-1", "2026-09-26T00:00:01Z", { type: "message", message_id: "m1", channel: "commentary", text: "recovered", truncated: false }), source_id: "source-old" },
+          { ...event("old:702", "turn-1", "2026-09-26T00:00:02Z", { type: "tool_call", call_id: "plan-1", name: "exec", arguments: 'tools.update_plan({plan:[{step:"Recovered plan",status:"in_progress"}]})', truncated: false }), source_id: "source-old" },
+          { ...event("old:900", "turn-1", "2026-09-26T00:00:03Z", { type: "source_error", code: "runtime_identity_changed" }), source_id: "source-old" }
+        ], next_cursor: "old:900", earliest_cursor: "old:0", latest_cursor: "old:900" });
+      }
+      expect(sourceId).toBe("source-current");
+      expect(after).toBe("current:0");
+      return response({ type: "agent_events_batch", events: [{ ...event("current:1", "turn-1", "2026-09-26T00:00:04Z", { type: "message", message_id: "m2", channel: "commentary", text: "live", truncated: false }), source_id: "source-current" }], next_cursor: "current:1", earliest_cursor: "current:0", latest_cursor: "current:1" });
     });
     const reader = new HerdrEventsReader({ run }, { async listAllPanes() { return [pane]; } }, "herdr", async () => ({ sessionId: "session-1", path: "/tmp/session.jsonl" }));
 
     const opened = await reader.openActiveTurn(source);
     if (opened.mode !== "typed" || !opened.cursor.readObservation) throw new Error("reader unavailable");
-    await expect(opened.cursor.readObservation()).resolves.toMatchObject({ answerDelta: "recovered" });
+    await expect(opened.cursor.readObservation()).resolves.toMatchObject({
+      answerDelta: "recovered",
+      mainStatus: { planSteps: [{ label: "Recovered plan", state: "active" }] }
+    });
+    await expect(opened.cursor.readObservation()).resolves.toMatchObject({ answerDelta: "live" });
     expect(run.mock.calls.filter(([, args]) => args.includes("locate")).map(([, args]) => args[args.indexOf("--source") + 1])).toEqual(["source-current", "source-old"]);
+    expect(run).toHaveBeenCalledTimes(5);
   });
 
   it.each([
