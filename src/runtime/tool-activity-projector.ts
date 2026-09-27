@@ -17,6 +17,7 @@ const TARGET_LIMIT = 160;
 const FAILURE_DETAIL_LIMIT = 4_000;
 const COMMAND_OUTPUT_LIMIT = 4_000;
 const FAILURE_LINE_LIMIT = 20;
+const NESTED_TOOL_INPUT_LIMIT = 64 * 1024;
 const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s"']+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
 export function projectToolCall(name: string, argumentsJson: string): ProjectedToolCall {
@@ -105,15 +106,92 @@ function descriptor(category: ToolActivityCategory, target: string): ToolActivit
 }
 
 function nestedToolCall(value: string): { name: string; arguments: unknown } | null {
-  const match = /tools\.([A-Za-z0-9_]+)\s*\(\s*\{([\s\S]*?)\}\s*\)/.exec(value);
-  if (!match) return null;
-  const body = match[2] ?? "";
+  const input = value.slice(0, NESTED_TOOL_INPUT_LIMIT);
+  const invocation = findToolInvocation(input);
+  if (!invocation) return null;
   const fields: Record<string, unknown> = {};
   for (const key of ["cmd", "command", "path", "query", "pattern", "task_name", "target"]) {
-    const field = new RegExp(key + "\\s*:\\s*([\\\"'])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1").exec(body);
-    if (field?.[2]) fields[key] = field[2].replace(/\\([\\"'])/g, "$1");
+    const field = findStringField(input, invocation.bodyStart, invocation.bodyEnd, key);
+    if (field) fields[key] = field;
   }
-  return { name: match[1]!, arguments: fields };
+  return { name: invocation.name, arguments: fields };
+}
+
+function findToolInvocation(input: string): { name: string; bodyStart: number; bodyEnd: number } | null {
+  let cursor = 0;
+  while (cursor < input.length) {
+    const start = input.indexOf("tools.", cursor);
+    if (start < 0) return null;
+    let index = start + "tools.".length;
+    const nameStart = index;
+    while (index < input.length && isIdentifierCharacter(input.charCodeAt(index))) index += 1;
+    if (index === nameStart) { cursor = start + 1; continue; }
+    const name = input.slice(nameStart, index);
+    index = skipWhitespace(input, index);
+    if (input[index] !== "(") { cursor = start + 1; continue; }
+    index = skipWhitespace(input, index + 1);
+    if (input[index] !== "{") { cursor = start + 1; continue; }
+    return { name, bodyStart: index + 1, bodyEnd: findObjectEnd(input, index) };
+  }
+  return null;
+}
+
+function findObjectEnd(input: string, opening: number): number {
+  let depth = 1;
+  let quote = "";
+  for (let index = opening + 1; index < input.length; index += 1) {
+    const character = input[index]!;
+    if (quote) {
+      if (character === "\\") index += 1;
+      else if (character === quote) quote = "";
+      continue;
+    }
+    if (character === "\"" || character === "'" || character === "`") { quote = character; continue; }
+    if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) return index;
+  }
+  return input.length;
+}
+
+function findStringField(input: string, bodyStart: number, bodyEnd: number, key: string): string | null {
+  let cursor = bodyStart;
+  while (cursor < bodyEnd) {
+    const start = input.indexOf(key, cursor);
+    if (start < 0 || start >= bodyEnd) return null;
+    const before = input[start - 1];
+    const after = input[start + key.length];
+    const quoted = (before === "\"" || before === "'") && after === before;
+    const bare = !isIdentifierCharacter(input.charCodeAt(start - 1)) && !isIdentifierCharacter(input.charCodeAt(start + key.length));
+    if (!quoted && !bare) { cursor = start + key.length; continue; }
+    let index = skipWhitespace(input, start + key.length + (quoted ? 1 : 0));
+    if (input[index] !== ":") { cursor = start + key.length; continue; }
+    index = skipWhitespace(input, index + 1);
+    const quote = input[index];
+    if (quote !== "\"" && quote !== "'") { cursor = start + key.length; continue; }
+    const valueStart = index + 1;
+    index = valueStart;
+    while (index < bodyEnd) {
+      if (input[index] === "\\") { index += 2; continue; }
+      if (input[index] === quote) return decodeQuotedField(input.slice(valueStart, index));
+      index += 1;
+    }
+    return null;
+  }
+  return null;
+}
+
+function decodeQuotedField(value: string): string {
+  return value.replace(/\\([\\"'])/g, "$1");
+}
+
+function skipWhitespace(value: string, start: number): number {
+  let index = start;
+  while (index < value.length && /\s/.test(value[index]!)) index += 1;
+  return index;
+}
+
+function isIdentifierCharacter(code: number): boolean {
+  return code >= 48 && code <= 57 || code >= 65 && code <= 90 || code === 95 || code >= 97 && code <= 122;
 }
 
 function skillNamesFromArguments(value: unknown): string[] {

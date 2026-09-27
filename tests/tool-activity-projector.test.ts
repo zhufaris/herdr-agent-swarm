@@ -27,6 +27,22 @@ describe("tool activity projector", () => {
     expect(projected.descriptor.target.length).toBeLessThanOrEqual(160);
   });
 
+  it("bounds malformed nested tool parsing without catastrophic backtracking", () => {
+    const malformed = "tools.exec_command({cmd: '" + "x".repeat(250_000) + "});";
+    const startedAt = performance.now();
+
+    const projected = projectToolCall("exec", malformed);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(projected.descriptor).toEqual({ category: "Command", target: "", skillNames: [] });
+  });
+
+  it("does not borrow fields from a later nested tool call", () => {
+    const projected = projectToolCall("exec", "tools.wait({cell_id: '123'}); tools.exec_command({cmd: 'npm test'});");
+
+    expect(projected.descriptor).toEqual({ category: "Wait", target: "wait", skillNames: [] });
+  });
+
   it("redacts secrets from command targets", () => {
     const projected = projectToolCall("exec_command", JSON.stringify({
       cmd: "curl -H 'Authorization: Bearer top-secret' https://example.test?token=query-secret"
