@@ -33,7 +33,7 @@ describe("rich-text Answer workflow", () => {
       expect(JSON.parse(update.payload)).toMatchObject({ pageState: "active", document: { markdown: expect.stringContaining("Hello **world**") } });
       expect(JSON.parse(update.payload).document.title).toBe("🤖 bridge · abcd");
       expect(JSON.parse(update.payload).document.markdown).toContain("📋 **任务 0/1**\n- ■ 实现正文");
-      expect(JSON.parse(update.payload).document.markdown).toMatch(/💭$/u);
+      expect(JSON.parse(update.payload).document.markdown).toMatch(/💭·{0,3}$/u);
       store.markOutboundReplyDelivered(update.id, "answer-1");
 
       const live = store.loadRunCard("p1")!;

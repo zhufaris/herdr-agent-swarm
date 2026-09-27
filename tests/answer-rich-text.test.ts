@@ -4,8 +4,9 @@ import { planRichTextAnswerPage, richTextAnswerTitle, safeStreamingMarkdown, sho
 describe("safe rich-text Answer streaming", () => {
   it("throttles small rapid snapshots but admits a useful later chunk", () => {
     const previous = JSON.stringify({ document: { markdown: "hello\n\n💭" } });
-    expect(shouldRefreshRichText(previous, { markdown: "hello again\n\n💭" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(false);
-    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(60)}\n\n💭` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.000Z"))).toBe(true);
+    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(16)}\n\n💭·` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.749Z"))).toBe(false);
+    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(16)}\n\n💭·` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.750Z"))).toBe(true);
+    expect(shouldRefreshRichText(previous, { markdown: "hello\n\n💭··" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.000Z"))).toBe(false);
   });
   it("withholds an incomplete fenced block until it closes", () => {
     expect(safeStreamingMarkdown("Before\n\n```ts\nconst value = 1;")).toBe("Before");
@@ -22,6 +23,12 @@ describe("safe rich-text Answer streaming", () => {
     const items = [{ kind: "agent_message" as const, id: "m1", sequence: 1, markdown: "Hello **world**" }];
     expect(planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**\n\n💭" });
     expect(planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**" });
+  });
+
+  it("advances the active marker from durable activity frames", () => {
+    const items = [{ kind: "agent_message" as const, id: "m1", sequence: 1, markdown: "Working" }];
+    expect([0, 1, 2, 3, 4].map((activityFrame) => planRichTextAnswerPage(items, null, { active: true, pageIndex: 0, activityFrame }).document.markdown))
+      .toEqual(["Working\n\n💭", "Working\n\n💭·", "Working\n\n💭··", "Working\n\n💭···", "Working\n\n💭"]);
   });
 
   it("builds stable Primary and Worker metadata titles with token preference", () => {

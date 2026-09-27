@@ -241,6 +241,35 @@ describe("run card", () => {
     expect(serialized).toContain("◻ 核验发布结果");
   });
 
+  it("keeps the active step visible when a long plan is collapsed", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", liveStatus: {
+        statusTitle: "Implementing card polish", elapsedSeconds: 10, tokenCount: 100,
+        planSteps: Array.from({ length: 7 }, (_, index) => ({
+          key: `plan:${index}`, kind: "step" as const, label: index === 5 ? "Current visible step" : `Step ${index + 1}`,
+          state: index < 5 ? "done" as const : index === 5 ? "active" as const : "pending" as const, occurredAt: "now"
+        }))
+      }
+    });
+    const currentTask = (card as { body: { elements: Array<{ header?: { title?: { content?: string } }; elements?: Array<{ tag?: string; content?: string }> }> } }).body.elements
+      .find((element) => element.header?.title?.content === "🎯 当前任务 · 5/7")!;
+
+    expect(currentTask.elements?.some((element) => element.tag === "markdown" && element.content?.includes("■ Current visible step"))).toBe(true);
+    expect(currentTask.elements?.some((element) => element.header?.title?.content === "完整计划 · 5/7")).toBe(true);
+  });
+
+  it("omits current activity when it duplicates live status or the active plan step", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", liveStatus: {
+        statusTitle: "Checking deployment state", elapsedSeconds: 10, tokenCount: 100,
+        planSteps: [{ key: "plan:1", kind: "step", label: "Run focused tests", state: "active", occurredAt: "now" }]
+      },
+      recentProgress: [{ key: "tool:1", kind: "test", label: "Run focused tests now", state: "active", occurredAt: "now" }]
+    });
+
+    expect(JSON.stringify(card)).not.toContain("⚙️ 当前操作");
+  });
+
   it("makes live work the primary Main Card section and moves runtime identity to the footer", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Deploy Query Log", phase: "running",
@@ -263,14 +292,14 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     const liveIndex = elements.findIndex((element) => element.header?.title?.content === "🎯 当前任务 · 1/2");
     const workersIndex = elements.findIndex((element) => element.content?.startsWith("**🤖 Workers**"));
-    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 当前活动"));
+    const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 当前操作"));
     const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息**"));
     const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
 
     expect(liveIndex).toBeGreaterThanOrEqual(0);
     expect(previewIndex).toBeGreaterThan(liveIndex);
-    expect(workersIndex).toBeGreaterThan(previewIndex);
-    expect(activityIndex).toBeGreaterThan(workersIndex);
+    expect(activityIndex).toBeGreaterThan(previewIndex);
+    expect(workersIndex).toBeGreaterThan(activityIndex);
     expect(footerIndex).toBe(elements.length - 1);
     expect(serialized).not.toContain("**📊 状态**");
     expect(serialized).not.toContain("当前进展");
@@ -314,7 +343,7 @@ describe("run card", () => {
     expect(serialized).toContain("newest conclusion");
     expect(serialized).toContain("old answer");
     expect(serialized).toContain("✓ 🛠️ changed secret.ts");
-    expect(serialized).toContain("当前活动");
+    expect(serialized).toContain("当前操作");
   });
 
   it("keeps both ends of a long JSON message in main-card previews without mutating state", () => {
@@ -472,7 +501,7 @@ describe("run card", () => {
       .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content;
 
     expect(latestMessage).toBeUndefined();
-    expect(JSON.stringify(card)).toContain("⚙️ 当前活动");
+    expect(JSON.stringify(card)).toContain("⚙️ 当前操作");
     expect(JSON.stringify(card)).toContain("正在运行聚焦测试");
   });
 

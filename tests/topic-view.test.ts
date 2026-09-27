@@ -215,7 +215,7 @@ describe("topic view reducer", () => {
     });
   });
 
-  it("upserts one streaming Agent message and retains the newest five conversation messages", () => {
+  it("adds one terminal Agent message and retains the newest five conversation messages", () => {
     let topic = initialTopicView("b1");
     for (let index = 1; index <= 3; index += 1) {
       const queued = createQueuedRunCard({ promptId: `p${index}`, bindingId: "b1", title: `Task ${index}`, workspaceId: "w1", paneId: "w1:p1", requestText: `request-${index}`, queuePosition: 0, occurredAt: `2026-08-22T00:0${index}:00Z` });
@@ -224,6 +224,8 @@ describe("topic view reducer", () => {
       topic = mirrorRunCardToTopic(topic, first);
       const updated = reduceRunCard(first, { type: "output", occurredAt: `2026-08-22T00:0${index}:02Z`, answerSnapshot: `answer-${index}`, progressEvents: [] });
       topic = mirrorRunCardToTopic(topic, updated);
+      const completed = reduceRunCard(updated, { type: "completed", occurredAt: `2026-08-22T00:0${index}:03Z`, answer: "", replaceAnswer: false });
+      topic = mirrorRunCardToTopic(topic, completed);
     }
 
     expect(topic.recentConversation).toEqual([
@@ -234,6 +236,22 @@ describe("topic view reducer", () => {
       expect.objectContaining({ key: "p3:agent", content: "answer-3" })
     ]);
     expect(topic.recentConversation.filter((message) => message.key === "p3:agent")).toHaveLength(1);
+  });
+
+  it("keeps an active Agent draft out of Main Card history until the run is terminal", () => {
+    const queued = createQueuedRunCard({ promptId: "p-live", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "inspect", queuePosition: 0, occurredAt: "start" });
+    const running = reduceRunCard(queued, { type: "output", occurredAt: "middle", answerSnapshot: "partial answer", progressEvents: [] });
+    const liveTopic = mirrorRunCardToTopic(initialTopicView("b1"), running);
+    const completed = reduceRunCard(running, { type: "completed", occurredAt: "done", answer: "final answer" });
+    const finalTopic = mirrorRunCardToTopic(liveTopic, completed);
+
+    expect(liveTopic.recentConversation).toEqual([
+      expect.objectContaining({ key: "p-live:user", content: "inspect" })
+    ]);
+    expect(finalTopic.recentConversation).toEqual([
+      expect.objectContaining({ key: "p-live:user", content: "inspect" }),
+      expect.objectContaining({ key: "p-live:agent", content: "partial answer\n\nfinal answer" })
+    ]);
   });
 
   it("upserts answer timeline items by stable identity and canonical sequence", () => {

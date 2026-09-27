@@ -171,8 +171,7 @@ describe("event-driven card projection", () => {
     await Promise.resolve();
     expect(converge).toHaveBeenCalledTimes(1);
     expect(store.loadTopicView("b1")?.recentConversation).toEqual([
-      expect.objectContaining({ key: "p1:user", content: "work" }),
-      expect.objectContaining({ key: "p1:agent", content: "短首段" })
+      expect.objectContaining({ key: "p1:user", content: "work" })
     ]);
 
     await bus.publish({ eventId: "small", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "小增量", answerUpdate: "append", progressEvents: [] } });
@@ -181,8 +180,7 @@ describe("event-driven card projection", () => {
     await vi.advanceTimersByTimeAsync(1);
     await vi.waitFor(() => expect(converge).toHaveBeenCalledTimes(2));
     expect(store.loadTopicView("b1")?.recentConversation).toEqual([
-      expect.objectContaining({ key: "p1:user", content: "work" }),
-      expect.objectContaining({ key: "p1:agent", content: "短首段\n\n小增量" })
+      expect.objectContaining({ key: "p1:user", content: "work" })
     ]);
 
     await projector.stop(); store.close(); vi.useRealTimers();

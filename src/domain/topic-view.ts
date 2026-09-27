@@ -132,7 +132,7 @@ export function projectRecentConversation(current: readonly RecentConversationMe
   const byKey = new Map(current.map((message) => [message.key, message]));
   for (const run of runs) {
     upsertConversationMessage(byKey, run, "user", run.requestText, run.createdAt);
-    if (run.answer.trim()) upsertConversationMessage(byKey, run, "agent", run.answer, run.finishedAt ?? run.updatedAt);
+    if ((run.phase === "completed" || run.phase === "failed") && run.answer.trim()) upsertConversationMessage(byKey, run, "agent", run.answer, run.finishedAt ?? run.updatedAt);
   }
   return [...byKey.values()].sort(compareConversationMessages).slice(-RECENT_CONVERSATION_LIMIT);
 }

@@ -927,7 +927,7 @@ describe("coordinator concurrency controls", () => {
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Pi durable answer" }));
 
       const card = store.listRunCards("b1")[0]!;
-      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, paneId: "w1:p1", nativeSession: null });
+      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, nativeSession: null });
       expect(store.getPrompt(card.promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: expect.any(String) });
       expect(card.answer).not.toMatch(/不支持结构化输出|private chain of thought|SECRET_TERMINAL_SENTINEL/);
       expect(runPrompt).toHaveBeenCalledOnce();

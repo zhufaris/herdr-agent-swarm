@@ -9,8 +9,8 @@ import { redactSecrets } from "./redact-secrets.js";
 export const ANSWER_RICH_TEXT_PAGE_LIMIT = 9_000;
 export const ANSWER_TYPEWRITER_CURSOR = "💭";
 export const ANSWER_PLACEHOLDER = `正在生成… ${ANSWER_TYPEWRITER_CURSOR}`;
-export const ANSWER_RICH_TEXT_MIN_INTERVAL_MS = 1_000;
-export const ANSWER_RICH_TEXT_MIN_DELTA = 48;
+export const ANSWER_RICH_TEXT_MIN_INTERVAL_MS = 750;
+export const ANSWER_RICH_TEXT_MIN_DELTA = 16;
 
 const TOOL_LABEL_LIMIT = 160;
 const TOOL_COMMAND_LIMIT = 1_000;
@@ -56,12 +56,13 @@ export function richTextAnswerTitle(metadata: RichTextAnswerMetadata, pageIndex:
 export function planRichTextAnswerPage(
   items: readonly AnswerTimelineItem[],
   cursor: AnswerTimelineCursor | null,
-  options: { active: boolean; pageIndex: number; limit?: number; prefixItems?: readonly AnswerTimelineItem[]; terminalNotice?: string | null; progressEvents?: readonly RunProgressEvent[]; metadata?: RichTextAnswerMetadata }
+  options: { active: boolean; pageIndex: number; limit?: number; prefixItems?: readonly AnswerTimelineItem[]; terminalNotice?: string | null; progressEvents?: readonly RunProgressEvent[]; metadata?: RichTextAnswerMetadata; activityFrame?: number }
 ): RichTextAnswerPage {
   const safeItems = options.active ? items.map(safeStreamingItem) : [...items];
   const safePrefix = options.active ? (options.prefixItems ?? []).map(safeStreamingItem) : options.prefixItems ?? [];
   const footer = taskListMarkdown(options.progressEvents ?? []);
-  const suffixBudget = footer.length + (options.active ? ANSWER_TYPEWRITER_CURSOR.length + 4 : 0) + (options.terminalNotice?.length ?? 0) + 8;
+  const activityMarker = answerActivityMarker(options.activityFrame ?? 0);
+  const suffixBudget = footer.length + (options.active ? activityMarker.length + 4 : 0) + (options.terminalNotice?.length ?? 0) + 8;
   const pageLimit = Math.max(1, (options.limit ?? ANSWER_RICH_TEXT_PAGE_LIMIT) - suffixBudget);
   const page = planAnswerTimelinePage(safeItems, cursor, pageLimit, safePrefix);
   const body = markdownFromTimelineItems(page.items);
@@ -70,7 +71,7 @@ export function planRichTextAnswerPage(
   else if (options.active) sections.push("正在生成…");
   if (!options.active && options.terminalNotice) sections.push(`⚠️ ${safeInline(options.terminalNotice, TOOL_PREVIEW_LIMIT)}`);
   if (footer) sections.push(footer);
-  if (options.active) sections.push(ANSWER_TYPEWRITER_CURSOR);
+  if (options.active) sections.push(activityMarker);
   const markdown = sections.join("\n\n").trim() || "任务已结束，未生成可展示内容。";
   return {
     document: { ...(options.metadata ? { title: richTextAnswerTitle(options.metadata, options.pageIndex) } : options.pageIndex > 0 ? { title: `回答（续 ${options.pageIndex + 1}）` } : {}), markdown },
@@ -123,7 +124,11 @@ export function shouldRefreshRichText(previousPayload: string, next: RichTextDoc
 }
 
 function withoutCursor(markdown: string): string {
-  return markdown.replace(/\s*💭\s*$/u, "");
+  return markdown.replace(/\s*💭·{0,3}\s*$/u, "");
+}
+
+function answerActivityMarker(frame: number): string {
+  return `${ANSWER_TYPEWRITER_CURSOR}${"·".repeat(Math.abs(Math.trunc(frame)) % 4)}`;
 }
 
 function safeStreamingItem(item: AnswerTimelineItem): AnswerTimelineItem {

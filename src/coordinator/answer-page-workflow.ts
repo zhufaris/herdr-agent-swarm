@@ -100,7 +100,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       paneId: binding?.paneId ?? view.paneId,
       paneToken: binding?.paneToken ?? view.paneToken
     };
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents, metadata });
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents, metadata, activityFrame: view.viewVersion });
     if (plan.nextCursor) {
       if (!binding?.rootMessageId) return;
       const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.planning.pageLimit, metadata });

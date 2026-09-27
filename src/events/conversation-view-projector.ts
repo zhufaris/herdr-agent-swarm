@@ -128,11 +128,19 @@ export class ConversationViewProjector {
     const current = this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
     const reduced = reduceTopicView(current, event);
     const next = projectedRunCard ? mirrorRunCardToTopic(reduced, projectedRunCard) : reduced;
-    if (next === current) return;
+    if (next === current) {
+      // A transactional terminal transition may have persisted the newest Topic view
+      // before its process-local lifecycle notification reaches this projector.
+      if ((event.type === "TurnCompleted" || event.type === "TurnFailed") && current.viewVersion > current.deliveredVersion) {
+        await this.mainCards.converge(event.bindingId, "live");
+      }
+      return;
+    }
     this.store.saveTopicView(next);
 
     try {
-      this.scheduler.schedule(mainCardKey(event.bindingId), next.viewVersion, {
+      if (event.type === "TurnCompleted" || event.type === "TurnFailed") await this.mainCards.converge(event.bindingId, "live");
+      else this.scheduler.schedule(mainCardKey(event.bindingId), next.viewVersion, {
         priority: isImmediateMainEvent(event, next.phase) ? "terminal" : isInteractiveMainEvent(event) ? "interactive" : "normal",
         delayMs: isInteractiveMainEvent(event) ? Math.min(1_000, this.mainUpdateDelayMs) : this.mainUpdateDelayMs
       });

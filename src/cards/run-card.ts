@@ -165,6 +165,11 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     }, "primary")
   ] };
   const canCreateWorker = input.phase === "ready" || input.phase === "queued" || input.phase === "running" || input.phase === "blocked" || input.phase === "done";
+  const currentActivity = currentMainCardActivity(progress, planKeys, [
+    input.liveStatus?.statusTitle ?? "",
+    ...(input.liveStatus?.planSteps.filter((step) => step.state === "active").map((step) => step.label) ?? [])
+  ]);
+  if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前操作", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
   if (input.workers.length > 0) {
     elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n${input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
     const workerButtons = [
@@ -174,8 +179,6 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     if (row) elements.push(row);
     if (canCreateWorker) elements.push(createWorker);
   } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, ...(canCreateWorker ? [createWorker] : []));
-  const currentActivity = currentMainCardActivity(progress, planKeys);
-  if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前活动", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
@@ -322,13 +325,17 @@ function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, pha
   const title = status.statusTitle ? `◈ **${escapeMarkdown(truncate(status.statusTitle, 160))}**` : "◈ **TraeX 正在处理**";
   const lines = status.planSteps.map((step) => `${{ pending: "◻", active: "■", done: "✔", failed: "✕" }[step.state]} ${escapeMarkdown(truncate(step.label, 300))}`);
   const done = lines.filter((line) => line.startsWith("✔")).length;
-  const content: object[] = [{ tag: "markdown", content: [title, metadata].filter(Boolean).join("\n") }];
-  if (lines.length && lines.length <= 6) content.push({ tag: "markdown", content: lines.join("\n") });
-  if (lines.length > 6) content.push({
-    tag: "collapsible_panel", expanded: false,
-    header: { title: { tag: "plain_text", content: `完整计划 · ${done}/${lines.length}` } },
-    elements: [{ tag: "markdown", content: lines.join("\n") }]
-  });
+  const content: object[] = [{ tag: "markdown", content: [title, metadata].filter(Boolean).join(" · ") }];
+  if (lines.length && lines.length <= 5) content.push({ tag: "markdown", content: lines.join("\n") });
+  if (lines.length > 5) {
+    const active = status.planSteps.findIndex((step) => step.state === "active");
+    if (active >= 0) content.push({ tag: "markdown", content: lines[active]! });
+    content.push({
+      tag: "collapsible_panel", expanded: false,
+      header: { title: { tag: "plain_text", content: `完整计划 · ${done}/${lines.length}` } },
+      elements: [{ tag: "markdown", content: lines.join("\n") }]
+    });
+  }
   return [{
     tag: "collapsible_panel", expanded: true, border: { color: phase === "done" ? "green" : phase === "error" || phase === "blocked" ? "orange" : "blue", corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: lines.length ? `🎯 当前任务 · ${done}/${lines.length}` : "🎯 当前任务" } },
