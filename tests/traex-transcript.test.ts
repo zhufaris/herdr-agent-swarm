@@ -740,6 +740,50 @@ describe("TraexTranscriptReader", () => {
     });
   });
 
+  it("projects current item-completed CommandExecution events into the active Answer timeline", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const itemId = "code-mode-nested:29:call-live:exec-live";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({
+        type: "item_completed",
+        turn_id: turnId,
+        item: {
+          type: "CommandExecution",
+          id: itemId,
+          command: ["/bin/bash", "-lc", "TOKEN=top-secret npm test"],
+          status: "completed",
+          exit_code: 0,
+          aggregated_output: "Test Files 2 passed\nAuthorization: Bearer private-output"
+        }
+      })
+    ].join(""));
+
+    const observation = await cursor.readObservation?.();
+    expect(observation).toMatchObject({
+      turnId,
+      timelineDeltas: [{
+        kind: "tool",
+        id: `tool:${itemId}`,
+        sequence: 1,
+        category: "test",
+        label: "TOKEN=[REDACTED] npm test",
+        command: "TOKEN=[REDACTED] npm test",
+        state: "succeeded"
+      }],
+      toolActivities: [{
+        key: `tool:${itemId}`,
+        kind: "test",
+        label: "Command · TOKEN=[REDACTED] npm test",
+        state: "done"
+      }],
+      turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
+    });
+    expect(JSON.stringify(observation)).not.toMatch(/top-secret|private-output/);
+  });
+
   it("uses the sanitized task-jz33 history_mutation records as typed input", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));

@@ -21,6 +21,14 @@ const completedUserMessageEventSchema = z.object({
   type: z.literal("item_completed"), turn_id: z.string().min(1),
   item: z.object({ type: z.literal("UserMessage"), id: z.string().min(1), content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()) }).passthrough()
 }).passthrough();
+const completedCommandExecutionEventSchema = z.object({
+  type: z.literal("item_completed"), turn_id: z.string().min(1),
+  item: z.object({
+    type: z.literal("CommandExecution"), id: z.string().min(1),
+    command: z.union([z.string(), z.array(z.string())]),
+    status: z.string().optional(), exit_code: z.number().int().nullable().optional()
+  }).passthrough()
+}).passthrough();
 const planArgumentsSchema = z.object({ plan: z.array(z.object({ step: z.string(), status: z.enum(["pending", "in_progress", "completed"]) })).max(100) }).passthrough();
 
 export class TraexTranscriptProjector {
@@ -46,6 +54,11 @@ export class TraexTranscriptProjector {
         if (completedUserMessage.success && observationTurnId && completedUserMessage.data.turn_id === observationTurnId && lifecycle?.turnId === observationTurnId) {
           const text = this.userMessageText(completedUserMessage.data.item, input.maxRenderedDeltaChars);
           if (text) requestText = text;
+        }
+        const completedCommand = completedCommandExecutionEventSchema.safeParse(envelope.payload);
+        if (completedCommand.success && observationTurnId && completedCommand.data.turn_id === observationTurnId && lifecycle?.turnId === observationTurnId) {
+          const rendered = this.renderCompletedCommandExecution(completedCommand.data.item, toolActivities, timelineDeltas, input.maxRenderedDeltaChars);
+          if (rendered) blocks.push(rendered);
         }
         const reasoning = reasoningEventSchema.safeParse(envelope.payload); if (reasoning.success) statusTitle = extractStatusTitle(reasoning.data.text) ?? statusTitle;
         const tokens = tokenCountEventSchema.safeParse(envelope.payload); if (tokens.success && input.tokenBaseline !== null && tokens.data.info.total_token_usage.total_tokens >= input.tokenBaseline) tokenCount = tokens.data.info.total_token_usage.total_tokens - input.tokenBaseline;
@@ -113,6 +126,33 @@ export class TraexTranscriptProjector {
     if (activity && timelineEnabled) timelineDeltas.push(toolTimelineItem(result.data.call_id, sequence, descriptor, activity.state === "active" ? "running" : activity.state === "done" ? "succeeded" : "failed", result.data.output, max));
     return projectToolResult(descriptor, result.data.output);
   }
+
+  private renderCompletedCommandExecution(
+    item: z.infer<typeof completedCommandExecutionEventSchema>["item"],
+    toolActivities: NonNullable<AgentTranscriptObservation["toolActivities"]>,
+    timelineDeltas: AnswerTimelineDelta[],
+    max: number,
+  ): string {
+    if (this.emittedItemIds.has(item.id)) return "";
+    this.emittedItemIds.add(item.id);
+    const command = commandExecutionText(item.command);
+    const projected = projectToolCall("exec_command", JSON.stringify({ cmd: command }));
+    const result = { status: item.status, exit_code: item.exit_code };
+    const state = projectToolResultState(result);
+    const sequence = this.nextTimelineSequence++;
+    const activity = projectActivity(item.id, projected.descriptor, state);
+    if (activity) {
+      toolActivities.push(activity);
+      timelineDeltas.push(toolTimelineItem(item.id, sequence, projected.descriptor, state === "active" ? "running" : state === "done" ? "succeeded" : "failed", undefined, max));
+    }
+    return projectToolResult(projected.descriptor, result);
+  }
+}
+
+function commandExecutionText(command: string | string[]): string {
+  if (typeof command === "string") return command;
+  if (command.length >= 3 && /(?:^|\/)(?:ba|z|da)?sh$/.test(command[0] ?? "") && command[1] === "-lc") return command[2] ?? "";
+  return command.join(" ");
 }
 
 function toolTimelineItem(id: string, sequence: number, descriptor: ToolActivityDescriptor, state: "running" | "succeeded" | "failed", output: unknown, max: number): AnswerTimelineDelta {
