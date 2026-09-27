@@ -4,6 +4,7 @@ import type { AcceptPromptInput, PromptAcceptanceEffect, PromptAcceptanceReceipt
 import type { Binding, PromptJob } from "../../domain/types.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
+import { richTextAnswerTitle } from "../../runtime/answer-rich-text.js";
 import { mapPrompt, type PromptRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
@@ -54,11 +55,12 @@ export class SqlitePromptAcceptanceStore {
       this.context.database.prepare(`INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, parent_prompt_id, priority, was_detached, state, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`)
         .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, input.prompt.parentPromptId ?? null, input.prompt.priority ?? "normal", input.prompt.wasDetached ? 1 : 0, timestamp, timestamp);
       const view = input.view;
+      const binding = this.dependencies.getBinding(input.prompt.bindingId);
       this.projections.insertRunCard(view);
       this.dependencies.enqueueOutboundReply({
         id: randomUUID(), idempotencyKey: `answer-post:${input.prompt.id}:0`, bindingId: input.prompt.bindingId,
         promptId: input.prompt.id, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId,
-        kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId))
+        kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId, richTextAnswerTitle({ projectId: binding?.projectId, paneId: binding?.paneId ?? view.paneId, paneToken: binding?.paneToken ?? view.paneToken }, 0)))
       });
       const prompt = this.getPrompt(input.prompt.id);
       if (!prompt) throw new Error(`Prompt not found: ${input.prompt.id}`);

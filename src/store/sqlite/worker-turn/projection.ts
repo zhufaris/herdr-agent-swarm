@@ -216,7 +216,7 @@ export class WorkerTurnProjection {
     this.timelinePages.reserve("worker-turn", input.turnId, input.pageIndex, reply.id, input.cursor, input.items);
     return "reserved";
   }
-  reserveRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome {
+  reserveRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; nextTitle?: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome {
     const page = this.listPages(input.turnId).find((candidate) => candidate.state === "active" && candidate.pageIndex === input.pageIndex);
     const view = this.load(input.turnId);
     if (!page || !view || page.deliveryMode !== "rich_post" || page.messageId !== input.messageId || input.nextPageIndex !== input.pageIndex + 1) return "stale";
@@ -226,7 +226,7 @@ export class WorkerTurnProjection {
     const update = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", intentKind: "rich-text-update", payload, projectionKey: key, snapshotRevision: 1, laneKeyOverride: `worker-turn:${input.turnId}` }) as OutboundReply;
     this.timelinePages.reserve("worker-turn", input.turnId, input.pageIndex, update.id, input.cursor, input.items);
     this.timelinePages.ensure("worker-turn", input.turnId, input.nextPageIndex, input.cursor);
-    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.nextPageIndex, input.nextPageStart, input.nextElementId)), laneKeyOverride: `worker-turn:${input.turnId}` });
+    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.nextPageIndex, input.nextPageStart, input.nextElementId, input.nextTitle)), laneKeyOverride: `worker-turn:${input.turnId}` });
     return "reserved";
   }
   reserveContent(input: {

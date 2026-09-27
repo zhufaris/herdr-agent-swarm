@@ -320,7 +320,7 @@ export class SqliteProjectionStore {
     });
   }
 
-  reserveRichTextAnswerContinuation(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome {
+  reserveRichTextAnswerContinuation(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; nextTitle?: string; rootMessageId: string; viewVersion: number; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome {
     return this.context.transaction(() => {
       const page = this.getActiveAnswerPage(input.promptId);
       const view = this.loadRunCard(input.promptId);
@@ -331,7 +331,7 @@ export class SqliteProjectionStore {
       const update = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.messageId, kind: "card_update", intentKind: "rich-text-update", payload, projectionKey: key, snapshotRevision: 1, laneKeyOverride: `answer:${input.promptId}` }) as OutboundReply;
       this.timelinePages.reserve("primary-run", input.promptId, input.pageIndex, update.id, input.cursor, input.items);
       this.timelinePages.ensure("primary-run", input.promptId, input.nextPageIndex, input.cursor);
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: input.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.nextPageIndex, input.nextPageStart, input.nextElementId)), laneKeyOverride: `answer:${input.promptId}` });
+      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.promptId}:${input.nextPageIndex}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: input.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.nextPageIndex, input.nextPageStart, input.nextElementId, input.nextTitle)), laneKeyOverride: `answer:${input.promptId}` });
       return "reserved";
     });
   }

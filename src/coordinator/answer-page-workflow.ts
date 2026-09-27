@@ -8,7 +8,7 @@ import type { AnswerPageConvergencePort } from "../domain/ports/card-convergence
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { continuationSummary } from "../domain/card-page-handoff.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
-import { planRichTextAnswerPage } from "../runtime/answer-rich-text.js";
+import { planRichTextAnswerPage, richTextAnswerTitle } from "../runtime/answer-rich-text.js";
 import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 
 export class AnswerPageWorkflow implements AnswerPageConvergencePort {
@@ -94,14 +94,19 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
     if (checkpoint.pending) return;
     const active = view.phase !== "completed" && view.phase !== "failed";
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents });
+    const binding = this.store.getBinding(view.bindingId);
+    const metadata = {
+      projectId: binding?.projectId,
+      paneId: binding?.paneId ?? view.paneId,
+      paneToken: binding?.paneToken ?? view.paneToken
+    };
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents, metadata });
     if (plan.nextCursor) {
-      const binding = this.store.getBinding(view.bindingId);
       if (!binding?.rootMessageId) return;
-      const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.planning.pageLimit });
+      const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.planning.pageLimit, metadata });
       const nextPageIndex = page.pageIndex + 1;
       const nextElementId = answerElementId(view.promptId, nextPageIndex);
-      const outcome = this.store.reserveRichTextAnswerContinuation({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, document: frozen.document, cursor: plan.nextCursor, items: frozen.items, sourceEnd: nextSourceOffset(plan.nextCursor, nextPageIndex), nextPageIndex, nextPageStart: nextSourceOffset(plan.nextCursor, nextPageIndex), nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, ...(workClass ? { workClass } : {}) });
+      const outcome = this.store.reserveRichTextAnswerContinuation({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, document: frozen.document, cursor: plan.nextCursor, items: frozen.items, sourceEnd: nextSourceOffset(plan.nextCursor, nextPageIndex), nextPageIndex, nextPageStart: nextSourceOffset(plan.nextCursor, nextPageIndex), nextElementId, nextTitle: richTextAnswerTitle(metadata, nextPageIndex), rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, ...(workClass ? { workClass } : {}) });
       if (outcome === "reserved") this.wakeOutbound();
       return;
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planRichTextAnswerPage, safeStreamingMarkdown, shouldRefreshRichText } from "../src/runtime/answer-rich-text.js";
+import { planRichTextAnswerPage, richTextAnswerTitle, safeStreamingMarkdown, shouldRefreshRichText } from "../src/runtime/answer-rich-text.js";
 
 describe("safe rich-text Answer streaming", () => {
   it("throttles small rapid snapshots but admits a useful later chunk", () => {
@@ -22,6 +22,29 @@ describe("safe rich-text Answer streaming", () => {
     const items = [{ kind: "agent_message" as const, id: "m1", sequence: 1, markdown: "Hello **world**" }];
     expect(planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**\n\n▌" });
     expect(planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**" });
+  });
+
+  it("builds stable Primary and Worker metadata titles with token preference", () => {
+    expect(richTextAnswerTitle({ projectId: "herdr-agent-swarm", paneId: "wN:p4D", paneToken: "vdfn" }, 0))
+      .toBe("🤖 herdr-agent-swarm · vdfn");
+    expect(richTextAnswerTitle({ projectId: "herdr-agent-swarm", paneId: "wN:p4E", paneToken: "yx0c", workerName: "reviewer" }, 1))
+      .toBe("🤖 herdr-agent-swarm · yx0c · reviewer · 续 2");
+  });
+
+  it("falls back to Pane ID and safely bounds malformed title metadata", () => {
+    expect(richTextAnswerTitle({ projectId: " bridge\nproject ", paneId: "wN:p4D", paneToken: null }, 0))
+      .toBe("🤖 bridge project · wN:p4D");
+    const title = richTextAnswerTitle({ projectId: `token=secret ${"p".repeat(200)}`, paneId: null, paneToken: null, workerName: "worker\nname" }, 0);
+    expect(title).toContain("token=[REDACTED]");
+    expect(title).toContain("未知 Pane");
+    expect(title).toContain("worker name");
+    expect(title.length).toBeLessThanOrEqual(200);
+  });
+
+  it("attaches metadata titles to active and terminal page documents", () => {
+    const metadata = { projectId: "bridge", paneId: "w1:p1", paneToken: "abcd" };
+    expect(planRichTextAnswerPage([], null, { active: true, pageIndex: 0, metadata }).document.title).toBe("🤖 bridge · abcd");
+    expect(planRichTextAnswerPage([], null, { active: false, pageIndex: 2, metadata }).document.title).toBe("🤖 bridge · abcd · 续 3");
   });
 
   it("renders tool activity inline and labels continuation pages", () => {

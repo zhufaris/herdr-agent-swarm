@@ -11,6 +11,7 @@ import { matchesAgentKind } from "../../domain/agent-instance.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteBindingLifecycleStore } from "./binding-store.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
+import { richTextAnswerTitle } from "../../runtime/answer-rich-text.js";
 
 export class SqliteBindingProjectionStore {
   constructor(
@@ -73,7 +74,7 @@ export class SqliteBindingProjectionStore {
           answerOutboxReserved = true;
         } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
           const existing = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ? AND state = 'pending'").get(`answer-post:${next.promptId}:0`);
-          if (!existing) this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${next.promptId}:0`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, next.answerElementId)) });
+          if (!existing) this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${next.promptId}:0`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, next.answerElementId, richTextAnswerTitle({ projectId: binding.projectId, paneId: binding.paneId ?? next.paneId, paneToken: binding.paneToken ?? next.paneToken }, 0))) });
           answerOutboxReserved = true;
         }
       }

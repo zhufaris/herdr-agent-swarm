@@ -6,7 +6,7 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import { workerTurnElementId, workerTurnProgressElementId } from "../domain/worker-turn-card-view.js";
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
-import { planRichTextAnswerPage } from "../runtime/answer-rich-text.js";
+import { planRichTextAnswerPage, richTextAnswerTitle } from "../runtime/answer-rich-text.js";
 import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 
 type WorkerTurnCardPresentation = Pick<WorkerPresentation, "workerTurn" | "workerTurnPage" | "workerTurnProgress" | "answerTimelinePage">;
@@ -99,13 +99,15 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     const checkpoint = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
     if (checkpoint.pending) return;
     const active = !["completed", "failed", "cancelled", "dispatch-uncertain"].includes(view.phase);
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents });
+    const instance = this.store.getAgentInstance(view.instanceId);
+    const metadata = { projectId: instance?.projectId, paneId: instance?.runtimeRef?.paneId, paneToken: instance?.runtimeRef?.paneToken, workerName: view.workerName };
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents, metadata });
     if (plan.nextCursor) {
-      const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.pageLimit });
+      const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.pageLimit, metadata });
       const nextPageIndex = page.pageIndex + 1;
       const nextElementId = workerTurnElementId(view.turnId, nextPageIndex);
       const nextPageStart = nextSourceOffset(plan.nextCursor, nextPageIndex);
-      const outcome = this.store.reserveWorkerRichTextContinuation({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId, document: frozen.document, cursor: plan.nextCursor, items: frozen.items, sourceEnd: nextPageStart, nextPageIndex, nextPageStart, nextElementId, rootMessageId: view.rootMessageId, viewVersion: view.viewVersion });
+      const outcome = this.store.reserveWorkerRichTextContinuation({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId, document: frozen.document, cursor: plan.nextCursor, items: frozen.items, sourceEnd: nextPageStart, nextPageIndex, nextPageStart, nextElementId, nextTitle: richTextAnswerTitle(metadata, nextPageIndex), rootMessageId: view.rootMessageId, viewVersion: view.viewVersion });
       if (outcome === "reserved") this.wakeOutbound();
       return;
     }

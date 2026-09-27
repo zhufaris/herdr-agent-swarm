@@ -15,6 +15,7 @@ import type { WorkerTurnProjection } from "./projection.js";
 import type { WorkerTurnQueue } from "./queue.js";
 import { mapInstanceTurn } from "./records.js";
 import { initialRichTextAnswerPayload } from "../../../domain/rich-text.js";
+import { richTextAnswerTitle } from "../../../runtime/answer-rich-text.js";
 
 type BasicInput = {
   id: string;
@@ -184,7 +185,7 @@ export class WorkerTurnAcceptance {
           rootMessageId: acceptedView.rootMessageId,
           kind: "text",
           intentKind: "rich-text-reply",
-          payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, acceptedView.elementId)),
+          payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, acceptedView.elementId, richTextAnswerTitle({ projectId: current?.projectId, paneId: current?.runtimeRef?.paneId, paneToken: current?.runtimeRef?.paneToken, workerName: acceptedView.workerName }, 0))),
         });
       this.dependencies.invalidateWorkerCardContexts(
         acceptedView,

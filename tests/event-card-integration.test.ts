@@ -414,8 +414,9 @@ describe("event-driven card projection", () => {
       async updateRichText(messageId, content) { streamed.push({ cardId: messageId, elementId: "", content: JSON.stringify(content), sequence: streamed.filter((item) => item.cardId === messageId).length + 1 }); }
     };
     const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", paneToken: "abcd" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", paneToken: "abcd", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
@@ -446,7 +447,7 @@ describe("event-driven card projection", () => {
     expect(firstPageContent).toContain("| Key | Value |");
     expect(firstPageContent).toContain("[literal](javascript:alert(1))");
     expect(firstPageContent).not.toContain("<b>Result</b>");
-    expect(JSON.stringify(created[1])).toContain("回答（续 2）");
+    expect(JSON.stringify(created[1])).toContain("🤖 bridge · abcd · 续 2");
     expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: null, answerMessageId: "answer-2", answerPageIndex: 1, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();

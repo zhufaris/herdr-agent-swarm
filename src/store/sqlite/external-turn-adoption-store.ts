@@ -7,6 +7,7 @@ import type { SqliteContext } from "./context.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
+import { richTextAnswerTitle } from "../../runtime/answer-rich-text.js";
 
 export class SqliteExternalTurnAdoptionStore {
   constructor(
@@ -78,7 +79,8 @@ export class SqliteExternalTurnAdoptionStore {
         const view = { ...input.externalView, promptId, bindingId: input.bindingId, bindingGeneration: input.expectedGeneration, paneId: input.expectedPaneId, requestText: input.requestText, queuePosition: 0 };
         const runningView = reduceRunCard(view, { type: "started", occurredAt: input.startedAt });
         this.projections.insertRunCard(view);
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${promptId}:0`, gatewayId, bindingId: input.bindingId, promptId, viewVersion: runningView.viewVersion, cardRole: "answer", rootMessageId: binding.root_message_id, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, runningView.answerElementId)) });
+        const title = richTextAnswerTitle({ projectId: binding.project_id, paneId: binding.pane_id ?? runningView.paneId, paneToken: binding.pane_token ?? runningView.paneToken }, 0);
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${promptId}:0`, gatewayId, bindingId: input.bindingId, promptId, viewVersion: runningView.viewVersion, cardRole: "answer", rootMessageId: binding.root_message_id, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, runningView.answerElementId, title)) });
         outboxReserved = true;
       }
       const prompt = this.getPrompt(promptId);

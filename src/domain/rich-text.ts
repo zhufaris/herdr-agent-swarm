@@ -13,13 +13,13 @@ export interface RichTextAnswerPayload {
   document: RichTextDocument;
 }
 
-export function initialRichTextAnswerPayload(pageIndex: number, pageStart: number, elementId: string): RichTextAnswerPayload {
+export function initialRichTextAnswerPayload(pageIndex: number, pageStart: number, elementId: string, title?: string): RichTextAnswerPayload {
   return {
     pageIndex,
     pageStart,
     elementId,
     document: {
-      ...(pageIndex > 0 ? { title: `回答（续 ${pageIndex + 1}）` } : {}),
+      ...(title ? { title } : pageIndex > 0 ? { title: `回答（续 ${pageIndex + 1}）` } : {}),
       markdown: "正在生成… ▌"
     }
   };

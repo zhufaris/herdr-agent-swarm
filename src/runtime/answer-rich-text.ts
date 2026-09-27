@@ -2,6 +2,7 @@ import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import type { RichTextDocument } from "../domain/rich-text.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 import { planAnswerTimelinePage } from "../cards/answer-timeline-page.js";
 import { redactSecrets } from "./redact-secrets.js";
 
@@ -15,6 +16,7 @@ const TOOL_LABEL_LIMIT = 160;
 const TOOL_PREVIEW_LIMIT = 240;
 const TASK_STEP_LIMIT = 240;
 const TASK_LIST_VISIBLE_STEPS = 5;
+const ANSWER_TITLE_LIMIT = 200;
 const ANSI = /[\u001B\u009B][[\]\(\)#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 
 const TOOL_CATEGORY = {
@@ -35,10 +37,25 @@ export interface RichTextAnswerPage {
   nextCursor: AnswerTimelineCursor | null;
 }
 
+export interface RichTextAnswerMetadata {
+  projectId?: string | null | undefined;
+  paneId?: string | null | undefined;
+  paneToken?: string | null | undefined;
+  workerName?: string | null | undefined;
+}
+
+export function richTextAnswerTitle(metadata: RichTextAnswerMetadata, pageIndex: number): string {
+  const project = safeTitleSegment(metadata.projectId, 72, "未知项目");
+  const pane = safeTitleSegment(displayPaneIdentity(metadata, "未知 Pane"), 64, "未知 Pane");
+  const worker = metadata.workerName ? safeTitleSegment(metadata.workerName, 48, "Worker") : "";
+  const parts = [`🤖 ${project}`, pane, worker, pageIndex > 0 ? `续 ${pageIndex + 1}` : ""].filter(Boolean);
+  return truncateInline(parts.join(" · "), ANSWER_TITLE_LIMIT);
+}
+
 export function planRichTextAnswerPage(
   items: readonly AnswerTimelineItem[],
   cursor: AnswerTimelineCursor | null,
-  options: { active: boolean; pageIndex: number; limit?: number; prefixItems?: readonly AnswerTimelineItem[]; terminalNotice?: string | null; progressEvents?: readonly RunProgressEvent[] }
+  options: { active: boolean; pageIndex: number; limit?: number; prefixItems?: readonly AnswerTimelineItem[]; terminalNotice?: string | null; progressEvents?: readonly RunProgressEvent[]; metadata?: RichTextAnswerMetadata }
 ): RichTextAnswerPage {
   const safeItems = options.active ? items.map(safeStreamingItem) : [...items];
   const safePrefix = options.active ? (options.prefixItems ?? []).map(safeStreamingItem) : options.prefixItems ?? [];
@@ -55,7 +72,7 @@ export function planRichTextAnswerPage(
   if (options.active) sections.push(ANSWER_TYPEWRITER_CURSOR);
   const markdown = sections.join("\n\n").trim() || "任务已结束，未生成可展示内容。";
   return {
-    document: { ...(options.pageIndex > 0 ? { title: `回答（续 ${options.pageIndex + 1}）` } : {}), markdown },
+    document: { ...(options.metadata ? { title: richTextAnswerTitle(options.metadata, options.pageIndex) } : options.pageIndex > 0 ? { title: `回答（续 ${options.pageIndex + 1}）` } : {}), markdown },
     items: page.items,
     nextCursor: page.nextCursor
   };
@@ -165,6 +182,11 @@ function inlineCode(value: string): string {
 
 function safeInline(value: string, limit: number): string {
   return truncateInline(redactSecrets(stripAnsi(value)).replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim(), limit);
+}
+
+function safeTitleSegment(value: string | null | undefined, limit: number, fallback: string): string {
+  const safe = value ? safeInline(value, limit) : "";
+  return safe || fallback;
 }
 
 function truncateInline(value: string, limit: number): string {

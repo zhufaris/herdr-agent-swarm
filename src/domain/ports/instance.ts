@@ -76,7 +76,7 @@ export interface InstanceStore {
   listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number): AnswerTimelineFrozenItem[];
   reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
   reserveWorkerRichTextUpdate(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished" }): AnswerPageReservationOutcome;
-  reserveWorkerRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome;
+  reserveWorkerRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; nextTitle?: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
@@ -140,7 +140,7 @@ export type WorkerTurnDispatchStore = Pick<InstanceStore,
 >;
 
 export type WorkerTurnCardStore = Pick<InstanceStore,
-  "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "reserveWorkerAnswerTimelineCard" |
+  "getAgentInstance" | "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "reserveWorkerAnswerTimelineCard" |
   "reserveWorkerTurnContent" | "reserveWorkerRichTextUpdate" | "reserveWorkerRichTextContinuation" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
   "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation"
 >;
