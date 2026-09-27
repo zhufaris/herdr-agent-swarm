@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
 import type { BridgeEvent } from "../../domain/events.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
@@ -66,11 +67,13 @@ export class SqliteBindingProjectionStore {
         const next: RunCardView = { ...view, phase: "failed", notice: input.reason, finishedAt: input.occurredAt, queuePosition: 0, activityAt: input.occurredAt, viewVersion: view.viewVersion + 1, updatedAt: input.occurredAt };
         this.projections.saveRunCard(next);
         updatedPromptIds.push(next.promptId);
-        if (!next.answerCardId && next.answerMessageId) {
+        const answerPage = this.projections.listAnswerPages(next.promptId).find(({ pageIndex }) => pageIndex === next.answerPageIndex);
+        if (!next.answerCardId && next.answerMessageId && answerPage?.deliveryMode !== "rich_post") {
           this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(input.renderRunCard(next)) });
           answerOutboxReserved = true;
         } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
-          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${next.promptId}:answer`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
+          const existing = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ? AND state = 'pending'").get(`answer-post:${next.promptId}:0`);
+          if (!existing) this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${next.promptId}:0`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, next.answerElementId)) });
           answerOutboxReserved = true;
         }
       }
@@ -90,7 +93,8 @@ export class SqliteBindingProjectionStore {
         ? isNativeTraexSession(persisted) && sameNativeTraexSession(persisted, observed)
         : persisted.source === observed.source && persisted.agent === observed.agent && persisted.kind === observed.kind && persisted.value === observed.value));
       const agentMatches = binding.agentKind === "traex" ? isTraexCompatibleNativeAgent(input.pane) : matchesAgentKind(binding.agentKind, input.pane.agentKind);
-      if (!binding.traexSessionId || !input.pane.terminalId || binding.traexSessionId !== input.pane.terminalId || !sessionMatches || !agentMatches) return { outcome: "identity_mismatch", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: false };
+      if (!binding.traexSessionId || !input.pane.terminalId || !sessionMatches || !agentMatches) return { outcome: "identity_mismatch", binding, view: this.projections.loadTopicView(input.bindingId), outboxReserved: false };
+      if (binding.traexSessionId !== input.pane.terminalId) binding = this.bindings.updateBindingMetadata(binding.id, { traexSessionId: input.pane.terminalId });
       binding = this.bindings.transitionBinding(input.bindingId, { type: "pane_reattached", replacement: false });
       binding = this.bindings.transitionBinding(input.bindingId, { type: "pane_observed", runtime: input.pane.agentState });
       this.projections.saveTopicView(input.view);

@@ -35,7 +35,7 @@ export class SqliteOutboxQueueStore {
       : input.bindingId ? this.dependencies.getBinding(input.bindingId)?.generation ?? null : null);
     const logicalLaneKey = input.laneKeyOverride ?? outboundLaneKey({ ...input, bindingGeneration });
     const streamMetadata = outboundStreamMetadata(input.kind, input.payload);
-    const encoded = encodeDeliveryIntent(input.kind, input.payload);
+    const encoded = encodeDeliveryIntent(input.kind, input.payload, input.intentKind ?? undefined);
     const intentKind = input.intentKind ?? encoded.intentKind;
     const intentJson = input.intentJson ?? encoded.intentJson;
     const rendererRevision = input.rendererRevision ?? encoded.rendererRevision;
@@ -136,6 +136,17 @@ export class SqliteOutboxQueueStore {
         const elementId = stream?.elementId ?? view?.elementId;
         if (!view || !elementId) throw new Error(`Worker card page metadata missing for turn: ${input.workerTurnId}`);
         this.context.database.prepare(`INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, state, sequence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, 'creating', 0, ?, ?) ON CONFLICT(turn_id, page_index) DO NOTHING`).run(`${input.workerTurnId}:${pageIndex}`, input.workerTurnId, pageIndex, stream?.pageStart ?? 0, elementId, timestamp, timestamp);
+      }
+      if (intentKind === "rich-text-reply") {
+        const page = richTextPageState(input.payload);
+        if (!page) throw new Error("Rich-text Answer page metadata is missing");
+        if (input.promptId) {
+          this.context.database.prepare(`INSERT INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES (?, ?, NULL, NULL, ?, ?, 0, 'creating', 'rich_post', ?, ?) ON CONFLICT(prompt_id, page_index) DO NOTHING`).run(input.promptId, page.pageIndex, page.elementId, page.pageStart, timestamp, timestamp);
+          this.context.database.prepare("UPDATE answer_pages SET delivery_mode = 'rich_post', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating' AND message_id IS NULL AND card_id IS NULL").run(timestamp, input.promptId, page.pageIndex);
+        }
+        if (input.workerTurnId) {
+          this.context.database.prepare(`INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, delivery_mode, state, sequence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, 'rich_post', 'creating', 0, ?, ?) ON CONFLICT(turn_id, page_index) DO NOTHING`).run(`${input.workerTurnId}:${page.pageIndex}`, input.workerTurnId, page.pageIndex, page.pageStart, page.elementId, timestamp, timestamp);
+        }
       }
       return mapOutboundReply(row);
     });
@@ -253,6 +264,12 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
     return stream && Number.isInteger(stream.pageIndex) && Number.isInteger(stream.pageStart) && typeof stream.elementId === "string"
       ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
   } catch { return null; }
+}
+function richTextPageState(payload: string): { pageIndex: number; pageStart: number; elementId: string } | null {
+  const decoded = parseJsonRecord(payload);
+  return Number.isInteger(decoded.pageIndex) && Number.isInteger(decoded.pageStart) && typeof decoded.elementId === "string"
+    ? { pageIndex: Number(decoded.pageIndex), pageStart: Number(decoded.pageStart), elementId: decoded.elementId }
+    : null;
 }
 function outboundStreamMetadata(kind: OutboundReply["kind"], payload: string): { pageIndex: number | null; elementId: string | null } {
   if (kind !== "stream_card_create" && kind !== "stream_content" && kind !== "stream_finish") return { pageIndex: null, elementId: null };

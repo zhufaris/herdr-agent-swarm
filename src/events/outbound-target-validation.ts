@@ -54,6 +54,35 @@ export function assertAnswerMessageTarget(store: Pick<OutboxStore, "loadRunCard"
   if (!view || view.bindingId !== bindingId || view.answerMessageId !== messageId) throw new PermanentDeliveryError(`Answer card message target mismatch for prompt ${promptId}`);
 }
 
+export function assertAnswerRichTextCreateTarget(
+  store: Pick<OutboxStore, "getActiveAnswerPage" | "getBinding" | "isActiveBindingThreadAlias" | "loadRunCard">,
+  bindingId: string | null, promptId: string | null, rootMessageId: string,
+  page: { pageIndex: number; pageStart: number; elementId: string }
+): void {
+  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer rich-text create target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  const binding = store.getBinding(bindingId);
+  const validRoot = binding?.rootMessageId === rootMessageId || store.isActiveBindingThreadAlias(bindingId, rootMessageId);
+  if (!view || view.bindingId !== bindingId || !validRoot || page.elementId !== answerElementId(promptId, page.pageIndex)) throw new PermanentDeliveryError(`Answer rich-text create target mismatch for prompt ${promptId}`);
+  if (page.pageIndex === 0) {
+    if (view.answerMessageId || view.answerPageIndex !== 0 || page.pageStart !== 0) throw new PermanentDeliveryError(`Initial answer rich-text create is stale for prompt ${promptId}`);
+    return;
+  }
+  if (view.answerPageIndex !== page.pageIndex - 1 || view.answerMessageId === null || page.pageStart <= view.answerPageStart) throw new PermanentDeliveryError(`Answer rich-text continuation target mismatch for prompt ${promptId}`);
+}
+
+export function assertAnswerRichTextUpdateTarget(
+  store: Pick<OutboxStore, "getActiveAnswerPage" | "getBinding" | "loadRunCard">,
+  bindingId: string | null, promptId: string | null, messageId: string,
+  page: { pageIndex: number; pageStart: number; elementId: string }
+): void {
+  if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer rich-text update target is missing binding or prompt identity");
+  const view = store.loadRunCard(promptId);
+  const binding = store.getBinding(bindingId);
+  const active = store.getActiveAnswerPage(promptId);
+  if (!view || !binding || binding.generation !== view.bindingGeneration || view.bindingId !== bindingId || !active || active.deliveryMode !== "rich_post" || active.pageIndex !== page.pageIndex || active.sourceStart !== page.pageStart || active.elementId !== page.elementId || active.messageId !== messageId) throw new PermanentDeliveryError(`Answer rich-text update target mismatch for prompt ${promptId}`);
+}
+
 export function assertWorkerCardCreateTarget(
   store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, rootMessageId: string,
   card: object, stream?: { pageIndex: number; pageStart: number; elementId: string }
@@ -86,6 +115,25 @@ export function assertWorkerMessageTarget(store: Pick<OutboxStore, "loadWorkerTu
   const view = store.loadWorkerTurnCard(turnId);
   const page = store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view?.pageIndex);
   if (!view || (page?.messageId ?? view.messageId) !== messageId) throw new PermanentDeliveryError(`Worker card message target mismatch for turn ${turnId}`);
+}
+
+export function assertWorkerRichTextCreateTarget(
+  store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">,
+  turnId: string, rootMessageId: string, page: { pageIndex: number; pageStart: number; elementId: string }
+): void {
+  const view = store.loadWorkerTurnCard(turnId);
+  const stored = store.listWorkerTurnCardPages(turnId).find(({ pageIndex }) => pageIndex === page.pageIndex);
+  if (!view || view.rootMessageId !== rootMessageId || !stored || stored.pageStart !== page.pageStart || stored.elementId !== page.elementId || stored.messageId || stored.cardId) throw new PermanentDeliveryError(`Worker rich-text create target mismatch for turn ${turnId}`);
+  if (page.elementId !== workerTurnElementId(turnId, page.pageIndex)) throw new PermanentDeliveryError(`Worker rich-text page identity mismatch for turn ${turnId}`);
+}
+
+export function assertWorkerRichTextUpdateTarget(
+  store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">,
+  turnId: string, messageId: string, page: { pageIndex: number; pageStart: number; elementId: string }
+): void {
+  const view = store.loadWorkerTurnCard(turnId);
+  const stored = store.listWorkerTurnCardPages(turnId).find(({ pageIndex }) => pageIndex === page.pageIndex);
+  if (!view || view.instanceGeneration < 1 || !stored || stored.deliveryMode !== "rich_post" || stored.state !== "active" || stored.messageId !== messageId || stored.pageStart !== page.pageStart || stored.elementId !== page.elementId || view.pageIndex !== page.pageIndex) throw new PermanentDeliveryError(`Worker rich-text update target mismatch for turn ${turnId}`);
 }
 
 function collectElementIds(value: unknown): string[] {

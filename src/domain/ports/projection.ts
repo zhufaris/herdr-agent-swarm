@@ -1,5 +1,6 @@
 import type { Binding, AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint, MainCardReservationOutcome, OutboundWorkClass } from "../types.js";
 import type { AnswerTimelineItem } from "../answer-timeline.js";
+import type { RichTextDocument } from "../rich-text.js";
 import type { AnswerTimelineCursor } from "../delivery.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { TopicViewState } from "../topic-view.js";
@@ -14,6 +15,8 @@ export interface AnswerPageStore {
   getAnswerTimelinePage(promptId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
   listFrozenAnswerTimelineItems(promptId: string, beforePageIndex: number): AnswerTimelineFrozenItem[];
   reserveAnswerTimelineCard(input: { promptId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome;
+  reserveRichTextAnswerUpdate(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished"; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome;
+  reserveRichTextAnswerContinuation(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome;
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
   reserveAnswerContinuation(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;
   reserveAnswerFinish(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; summary: string; finalizedCard: object; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome;

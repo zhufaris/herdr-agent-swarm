@@ -11,6 +11,7 @@ import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import { mapTurnControlOperation, type OutboundReplyRow, type TurnControlOperationRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import { turnActorProvenance } from "./turn-actor-provenance.js";
+import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
 
 export interface TurnControlDependencies {
   getBinding(id: string): Binding | null;
@@ -68,7 +69,7 @@ export class SqliteTurnControlStore {
       const timestamp = now();
       this.database.prepare("INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, priority, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'priority', 0, 'queued', 'not_started', 0, NULL, ?, ?)").run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, timestamp, timestamp);
       this.dependencies.insertRunCard(input.view);
-      this.database.prepare("INSERT INTO outbound_replies(id, gateway_id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)").run(randomUUID(), binding.gatewayId, `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, input.view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCard), `gateway:${binding.gatewayId}:answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
+      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.prompt.id}:0`, gatewayId: binding.gatewayId, bindingId: input.prompt.bindingId, promptId: input.prompt.id, viewVersion: input.view.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, input.view.answerElementId)) });
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
       const converted = this.get(input.operationId)!; if (input.card) this.updateResult(converted, input.card);
       const prompt = this.dependencies.getPrompt(input.prompt.id); if (!prompt) throw new Error(`Prompt not found: ${input.prompt.id}`);

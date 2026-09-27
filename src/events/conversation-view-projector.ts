@@ -32,10 +32,10 @@ export class ConversationViewProjector {
   constructor(
     private readonly bus: LifecycleEventSubscriber,
     private readonly store: ProjectionStore,
-    private readonly channelPublisher: OutboundIntentPort,
+    _channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
-    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
+    presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
     private readonly answerPages: AnswerPageConvergencePort,
     private readonly mainCards: MainCardConvergencePort,
     options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}
@@ -50,11 +50,6 @@ export class ConversationViewProjector {
       }
       const promptId = id;
       const view = this.store.loadRunCard(promptId);
-      if (!view?.answerCardId && view?.answerMessageId) {
-        await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", this.presentation.answerCard(view));
-        this.answerContentLengths.set(promptId, view.answer.length);
-        return;
-      }
       await this.answerPages.converge(promptId);
       if (view) this.answerContentLengths.set(promptId, view.answer.length);
     }, this.answerUpdateDelayMs, (error, cardKey, version) => {

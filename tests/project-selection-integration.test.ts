@@ -188,8 +188,7 @@ describe("project selection flow", () => {
     await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
     expect(created).toHaveLength(1);
     expect(created[0]).toMatch(/^[a-z0-9]{4}$/);
-    expect(selectorCards).toHaveLength(1);
-    expect(JSON.stringify(selectorCards)).not.toContain('\"action\":\"project_select\"');
+    expect(selectorCards).toHaveLength(0);
     expect(groupCards).toHaveLength(1);
     expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", projectId: "alpha", workspaceId: "w1", title: `herdr / ${created[0]}` });
     const selection = store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("natural-m1") as { id: string };

@@ -163,13 +163,14 @@ export class SqlitePromptRecoveryStore {
       const topic = this.projections.loadTopicView(input.bindingId);
       if (topic) this.projections.saveTopicView(mirrorRunCardToTopic(topic, next));
       let outboxReserved = false;
-      if (next.answerMessageId) {
+      const answerPage = this.projections.listAnswerPages(next.promptId).find(({ pageIndex }) => pageIndex === next.answerPageIndex);
+      if (next.answerMessageId && answerPage?.deliveryMode !== "rich_post") {
         this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(input.renderRunCard(next)) });
         outboxReserved = true;
       } else if (input.rootMessageId) {
-        const pendingCreate = this.context.database.prepare("SELECT idempotency_key FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' ORDER BY delivery_order LIMIT 1").get(next.promptId) as { idempotency_key: string } | undefined;
+        const pendingCreate = this.context.database.prepare("SELECT idempotency_key, kind, payload, intent_kind FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state = 'pending' AND (kind = 'stream_card_create' OR intent_kind = 'rich-text-reply') ORDER BY delivery_order LIMIT 1").get(next.promptId) as { idempotency_key: string; kind: "stream_card_create" | "text"; payload: string; intent_kind: "rich-text-reply" | null } | undefined;
         if (pendingCreate) {
-          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: pendingCreate.idempotency_key, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
+          if (pendingCreate.intent_kind !== "rich-text-reply") this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: pendingCreate.idempotency_key, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
           outboxReserved = true;
         }
       }

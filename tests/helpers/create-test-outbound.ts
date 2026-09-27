@@ -18,12 +18,18 @@ export type TestOutbound = LarkOutboxDispatcher & OutboundIntentPort & OutboundC
 /** Combined test facade for legacy integration fixtures; production composition keeps writer and worker separate. */
 export function createTestPublisher(store: SqliteBindingStore, lark: LarkPort, logger: Logger): TestOutbound {
   let dispatcher!: LarkOutboxDispatcher;
+  let richTextSequence = 0;
+  const transport: LarkPort = {
+    ...lark,
+    replyRichText: lark.replyRichText ?? (async () => ({ messageId: `rich-text-${++richTextSequence}` })),
+    updateRichText: lark.updateRichText ?? (async (messageId, content) => lark.updateCard(messageId, content))
+  };
   const processWork = new InProcessOutboundWorkNotifier(logger);
   const work = {
     subscribe: processWork.subscribe.bind(processWork),
     wake: () => { processWork.wake(); void dispatcher.requestScan(); }
   };
-  dispatcher = new LarkOutboxDispatcher(store, createFeishuCompatibilityDelivery(lark), logger, work);
+  dispatcher = new LarkOutboxDispatcher(store, createFeishuCompatibilityDelivery(transport), logger, work);
   const writer = new OutboundIntentWriter(store, work);
   return Object.assign(dispatcher, {
     enqueueCard: writer.enqueueCard.bind(writer),

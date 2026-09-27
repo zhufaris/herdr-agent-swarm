@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import type { RichTextDocument } from "../../domain/rich-text.js";
 import type { GatewayRenderableView } from "./view.js";
 export type { GatewayRenderableView, GatewayView, GatewayViewNode, LegacyGatewayView } from "./view.js";
 
@@ -77,9 +78,13 @@ export type GatewayIngressResponse = void | { toast?: { level: "success" | "warn
 export interface GatewayIngressSink { accept(event: GatewayInboundEvent): Promise<GatewayIngressResponse>; }
 export interface GatewayIngressPort { start(sink: GatewayIngressSink): Promise<void>; stop(): Promise<void>; }
 
+export type GatewayRichTextDocument = RichTextDocument;
+
 export type GatewayDeliveryIntent =
   | { kind: "conversation.create"; purpose: GatewayDeliveryPurpose; conversationId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "message.reply.text"; purpose: GatewayDeliveryPurpose; rootMessageId: string; text: string; idempotencyKey: string }
+  | { kind: "message.reply.rich_text"; purpose: GatewayDeliveryPurpose; rootMessageId: string; document: GatewayRichTextDocument; idempotencyKey: string }
+  | { kind: "message.update.rich_text"; purpose: GatewayDeliveryPurpose; messageId: string; document: GatewayRichTextDocument }
   | { kind: "message.reply.view"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "surface.replace"; purpose: GatewayDeliveryPurpose; messageId: string; view: GatewayRenderableView; sequence?: number }
   | { kind: "stream.create"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }

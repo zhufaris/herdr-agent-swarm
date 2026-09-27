@@ -82,6 +82,7 @@ export function mapWorkerTurnCardPage(
     elementId: String(row.element_id),
     messageId: row.message_id === null ? null : String(row.message_id),
     cardId: row.card_id === null ? null : String(row.card_id),
+    deliveryMode: row.delivery_mode === "rich_post" ? "rich_post" : "streaming",
     state: String(row.state) as WorkerTurnCardPage["state"],
     sequence: Number(row.sequence),
     createdAt: String(row.created_at),

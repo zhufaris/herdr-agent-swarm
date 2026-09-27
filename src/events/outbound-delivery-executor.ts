@@ -105,10 +105,15 @@ export class OutboundDeliveryExecutor {
 
   private afterDelivery(reply: OutboundReply, streamMetadata: boolean): void {
     if (reply.kind === "stream_card_create" && reply.bindingId && reply.promptId && this.store.getPrompt(reply.promptId)) this.runPostDelivery("prompt-wakeup", reply, () => this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId! }));
-    if (reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish")) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
+    if (reply.promptId && (reply.kind === "stream_content" || reply.kind === "stream_finish" || reply.intentKind === "rich-text-update")) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, reply.viewVersion ?? 0), reply);
     if (reply.promptId && reply.kind === "stream_card_create" && streamMetadata) this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, (reply.viewVersion ?? 0) + 1), reply);
-    if (reply.workerTurnId && (reply.kind === "stream_content" || reply.kind === "stream_finish" || reply.kind === "card_update")) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
+    if (reply.promptId && reply.intentKind === "rich-text-reply") {
+      this.runPostDelivery("prompt-wakeup", reply, () => reply.bindingId && this.scheduler?.wake({ kind: "prompt-ready", bindingId: reply.bindingId }));
+      this.notify("answer", this.answerCheckpoints, (listener) => listener(reply.promptId!, (reply.viewVersion ?? 0) + 1), reply);
+    }
+    if (reply.workerTurnId && (reply.kind === "stream_content" || reply.kind === "stream_finish" || reply.kind === "card_update" || reply.intentKind === "rich-text-update")) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, reply.viewVersion ?? 0), reply);
     if (reply.workerTurnId && reply.kind === "stream_card_create" && streamMetadata) this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, (reply.viewVersion ?? 0) + 1), reply);
+    if (reply.workerTurnId && reply.intentKind === "rich-text-reply") this.notify("worker-turn", this.workerTurnCheckpoints, (listener) => listener(reply.workerTurnId!, (reply.viewVersion ?? 0) + 1), reply);
     if (reply.workerId && reply.workerSessionGeneration !== null && reply.kind !== "group_card_create") this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion ?? 0), reply);
     if (reply.workerThreadId && reply.workerId && reply.workerSessionGeneration !== null && reply.kind === "group_card_create" && reply.viewVersion !== null) this.notify("worker-main", this.workerMainCheckpoints, (listener) => listener(reply.workerId!, reply.workerSessionGeneration!, reply.viewVersion!), reply);
     if (reply.bindingId && reply.targetRole === "session_status") this.notify("main-card", this.mainCardCheckpoints, (listener) => listener(reply.bindingId!, reply.viewVersion ?? 0), reply);

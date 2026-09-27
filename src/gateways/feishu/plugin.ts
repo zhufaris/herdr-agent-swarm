@@ -5,6 +5,7 @@ import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult 
 import { GATEWAY_PROTOCOL_VERSION, GatewayDeliveryError, type ConversationGatewayPlugin, type GatewayDeliveryContext, type GatewayDeliveryIntent, type GatewayDeliveryReceipt, type GatewayExternalRef, type GatewayIngressResponse, type GatewaySession, type NegotiatedGatewayProfile, type PreparedGatewayDelivery } from "../contract/plugin.js";
 import { performFeishuDelivery } from "./errors.js";
 import { materializeFeishuView } from "./cardkit-view.js";
+import { materializeFeishuRichText } from "./rich-text.js";
 
 export interface FeishuGatewayConfig {
   gatewayId: string; appId: string; appSecret: string; chatId: string; botOpenId: string; requestTimeoutMs?: number;
@@ -64,6 +65,17 @@ class FeishuGatewayDelivery {
       return { refs: [ref(this.gatewayId, "thread", receipt.topicId), ref(this.gatewayId, "message", receipt.rootMessageId)] };
     }
     if (intent.kind === "message.reply.text") return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "reply_text", () => this.transport.replyText(intent.rootMessageId, intent.text, intent.idempotencyKey))).messageId)] };
+    if (intent.kind === "message.reply.rich_text") {
+      if (!this.transport.replyRichText) throw unsupportedRichText("reply");
+      const content = materializeFeishuRichText(intent.document);
+      return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "reply_rich_text", () => this.transport.replyRichText!(intent.rootMessageId, content, intent.idempotencyKey))).messageId)] };
+    }
+    if (intent.kind === "message.update.rich_text") {
+      if (!this.transport.updateRichText) throw unsupportedRichText("update");
+      const content = materializeFeishuRichText(intent.document);
+      await performFeishuDelivery(intent, "update_rich_text", () => this.transport.updateRichText!(intent.messageId, content));
+      return { refs: [] };
+    }
     if (intent.kind === "message.reply.view") {
       const receipt = await performFeishuDelivery(intent, "reply_card", () => this.transport.replyCard(intent.rootMessageId, view!, intent.idempotencyKey));
       const cardId = (receipt as { cardId?: unknown }).cardId;
@@ -99,6 +111,10 @@ class FeishuGatewayDelivery {
     }
     return { refs: [ref(this.gatewayId, "message", (await performFeishuDelivery(intent, "share_thread", () => this.transport.shareThread(intent.conversationId, { messageId: intent.messageId, chatId: intent.targetConversationId, ...(intent.rootMessageId ? { sourceRootMessageId: intent.rootMessageId } : {}) }))).messageId)] };
   }
+}
+
+function unsupportedRichText(operation: string): GatewayDeliveryError {
+  return new GatewayDeliveryError({ failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: `Feishu Gateway does not support rich-text ${operation}` });
 }
 
 function feishuProfile(): NegotiatedGatewayProfile {

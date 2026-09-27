@@ -36,6 +36,7 @@ export interface StartupViewStore {
   listActionableStartupRunCards(bindingId: string): RunCardView[];
   loadStartupMainRunCard(bindingId: string, preferredPromptId: string | null): RunCardView | null;
   loadTopicView(bindingId: string): TopicViewState | null;
+  listAnswerPages(promptId: string): import("../types.js").AnswerPage[];
   retireUndeliveredWorkerTaskCardIntents(): number;
   recoverStaleOutboxQuarantines(): StaleOutboxQuarantineRecovery;
   saveRunCard(view: RunCardView): RunCardView;

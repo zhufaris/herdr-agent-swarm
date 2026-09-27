@@ -48,6 +48,7 @@ export class SqliteStartupViewCapabilityStore implements StartupViewStore {
   listActionableStartupRunCards: StartupViewStore["listActionableStartupRunCards"] = (id) => this.projections.listActionableStartupRunCards(id);
   loadStartupMainRunCard: StartupViewStore["loadStartupMainRunCard"] = (id, preferredPromptId) => this.projections.loadStartupMainRunCard(id, preferredPromptId);
   loadTopicView: StartupViewStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
+  listAnswerPages: StartupViewStore["listAnswerPages"] = (id) => this.projections.listAnswerPages(id);
   retireUndeliveredWorkerTaskCardIntents: StartupViewStore["retireUndeliveredWorkerTaskCardIntents"] = () => this.outbox.retireUndeliveredWorkerTaskCardIntents();
   recoverStaleOutboxQuarantines: StartupViewStore["recoverStaleOutboxQuarantines"] = () => this.outbox.recoverStaleOutboxQuarantines();
   saveRunCard: StartupViewStore["saveRunCard"] = (view) => this.projections.saveRunCard(view);

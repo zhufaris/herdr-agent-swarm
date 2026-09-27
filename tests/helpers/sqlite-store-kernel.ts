@@ -7,6 +7,7 @@ import type { TurnControlStore } from "../../src/domain/ports/turn-control.js";
 import type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelinePageCheckpoint, Binding, BindingMetadataPatch, BindingTitleProjectionInput, BindingTitleProjectionResult, CardInteraction, CardInteractionActionKind, DeadLetterActionOutcome, DurablePromptWorkScan, ExternalTurnAdoption, FailureSummary, HerdrPane, MainCardReservationOutcome, OrphanBindingProjectionInput, OrphanBindingProjectionResult, OutboundTargetRole, OutboundWorkClass, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind, ProjectSelection, ProjectSelectionClaim, PromptJob, PromptState, RecoverOrphanBindingProjectionInput, RecoverOrphanBindingProjectionResult, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeDegradationInput, RuntimeDegradationResult, RuntimeObservationApplication, SessionSummary, StalePromptClaim, TranscriptTurnClaimOutcome } from "../../src/domain/types.js";
 import type { AnswerTimelineItem } from "../../src/domain/answer-timeline.js";
 import type { AnswerTimelineCursor } from "../../src/domain/delivery.js";
+import type { RichTextDocument } from "../../src/domain/rich-text.js";
 import type { TopicViewState } from "../../src/domain/topic-view.js";
 import type { RunCardView } from "../../src/domain/run-card-view.js";
 import type { BridgeEvent } from "../../src/domain/events.js";
@@ -137,6 +138,11 @@ export class SqliteStoreKernel implements TurnControlStore {
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null { return this.workerTurns.findWorkerTurnByCardMessage(messageId); }
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[] { return this.workerTurns.listWorkerTurnCardPages(turnId); }
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts { return this.workerTurns.getWorkerTurnCardDeliveryFacts(turnId, pageIndex); }
+  getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint { return this.workerTurns.getWorkerAnswerTimelinePage(turnId, pageIndex); }
+  listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number) { return this.workerTurns.listFrozenWorkerAnswerTimelineItems(turnId, beforePageIndex); }
+  reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerAnswerTimelineCard(input); }
+  reserveWorkerRichTextUpdate(input: Parameters<SqliteWorkerTurnStore["reserveWorkerRichTextUpdate"]>[0]): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerRichTextUpdate(input); }
+  reserveWorkerRichTextContinuation(input: Parameters<SqliteWorkerTurnStore["reserveWorkerRichTextContinuation"]>[0]): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerRichTextContinuation(input); }
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnContent(input); }
   listActionableWorkerTurnCardIds(): string[] { return this.workerTurns.listActionableWorkerTurnCardIds(); }
   reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnProgress(input); }
@@ -654,6 +660,8 @@ export class SqliteStoreKernel implements TurnControlStore {
   getAnswerTimelinePage(promptId: string, pageIndex: number): AnswerTimelinePageCheckpoint { return this.projections.getAnswerTimelinePage(promptId, pageIndex); }
   listFrozenAnswerTimelineItems(promptId: string, beforePageIndex: number) { return this.projections.listFrozenAnswerTimelineItems(promptId, beforePageIndex); }
   reserveAnswerTimelineCard(input: { promptId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome { return this.projections.reserveAnswerTimelineCard(input); }
+  reserveRichTextAnswerUpdate(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished"; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome { return this.projections.reserveRichTextAnswerUpdate(input); }
+  reserveRichTextAnswerContinuation(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome { return this.projections.reserveRichTextAnswerContinuation(input); }
 
   reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
     return this.projections.reserveAnswerContent(input);

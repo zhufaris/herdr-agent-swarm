@@ -35,15 +35,12 @@ import { WorkerTurnQueue } from "./worker-turn/queue.js";
 import { WorkerTurnRecovery } from "./worker-turn/recovery.js";
 import { mapInstanceTurn, mapWorkerTurnCard } from "./worker-turn/records.js";
 import { WorkerTurnTransition } from "./worker-turn/transition.js";
+import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
 
 export interface WorkerTurnStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
   getBinding(id: string): Binding | null;
-  enqueueOutboundReply(
-    input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & {
-      laneKeyOverride?: string;
-    },
-  ): unknown;
+  enqueueOutboundReply(input: EnqueueOutboundReplyInput): unknown;
   invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void;
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean;
 }
@@ -209,6 +206,12 @@ export class SqliteWorkerTurnStore {
     return this.context.transaction(() =>
       this.projection.reserveTimelineCard(input),
     );
+  }
+  reserveWorkerRichTextUpdate(input: Parameters<WorkerTurnProjection["reserveRichTextUpdate"]>[0]): AnswerPageReservationOutcome {
+    return this.context.transaction(() => this.projection.reserveRichTextUpdate(input));
+  }
+  reserveWorkerRichTextContinuation(input: Parameters<WorkerTurnProjection["reserveRichTextContinuation"]>[0]): AnswerPageReservationOutcome {
+    return this.context.transaction(() => this.projection.reserveRichTextContinuation(input));
   }
   reserveWorkerTurnContent(input: {
     turnId: string;

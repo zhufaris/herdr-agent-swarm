@@ -138,6 +138,26 @@ export class CardOutboxMigrations {
     if (!columns.has("delivery_mode")) this.context.database.exec("ALTER TABLE answer_pages ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','static'))");
   }
 
+  ensureRichTextAnswerPageModes(): void {
+    const answerSchema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'answer_pages'").get() as { sql: string } | undefined;
+    if (answerSchema && !answerSchema.sql.includes("'rich_post'")) {
+      runForeignKeySafeRebuild(this.context, "Rich-text Answer page migration", () => this.context.database.exec(`
+        CREATE TABLE answer_pages_next(
+          prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id), page_index INTEGER NOT NULL, message_id TEXT, card_id TEXT, element_id TEXT NOT NULL,
+          source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), delivery_mode TEXT NOT NULL DEFAULT 'rich_post' CHECK(delivery_mode IN ('streaming','static','rich_post')),
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
+        );
+        INSERT INTO answer_pages_next(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at)
+          SELECT prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at FROM answer_pages;
+        DROP TABLE answer_pages; ALTER TABLE answer_pages_next RENAME TO answer_pages;
+        CREATE UNIQUE INDEX answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
+      `));
+    }
+    const workerColumns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_card_pages)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!workerColumns.has("delivery_mode")) this.context.database.exec("ALTER TABLE worker_turn_card_pages ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','rich_post'))");
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (52)").run();
+  }
+
   ensureMainCardSequences(): void {
     const bindingColumns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
     if (!bindingColumns.has("status_card_sequence")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN status_card_sequence INTEGER NOT NULL DEFAULT 0");

@@ -253,14 +253,14 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
-  it("rebuilds missing terminal stream intents from a durable completed run card", async () => {
+  it("rebuilds a missing terminal rich-text update from a durable completed run", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "work", workspaceId: "wH", paneId: "wH:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "request", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
     const create = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.markOutboundReplyDelivered(create.id, "answer-message");
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "durable answer", answerSegments: ["durable answer"], viewVersion: 3, answerDeliveredVersion: 1 });
     const outbound = { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort;
 
@@ -268,8 +268,8 @@ describe("StartupViewConverger", () => {
 
     const pending = store.listPendingOutboundReplies();
     const answer = pending.find((reply) => reply.promptId === "p1");
-    expect(answer).toMatchObject({ kind: "stream_content", promptId: "p1", rootMessageId: "answer-card", viewVersion: 1, workClass: "history" });
-    expect(JSON.parse(answer!.payload)).toMatchObject({ content: expect.stringContaining("durable answer"), sequence: 1, pageIndex: 0 });
+    expect(answer).toMatchObject({ kind: "card_update", intentKind: "rich-text-update", promptId: "p1", rootMessageId: "answer-message", workClass: "history" });
+    expect(JSON.parse(answer!.payload)).toMatchObject({ terminal: true, pageState: "finished", document: { markdown: expect.stringContaining("durable answer") }, pageIndex: 0 });
     expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", bindingId: "b1", targetRole: "session_status", workClass: "history" }));
     store.close();
   });
@@ -284,8 +284,6 @@ describe("StartupViewConverger", () => {
     await createConverger(store).converge();
 
     expect(store.loadRunCard("p1")).toMatchObject({ sessionTitle: "herdr-lark-bridge / task-ab12", viewVersion: 2 });
-    const answerCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1" && reply.kind === "stream_card_create");
-    expect(JSON.parse(answerCreate!.payload)).toMatchObject({ header: { subtitle: { content: "herdr-lark-bridge / task-ab12 · work" } } });
     store.close();
   });
 });

@@ -132,9 +132,10 @@ function createStoreCluster(context: SqliteContext): StoreCluster {
   });
   const promptAcceptance = new SqlitePromptAcceptanceStore(context, projections, {
     getBinding: (id) => bindings.getBinding(id),
-    countPendingPrompts: (id) => prompts.countPendingPrompts(id)
+    countPendingPrompts: (id) => prompts.countPendingPrompts(id),
+    enqueueOutboundReply: (input) => outbox.enqueueOutboundReply(input)
   });
-  const externalTurnAdoption = new SqliteExternalTurnAdoptionStore(context, projections, (id) => promptDispatch.getPrompt(id));
+  const externalTurnAdoption = new SqliteExternalTurnAdoptionStore(context, projections, (id) => promptDispatch.getPrompt(id), (input) => outbox.enqueueOutboundReply(input));
   const workerTurns = new SqliteWorkerTurnStore(context, {
     getAgentInstance: (id) => instancesLink.get().getAgentInstance(id),
     getBinding: (id) => bindings.getBinding(id),

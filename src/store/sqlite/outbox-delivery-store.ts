@@ -32,7 +32,7 @@ export class SqliteOutboxDeliveryStore {
   markDelivered(id: string, messageId: string, cardId?: string, claim?: OutboundDeliveryClaim, topicId?: string): boolean {
     return this.context.transaction(() => {
       if (!this.queue.matchesClaim(id, claim)) return false;
-      const row = this.context.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, thread_alias_id, worker_thread_id, kind, payload, root_message_id, projection_key, snapshot_revision, state FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; thread_alias_id: string | null; worker_thread_id: string | null; kind: string; payload: string; root_message_id: string | null; projection_key: string | null; snapshot_revision: number; state: OutboundReply["state"] } | undefined;
+      const row = this.context.database.prepare("SELECT idempotency_key, binding_id, prompt_id, worker_turn_id, worker_id, worker_session_generation, view_version, card_sequence, selection_id, card_role, target_role, thread_alias_id, worker_thread_id, kind, intent_kind, payload, root_message_id, projection_key, snapshot_revision, state FROM outbound_replies WHERE id = ?").get(id) as { idempotency_key: string; binding_id: string | null; prompt_id: string | null; worker_turn_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; card_sequence: number | null; selection_id: string | null; card_role: string | null; target_role: string | null; thread_alias_id: string | null; worker_thread_id: string | null; kind: string; intent_kind: string | null; payload: string; root_message_id: string | null; projection_key: string | null; snapshot_revision: number; state: OutboundReply["state"] } | undefined;
       if (!row || row.state !== "pending") {
         if (claim) this.queue.releaseClaim(id);
         return false;
@@ -54,11 +54,13 @@ export class SqliteOutboxDeliveryStore {
       }
       if (row.prompt_id) {
         if (row.card_role === "answer") {
-          if (row.kind === "card_reply" || row.kind === "stream_card_create") {
+          if (row.kind === "card_reply" || row.kind === "stream_card_create" || row.intent_kind === "rich-text-reply") {
+            const rich = row.intent_kind === "rich-text-reply" ? richTextPageState(row.payload) : null;
             const stream = row.kind === "stream_card_create" ? streamCardState(row.payload) : null;
-            const expectedPageIndex = stream && stream.pageIndex > 0 ? stream.pageIndex - 1 : null;
-            const pageIndex = stream?.pageIndex ?? 0;
-            const updated = this.context.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ? AND (? IS NULL OR answer_page_index = ?)").run(messageId, cardId ?? null, stream?.elementId ?? null, stream ? 1 : null, stream?.pageIndex ?? null, stream?.pageStart ?? null, cardId ?? null, messageId, row.view_version ?? 0, now(), row.prompt_id, expectedPageIndex, expectedPageIndex);
+            const metadata = rich ?? stream;
+            const expectedPageIndex = metadata && metadata.pageIndex > 0 ? metadata.pageIndex - 1 : null;
+            const pageIndex = metadata?.pageIndex ?? 0;
+            const updated = this.context.database.prepare("UPDATE run_cards SET answer_message_id = ?, answer_card_id = COALESCE(?, answer_card_id), answer_element_id = COALESCE(?, answer_element_id), answer_sequence = CASE WHEN ? IS NULL THEN answer_sequence ELSE 0 END, answer_page_index = COALESCE(?, answer_page_index), answer_page_start = COALESCE(?, answer_page_start), lark_message_id = CASE WHEN ? IS NULL THEN COALESCE(lark_message_id, ?) ELSE lark_message_id END, answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ? AND (? IS NULL OR answer_page_index = ?)").run(messageId, cardId ?? null, metadata?.elementId ?? null, metadata ? 1 : null, metadata?.pageIndex ?? null, metadata?.pageStart ?? null, cardId ?? null, messageId, row.view_version ?? 0, now(), row.prompt_id, expectedPageIndex, expectedPageIndex);
             if (updated.changes > 0) {
               if (pageIndex > 0) this.context.database.prepare("UPDATE answer_pages SET state = 'frozen', updated_at = ? WHERE prompt_id = ? AND state = 'active' AND page_index < ?").run(now(), row.prompt_id, pageIndex);
               this.context.database.prepare("UPDATE answer_pages SET message_id = ?, card_id = COALESCE(?, card_id), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, state = 'active', updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'creating'").run(messageId, cardId ?? null, cardId ?? null, now(), row.prompt_id, pageIndex);
@@ -72,6 +74,11 @@ export class SqliteOutboxDeliveryStore {
             this.context.database.prepare("UPDATE run_cards SET answer_delivered_version = MAX(answer_delivered_version, ?), updated_at = ? WHERE prompt_id = ?").run(row.view_version ?? 0, now(), row.prompt_id);
             const payload = parseJsonRecord(row.payload);
             const pageIndex = Number.isInteger(payload.pageIndex) ? Number(payload.pageIndex) : null;
+            if (row.intent_kind === "rich-text-update" && pageIndex !== null) {
+              const nextState = payload.pageState === "frozen" ? "frozen" : payload.pageState === "finished" ? "finished" : "active";
+              this.context.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND message_id = ? AND state != 'frozen'").run(row.view_version ?? 0, nextState, now(), row.prompt_id, pageIndex, row.root_message_id);
+              if (nextState === "finished") this.freezeRunCard(row.prompt_id);
+            }
             if (row.kind === "stream_content") this.context.database.prepare("UPDATE answer_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE prompt_id = ? AND state = 'active' AND (? IS NULL OR page_index = ?)").run(row.view_version ?? 0, now(), row.prompt_id, pageIndex, pageIndex);
             if (row.kind === "stream_finish") {
               const pendingContinuation = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.prompt_id);
@@ -91,12 +98,15 @@ export class SqliteOutboxDeliveryStore {
       if (row.worker_turn_id) {
         const stream = streamCardState(row.payload);
         const pageIndex = stream?.pageIndex ?? 0;
-        if (row.kind === "stream_card_create") {
-          const expectedPageIndex = pageIndex > 0 ? pageIndex - 1 : pageIndex;
-          const updated = this.context.database.prepare("UPDATE worker_turn_cards SET message_id = ?, card_id = COALESCE(?, card_id), element_id = COALESCE(?, element_id), page_index = ?, page_start = COALESCE(?, page_start), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?").run(messageId, cardId ?? null, stream?.elementId ?? null, pageIndex, stream?.pageStart ?? null, cardId ?? null, row.view_version ?? 0, now(), row.worker_turn_id, expectedPageIndex);
+        if (row.kind === "stream_card_create" || row.intent_kind === "rich-text-reply") {
+          const rich = row.intent_kind === "rich-text-reply" ? richTextPageState(row.payload) : null;
+          const metadata = rich ?? stream;
+          const richPageIndex = metadata?.pageIndex ?? pageIndex;
+          const expectedPageIndex = richPageIndex > 0 ? richPageIndex - 1 : richPageIndex;
+          const updated = this.context.database.prepare("UPDATE worker_turn_cards SET message_id = ?, card_id = COALESCE(?, card_id), element_id = COALESCE(?, element_id), page_index = ?, page_start = COALESCE(?, page_start), sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?").run(messageId, cardId ?? null, metadata?.elementId ?? null, richPageIndex, metadata?.pageStart ?? null, cardId ?? null, row.view_version ?? 0, now(), row.worker_turn_id, expectedPageIndex);
           if (updated.changes > 0) {
-            if (pageIndex > 0) this.context.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, pageIndex);
-            this.context.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'").run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, pageIndex);
+            if (richPageIndex > 0) this.context.database.prepare("UPDATE worker_turn_card_pages SET state = 'frozen', updated_at = ? WHERE turn_id = ? AND state = 'active' AND page_index < ?").run(now(), row.worker_turn_id, richPageIndex);
+            this.context.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = COALESCE(?, card_id), state = 'active', sequence = CASE WHEN ? IS NULL THEN sequence ELSE 0 END, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'creating'").run(messageId, cardId ?? null, cardId ?? null, now(), row.worker_turn_id, richPageIndex);
             const latest = this.dependencies.loadWorkerTurnCard(row.worker_turn_id);
             if (latest) {
               const main = this.dependencies.loadWorkerMainView(latest.instanceId, latest.workerSessionGeneration);
@@ -109,6 +119,13 @@ export class SqliteOutboxDeliveryStore {
           }
         } else {
           this.context.database.prepare("UPDATE worker_turn_cards SET delivered_version = MAX(delivered_version, ?), updated_at = ? WHERE turn_id = ?").run(row.view_version ?? 0, now(), row.worker_turn_id);
+          if (row.intent_kind === "rich-text-update") {
+            const rich = richTextPageState(row.payload);
+            if (rich) {
+              const nextState = rich.pageState === "frozen" ? "frozen" : rich.pageState === "finished" ? "finished" : "active";
+              this.context.database.prepare("UPDATE worker_turn_card_pages SET sequence = MAX(sequence, ?), state = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND message_id = ? AND state != 'frozen'").run(row.view_version ?? 0, nextState, now(), row.worker_turn_id, rich.pageIndex, row.root_message_id);
+            }
+          }
           if (row.kind === "stream_content") this.context.database.prepare("UPDATE worker_turn_card_pages SET sequence = MAX(sequence, ?), updated_at = ? WHERE turn_id = ? AND page_index = ?").run(row.view_version ?? 0, now(), row.worker_turn_id, pageIndex);
           if (row.kind === "stream_finish") {
             const pendingContinuation = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_card_create' AND state = 'pending' LIMIT 1").get(row.worker_turn_id);
@@ -219,6 +236,12 @@ function streamCardState(payload: string): { pageIndex: number; pageStart: numbe
     return stream && Number.isInteger(stream.pageIndex) && Number.isInteger(stream.pageStart) && typeof stream.elementId === "string"
       ? { pageIndex: Number(stream.pageIndex), pageStart: Number(stream.pageStart), elementId: stream.elementId } : null;
   } catch { return null; }
+}
+function richTextPageState(payload: string): { pageIndex: number; pageStart: number; elementId: string; sourceEnd: number | null; pageState: string | null } | null {
+  const decoded = parseJsonRecord(payload);
+  return Number.isInteger(decoded.pageIndex) && Number.isInteger(decoded.pageStart) && typeof decoded.elementId === "string"
+    ? { pageIndex: Number(decoded.pageIndex), pageStart: Number(decoded.pageStart), elementId: decoded.elementId, sourceEnd: Number.isInteger(decoded.sourceEnd) ? Number(decoded.sourceEnd) : null, pageState: typeof decoded.pageState === "string" ? decoded.pageState : null }
+    : null;
 }
 function parseJsonRecord(value: string): Record<string, unknown> {
   try { const parsed = JSON.parse(value) as unknown; return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { return {}; }

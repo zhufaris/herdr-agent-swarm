@@ -6,6 +6,8 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import { workerTurnElementId, workerTurnProgressElementId } from "../domain/worker-turn-card-view.js";
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
+import { planRichTextAnswerPage } from "../runtime/answer-rich-text.js";
+import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 
 type WorkerTurnCardPresentation = Pick<WorkerPresentation, "workerTurn" | "workerTurnPage" | "workerTurnProgress" | "answerTimelinePage">;
 
@@ -33,7 +35,9 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     const view = this.store.loadWorkerTurnCard(turnId);
     const pages = this.store.listWorkerTurnCardPages(turnId);
     const page = pages.find(({ state }) => state === "active") ?? (view?.phase === "completed" ? pages.findLast(({ state }) => state === "finished") : undefined);
-    if (!view || !page?.cardId || !page.messageId) return;
+    if (!view || !page?.messageId) return;
+    if (page.deliveryMode === "rich_post") { this.convergeRichText(view, page); return; }
+    if (!page.cardId) return;
     if (view.timelineItems.length > 0) {
       this.convergeTimeline(view, page);
       return;
@@ -89,6 +93,26 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     this.log(turnId, page.pageIndex, "content", reserved ? "reserved" : "waiting");
   }
 
+  private convergeRichText(view: NonNullable<ReturnType<WorkerTurnCardStore["loadWorkerTurnCard"]>>, page: ReturnType<WorkerTurnCardStore["listWorkerTurnCardPages"]>[number]): void {
+    if (!page.messageId) return;
+    const items = workerAnswerItems(view);
+    const checkpoint = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
+    if (checkpoint.pending) return;
+    const active = !["completed", "failed", "cancelled", "dispatch-uncertain"].includes(view.phase);
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice });
+    if (plan.nextCursor) {
+      const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.pageLimit });
+      const nextPageIndex = page.pageIndex + 1;
+      const nextElementId = workerTurnElementId(view.turnId, nextPageIndex);
+      const nextPageStart = nextSourceOffset(plan.nextCursor, nextPageIndex);
+      const outcome = this.store.reserveWorkerRichTextContinuation({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId, document: frozen.document, cursor: plan.nextCursor, items: frozen.items, sourceEnd: nextPageStart, nextPageIndex, nextPageStart, nextElementId, rootMessageId: view.rootMessageId, viewVersion: view.viewVersion });
+      if (outcome === "reserved") this.wakeOutbound();
+      return;
+    }
+    const outcome = this.store.reserveWorkerRichTextUpdate({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId, document: plan.document, cursor: null, items: plan.items, sourceEnd: view.answer.length, pageState: active ? "active" : "finished" });
+    if (outcome === "reserved") this.wakeOutbound();
+  }
+
   private convergeTimeline(view: NonNullable<ReturnType<WorkerTurnCardStore["loadWorkerTurnCard"]>>, page: ReturnType<WorkerTurnCardStore["listWorkerTurnCardPages"]>[number]): void {
     const checkpoint = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
     const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenWorkerAnswerTimelineItems(view.turnId, page.pageIndex), page.pageIndex);
@@ -139,4 +163,13 @@ function terminalSummary(phase: string): string {
   if (phase === "failed") return "Failed";
   if (phase === "cancelled") return "Cancelled";
   return "Dispatch uncertain";
+}
+
+function workerAnswerItems(view: NonNullable<ReturnType<WorkerTurnCardStore["loadWorkerTurnCard"]>>): readonly AnswerTimelineItem[] {
+  if (view.timelineItems.length > 0) return view.timelineItems;
+  return view.answer ? [{ id: `answer:${view.turnId}`, sequence: 0, kind: view.phase === "completed" ? "final_answer" : "agent_message", markdown: view.answer }] : [];
+}
+
+function nextSourceOffset(cursor: AnswerTimelineCursor, fallback: number): number {
+  return cursor.markdownOffset > 0 ? cursor.markdownOffset : Math.max(fallback, cursor.itemIndex);
 }

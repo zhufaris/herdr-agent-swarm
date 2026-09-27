@@ -236,8 +236,8 @@ describe("coordinator concurrency controls", () => {
       await coordinator.handleMessage({ eventId: "alias-e1", messageId: "alias-m1", chatId: "chat", topicId: "alias-topic", rootMessageId: "alias-root", actorOpenId: "user", text: "continue here", mentionsBot: false, isRootMessage: false });
       const prompt = store.listRunCards("b1").find((view) => view.requestText === "continue here")!;
       expect(prompt).toBeDefined();
-      const answerCreate = store.database.prepare("SELECT prompt_id, kind, root_message_id, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.promptId) as { prompt_id: string; kind: string; root_message_id: string; state: string };
-      expect(answerCreate).toMatchObject({ prompt_id: prompt.promptId, kind: "stream_card_create", root_message_id: "alias-root" });
+      const answerCreate = store.database.prepare("SELECT prompt_id, kind, intent_kind, root_message_id, state FROM outbound_replies WHERE prompt_id = ? AND intent_kind = 'rich-text-reply'").get(prompt.promptId) as { prompt_id: string; kind: string; intent_kind: string; root_message_id: string; state: string };
+      expect(answerCreate).toMatchObject({ prompt_id: prompt.promptId, kind: "text", intent_kind: "rich-text-reply", root_message_id: "alias-root" });
       expect(answerCreate.state).not.toBe("dead_letter");
       expect(store.getBinding("b1")).toMatchObject({ rootMessageId: "canonical-root", topicId: "canonical-topic" });
     } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
@@ -340,13 +340,11 @@ describe("coordinator concurrency controls", () => {
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "legacy" }; },
       async updateCard() {},
-      async createStreamingCard() { return { cardId: "cardkit-1" }; },
-      async replyStreamingCardReference() {
+      async replyRichText() {
         if (failReply) { failReply = false; throw Object.assign(new Error("temporary"), { response: { status: 503 } }); }
         return { messageId: "answer-1" };
       },
-      async streamCardContent() {},
-      async finishStreamingCard() {}
+      async updateRichText() {}
     };
     const { coordinator, publisher, store } = fixture(herdr, lark);
     try {
@@ -929,7 +927,7 @@ describe("coordinator concurrency controls", () => {
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Pi durable answer" }));
 
       const card = store.listRunCards("b1")[0]!;
-      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, nativeSession: null });
+      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, paneId: "w1:p1", nativeSession: null });
       expect(store.getPrompt(card.promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: expect.any(String) });
       expect(card.answer).not.toMatch(/不支持结构化输出|private chain of thought|SECRET_TERMINAL_SENTINEL/);
       expect(runPrompt).toHaveBeenCalledOnce();

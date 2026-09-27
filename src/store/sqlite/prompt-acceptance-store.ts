@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { createBridgeEvent } from "../../domain/create-bridge-event.js";
 import type { AcceptPromptInput, PromptAcceptanceEffect, PromptAcceptanceReceipt } from "../../domain/ports/prompt-acceptance.js";
 import type { Binding, PromptJob } from "../../domain/types.js";
+import type { OutboxStore } from "../../domain/ports/outbox.js";
+import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
 import { mapPrompt, type PromptRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
@@ -9,6 +11,7 @@ import type { SqliteProjectionStore } from "./projection-store.js";
 export interface PromptAcceptanceStoreDependencies {
   getBinding(id: string): Binding | null;
   countPendingPrompts(bindingId: string): number;
+  enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
 }
 
 export class SqlitePromptAcceptanceStore {
@@ -52,8 +55,11 @@ export class SqlitePromptAcceptanceStore {
         .run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, input.prompt.parentPromptId ?? null, input.prompt.priority ?? "normal", input.prompt.wasDetached ? 1 : 0, timestamp, timestamp);
       const view = input.view;
       this.projections.insertRunCard(view);
-      this.context.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-        .run(randomUUID(), `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, view.viewVersion, "answer", input.rootMessageId, "stream_card_create", JSON.stringify(input.answerCard), `gateway:${this.dependencies.getBinding(input.prompt.bindingId)?.gatewayId ?? "feishu:primary"}:answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
+      this.dependencies.enqueueOutboundReply({
+        id: randomUUID(), idempotencyKey: `answer-post:${input.prompt.id}:0`, bindingId: input.prompt.bindingId,
+        promptId: input.prompt.id, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId,
+        kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId))
+      });
       const prompt = this.getPrompt(input.prompt.id);
       if (!prompt) throw new Error(`Prompt not found: ${input.prompt.id}`);
       return { prompt, view: this.projections.loadRunCard(input.prompt.id)!, inserted: true };

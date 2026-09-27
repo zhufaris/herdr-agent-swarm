@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const createMessage = vi.fn();
 const replyMessage = vi.fn();
 const patchMessage = vi.fn();
+const updateMessage = vi.fn();
 const getMessage = vi.fn();
 const forwardThread = vi.fn();
 const forwardMessage = vi.fn();
@@ -16,7 +17,7 @@ let registeredHandlers: Record<string, (data: unknown) => Promise<unknown>> = {}
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
     constructor(options: Record<string, unknown>) { clientOptions = options; }
-    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage, forward: forwardMessage }, thread: { forward: forwardThread } } };
+    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, update: updateMessage, get: getMessage, forward: forwardMessage }, thread: { forward: forwardThread } } };
     cardkit = { v1: { card: { create: createCard, settings: updateSettings, update: updateCardEntity, idConvert: convertCardId }, cardElement: { content: streamContent } } };
   },
   defaultHttpInstance: { request: vi.fn(), get: vi.fn(), delete: vi.fn(), head: vi.fn(), options: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn() },
@@ -27,13 +28,33 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
 beforeEach(() => {
-  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); forwardMessage.mockReset();
+  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); updateMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); forwardMessage.mockReset();
   createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset(); updateCardEntity.mockReset(); convertCardId.mockReset();
   clientOptions = undefined;
   registeredHandlers = {};
 });
 
 describe("Lark streaming Answer cards", () => {
+  it("replies with and updates an ordinary rich-text post", async () => {
+    replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
+    updateMessage.mockResolvedValue({});
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    const content = { zh_cn: { title: "", content: [[{ tag: "md", text: "Hello **world** ▌" }]] } };
+
+    await expect(adapter.replyRichText("root-1", content, "answer-post:p1:0")).resolves.toEqual({ messageId: "answer-1" });
+    await expect(adapter.updateRichText("answer-1", content)).resolves.toBeUndefined();
+
+    expect(replyMessage).toHaveBeenCalledWith({
+      path: { message_id: "root-1" },
+      data: { msg_type: "post", content: JSON.stringify(content), reply_in_thread: true, uuid: "answer-post:p1:0" }
+    });
+    expect(updateMessage).toHaveBeenCalledWith({
+      path: { message_id: "answer-1" },
+      data: { msg_type: "post", content: JSON.stringify(content) }
+    });
+    expect(patchMessage).not.toHaveBeenCalled();
+  });
+
   it("creates a CardKit entity and replies with a card reference", async () => {
     createCard.mockResolvedValue({ data: { card_id: "card-1" } });
     replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });

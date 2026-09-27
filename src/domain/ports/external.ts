@@ -23,6 +23,8 @@ export interface LarkPort {
   isReady(): boolean;
   createTopic(card: object, idempotencyKey?: string, targetChatId?: string): Promise<{ topicId: string; rootMessageId: string }>;
   replyText(rootMessageId: string, text: string, idempotencyKey?: string): Promise<{ messageId: string }>;
+  replyRichText?(rootMessageId: string, content: object, idempotencyKey?: string): Promise<{ messageId: string }>;
+  updateRichText?(messageId: string, content: object): Promise<void>;
   replyCard(rootMessageId: string, card: object, idempotencyKey?: string): Promise<{ messageId: string }>;
   replyStreamingCard?(rootMessageId: string, card: object): Promise<{ messageId: string; cardId: string }>;
   createStreamingCard?(card: object): Promise<{ cardId: string }>;

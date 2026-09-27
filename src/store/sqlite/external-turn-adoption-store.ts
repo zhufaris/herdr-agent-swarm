@@ -5,12 +5,15 @@ import { reduceRunCard } from "../../domain/run-card-view.js";
 import { mapPrompt, type BindingRow, type PromptRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
+import type { OutboxStore } from "../../domain/ports/outbox.js";
+import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
 
 export class SqliteExternalTurnAdoptionStore {
   constructor(
     private readonly context: SqliteContext,
     private readonly projections: SqliteProjectionStore,
-    private readonly getPrompt: (id: string) => PromptJob | null
+    private readonly getPrompt: (id: string) => PromptJob | null,
+    private readonly enqueueOutboundReply: (input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }) => unknown
   ) {}
 
   getActiveExternalPrompt(bindingId: string, expectedGeneration: number): PromptJob | null {
@@ -67,7 +70,7 @@ export class SqliteExternalTurnAdoptionStore {
         this.context.database.prepare(`UPDATE prompt_jobs SET execution_origin = 'herdr', state = 'running', observation_state = 'attached', dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ?, error = NULL, updated_at = ? WHERE id = ?`).run(input.startedAt, input.turnId, input.startedAt, timestamp, promptId);
         const queuedView = this.projections.loadRunCard(promptId)!;
         const runningView = reduceRunCard(queuedView, { type: "started", occurredAt: input.startedAt });
-        outboxReserved = Number(this.context.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE prompt_id = ? AND kind = 'stream_card_create' AND card_role = 'answer' AND state = 'pending' AND first_claimed_at IS NULL AND attempt_count = 0 AND card_id_checkpoint IS NULL").run(JSON.stringify(input.answerCardFor(runningView)), runningView.viewVersion, timestamp, promptId).changes) > 0;
+        outboxReserved = Number(this.context.database.prepare("UPDATE outbound_replies SET view_version = ?, updated_at = ? WHERE prompt_id = ? AND card_role = 'answer' AND state = 'pending' AND intent_kind = 'rich-text-reply' AND first_claimed_at IS NULL AND attempt_count = 0").run(runningView.viewVersion, timestamp, promptId).changes) > 0;
       } else {
         promptId = input.externalPromptId;
         outcome = "created_external";
@@ -75,7 +78,7 @@ export class SqliteExternalTurnAdoptionStore {
         const view = { ...input.externalView, promptId, bindingId: input.bindingId, bindingGeneration: input.expectedGeneration, paneId: input.expectedPaneId, requestText: input.requestText, queuePosition: 0 };
         const runningView = reduceRunCard(view, { type: "started", occurredAt: input.startedAt });
         this.projections.insertRunCard(view);
-        this.context.database.prepare(`INSERT INTO outbound_replies(id, gateway_id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), gatewayId, `run-card:create:${promptId}:answer`, input.bindingId, promptId, runningView.viewVersion, binding.root_message_id, JSON.stringify(input.answerCardFor(runningView)), `gateway:${gatewayId}:answer:${promptId}`, timestamp, timestamp, timestamp);
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${promptId}:0`, gatewayId, bindingId: input.bindingId, promptId, viewVersion: runningView.viewVersion, cardRole: "answer", rootMessageId: binding.root_message_id, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, runningView.answerElementId)) });
         outboxReserved = true;
       }
       const prompt = this.getPrompt(promptId);

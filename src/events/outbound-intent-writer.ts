@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { initialRichTextAnswerPayload } from "../domain/rich-text.js";
 import type { OutboundIntentPort, OutboundIntentStore } from "../domain/ports/outbox.js";
 import type { OutboundWorkClass } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
@@ -29,7 +30,7 @@ export class OutboundIntentWriter implements OutboundIntentPort {
   }
 
   async enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void> {
-    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.pageIndex}`, bindingId: input.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.pageIndex, pageStart: input.pageStart, elementId: input.elementId } }) });
+    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.promptId}:${input.pageIndex}`, bindingId: input.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.pageIndex, input.pageStart, input.elementId)) });
     this.work.wake();
   }
 

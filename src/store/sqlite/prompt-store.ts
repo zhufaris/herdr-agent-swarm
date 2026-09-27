@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
 import type { Binding, OutboundReply, OutboundWorkClass } from "../../domain/types.js";
 import type { ModelPreference } from "../../domain/model-selection.js";
@@ -93,11 +94,11 @@ export class SqlitePromptStore {
   ensureAnswerCard(promptId: string, rootMessageId: string, card: object, workClass?: OutboundWorkClass): void {
     const view = this.projections.loadRunCard(promptId);
     if (!view || view.answerMessageId) return;
-    const existing = this.context.database.prepare("SELECT view_version, work_class FROM outbound_replies WHERE idempotency_key = ?").get(`run-card:create:${promptId}:answer`) as { view_version: number | null; work_class: OutboundWorkClass } | undefined;
+    const existing = this.context.database.prepare("SELECT view_version, work_class FROM outbound_replies WHERE idempotency_key IN (?, ?) ORDER BY delivery_order DESC LIMIT 1").get(`answer-post:${promptId}:0`, `run-card:create:${promptId}:answer`) as { view_version: number | null; work_class: OutboundWorkClass } | undefined;
     if (existing && (existing.view_version ?? 0) >= view.viewVersion) return;
     const prompt = this.context.database.prepare("SELECT binding_id FROM prompt_jobs WHERE id = ?").get(promptId) as { binding_id: string } | undefined;
     if (!prompt) throw new Error(`Prompt not found: ${promptId}`);
-    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${promptId}:answer`, bindingId: prompt.binding_id, promptId, viewVersion: view.viewVersion, cardRole: "answer", ...(existing ? { workClass: existing.work_class } : workClass ? { workClass } : {}), rootMessageId, kind: "card_reply", payload: JSON.stringify(card) });
+    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${promptId}:0`, bindingId: prompt.binding_id, promptId, viewVersion: view.viewVersion, cardRole: "answer", ...(existing ? { workClass: existing.work_class } : workClass ? { workClass } : {}), rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId)) });
   }
 
   getModelPreference(bindingId: string): ModelPreference | null {
@@ -129,15 +130,13 @@ export class SqlitePromptStore {
         const next = reduceRunCard(current, { type: "failed", occurredAt: input.occurredAt, notice: input.reason });
         this.projections.saveRunCard(next);
         const card = input.renderRunCard(next);
-        if (!next.answerCardId && next.answerMessageId) {
+        const answerPage = this.projections.listAnswerPages(next.promptId).find(({ pageIndex }) => pageIndex === next.answerPageIndex);
+        if (!next.answerCardId && next.answerMessageId && answerPage?.deliveryMode !== "rich_post") {
           this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(card) });
           outboxReserved = true;
         } else if (!next.answerCardId && !next.answerMessageId && input.rootMessageId) {
-          const create = this.context.database.prepare("SELECT card_id_checkpoint FROM outbound_replies WHERE idempotency_key = ? AND state = 'pending'").get(`run-card:create:${next.promptId}:answer`) as { card_id_checkpoint: string | null } | undefined;
-          if (create && !create.card_id_checkpoint) {
-            this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:create:${next.promptId}:answer`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(card) });
-            outboxReserved = true;
-          }
+          const create = this.context.database.prepare("SELECT first_claimed_at FROM outbound_replies WHERE idempotency_key = ? AND state = 'pending'").get(`answer-post:${next.promptId}:0`) as { first_claimed_at: string | null } | undefined;
+          if (create) outboxReserved = true;
         }
       }
       return { cancelledPromptIds: rows.map((row) => row.id), outboxReserved };

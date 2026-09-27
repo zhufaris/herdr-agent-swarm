@@ -213,13 +213,15 @@ export class WorkerMigrations {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 9").get();
     if (migrated) return;
     const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_turn_card_pages'").get() as { sql: string } | undefined;
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_card_pages)").all() as Array<{ name: string }>).map(({ name }) => name));
     this.context.database.exec("BEGIN IMMEDIATE");
     try {
       if (schema && (!schema.sql.includes("'creating'") || !schema.sql.includes("'frozen'"))) this.context.database.exec(`
         CREATE TABLE worker_turn_card_pages_next(
-          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
+          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','rich_post')), state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
         );
-        INSERT INTO worker_turn_card_pages_next SELECT * FROM worker_turn_card_pages;
+        INSERT INTO worker_turn_card_pages_next(id, turn_id, page_index, page_start, element_id, message_id, card_id, delivery_mode, state, sequence, created_at, updated_at)
+          SELECT id, turn_id, page_index, page_start, element_id, message_id, card_id, ${columns.has("delivery_mode") ? "delivery_mode" : "'streaming'"}, state, sequence, created_at, updated_at FROM worker_turn_card_pages;
         DROP TABLE worker_turn_card_pages; ALTER TABLE worker_turn_card_pages_next RENAME TO worker_turn_card_pages;
       `);
       this.context.database.exec("CREATE INDEX IF NOT EXISTS worker_turn_card_pages_turn ON worker_turn_card_pages(turn_id, page_index)");

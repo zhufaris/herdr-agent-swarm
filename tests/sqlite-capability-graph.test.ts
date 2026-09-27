@@ -60,7 +60,7 @@ describe("SQLite capability graph", () => {
       "prompt.ensureModelPreferenceSchema", "prompt.ensurePromptExecutionOriginColumn", "cards.ensureRunCardActivityColumn",
       "retired.convergeRetiredPromptSteering", "prompt.ensurePrimaryContinuationLineage", "cards.ensureOutboundDeliveryOrder",
       "cards.ensureOutboundDismissedState", "cards.ensureOutboundDeliveryOrder", "worker.ensureWorkerTurnCards", "worker.ensureWorkerPaneTokenColumn",
-      "worker.ensureWorkerTurnCardPageStates", "worker.ensureWorkerTurnCardProgress", "worker.ensureWorkerTurnProgressSequence",
+      "worker.ensureWorkerTurnCardPageStates", "cards.ensureRichTextAnswerPageModes", "worker.ensureWorkerTurnCardProgress", "worker.ensureWorkerTurnProgressSequence",
       "worker.ensureWorkerTurnTokenCount", "worker.ensureWorkerSourcePrimaryPaneLabel", "worker.ensureWorkerParentIdentity",
       "worker.ensurePrimaryScopedWorkerNames", "worker.ensureCardContextProjectionTables", "worker.ensureCardContextPendingIndex",
       "worker.ensureActiveWorkerScopedNames", "worker.ensureWorkerTurnContextReferences", "worker.ensureInstanceTurnActorProvenance",

@@ -15,7 +15,11 @@ import type {
 } from "../../../domain/worker-turn-card-view.js";
 import { SqliteAnswerTimelinePageStore } from "../answer-timeline-page-store.js";
 import { SqliteAnswerTimelineStore } from "../answer-timeline-store.js";
+import type { RichTextDocument } from "../../../domain/rich-text.js";
+import { initialRichTextAnswerPayload } from "../../../domain/rich-text.js";
+import { shouldRefreshRichText } from "../../../runtime/answer-rich-text.js";
 import type { SqliteContext } from "../context.js";
+import type { EnqueueOutboundReplyInput } from "../outbox-queue-store.js";
 import {
   mapWorkerTurnCard,
   mapWorkerTurnCardPage,
@@ -28,11 +32,7 @@ export class WorkerTurnProjection {
   constructor(
     private readonly context: SqliteContext,
     private readonly dependencies: {
-      enqueueOutboundReply(
-        input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & {
-          laneKeyOverride?: string;
-        },
-      ): unknown;
+      enqueueOutboundReply(input: EnqueueOutboundReplyInput): unknown;
     },
   ) {
     this.timelines = new SqliteAnswerTimelineStore(context);
@@ -70,7 +70,7 @@ export class WorkerTurnProjection {
     return (
       this.context.database
         .prepare(
-          `SELECT DISTINCT card.turn_id FROM worker_turn_cards card JOIN worker_turn_card_pages page ON page.turn_id = card.turn_id WHERE page.state = 'active' AND page.message_id IS NOT NULL AND page.card_id IS NOT NULL ORDER BY card.updated_at, card.turn_id`,
+          `SELECT DISTINCT card.turn_id FROM worker_turn_cards card JOIN worker_turn_card_pages page ON page.turn_id = card.turn_id WHERE page.state = 'active' AND page.message_id IS NOT NULL AND (page.delivery_mode = 'rich_post' OR page.card_id IS NOT NULL) ORDER BY card.updated_at, card.turn_id`,
         )
         .all() as Array<{ turn_id: string }>
     ).map(({ turn_id }) => turn_id);
@@ -199,6 +199,34 @@ export class WorkerTurnProjection {
       input.cursor,
       input.items,
     );
+    return "reserved";
+  }
+  reserveRichTextUpdate(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished" }): AnswerPageReservationOutcome {
+    const page = this.listPages(input.turnId).find((candidate) => candidate.state === "active" && candidate.pageIndex === input.pageIndex);
+    const view = this.load(input.turnId);
+    if (!page || !view || page.deliveryMode !== "rich_post" || page.messageId !== input.messageId) return "stale";
+    this.timelinePages.ensure("worker-turn", input.turnId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
+    const key = `worker-rich:${input.turnId}:${input.pageIndex}`;
+    const payload = JSON.stringify({ pageIndex: input.pageIndex, pageStart: page.pageStart, elementId: page.elementId, ...(input.sourceEnd === undefined ? {} : { sourceEnd: input.sourceEnd }), pageState: input.pageState, terminal: input.pageState === "finished", document: input.document });
+    const existing = this.context.database.prepare("SELECT payload, snapshot_revision, state, updated_at FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision DESC, delivery_order DESC LIMIT 1").get(key) as { payload: string; snapshot_revision: number; state: OutboundReplyState; updated_at: string } | undefined;
+    if (existing?.payload === payload || existing?.state === "pending") return "waiting";
+    if (input.pageState === "active" && existing?.state === "delivered" && !shouldRefreshRichText(existing.payload, input.document, existing.updated_at)) return "waiting";
+    const revision = (existing?.snapshot_revision ?? 0) + 1;
+    const reply = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `${key}:revision:${revision}`, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", intentKind: "rich-text-update", payload, projectionKey: key, snapshotRevision: revision, laneKeyOverride: `worker-turn:${input.turnId}` }) as OutboundReply;
+    this.timelinePages.reserve("worker-turn", input.turnId, input.pageIndex, reply.id, input.cursor, input.items);
+    return "reserved";
+  }
+  reserveRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome {
+    const page = this.listPages(input.turnId).find((candidate) => candidate.state === "active" && candidate.pageIndex === input.pageIndex);
+    const view = this.load(input.turnId);
+    if (!page || !view || page.deliveryMode !== "rich_post" || page.messageId !== input.messageId || input.nextPageIndex !== input.pageIndex + 1) return "stale";
+    const key = `worker-rich:${input.turnId}:${input.pageIndex}:freeze`;
+    if (this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE projection_key = ? AND state IN ('pending','delivered')").get(key)) return "waiting";
+    const payload = JSON.stringify({ pageIndex: page.pageIndex, pageStart: page.pageStart, elementId: page.elementId, ...(input.sourceEnd === undefined ? {} : { sourceEnd: input.sourceEnd }), pageState: "frozen", document: input.document });
+    const update = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", intentKind: "rich-text-update", payload, projectionKey: key, snapshotRevision: 1, laneKeyOverride: `worker-turn:${input.turnId}` }) as OutboundReply;
+    this.timelinePages.reserve("worker-turn", input.turnId, input.pageIndex, update.id, input.cursor, input.items);
+    this.timelinePages.ensure("worker-turn", input.turnId, input.nextPageIndex, input.cursor);
+    this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.nextPageIndex, input.nextPageStart, input.nextElementId)), laneKeyOverride: `worker-turn:${input.turnId}` });
     return "reserved";
   }
   reserveContent(input: {

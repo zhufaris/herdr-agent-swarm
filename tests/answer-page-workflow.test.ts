@@ -15,6 +15,7 @@ function readyStore(path = ":memory:"): SqliteBindingStore {
   const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
   store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
   store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+  store.database.prepare("UPDATE answer_pages SET delivery_mode = 'streaming' WHERE prompt_id = 'p1'").run();
   return store;
 }
 

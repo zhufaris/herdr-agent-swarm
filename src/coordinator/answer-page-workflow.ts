@@ -8,6 +8,8 @@ import type { AnswerPageConvergencePort } from "../domain/ports/card-convergence
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { continuationSummary } from "../domain/card-page-handoff.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
+import { planRichTextAnswerPage } from "../runtime/answer-rich-text.js";
+import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 
 export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   private readonly tails = new Map<string, Promise<void>>();
@@ -32,15 +34,18 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   private async convergeOnce(promptId: string, workClass?: OutboundWorkClass): Promise<void> {
     const view = this.store.loadRunCard(promptId);
     const page = this.store.getActiveAnswerPage(promptId);
-    if (!view?.answerCardId) return;
+    if (!view) return;
     if (!page) {
       const pages = this.store.listAnswerPages(view.promptId);
       const latest = pages.at(-1);
+      if (latest?.deliveryMode === "rich_post") return;
       const previous = latest?.state === "creating" && latest.deliveryMode === "static" ? pages.at(-2) : latest;
       if (previous?.state === "frozen" && previous.deliveryMode === "static") this.reserveStaticAnswerReplacement(view, workClass);
       else this.reserveFinalFoldedCard(view, workClass);
       return;
     }
+    if (page.deliveryMode === "rich_post") { this.convergeRichText(view, page, workClass); return; }
+    if (!view.answerCardId) return;
     if (!page.cardId) { this.reserveClosedAnswerCard(view, workClass); return; }
     if (view.timelineItems.length > 0 && page.messageId) {
       this.convergeTimeline(view, page, workClass);
@@ -81,6 +86,27 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     if (outcome === "reserved") this.wakeOutbound();
     this.reserveFinalFoldedCard(view, workClass);
     if (plan.type !== "wait") this.logger?.debug({ event: "answer-page-converged", promptId, bindingId: view.bindingId, pageIndex: page.pageIndex, action: plan.type, outcome }, "planned durable Answer page delivery");
+  }
+
+  private convergeRichText(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>, workClass?: OutboundWorkClass): void {
+    if (!page.messageId) return;
+    const items = answerItems(view);
+    const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
+    if (checkpoint.pending) return;
+    const active = view.phase !== "completed" && view.phase !== "failed";
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice });
+    if (plan.nextCursor) {
+      const binding = this.store.getBinding(view.bindingId);
+      if (!binding?.rootMessageId) return;
+      const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.planning.pageLimit });
+      const nextPageIndex = page.pageIndex + 1;
+      const nextElementId = answerElementId(view.promptId, nextPageIndex);
+      const outcome = this.store.reserveRichTextAnswerContinuation({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, document: frozen.document, cursor: plan.nextCursor, items: frozen.items, sourceEnd: nextSourceOffset(plan.nextCursor, nextPageIndex), nextPageIndex, nextPageStart: nextSourceOffset(plan.nextCursor, nextPageIndex), nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, ...(workClass ? { workClass } : {}) });
+      if (outcome === "reserved") this.wakeOutbound();
+      return;
+    }
+    const outcome = this.store.reserveRichTextAnswerUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, document: plan.document, cursor: plan.nextCursor, items: plan.items, sourceEnd: this.presentation.answerStreamContent(view).length, pageState: active ? "active" : "finished", ...(workClass ? { workClass } : {}) });
+    if (outcome === "reserved") this.wakeOutbound();
   }
 
   private convergeTimeline(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>, workClass?: OutboundWorkClass): void {
@@ -173,4 +199,13 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
 
 function sameCursor(left: AnswerTimelineCursor | null, right: AnswerTimelineCursor | null): boolean {
   return left?.itemIndex === right?.itemIndex && left?.markdownOffset === right?.markdownOffset || left === null && right === null;
+}
+
+function answerItems(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>): readonly AnswerTimelineItem[] {
+  if (view.timelineItems.length > 0) return view.timelineItems;
+  return view.answer ? [{ id: `answer:${view.promptId}`, sequence: 0, kind: view.phase === "completed" ? "final_answer" : "agent_message", markdown: view.answer }] : [];
+}
+
+function nextSourceOffset(cursor: AnswerTimelineCursor, fallback: number): number {
+  return cursor.markdownOffset > 0 ? cursor.markdownOffset : Math.max(fallback, cursor.itemIndex);
 }

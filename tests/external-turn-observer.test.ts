@@ -34,9 +34,8 @@ describe("ExternalTurnObserver", () => {
       async createTopic() { return { topicId: "topic", rootMessageId: "root" }; },
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "card" }; },
-      async replyStreamingCard() { return { messageId: "answer-1", cardId: "answer-card-1" }; },
-      async streamCardContent(_cardId, _elementId, content) { answerUpdates.push(content); },
-      async finishStreamingCard() {},
+      async replyRichText() { return { messageId: "answer-1" }; },
+      async updateRichText(_messageId, content) { answerUpdates.push(JSON.stringify(content)); },
       async updateCard(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
       async shareThread() { return { messageId: "shared" }; }
     };
@@ -93,13 +92,13 @@ describe("ExternalTurnObserver", () => {
       async createTopic() { return { topicId: "topic", rootMessageId: "root" }; },
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "card" }; },
-      async replyStreamingCard() {
+      async replyRichText() {
         const page = createdMessages.length + 1;
         const messageId = `answer-${page}`;
         createdMessages.push(messageId);
-        return { messageId, cardId: `answer-card-${page}` };
+        return { messageId };
       },
-      async streamCardContent() {}, async finishStreamingCard() {},
+      async updateRichText() {},
       async updateCard(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
       async shareThread() { return { messageId: "shared" }; }
     };

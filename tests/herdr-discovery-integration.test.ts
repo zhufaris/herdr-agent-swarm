@@ -350,6 +350,8 @@ describe("Herdr discovery", () => {
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
       async replyText(_rootMessageId, text) { replies.push(text); return { messageId: "text-1" }; },
       async replyCard(_root, card) { cards.push(card); return { messageId: "request-card-1" }; },
+      async replyRichText() { return { messageId: "rich-text-1" }; },
+      async updateRichText() {},
       async updateCard(messageId, card) { updates.push({ messageId, card }); }
     };
     const herdr: HerdrPort = {
@@ -378,10 +380,9 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE, larkMessageId: "request-card-1", answerMessageId: "request-card-1" }));
-    await vi.waitFor(() => expect(updates.some((update) => update.messageId === "request-card-1" && JSON.stringify(update.card).includes(STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE))).toBe(true));
+    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE, larkMessageId: "rich-text-1", answerMessageId: "rich-text-1" }));
     expect(JSON.stringify(updates)).not.toContain("thread reply");
-    expect(cards).toHaveLength(1);
+    expect(cards).toHaveLength(0);
     expect(updates.some((update) => JSON.stringify(update.card).includes("HERDR REQUEST"))).toBe(false);
     expect(replies).toEqual([]);
     expect(inboundEvents).toEqual(["InboundMessageReceived"]);

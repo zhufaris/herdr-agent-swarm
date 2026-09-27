@@ -98,6 +98,7 @@ export class SqliteMigrations {
     this.worker.ensureWorkerTurnCards();
     this.worker.ensureWorkerPaneTokenColumn();
     this.worker.ensureWorkerTurnCardPageStates();
+    this.cards.ensureRichTextAnswerPageModes();
     this.worker.ensureWorkerTurnCardProgress();
     this.worker.ensureWorkerTurnProgressSequence();
     this.worker.ensureWorkerTurnTokenCount();

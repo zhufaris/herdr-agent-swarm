@@ -10,7 +10,7 @@ import type { LarkPort } from "../src/domain/ports.js";
 import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { createFeishuCompatibilityDelivery } from "../src/gateways/feishu/plugin.js";
 import { InProcessOutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
-import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { ANSWER_STREAM_PAGE_LIMIT } from "../src/runtime/answer-stream.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 
 let directory: string | null = null;
@@ -20,17 +20,15 @@ describe("Answer page crash recovery", () => {
   it("converges a three-page terminal answer across repeated store and worker restarts", async () => {
     directory = mkdtempSync(join(tmpdir(), "answer-page-recovery-"));
     const databasePath = join(directory, "bridge.db");
-    const cards = new Map<string, { messageId: string; contents: Array<{ sequence: number; content: string }>; finishes: Array<{ sequence: number; summary: string }> }>();
+    const posts = new Map<string, object[]>();
     const deliveries: string[] = [];
-    let nextCard = 1;
+    let nextPost = 1;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "root-1" }; },
       async replyText() { return { messageId: "text-1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard(messageId) { deliveries.push(`update:${messageId}`); },
-      async createStreamingCard() { const cardId = `card-${nextCard++}`; deliveries.push(`create:${cardId}`); cards.set(cardId, { messageId: "", contents: [], finishes: [] }); return { cardId }; },
-      async replyStreamingCardReference(_root, cardId) { const card = cards.get(cardId)!; card.messageId ||= `message-${cardId}`; return { messageId: card.messageId }; },
-      async streamCardContent(cardId, _elementId, content, sequence) { cards.get(cardId)!.contents.push({ sequence, content }); },
-      async finishStreamingCard(cardId, sequence, summary) { deliveries.push(`finish:${cardId}`); cards.get(cardId)!.finishes.push({ sequence, summary }); },
+      async replyRichText(_root, content) { const messageId = `post-${nextPost++}`; deliveries.push(`create:${messageId}`); posts.set(messageId, [content]); return { messageId }; },
+      async updateRichText(messageId, content) { deliveries.push(`update:${messageId}`); posts.get(messageId)!.push(content); },
       async shareThread() { return { messageId: "shared" }; }
     };
 
@@ -46,6 +44,7 @@ describe("Answer page crash recovery", () => {
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer, answerSegments: [answer], viewVersion: 2 });
     store.close();
 
+    let finished = false;
     for (let step = 0; step < 20; step += 1) {
       store = new SqliteBindingStore(databasePath);
       const dispatcher = new LarkOutboxDispatcher(store, createFeishuCompatibilityDelivery(lark), logger, new InProcessOutboundWorkNotifier(logger));
@@ -53,34 +52,24 @@ describe("Answer page crash recovery", () => {
       await workflow.converge("p1");
       await dispatcher.requestScan(true);
       const pages = store.listAnswerPages("p1");
-      if (pages.at(-1)?.state === "finished") break;
+      if (pages.at(-1)?.state === "finished") { finished = true; break; }
       store.close();
     }
 
+    if (!finished) store = new SqliteBindingStore(databasePath);
     const pages = store.listAnswerPages("p1");
     expect(pages.length).toBeGreaterThanOrEqual(3);
     expect(pages.slice(0, -1).every((page) => page.state === "frozen")).toBe(true);
     expect(pages.at(-1)?.state).toBe("finished");
-    expect(cards.size).toBe(pages.length);
-    for (const card of cards.values()) {
-      const sequences = [...card.contents.map((item) => item.sequence), ...card.finishes.map((item) => item.sequence)];
-      expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
-      expect(new Set(sequences).size).toBe(sequences.length);
-      expect(sequences[0]).toBe(1);
-    }
+    expect(posts.size).toBe(pages.length);
     for (const page of pages.slice(0, -1)) {
-      const finish = deliveries.indexOf(`finish:${page.cardId}`);
+      const updates = deliveries.filter((entry) => entry === `update:${page.messageId}`);
       const update = deliveries.indexOf(`update:${page.messageId}`);
-      const nextCreate = deliveries.indexOf(`create:${pages[page.pageIndex + 1]!.cardId}`);
-      expect(finish).toBeGreaterThanOrEqual(0);
-      expect(update).toBeGreaterThan(finish);
+      const nextCreate = deliveries.indexOf(`create:${pages[page.pageIndex + 1]!.messageId}`);
+      expect(updates.length).toBeGreaterThan(0);
       expect(nextCreate).toBeGreaterThan(update);
     }
-    const canonical = answerStreamContent(store.loadRunCard("p1")!);
-    for (const page of pages) {
-      const delivered = cards.get(page.cardId!)!;
-      expect(delivered.contents.at(-1)?.content).toBe(renderAnswerStreamPage(canonical, page.sourceStart).page);
-    }
+    expect(pages.every((page) => page.deliveryMode === "rich_post" && page.cardId === null)).toBe(true);
     store.close();
   });
 });

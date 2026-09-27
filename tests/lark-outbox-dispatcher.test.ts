@@ -294,21 +294,26 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("creates one CardKit answer and streams cumulative content without patching the message", async () => {
-    const create = vi.fn(async () => ({ messageId: "answer-1", cardId: "cardkit-1" }));
-    const stream = vi.fn(async () => {});
+  it("creates one rich-text Answer post and edits that message in place", async () => {
+    const create = vi.fn(async () => ({ messageId: "answer-1" }));
+    const update = vi.fn(async () => {});
     const updateCard = vi.fn(async () => {});
-    const lark = fakeLark({ replyStreamingCard: create, streamCardContent: stream, updateCard });
+    const lark = fakeLark({ replyRichText: create, updateRichText: update, updateCard });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     await publisher.requestScan();
-    await connectedWriter(store, publisher).enqueueStreamContent("b1", "p1", "cardkit-1", answerElementId("p1", 0), "Working\nDone", 2);
+    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "Working\nDone", answerSegments: ["Working\nDone"], viewVersion: 2 });
+    const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation);
+    await workflow.converge("p1");
+    await publisher.requestScan();
 
     expect(create).toHaveBeenCalledTimes(1);
-    expect(stream).toHaveBeenCalledWith("cardkit-1", answerElementId("p1", 0), "Working\nDone", 2);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0]![0]).toBe("answer-1");
+    expect(JSON.stringify(update.mock.calls[0]![1])).toContain("Working\\nDone");
     expect(updateCard).not.toHaveBeenCalled();
     store.close();
   });
@@ -550,77 +555,6 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("archives a closed Answer stream and continues on a new static Answer Card", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
-    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "running", answer: "partial answer", answerSegments: ["partial answer"], viewVersion: 2 });
-    const workflow = new AnswerPageWorkflow(store, () => {}, primaryPresentation, pino({ enabled: false }));
-    await workflow.converge("p1");
-
-    const streamClosed = Object.assign(new Error("Lark CardKit content update failed (code=300309, msg=streaming mode is closed)"), { larkCode: 300309 });
-    const updateCard = vi.fn(async () => {});
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({
-      streamCardContent: vi.fn(async () => { throw streamClosed; }), updateCard,
-      replyStreamingCard: vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }))
-    }), pino({ enabled: false }));
-    let convergence = Promise.resolve();
-    publisher.onAnswerCheckpoint((promptId) => { convergence = workflow.converge(promptId); });
-
-    await publisher.requestScan(true);
-    await convergence;
-
-    expect(store.listAnswerPages("p1")).toEqual(expect.arrayContaining([expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" })]));
-    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 1, outboxQuarantines: { active: 0, released: 1, byLaneClass: { answer_stream: 1 } } });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" })]);
-
-    await publisher.requestScan();
-    await convergence;
-
-    expect(updateCard).toHaveBeenCalledOnce();
-    expect(updateCard.mock.calls[0]![0]).toBe("answer-2");
-    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 0, deliveryRecoveries: { recovered: 1 } });
-    expect(store.listAnswerPages("p1")).toEqual([
-      expect.objectContaining({ pageIndex: 0, state: "frozen", deliveryMode: "static", messageId: "answer-1" }),
-      expect.objectContaining({ pageIndex: 1, state: "active", deliveryMode: "static", messageId: "answer-2" })
-    ]);
-    expect(store.listPendingOutboundReplies()).toEqual([]);
-
-    store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "later answer", answerSegments: ["later answer"], viewVersion: 3 });
-    await workflow.converge("p1");
-    await publisher.requestScan();
-
-    expect(updateCard).toHaveBeenCalledTimes(2);
-    expect(updateCard.mock.calls[1]![0]).toBe("answer-2");
-    expect(JSON.stringify(updateCard.mock.calls[1]![1])).toContain("later answer");
-    expect(store.listPendingOutboundReplies()).toEqual([]);
-    await publisher.stop();
-    store.close();
-  });
-
-  it("does not replace an Answer when stream finalization returns the closed-content code", async () => {
-    const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
-    const closed = Object.assign(new Error("streaming mode is closed"), { larkCode: 300309 });
-    const finishStreamingCard = vi.fn(async () => { throw closed; });
-    const replyStreamingCard = vi.fn(async () => ({ messageId: "answer-2", cardId: "cardkit-2" }));
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({ finishStreamingCard, replyStreamingCard }), pino({ enabled: false }));
-
-    await connectedWriter(store, publisher).enqueueStreamFinish("b1", "p1", "cardkit-1", "Completed", 2);
-
-    expect(finishStreamingCard).toHaveBeenCalledOnce();
-    expect(replyStreamingCard).not.toHaveBeenCalled();
-    expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ pageIndex: 0, state: "active", deliveryMode: "streaming", messageId: "answer-1" })]);
-    expect(store.listPendingOutboundReplies()).toEqual([]);
-    expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, outboxQuarantines: { active: 1, byLaneClass: { answer_stream: 1 } } });
-    store.close();
-  });
-
   it("streams canonical content from the preserved offset after a lightweight startup replacement is delivered", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -685,35 +619,33 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("reuses a checkpointed CardKit entity when replying is retried", async () => {
+  it("retries a rich-text Answer reply with the same idempotency key", async () => {
     let failReply = true;
-    const create = vi.fn(async () => ({ cardId: "cardkit-1" }));
-    const reply = vi.fn(async (_root: string, cardId: string, idempotencyKey: string) => {
+    const reply = vi.fn(async (_root: string, _content: object, idempotencyKey?: string) => {
       if (failReply) throw Object.assign(new Error("temporary"), { response: { status: 503 } });
-      return { messageId: `message-for-${cardId}-${idempotencyKey}` };
+      return { messageId: `message-for-${idempotencyKey}` };
     });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({ createStreamingCard: create, replyStreamingCardReference: reply }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyRichText: reply }), pino({ enabled: false }));
 
     await publisher.requestScan();
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(store.listPendingOutboundReplies()[0]).toMatchObject({ cardIdCheckpoint: "cardkit-1" });
     failReply = false;
     await publisher.requestScan(true);
 
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(reply).toHaveBeenLastCalledWith("root-1", "cardkit-1", "run-card:create:p1:answer");
-    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "message-for-cardkit-1-run-card:create:p1:answer", answerCardId: "cardkit-1" });
+    expect(reply).toHaveBeenCalledTimes(2);
+    expect(reply.mock.calls.map((call) => call[2])).toEqual(["answer-post:p1:0", "answer-post:p1:0"]);
+    expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "message-for-answer-post:p1:0", answerCardId: null });
     store.close();
   });
 
   it("does not retry an idempotent reply whose remote outcome is uncertain", async () => {
     const logicalMessages = new Map<string, string>();
     let firstAttempt = true;
-    const reply = vi.fn(async (_root: string, _cardId: string, idempotencyKey: string) => {
+    const reply = vi.fn(async (_root: string, _content: object, idempotencyKey?: string) => {
+      if (!idempotencyKey) throw new Error("missing idempotency key");
       const messageId = logicalMessages.get(idempotencyKey) ?? `message-${logicalMessages.size + 1}`;
       logicalMessages.set(idempotencyKey, messageId);
       if (firstAttempt) { firstAttempt = false; throw Object.assign(new Error("timeout after acceptance"), { code: "ETIMEDOUT" }); }
@@ -723,16 +655,13 @@ describe("Lark channel publisher", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    const publisher = new LarkOutboxDispatcher(store, fakeLark({
-      async createStreamingCard() { return { cardId: "cardkit-1" }; },
-      replyStreamingCardReference: reply
-    }), pino({ enabled: false }));
+    const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyRichText: reply }), pino({ enabled: false }));
 
     await publisher.requestScan();
     await publisher.requestScan(true);
 
-    expect(reply.mock.calls.map((call) => call[2])).toEqual(["run-card:create:p1:answer"]);
-    expect(logicalMessages).toEqual(new Map([["run-card:create:p1:answer", "message-1"]]));
+    expect(reply.mock.calls.map((call) => call[2])).toEqual(["answer-post:p1:0"]);
+    expect(logicalMessages).toEqual(new Map([["answer-post:p1:0", "message-1"]]));
     expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: null, answerCardId: null });
     expect(store.database.prepare("SELECT state, failure_class, effect_certainty FROM outbound_replies WHERE prompt_id = ?").get("p1")).toEqual({ state: "dead_letter", failure_class: "unknown", effect_certainty: "uncertain" });
     expect(store.getOperationalSummary()).toMatchObject({ uncertainDeliveryEffects: 1, eligibleDeadLetterRecoveries: 0, outboxQuarantines: { active: 1 } });
@@ -1241,13 +1170,13 @@ describe("Lark channel publisher", () => {
     store.close();
   });
 
-  it("delivers a new Answer Card creation ahead of stalled historical Answer updates", async () => {
+  it("delivers a new rich-text Answer ahead of stalled historical Answer updates", async () => {
     let releaseOld!: () => void;
     const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
     const started: string[] = [];
     const lark = fakeLark({
       async updateCard(messageId) { started.push(messageId); await oldGate; },
-      async replyStreamingCard() { started.push("interactive-answer"); return { messageId: "answer-message", cardId: "answer-card" }; }
+      async replyRichText() { started.push("interactive-answer"); return { messageId: "answer-message" }; }
     });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old-binding", workspaceId: "old-workspace", chatId: "old-chat", topicId: "old-topic", rootMessageId: "old-root", title: "Old task" });
@@ -1271,7 +1200,7 @@ describe("Lark channel publisher", () => {
     releaseOld();
     await draining;
 
-    expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-message", cardId: "answer-card" });
+    expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-message", cardId: null, deliveryMode: "rich_post" });
     expect(store.listPendingOutboundReplies()).toEqual([]);
     store.close();
   });
@@ -1309,8 +1238,8 @@ describe("Lark channel publisher", () => {
     store.acceptPrompt({ prompt: { id: "live-prompt", bindingId: "live-binding", larkMessageId: "live-message", actorOpenId: "u1", body: "now" }, view: liveView, rootMessageId: "live-root", answerCard: {} });
     const publisher = new LarkOutboxDispatcher(store, fakeLark({
       async updateCard(messageId) { started.push(messageId); await historyGate; },
-      async streamCardContent(cardId) { started.push(cardId); await historyGate; },
-      async replyStreamingCard(rootMessageId) { started.push(rootMessageId); return { messageId: "live-answer-message", cardId: "live-answer-card" }; }
+      async updateRichText(messageId) { started.push(messageId); await historyGate; },
+      async replyRichText(rootMessageId) { started.push(rootMessageId); return { messageId: "live-answer-message" }; }
     }), pino({ enabled: false }));
 
     const draining = publisher.requestScan();
@@ -1644,12 +1573,16 @@ describe("Lark channel publisher", () => {
 });
 
 function fakeLark(overrides: Partial<LarkPort>): LarkPort {
+  let richTextSequence = 0;
   return {
     async start() {}, async stop() {}, isReady: () => true,
     async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
     async replyText() { return { messageId: "text-1" }; },
     async replyCard() { return { messageId: "card-1" }; },
-    async updateCard() {}, ...overrides
+    async updateCard() {},
+    async replyRichText() { return { messageId: `rich-text-${++richTextSequence}` }; },
+    async updateRichText() {},
+    ...overrides
   };
 }
 

@@ -1371,7 +1371,7 @@ describe("SQLite store", () => {
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: false, turn: { id: "turn-1" } });
     expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ requestText: "review", queuePosition: 1 });
     expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === "turn-1")).toEqual([expect.objectContaining({
-      idempotencyKey: "worker-turn:create:turn-1:0", kind: "stream_card_create", rootMessageId: "root-1"
+      idempotencyKey: "answer-post:turn-1:0", kind: "text", intentKind: "rich-text-reply", rootMessageId: "root-1"
     })]);
     expect(store.hasPendingOutboundReplyForWorkerTurn("turn-1")).toBe(true);
     expect(store.hasPendingOutboundReplyForWorkerTurn("missing")).toBe(false);
@@ -1747,7 +1747,7 @@ describe("SQLite store", () => {
 
     expect(result).toMatchObject({ outcome: "created_external", prompt: { id: "external", executionOrigin: "herdr", state: "running", observationState: "attached", transcriptTurnId: "turn-2" }, outboxReserved: true });
     expect(store.loadRunCard("external")).toMatchObject({ phase: "queued", queuePosition: 0, startedAt: null });
-    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: "external", kind: "stream_card_create", cardRole: "answer" })]));
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: "external", kind: "text", intentKind: "rich-text-reply", cardRole: "answer" })]));
   });
 
   it("fails an idle external turn only while every durable identity fence still matches", () => {
@@ -1879,16 +1879,14 @@ describe("SQLite store", () => {
       reason, occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: (view) => ({ phase: view.phase, notice: view.notice, version: view.viewVersion })
     });
 
-    expect(result).toEqual({ outcome: "skipped", promptId: "oldest", outboxReserved: true });
+    expect(result).toEqual({ outcome: "skipped", promptId: "oldest", outboxReserved: false });
     expect(store.getPrompt("oldest")).toMatchObject({ state: "failed", observationState: "completed", error: reason, updatedAt: "2026-09-05T00:01:00.000Z" });
     expect(store.loadRunCard("oldest")).toMatchObject({ phase: "failed", notice: reason, finishedAt: "2026-09-05T00:01:00.000Z" });
     expect(store.getPrompt("newer")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started" });
     expect(store.getPrompt("third")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.getPrompt("other")).toMatchObject({ state: "running", observationState: "detached" });
-    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({
-      idempotencyKey: "run-card:update:oldest:answer:2", kind: "card_update", rootMessageId: "answer-oldest", payload: JSON.stringify({ phase: "failed", notice: reason, version: 2 })
-    }));
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "oldest")).toEqual([]);
     expect(store.database.prepare("SELECT actor_open_id, action, target, outcome FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({
       actor_open_id: "creator", action: "swarm.skip", target: "binding:b1:prompt:oldest:message:skip-message", outcome: "skipped"
     });
@@ -1965,7 +1963,7 @@ describe("SQLite store", () => {
     expect(store.getPrompt("old")).toMatchObject({ state: "running", observationState: "detached" });
   });
 
-  it("rolls back detached skip when its durable card projection fails", () => {
+  it("does not render a CardKit projection when skipping a rich-text answer", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
@@ -1974,13 +1972,13 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
 
-    expect(() => store!.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => { throw new Error("render failed"); } })).toThrow("render failed");
-    expect(store.getPrompt("p1")).toMatchObject({ state: "running", observationState: "detached", error: null });
-    expect(store.loadRunCard("p1")).toMatchObject({ phase: "running" });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 0 });
+    expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => { throw new Error("CardKit renderer must not run"); } })).toMatchObject({ outcome: "skipped", outboxReserved: true });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "failed", observationState: "completed", error: "human skip" });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 1 });
   });
 
-  it("updates the original pending Answer Card creation when skipping before delivery", () => {
+  it("keeps the original rich-text create immutable when skipping before delivery", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
@@ -1994,7 +1992,7 @@ describe("SQLite store", () => {
 
     const replies = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1");
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatchObject({ id: original.id, idempotencyKey: "run-card:create:p1:answer", kind: "stream_card_create", viewVersion: 2, payload: JSON.stringify({ phase: "failed", version: 2 }) });
+    expect(replies[0]).toMatchObject({ id: original.id, idempotencyKey: "answer-post:p1:0", kind: "text", intentKind: "rich-text-reply", viewVersion: 1, payload: original.payload });
   });
 
   it("claims a priority Primary turn before ordinary FIFO without reordering the ordinary queue", () => {
@@ -2658,7 +2656,7 @@ describe("SQLite store", () => {
 
     expect(converted).toMatchObject({ operation: { state: "delivered" }, prompt: { id: "priority-1", state: "queued", priority: "priority" } });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ idempotencyKey: "run-card:create:priority-1:answer" })]));
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ idempotencyKey: "answer-post:priority-1:0", intentKind: "rich-text-reply" })]));
   });
 
   it("atomically projects one durable operation-result card through pending and delivered states", () => {
@@ -3016,7 +3014,7 @@ describe("SQLite store", () => {
     expect(store.getPrompt("queued")).toMatchObject({ state: "cancelled", observationState: "completed" });
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "orphaned" });
     expect(store.listPendingOutboundReplies().filter((reply) => reply.kind === "card_update" && reply.cardRole === "answer")).toHaveLength(2);
-    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "queued" && reply.kind === "stream_card_create")?.payload).toContain('\"phase\":\"failed\"');
+    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "queued")).toMatchObject({ kind: "text", intentKind: "rich-text-reply", idempotencyKey: "answer-post:queued:0" });
 
     expect(store.orphanBindingWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, occurredAt: "2026-08-27T00:01:01.000Z", reason: "Herdr pane w1:p1 no longer exists", view, rootMessageId: "root", mainCard: {}, renderRunCard: () => ({}) })).toMatchObject({ outcome: "unchanged" });
     expect(store.listPendingOutboundReplies()).toHaveLength(pendingBeforeOrphan + 3);
@@ -3344,7 +3342,7 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "uncertain-update", idempotencyKey: "uncertain-update", bindingId: "b1", promptId: "quarantine", viewVersion: 1, cardRole: "answer", rootMessageId: "message-quarantine", kind: "card_update", payload: "{}" });
     store.markOutboundReplyFailedWithQuarantine("uncertain-update", "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
 
-    expect(store.listActionableStartupRunCards("b1").map(({ promptId }) => promptId).sort()).toEqual(["lagging", "live", "missing", "pending", "quarantine", "streaming"]);
+    expect(store.listActionableStartupRunCards("b1").map(({ promptId }) => promptId).sort()).toEqual(["lagging", "live", "missing", "pending", "quarantine"]);
     expect(store.listActionableStartupRunCards("missing")).toEqual([]);
   });
 
@@ -3486,13 +3484,12 @@ describe("SQLite store", () => {
       expect(store.loadRunCard(id)).toMatchObject({ phase: "failed", notice: "Topic archived", queuePosition: 0, finishedAt: "2026-08-29T01:02:03.000Z", activityAt: "2026-08-29T01:02:03.000Z", updatedAt: "2026-08-29T01:02:03.000Z" });
     }
     const pendingAfter = store.listPendingOutboundReplies().find((reply) => reply.id === pendingCreate.id)!;
-    expect(pendingAfter).toMatchObject({ idempotencyKey: "run-card:create:pending:answer", kind: "stream_card_create", viewVersion: 2 });
+    expect(pendingAfter).toMatchObject({ idempotencyKey: "answer-post:pending:0", kind: "text", intentKind: "rich-text-reply", viewVersion: 1 });
     expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(pendingAfter.id)).toEqual({ lane_key: "gateway:feishu:primary:answer:pending" });
-    expect(pendingAfter.payload).toBe(JSON.stringify({ phase: "failed", notice: "Topic archived", version: 2 }));
+    expect(pendingAfter.payload).toBe(pendingBefore.payload);
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "pending")).toHaveLength(1);
     expect(store.listPendingOutboundReplies().find((reply) => reply.id === checkpointedCreate.id)).toMatchObject({ payload: checkpointedBefore.payload, viewVersion: checkpointedBefore.viewVersion, cardIdCheckpoint: "card-checkpointed" });
-    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ idempotencyKey: "run-card:update:delivered:answer:2", kind: "card_update", rootMessageId: "answer-delivered" }));
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "gateway:feishu:primary:primary-answer:delivered:1" });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "delivered")).toEqual([]);
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "card-target")).toEqual([]);
     expect(store.getOperationalSummary().prompts.cancelled).toBe(4);
     expect(store.countPendingPrompts("b1")).toBe(1);
@@ -3501,7 +3498,7 @@ describe("SQLite store", () => {
     expect(pendingBefore.id).toBe(pendingAfter.id);
   });
 
-  it("rolls back every queued cancellation when terminal outbox projection fails", () => {
+  it("does not mutate pending rich-text creates when cancelling queued turns", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     for (const id of ["p1", "p2"]) {
@@ -3510,12 +3507,12 @@ describe("SQLite store", () => {
     }
     store.database.exec(`CREATE TRIGGER fail_second_cancel_outbox BEFORE UPDATE ON outbound_replies WHEN OLD.prompt_id = 'p2' BEGIN SELECT RAISE(ABORT, 'injected cancellation outbox failure'); END`);
 
-    expect(() => store!.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "archive", occurredAt: "later", rootMessageId: "m1", renderRunCard: (view) => ({ phase: view.phase }) })).toThrow("injected cancellation outbox failure");
+    expect(store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "archive", occurredAt: "later", rootMessageId: "m1", renderRunCard: (view) => ({ phase: view.phase }) })).toMatchObject({ cancelledPromptIds: ["p1", "p2"], outboxReserved: true });
 
     for (const id of ["p1", "p2"]) {
-      expect(store.getPrompt(id)).toMatchObject({ state: "queued", observationState: "not_started", error: null });
-      expect(store.loadRunCard(id)).toMatchObject({ phase: "queued", viewVersion: 1, notice: null });
-      expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === id)).toMatchObject({ viewVersion: 1, payload: "{}" });
+      expect(store.getPrompt(id)).toMatchObject({ state: "cancelled", observationState: "completed", error: "archive" });
+      expect(store.loadRunCard(id)).toMatchObject({ phase: "failed", viewVersion: 2, notice: "archive" });
+      expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === id)).toMatchObject({ viewVersion: 1, kind: "text", intentKind: "rich-text-reply" });
     }
   });
 
@@ -3714,7 +3711,7 @@ describe("SQLite store", () => {
     expect(plan.some(({ detail }) => detail.includes("TEMP B-TREE"))).toBe(false);
   });
 
-  it("atomically accepts one streaming answer card and claims before its card identity is delivered", () => {
+  it("atomically accepts one rich-text answer post and claims before its message identity is delivered", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
@@ -3731,19 +3728,19 @@ describe("SQLite store", () => {
     expect(accepted.inserted).toBe(true);
     expect(duplicate).toMatchObject({ inserted: false, prompt: { id: "p1" }, view: { promptId: "p1" } });
     expect(store.listPendingOutboundReplies()).toMatchObject([
-      { promptId: "p1", viewVersion: 1, kind: "stream_card_create", cardRole: "answer", payload: JSON.stringify({ card: "answer" }) }
+      { promptId: "p1", viewVersion: 1, kind: "text", intentKind: "rich-text-reply", cardRole: "answer" }
     ]);
     expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1"]);
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
 
     const [answerCreate] = store.listPendingOutboundReplies();
-    store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1", "cardkit-1");
+    store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1");
     expect(store.loadRunCard("p1")).toMatchObject({
-      bindingGeneration: 3, conversionParentPromptId: "parent-prompt", larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
+      bindingGeneration: 3, conversionParentPromptId: "parent-prompt", larkMessageId: "answer-card-m1", answerMessageId: "answer-card-m1", answerCardId: null, requestText: "first **request**", answerDeliveredVersion: 1
     });
     expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({
-      promptId: "p1", pageIndex: 0, messageId: "answer-card-m1", cardId: "cardkit-1", elementId: answerElementId("p1", 0), sourceStart: 0, sequence: 0, state: "active"
+      promptId: "p1", pageIndex: 0, messageId: "answer-card-m1", cardId: null, deliveryMode: "rich_post", elementId: answerElementId("p1", 0), sourceStart: 0, sequence: 0, state: "active"
     })]);
     store.markPromptDispatched("p1");
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false });
@@ -4025,27 +4022,27 @@ describe("SQLite store", () => {
     });
   });
 
-  it("atomically reserves Answer content, continuation, and terminal finish intents", () => {
+  it("atomically reserves rich-text Answer updates and continuations", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
-    const elementId = answerElementId("p1", 0);
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1");
 
-    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId, content: "page one" })).toBe("reserved");
-    expect(store.getActiveAnswerPage("p1")?.sequence).toBe(1);
-    expect(store.loadRunCard("p1")?.answerSequence).toBe(1);
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_content", viewVersion: 1 })]);
-    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId, content: "page one" })).toBe("waiting");
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
+    expect(store.reserveRichTextAnswerUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", document: { markdown: "page one ▌" }, cursor: null, items: [], sourceEnd: 8, pageState: "active" })).toBe("reserved");
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", intentKind: "rich-text-update", rootMessageId: "answer-1" })]);
+    expect(store.reserveRichTextAnswerUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", document: { markdown: "page one ▌" }, cursor: null, items: [], sourceEnd: 8, pageState: "active" })).toBe("waiting");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1");
 
-    expect(store.reserveAnswerContinuation({ promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", summary: "Continued", finalizedCard: { final: true }, nextPageIndex: 1, nextPageStart: 9_000, nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2, card: {} })).toBe("reserved");
+    expect(store.reserveRichTextAnswerContinuation({ promptId: "p1", pageIndex: 0, messageId: "answer-1", document: { markdown: "page one" }, cursor: { itemIndex: 1, markdownOffset: 0 }, items: [], sourceEnd: 8, nextPageIndex: 1, nextPageStart: 8, nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2 })).toBe("reserved");
     expect(store.listAnswerPages("p1")).toEqual([
-      expect.objectContaining({ pageIndex: 0, state: "active", sequence: 2 }),
-      expect.objectContaining({ pageIndex: 1, state: "creating", sequence: 0 })
+      expect.objectContaining({ pageIndex: 0, state: "active", deliveryMode: "rich_post" }),
+      expect.objectContaining({ pageIndex: 1, state: "creating", deliveryMode: "rich_post" })
     ]);
-    expect(store.listPendingOutboundReplies().map((reply) => reply.kind)).toEqual(["stream_finish", "card_update", "stream_card_create"]);
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ kind: "card_update", intentKind: "rich-text-update" }),
+      expect.objectContaining({ kind: "text", intentKind: "rich-text-reply", idempotencyKey: "answer-post:p1:1" })
+    ]);
   });
 
   it("uses structural stream metadata when reading Answer delivery facts", () => {
@@ -4134,22 +4131,21 @@ describe("SQLite store", () => {
     }
   });
 
-  it("rolls back an Answer reservation when its outbox insert fails", () => {
+  it("rolls back a rich-text Answer reservation when its outbox insert fails", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
-    store.database.exec("CREATE TEMP TRIGGER reject_answer_content BEFORE INSERT ON outbound_replies WHEN NEW.kind = 'stream_content' BEGIN SELECT RAISE(ABORT, 'forced_answer_outbox_failure'); END");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1");
+    store.database.exec("CREATE TEMP TRIGGER reject_answer_content BEFORE INSERT ON outbound_replies WHEN NEW.intent_kind = 'rich-text-update' BEGIN SELECT RAISE(ABORT, 'forced_answer_outbox_failure'); END");
 
-    expect(() => store!.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: answerElementId("p1", 0), content: "new" })).toThrow("forced_answer_outbox_failure");
+    expect(() => store!.reserveRichTextAnswerUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", document: { markdown: "new ▌" }, cursor: null, items: [], sourceEnd: 3, pageState: "active" })).toThrow("forced_answer_outbox_failure");
 
-    expect(store.getActiveAnswerPage("p1")?.sequence).toBe(0);
-    expect(store.loadRunCard("p1")?.answerSequence).toBe(0);
+    expect(store.getAnswerTimelinePage("p1", 0).pending).toBe(false);
     expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
-  it("recovers only queued answer cards dead-lettered by the legacy element id format", () => {
+  it("does not revive obsolete Answer Card creates after rich-text cutover", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
@@ -4165,16 +4161,11 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", bindingId: "b1", rootMessageId: "m1", kind: "text", payload: "hello" });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("unrelated", "network unavailable");
 
-    expect(store.recoverLegacyElementIdDeadLetters()).toBe(1);
-    const [recovered] = store.listPendingOutboundReplies();
-    expect(recovered).toMatchObject({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null });
+    expect(store.recoverLegacyElementIdDeadLetters()).toBe(0);
+    const recovered = store.getOutboundReply(legacyReply!.id);
+    expect(recovered).toMatchObject({ id: legacyReply!.id, state: "dead_letter" });
     expect(store.loadRunCard("legacy-id")?.answerElementId).toBe(answerElementId("legacy-id", 0));
-    expect(JSON.parse(recovered!.payload)).toMatchObject({ body: { elements: [{ element_id: answerElementId("legacy-id", 0) }] } });
-    expect(store.getOperationalSummary().deadLetters).toBe(1);
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("legacy-id");
-
-    store.markOutboundReplyDelivered(legacyReply!.id, "answer-1", "cardkit-1");
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.getOperationalSummary().deadLetters).toBe(2);
   });
 
   it("canonicalizes pending continuation metadata with its card payload", () => {
@@ -4250,7 +4241,7 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT first_claimed_at FROM outbound_replies WHERE id = ?").get(reply.id)).toMatchObject({ first_claimed_at: expect.any(String) });
   });
 
-  it("repairs answer payloads when the persisted run-card id is already canonical", () => {
+  it("does not depend on obsolete stream metadata after rich-text startup", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-element-payload-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
@@ -4268,7 +4259,7 @@ describe("SQLite store", () => {
     const payload = JSON.parse(store.listPendingOutboundReplies()[0]!.payload);
     expect(store.loadRunCard("p1")?.answerElementId).toBe(canonicalId);
     expect(payload.body.elements[0].element_id).toBe(canonicalId);
-    expect(payload.stream.elementId).toBe(canonicalId);
+    expect(payload.stream.elementId).toBe(legacyId);
     expect(store.listPendingOutboundReplies().find((reply) => reply.id === "unrelated")?.payload).toBe(legacyId);
   });
 
@@ -4724,7 +4715,7 @@ describe("SQLite store", () => {
     expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
-  it("does not duplicate the single answer-card create operation", () => {
+  it("does not duplicate the single rich-text answer create operation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
@@ -4734,7 +4725,7 @@ describe("SQLite store", () => {
     store.ensureAnswerCard("p1", "root-1", { card: "duplicate" });
 
     expect(store.listPendingOutboundReplies()).toMatchObject([{
-      promptId: "p1", cardRole: "answer", kind: "stream_card_create", payload: JSON.stringify({})
+      promptId: "p1", cardRole: "answer", kind: "text", intentKind: "rich-text-reply", idempotencyKey: "answer-post:p1:0"
     }]);
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     const answerCreate = store.listPendingOutboundReplies()[0]!;
@@ -5188,33 +5179,19 @@ describe("SQLite store", () => {
     vi.useRealTimers();
   });
 
-  it("reopens a quarantined Answer card creation once more while preserving its failure history", () => {
+  it("rejects obsolete Answer Card continuation APIs after rich-text cutover", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const initialCreate = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(initialCreate.id, "answer-1", "card-1");
+    store.markOutboundReplyDelivered(initialCreate.id, "answer-1");
     expect(store.reserveAnswerContinuation({
       promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", summary: "continued", finalizedCard: {}, nextPageIndex: 1, nextPageStart: 1,
       nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2,
       card: { body: { elements: [{ tag: "markdown", element_id: answerElementId("p1", 1), content: "x".repeat(10_000) }] } }
-    })).toBe("reserved");
-    const create = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
-    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(create.id);
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine(create.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
-
-    expect(store.getOperationalSummary().outboxQuarantines.active).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
-    expect(store.database.prepare("SELECT state, attempt_count, auto_recovery_count FROM outbound_replies WHERE id = ?").get(create.id)).toEqual({ state: "dead_letter", attempt_count: 5, auto_recovery_count: 1 });
-    const replacement = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
-    expect(replacement.idempotencyKey).toBe(`startup-lite:${create.id}`);
-    expect(replacement.autoRecoveryCount).toBe(2);
-    expect(replacement.payload.length).toBeLessThan(create.payload.length);
-    expect(replacement.payload).toContain("正在恢复本页内容");
-    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(create.id)).toEqual({ state: "released", action: "startup_rebuild" });
-    expect(store.getOperationalSummary().deadLetters).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
+    })).toBe("stale");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
   it("rolls back an invalid recovery page reserved across dead-lettered canonical content", () => {
@@ -5250,30 +5227,16 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
   });
 
-  it("replaces an exhausted active-page content update with one bounded canonical chunk", () => {
+  it("does not schedule obsolete stream recovery for a rich-text Answer page", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0");
     const canonicalAnswer = "x".repeat(12_000);
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: canonicalAnswer, answerSegments: [canonicalAnswer], viewVersion: 3 });
-    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-0", elementId: answerElementId("p1", 0), content: canonicalAnswer })).toBe("reserved");
-    const failed = store.listPendingOutboundReplies()[0]!;
-    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(failed.id);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      store.markOutboundReplyFailedWithQuarantine(failed.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
-    }
-
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
-    const replacement = store.listPendingOutboundReplies()[0]!;
-    const payload = JSON.parse(replacement.payload) as { content: string; sourceEnd: number; sequence: number };
-    expect(replacement).toMatchObject({ idempotencyKey: `startup-lite-content:${failed.id}`, kind: "stream_content", autoRecoveryCount: 2 });
-    expect(payload.content.length).toBeLessThanOrEqual(4_000);
-    expect(payload.sourceEnd).toBeGreaterThan(0);
-    expect(payload.sourceEnd).toBeLessThan(canonicalAnswer.length);
-    expect(payload.sequence).toBe(2);
-    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failed.id)).toEqual({ state: "released", action: "startup_rebuild" });
+    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-0", elementId: answerElementId("p1", 0), content: canonicalAnswer })).toBe("stale");
+    expect(store.listPendingOutboundReplies()).toEqual([]);
     expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
   });
 

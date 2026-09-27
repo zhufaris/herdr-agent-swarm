@@ -5,6 +5,7 @@ import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn,
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../types.js";
 import type { AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint } from "../delivery.js";
 import type { AnswerTimelineItem } from "../answer-timeline.js";
+import type { RichTextDocument } from "../rich-text.js";
 import type { AnswerTimelineCursor } from "../delivery.js";
 import type { WorkerTurnCardChange, WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 import type { WorkerMainView } from "../worker-main-view.js";
@@ -74,6 +75,8 @@ export interface InstanceStore {
   getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
   listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number): AnswerTimelineFrozenItem[];
   reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
+  reserveWorkerRichTextUpdate(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished" }): AnswerPageReservationOutcome;
+  reserveWorkerRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
@@ -138,7 +141,7 @@ export type WorkerTurnDispatchStore = Pick<InstanceStore,
 
 export type WorkerTurnCardStore = Pick<InstanceStore,
   "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "reserveWorkerAnswerTimelineCard" |
-  "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
+  "reserveWorkerTurnContent" | "reserveWorkerRichTextUpdate" | "reserveWorkerRichTextContinuation" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
   "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation"
 >;
 
