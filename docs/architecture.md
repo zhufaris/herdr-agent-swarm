@@ -1308,7 +1308,7 @@ code fences, renders consecutive TraeX numbered diff rows in a `diff` fence,
 converts tables to fenced `text` blocks, removes HTML, and limits clickable links
 to HTTP or HTTPS. These transformations do not change the canonical Answer or its
 source offsets. Synthetic table, diff, and continuation fences count
-toward the 9,000-character rendered limit, while `source_start` always remains an
+toward the 12,000-character rendered limit, while `source_start` always remains an
 offset into the unmodified canonical Answer. This keeps live delivery and restart
 recovery deterministic even when normalization changes the displayed length.
 For each page request, the renderer builds one ephemeral source index for Markdown

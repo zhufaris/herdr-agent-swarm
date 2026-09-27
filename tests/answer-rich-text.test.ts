@@ -202,4 +202,23 @@ describe("safe rich-text Answer streaming", () => {
     expect(second.nextCursor?.markdownOffset).toBeGreaterThan(first.nextCursor!.markdownOffset);
     expect(second.document.title).toBe("回答（第 2 页）");
   });
+
+  it("budgets tool-heavy pages from the compact Markdown that is actually delivered", () => {
+    const items = Array.from({ length: 12 }, (_, index) => ({
+      kind: "tool" as const,
+      id: `tool:${index}`,
+      sequence: index + 1,
+      category: "command" as const,
+      label: `command ${index}`,
+      command: `printf '${"x".repeat(2_000)}'`,
+      resultPreview: "result ".repeat(2_000),
+      state: "succeeded" as const
+    }));
+
+    const first = planRichTextAnswerPage(items, null, { active: false, pageIndex: 0, limit: 12_000 });
+
+    expect(first.document.markdown.length).toBeGreaterThan(8_000);
+    expect(first.document.markdown.length).toBeLessThanOrEqual(12_000);
+    expect(first.nextCursor?.itemIndex).toBeGreaterThanOrEqual(8);
+  });
 });

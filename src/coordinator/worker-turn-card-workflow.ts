@@ -18,7 +18,7 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     private readonly store: WorkerTurnCardStore,
     private readonly wakeOutbound: () => void,
     private readonly presentation: WorkerTurnCardPresentation,
-    private readonly pageLimit = 9_000,
+    private readonly pageLimit = 12_000,
     private readonly logger?: Pick<Logger, "debug">
   ) {}
 

@@ -177,7 +177,7 @@ describe("project registry configuration", () => {
     expect(loadConfig(requiredEnvironment).runtimeTuning).toEqual({
       polling: { transcriptIdentityMs: 50, attachedTranscriptMs: 250, workerTurnMs: 250, externalTurnMs: 2_000 },
       cache: { herdrSnapshotTtlMs: 2_000 },
-      cards: { updateDebounceMs: 500, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 9_000 },
+      cards: { updateDebounceMs: 500, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 12_000 },
       paneClosure: { confirmationTtlMs: 60_000 },
       outboxSafetyScanIntervalMs: 30_000
     });

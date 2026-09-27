@@ -56,7 +56,7 @@ describe("file setup configuration repository", () => {
     expect(readEnvironmentFile(result.environmentFile).LARK_APP_SECRET).toBe("top-secret");
     expect(JSON.parse(readFileSync(result.projectsFile, "utf8"))).toEqual(draft.registry);
     expect(readFileSync(result.projectsFile, "utf8")).toBe(`${JSON.stringify(draft.registry, null, 2)}\n`);
-    expect(readFileSync(result.runtimeFile, "utf8")).toContain("answerPageLimitChars: 9000");
+    expect(readFileSync(result.runtimeFile, "utf8")).toContain("answerPageLimitChars: 12000");
     expect(existsSync(join(context.configDirectory, ".setup-transaction.json"))).toBe(false);
   });
 
@@ -150,7 +150,7 @@ describe("file setup configuration repository", () => {
     await repository.commit(draft, context);
     expect(await repository.load(context)).toEqual({
       environment: expect.objectContaining({ LARK_APP_SECRET: "top-secret" }), registry: draft.registry,
-      runtime: expect.objectContaining({ cards: expect.objectContaining({ answerPageLimitChars: 9_000 }) })
+      runtime: expect.objectContaining({ cards: expect.objectContaining({ answerPageLimitChars: 12_000 }) })
     });
     expect(await repository.validate(draft, context)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "config.schema", status: "pass" }),

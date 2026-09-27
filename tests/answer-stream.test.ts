@@ -3,8 +3,8 @@ import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage, renderFinalAnswerPage
 import { renderLarkMarkdownPage } from "../src/runtime/lark-markdown.js";
 
 describe("Answer stream pagination", () => {
-  it("uses a 9,000-character default page limit", () => {
-    expect(ANSWER_STREAM_PAGE_LIMIT).toBe(9_000);
+  it("uses a 12,000-character default page limit", () => {
+    expect(ANSWER_STREAM_PAGE_LIMIT).toBe(12_000);
   });
 
   it("keeps short content on one card", () => {

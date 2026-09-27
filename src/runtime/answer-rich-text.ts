@@ -3,10 +3,10 @@ import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import type { RichTextDocument } from "../domain/rich-text.js";
 import { displayPaneIdentity } from "../domain/pane-display-identity.js";
-import { planAnswerTimelinePage } from "../cards/answer-timeline-page.js";
+import { renderLarkMarkdownPage } from "./lark-markdown.js";
 import { redactSecrets } from "./redact-secrets.js";
 
-export const ANSWER_RICH_TEXT_PAGE_LIMIT = 9_000;
+export const ANSWER_RICH_TEXT_PAGE_LIMIT = 12_000;
 export const ANSWER_TYPEWRITER_CURSOR = "💭";
 export const ANSWER_PLACEHOLDER = `正在生成… ${ANSWER_TYPEWRITER_CURSOR}`;
 export const ANSWER_RICH_TEXT_MIN_INTERVAL_MS = 500;
@@ -74,7 +74,7 @@ export function planRichTextAnswerPage(
   const terminalSummary = options.active ? "" : terminalSummaryMarkdown(options.terminalSummary);
   const suffixBudget = footer.length + terminalSummary.length + (options.active ? activityMarker.length + 4 : 0) + (options.terminalNotice?.length ?? 0) + 12;
   const pageLimit = Math.max(1, (options.limit ?? ANSWER_RICH_TEXT_PAGE_LIMIT) - suffixBudget);
-  const page = planAnswerTimelinePage(safeItems, cursor, pageLimit, safePrefix);
+  const page = planRichTextTimelinePage(safeItems, cursor, pageLimit, safePrefix);
   const body = markdownFromTimelineItems(page.items);
   const sections: string[] = [];
   if (body) sections.push(body);
@@ -89,6 +89,51 @@ export function planRichTextAnswerPage(
     items: page.items,
     nextCursor: page.nextCursor
   };
+}
+
+function planRichTextTimelinePage(
+  items: readonly AnswerTimelineItem[],
+  cursor: AnswerTimelineCursor | null,
+  limit: number,
+  prefixItems: readonly AnswerTimelineItem[]
+): { items: AnswerTimelineItem[]; nextCursor: AnswerTimelineCursor | null } {
+  const ordered = [...items].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
+  const pageItems: AnswerTimelineItem[] = [];
+  let renderedLength = 0;
+  const append = (item: AnswerTimelineItem, markdown: string): boolean => {
+    const addition = markdown.length + (renderedLength > 0 && markdown ? 2 : 0);
+    if (renderedLength > 0 && renderedLength + addition > limit) return false;
+    pageItems.push(item);
+    renderedLength += addition;
+    return true;
+  };
+  for (const item of prefixItems) {
+    const markdown = markdownFromTimelineItem(item);
+    if (!append(item, markdown)) break;
+  }
+
+  let itemIndex = Math.max(0, cursor?.itemIndex ?? 0);
+  let markdownOffset = Math.max(0, cursor?.markdownOffset ?? 0);
+  while (itemIndex < ordered.length) {
+    const item = ordered[itemIndex]!;
+    if (item.kind === "agent_message" || item.kind === "final_answer") {
+      const separatorLength = renderedLength > 0 ? 2 : 0;
+      const available = Math.max(1, limit - renderedLength - separatorLength);
+      const rendered = renderLarkMarkdownPage(item.markdown, markdownOffset, available);
+      if (rendered.page) {
+        if (!append({ ...item, markdown: rendered.page }, rendered.page)) return { items: pageItems, nextCursor: { itemIndex, markdownOffset } };
+      }
+      if (rendered.nextPageStart !== null) return { items: pageItems, nextCursor: { itemIndex, markdownOffset: rendered.nextPageStart } };
+      itemIndex += 1;
+      markdownOffset = 0;
+      continue;
+    }
+
+    const markdown = markdownFromTimelineItem(item);
+    if (!append(item, markdown)) return { items: pageItems, nextCursor: { itemIndex, markdownOffset: 0 } };
+    itemIndex += 1;
+  }
+  return { items: pageItems, nextCursor: null };
 }
 
 export function safeStreamingMarkdown(source: string): string {

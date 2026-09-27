@@ -20,7 +20,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     private readonly presentation: Pick<PrimaryPresentation, "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage" | "answerTimelinePage">,
     private readonly logger?: Logger,
     planning?: AnswerPagePlanningPort
-  ) { this.planning = planning ?? { pageLimit: 9_000, answerStreamContent: presentation.answerStreamContent, renderAnswerStreamPage: presentation.answerStreamPage }; }
+  ) { this.planning = planning ?? { pageLimit: 12_000, answerStreamContent: presentation.answerStreamContent, renderAnswerStreamPage: presentation.answerStreamPage }; }
 
   converge(promptId: string, workClass?: OutboundWorkClass): Promise<void> {
     const previous = this.tails.get(promptId) ?? Promise.resolve();

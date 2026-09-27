@@ -15,7 +15,7 @@ const cardsSchema = z.object({
   updateDebounceMs: z.number().int().min(0).max(10_000).default(500),
   payloadLimitChars: z.number().int().min(1_000).max(50_000).default(12_000),
   answerStreamLimitChars: z.number().int().min(4_000).max(50_000).default(28_000),
-  answerPageLimitChars: z.number().int().min(1_000).max(28_000).default(9_000)
+  answerPageLimitChars: z.number().int().min(1_000).max(28_000).default(12_000)
 }).strict().default({}).superRefine((cards, context) => {
   if (cards.answerPageLimitChars > cards.answerStreamLimitChars) context.addIssue({ code: z.ZodIssueCode.custom, path: ["answerPageLimitChars"], message: "must not exceed answerStreamLimitChars" });
 });
