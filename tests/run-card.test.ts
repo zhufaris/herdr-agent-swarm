@@ -47,9 +47,23 @@ describe("run card", () => {
   it("opens only a checkpointed current Answer page from Primary Main", () => {
     const target = { aggregateKind: "primary-turn" as const, aggregateId: "prompt-1", generation: 3, messageId: "answer-page-2" };
     const card = JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), bindingGeneration: 3, phase: "running", currentAnswer: target }));
-    expect(card).toContain("打开当前回复");
+    expect(card).toContain("打开实时 Answer");
     expect(card).toContain("answer-page-2");
-    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), currentAnswer: { ...target, messageId: null } }))).not.toContain("打开当前回复");
+    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), phase: "done", currentAnswer: target }))).toContain("查看最终 Answer");
+    expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), currentAnswer: { ...target, messageId: null } }))).not.toContain("打开实时 Answer");
+  });
+
+  it("places the Answer entry before recent conversation", () => {
+    const target = { aggregateKind: "primary-turn" as const, aggregateId: "prompt-1", generation: 1, messageId: "answer-1" };
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", currentAnswer: target,
+      recentConversation: [{ key: "p1:user", promptId: "p1", role: "user", content: "continue", occurredAt: "now" }]
+    }) as { body: { elements: Array<{ tag?: string; content?: string; behaviors?: Array<{ value?: { action?: string } }> }> } };
+    const answerIndex = card.body.elements.findIndex((element) => element.tag === "button" && element.behaviors?.[0]?.value?.action === "card_target_open");
+    const conversationIndex = card.body.elements.findIndex((element) => element.content?.startsWith("**💬 最近对话**"));
+
+    expect(answerIndex).toBeGreaterThanOrEqual(0);
+    expect(conversationIndex).toBeGreaterThan(answerIndex);
   });
 
   it("documents Primary-scoped Worker creation", () => {
@@ -173,8 +187,12 @@ describe("run card", () => {
       content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `nxmz · yx0c`\n**AGENT**  `TraeX`   **MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
     });
     expect(projectCard.body.elements.at(-1)).toMatchObject({
-      tag: "markdown",
-      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `yx0c`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+      tag: "collapsible_panel", expanded: false,
+      header: { title: { content: "🖥️ Runtime · yx0c · TraeX · GPT-5.6-Sol · context 31.1K tokens · queue 2" } },
+      elements: [expect.objectContaining({
+        tag: "markdown",
+        content: "`datasage` · `w5:t1` · `yx0c`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+      })]
     });
     expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
   });
@@ -291,10 +309,10 @@ describe("run card", () => {
     const elements = (card as { body: { elements: Array<{ tag: string; content?: string; header?: { title?: { content?: string } } }> } }).body.elements;
     const serialized = JSON.stringify(card);
     const liveIndex = elements.findIndex((element) => element.header?.title?.content === "🎯 当前任务 · 1/2");
-    const workersIndex = elements.findIndex((element) => element.content?.startsWith("**🤖 Workers**"));
+    const workersIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("🤖 Workers ·"));
     const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 当前操作"));
     const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息**"));
-    const footerIndex = elements.findIndex((element) => element.content?.includes("`datasage` · `w5:t2` · `w5:p4E`"));
+    const footerIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("🖥️ Runtime ·"));
 
     expect(liveIndex).toBeGreaterThanOrEqual(0);
     expect(previewIndex).toBeGreaterThan(liveIndex);
@@ -308,6 +326,21 @@ describe("run card", () => {
     expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-1", "line-2", "line-3", "line-4", "line-5", "line-6"]);
     expect(serialized).toContain("`GPT-5.4` · context `36%` · queue `0`");
     expect(serialized).toContain("worktree `feat/query-log`");
+  });
+
+  it("collapses empty Workers and expands populated Workers without losing creation controls", () => {
+    const empty = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "ready" });
+    const populated = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running",
+      workers: [{ instanceId: "worker-1", name: "reviewer", state: "running", currentTaskTitle: "Review cards", queueCount: 0, workerMain: { aggregateKind: "worker-main", aggregateId: "worker-1", generation: 1, messageId: "worker-card" } }]
+    });
+    const emptyPanel = findTaggedNodes(empty, "collapsible_panel").find((panel) => JSON.stringify(panel.header).includes("Workers"));
+    const populatedPanel = findTaggedNodes(populated, "collapsible_panel").find((panel) => JSON.stringify(panel.header).includes("Workers"));
+
+    expect(emptyPanel).toMatchObject({ expanded: false, header: { title: { content: "🤖 Workers · 0" } } });
+    expect(findTaggedNodes(emptyPanel, "form")).toHaveLength(1);
+    expect(populatedPanel).toMatchObject({ expanded: true, header: { title: { content: "🤖 Workers · 1" } } });
+    expect(JSON.stringify(populatedPanel)).toContain("Review cards");
   });
 
   it("keeps the legacy current-work fallback when no live status exists", () => {
@@ -446,6 +479,28 @@ describe("run card", () => {
 
     expect(preview.length).toBeLessThanOrEqual(3_000);
     for (let index = 0; index < 5; index += 1) expect(preview).toContain(`tail-${index}`);
+  });
+
+  it("caps each recent message at four lines and gives the newest message more character budget", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"),
+      recentConversation: [
+        { key: "p1:user", promptId: "p1", role: "user", content: `old-head\nold-2\nold-3\nold-4\n${"o".repeat(2_000)} old-tail`, occurredAt: "one" },
+        { key: "p1:agent", promptId: "p1", role: "agent", content: `new-head\nnew-2\nnew-3\nnew-4\n${"n".repeat(2_000)} new-tail`, occurredAt: "two" }
+      ]
+    });
+    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
+      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+    const oldBody = preview.split("**用户**\n")[1]!.split("\n\n**Agent**")[0]!;
+    const newestBody = preview.split("**Agent**\n")[1]!;
+
+    expect(oldBody.split("\n").length).toBeLessThanOrEqual(4);
+    expect(newestBody.split("\n").length).toBeLessThanOrEqual(4);
+    expect(oldBody).not.toContain("old-head");
+    expect(newestBody).not.toContain("new-head");
+    expect(oldBody).toContain("old-tail");
+    expect(newestBody).toContain("new-tail");
+    expect(newestBody.length).toBeGreaterThan(oldBody.length);
   });
 
   it("keeps native Agent console status out of the recent conversation preview", () => {

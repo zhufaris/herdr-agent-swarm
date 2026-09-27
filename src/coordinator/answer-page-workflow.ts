@@ -93,14 +93,21 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const items = answerItems(view);
     const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
     if (checkpoint.pending) return;
-    const active = view.phase !== "completed" && view.phase !== "failed";
+    const terminalSummary = view.phase === "completed" || view.phase === "failed"
+      ? { state: view.phase, startedAt: view.startedAt, finishedAt: view.finishedAt }
+      : undefined;
+    const active = terminalSummary === undefined;
     const binding = this.store.getBinding(view.bindingId);
     const metadata = {
       projectId: binding?.projectId,
       paneId: binding?.paneId ?? view.paneId,
       paneToken: binding?.paneToken ?? view.paneToken
     };
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents, metadata, activityFrame: view.viewVersion });
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, {
+      active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice,
+      progressEvents: view.progressEvents, metadata, activityFrame: view.viewVersion,
+      ...(terminalSummary ? { terminalSummary } : {})
+    });
     if (plan.nextCursor) {
       if (!binding?.rootMessageId) return;
       const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.planning.pageLimit, metadata });

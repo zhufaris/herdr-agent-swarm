@@ -11,7 +11,6 @@ import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 import { actionRow, cardSection, lifecycleMarker, passiveCardElements, recentItems } from "./card-style.js";
 import { renderProgressTimeline } from "./progress-timeline.js";
 import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
-import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS } from "../domain/swarm-command.js";
 import { renderAnswerTimeline } from "./answer-timeline.js";
 import { currentMainCardActivity } from "../domain/main-card-activity.js";
@@ -41,6 +40,7 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
 const MAIN_CARD_PREVIEW_LIMIT = 2_000;
 const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 6;
 const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 3_000;
+const RECENT_CONVERSATION_MESSAGE_LINE_LIMIT = 4;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";
 const AGENT_LABEL: Record<AgentKind, string> = { traex: "TraeX", pi: "Pi", codex: "Codex", "claude-code": "Claude Code" };
@@ -152,9 +152,9 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
   if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
+  if (input.currentAnswer?.messageId) elements.push(callbackButton(mainAnswerActionLabel(input.phase), { action: "card_target_open", ...input.currentAnswer }, "primary"));
   if (conversationPreview) elements.push({ tag: "markdown", content: `${conversationHeading}\n\n${conversationPreview}` });
   else if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
-  if (input.currentAnswer?.messageId) elements.push(callbackButton(currentPageActionLabel("answer"), { action: "card_target_open", ...input.currentAnswer }, "primary"));
   const createWorker = { tag: "form", name: "primary_worker_create_form", elements: [
     { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "Worker name，例如 reviewer" } },
     formSubmitButton("创建并启动 Worker", "primary_worker_create_submit", {
@@ -170,16 +170,8 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     ...(input.liveStatus?.planSteps.filter((step) => step.state === "active").map((step) => step.label) ?? [])
   ]);
   if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前操作", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
-  if (input.workers.length > 0) {
-    elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n${input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n")}${input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : ""}` });
-    const workerButtons = [
-      ...input.workers.flatMap((worker) => worker.workerMain.messageId ? [callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default")] : [])
-    ];
-    const row = actionRow(workerButtons);
-    if (row) elements.push(row);
-    if (canCreateWorker) elements.push(createWorker);
-  } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, ...(canCreateWorker ? [createWorker] : []));
-  elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
+  elements.push({ tag: "hr" }, renderWorkersPanel(input, createWorker, canCreateWorker));
+  elements.push({ tag: "hr" }, renderRuntimePanel(input));
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
@@ -438,18 +430,37 @@ function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" |
   return [identity, runtime, `**WORKTREE**  \`${escapeCode(truncate(input.worktreeName ?? "—", 64))}\``].join("\n");
 }
 
-function runtimeFooter(input: TopicViewState): string {
+function renderWorkersPanel(input: TopicViewState, createWorker: object, canCreateWorker: boolean): object {
+  const count = input.workers.length + input.workerOverflowCount;
+  const content = input.workers.length
+    ? input.workers.map((worker) => `- ${lifecycleMarker(worker.state)} ${worker.name} · ${worker.state}${worker.currentTaskTitle ? ` · ${worker.currentTaskTitle}` : ""}${worker.queueCount > 0 ? ` · queue ${worker.queueCount}` : ""}`).join("\n") + (input.workerOverflowCount > 0 ? `\n- … 另有 ${input.workerOverflowCount} 个 Worker` : "")
+    : "暂无 Worker。";
+  const workerButtons = input.workers.flatMap((worker) => worker.workerMain.messageId ? [callbackButton(`打开 ${worker.name}`, { action: "card_target_open", ...worker.workerMain }, "default")] : []);
+  const row = actionRow(workerButtons);
+  return {
+    tag: "collapsible_panel", expanded: input.workers.length > 0, border: { color: "grey", corner_radius: "6px" },
+    header: { title: { tag: "plain_text", content: `🤖 Workers · ${count}` } },
+    elements: [{ tag: "markdown", content }, ...(row ? [row] : []), ...(canCreateWorker ? [createWorker] : [])]
+  };
+}
+
+function renderRuntimePanel(input: TopicViewState): object {
   const identity = [input.spaceName, input.tabId, displayPaneIdentity(input)].filter(Boolean).map((value) => `\`${escapeCode(value!)}\``).join(" · " );
   const preference = modelPreferenceHint(input);
   const runtime = [`agent \`${escapeCode(agentLabel(input.agentKind))}\``, input.model ? `\`${escapeCode(input.model)}\`` : null, preference, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
   const updated = relativeTime(input.activityAt);
   const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
-  return [cardSection("🖥️", "Runtime"), identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
+  const summary = [displayPaneIdentity(input), agentLabel(input.agentKind), input.model, input.context ? `context ${input.context}` : null, `queue ${input.queueDepth}`].filter(Boolean).map((value) => String(value).replace(/\s+/g, " ").trim()).join(" · " );
+  return {
+    tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
+    header: { title: { tag: "plain_text", content: truncate(`🖥️ Runtime · ${summary}`, 160) } },
+    elements: [{ tag: "markdown", content: [identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n") }]
+  };
 }
 
 function renderRecentConversation(messages: TopicViewState["recentConversation"], limit: number): string | null {
   const visible = messages.slice(-5)
-    .map((message) => ({ ...message, content: message.role === "agent" ? stripNativeTraexStatus(message.content) : message.content }))
+    .map((message) => ({ ...message, content: boundConversationLines(message.role === "agent" ? stripNativeTraexStatus(message.content) : message.content) }))
     .filter((message) => message.content.trim());
   if (!visible.length) return null;
   const labels = visible.map((message) => message.role === "user" ? "**用户**" : "**Agent**");
@@ -460,24 +471,35 @@ function renderRecentConversation(messages: TopicViewState["recentConversation"]
 }
 
 function allocateConversationBudgets(lengths: readonly number[], total: number): number[] {
+  if (lengths.length <= 1) return lengths.map((length) => Math.min(length, total));
   const budgets = Array(lengths.length).fill(0) as number[];
-  const pending = new Set(lengths.map((_, index) => index));
+  const newest = lengths.length - 1;
+  const olderShare = Math.floor(total / (lengths.length + 1));
   let remaining = total;
-  while (pending.size > 0) {
-    const share = Math.floor(remaining / pending.size);
-    const complete = [...pending].filter((index) => lengths[index]! <= share);
-    if (complete.length === 0) {
-      const ordered = [...pending];
-      for (const [offset, index] of ordered.entries()) budgets[index] = share + (offset >= ordered.length - remaining % ordered.length ? 1 : 0);
-      break;
-    }
-    for (const index of complete) {
-      budgets[index] = lengths[index]!;
-      remaining -= budgets[index]!;
-      pending.delete(index);
-    }
+  for (let index = 0; index < newest; index += 1) {
+    budgets[index] = Math.min(lengths[index]!, olderShare);
+    remaining -= budgets[index]!;
+  }
+  budgets[newest] = Math.min(lengths[newest]!, Math.max(0, remaining));
+  remaining -= budgets[newest]!;
+  for (let index = newest - 1; index >= 0 && remaining > 0; index -= 1) {
+    const extra = Math.min(lengths[index]! - budgets[index]!, remaining);
+    budgets[index] = budgets[index]! + extra;
+    remaining -= extra;
   }
   return budgets;
+}
+
+function boundConversationLines(content: string): string {
+  const normalized = normalizeLarkPreview(content);
+  const lines = normalized.split("\n");
+  if (lines.length <= RECENT_CONVERSATION_MESSAGE_LINE_LIMIT) return normalized;
+  const visibleTail = lines.slice(-(RECENT_CONVERSATION_MESSAGE_LINE_LIMIT - 1));
+  return [`… 省略 ${lines.length - visibleTail.length} 行`, ...visibleTail].join("\n");
+}
+
+function mainAnswerActionLabel(phase: TopicViewPhase): string {
+  return phase === "done" ? "查看最终 Answer" : "打开实时 Answer";
 }
 
 function modelPreferenceHint(input: TopicViewState): string | null {

@@ -35,7 +35,7 @@ describe("safe rich-text Answer streaming", () => {
     expect(richTextAnswerTitle({ projectId: "herdr-agent-swarm", paneId: "wN:p4D", paneToken: "vdfn" }, 0))
       .toBe("🤖 herdr-agent-swarm · vdfn");
     expect(richTextAnswerTitle({ projectId: "herdr-agent-swarm", paneId: "wN:p4E", paneToken: "yx0c", workerName: "reviewer" }, 1))
-      .toBe("🤖 herdr-agent-swarm · yx0c · reviewer · 续 2");
+      .toBe("🤖 herdr-agent-swarm · yx0c · reviewer · 第 2 页");
   });
 
   it("falls back to Pane ID and safely bounds malformed title metadata", () => {
@@ -51,13 +51,13 @@ describe("safe rich-text Answer streaming", () => {
   it("attaches metadata titles to active and terminal page documents", () => {
     const metadata = { projectId: "bridge", paneId: "w1:p1", paneToken: "abcd" };
     expect(planRichTextAnswerPage([], null, { active: true, pageIndex: 0, metadata }).document.title).toBe("🤖 bridge · abcd");
-    expect(planRichTextAnswerPage([], null, { active: false, pageIndex: 2, metadata }).document.title).toBe("🤖 bridge · abcd · 续 3");
+    expect(planRichTextAnswerPage([], null, { active: false, pageIndex: 2, metadata }).document.title).toBe("🤖 bridge · abcd · 第 3 页");
   });
 
   it("renders command tool activity as bash Markdown and labels continuation pages", () => {
     const items = [{ kind: "tool" as const, id: "t1", sequence: 1, category: "command" as const, label: "npm test", command: "npm test", resultPreview: "ok", state: "succeeded" as const }];
     const page = planRichTextAnswerPage(items, null, { active: true, pageIndex: 1 });
-    expect(page.document.title).toBe("回答（续 2）");
+    expect(page.document.title).toBe("回答（第 2 页）");
     expect(page.document.markdown).toContain("⚙️ Ran · ✓\n\n```bash\nnpm test\n```");
     expect(page.document.markdown).toContain("> └ ok");
     expect(page.document.markdown).not.toContain("`npm test`");
@@ -100,16 +100,30 @@ describe("safe rich-text Answer streaming", () => {
     expect(markdown).toContain("❌ 执行失败 · 连接中断");
   });
 
-  it("compacts, sanitizes, and redacts tool previews", () => {
-    const items = [{
-      kind: "tool" as const, id: "t1", sequence: 1, category: "read" as const, label: "\u001b[32msrc/config.ts\u001b[0m",
-      resultPreview: "\u001b[31mfirst line\u001b[0m\n\nclient_secret=do-not-show\nthird line", state: "succeeded" as const
-    }];
+  it("selects useful preview lines by tool state while sanitizing and redacting output", () => {
+    const items = [
+      { kind: "tool" as const, id: "running", sequence: 1, category: "read" as const, label: "running", resultPreview: "first\nlatest", state: "running" as const },
+      { kind: "tool" as const, id: "succeeded", sequence: 2, category: "read" as const, label: "\u001b[32msrc/config.ts\u001b[0m", resultPreview: "\u001b[31mfirst line\u001b[0m\n\nclient_secret=do-not-show\nthird line", state: "succeeded" as const },
+      { kind: "tool" as const, id: "failed", sequence: 3, category: "test" as const, label: "failed", resultPreview: "error header\ndetail one\ndetail two\nfinal cause", state: "failed" as const }
+    ];
     const markdown = planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document.markdown;
     expect(markdown).toContain("📖 Read · src/config.ts · ✓");
-    expect(markdown).toContain("> └ first line …（省略 2 行）");
+    expect(markdown).toContain("> └ latest （前 1 行已省略）");
+    expect(markdown).toContain("> └ third line （前 2 行已省略）");
+    expect(markdown).toContain("> └ error header …（省略 2 行）… final cause");
     expect(markdown).not.toContain("do-not-show");
     expect(markdown).not.toContain("\u001b");
+  });
+
+  it("preserves both ends of a long failed tool preview", () => {
+    const items = [{
+      kind: "tool" as const, id: "failed", sequence: 1, category: "test" as const, label: "suite",
+      resultPreview: `${"header ".repeat(40)}\nintermediate\n${"detail ".repeat(40)}final cause`, state: "failed" as const
+    }];
+    const markdown = planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document.markdown;
+
+    expect(markdown).toContain("> └ header");
+    expect(markdown).toContain("final cause");
   });
 
   it("keeps one current task-list snapshot before the active cursor", () => {
@@ -122,11 +136,9 @@ describe("safe rich-text Answer streaming", () => {
     ];
     const active = planRichTextAnswerPage([], null, { active: true, pageIndex: 0, progressEvents }).document.markdown;
     expect(active).toContain("📋 **任务 4/7**");
-    expect(active).toContain("- … 2 个较早步骤");
+    expect(active).toContain("- … 5 个其他步骤");
     expect(active).not.toContain("步骤 1");
-    expect(active).toContain("- ✔ 步骤 3");
     expect(active).toContain("- ■ 步骤 5");
-    expect(active).toContain("- ◻ 步骤 6");
     expect(active).toContain("- ✕ 步骤 7");
     expect(active).toMatch(/📋 \*\*任务 4\/7\*\*[\s\S]*\n\n💭$/);
 
@@ -135,12 +147,35 @@ describe("safe rich-text Answer streaming", () => {
     expect(terminal).not.toContain("💭");
   });
 
+  it("renders terminal state and valid duration only on terminal pages", () => {
+    const items = [{ kind: "final_answer" as const, id: "m1", sequence: 1, markdown: "Done" }];
+    const completed = planRichTextAnswerPage(items, null, {
+      active: false, pageIndex: 0,
+      terminalSummary: { state: "completed", startedAt: "2026-09-27T00:00:00.000Z", finishedAt: "2026-09-27T00:01:05.000Z" }
+    }).document.markdown;
+    expect(completed).toContain("---\n✅ 已完成 · 用时 1m 5s");
+
+    const invalid = planRichTextAnswerPage(items, null, {
+      active: false, pageIndex: 0,
+      terminalSummary: { state: "failed", startedAt: "later", finishedAt: "earlier" }
+    }).document.markdown;
+    expect(invalid).toContain("---\n❌ 执行失败");
+    expect(invalid).not.toContain("用时");
+
+    const active = planRichTextAnswerPage(items, null, {
+      active: true, pageIndex: 0,
+      terminalSummary: { state: "cancelled", startedAt: "2026-09-27T00:00:00.000Z", finishedAt: "2026-09-27T00:00:01.000Z" }
+    }).document.markdown;
+    expect(active).not.toContain("已取消");
+    expect(planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document.markdown).not.toMatch(/已完成|执行失败|已取消|状态不确定/);
+  });
+
   it("advances the canonical cursor across long Markdown without whitespace", () => {
     const items = [{ kind: "final_answer" as const, id: "m1", sequence: 1, markdown: "a".repeat(20_000) }];
     const first = planRichTextAnswerPage(items, null, { active: false, pageIndex: 0, limit: 9_000 });
     const second = planRichTextAnswerPage(items, first.nextCursor, { active: false, pageIndex: 1, limit: 9_000 });
     expect(first.nextCursor?.markdownOffset).toBeGreaterThan(0);
     expect(second.nextCursor?.markdownOffset).toBeGreaterThan(first.nextCursor!.markdownOffset);
-    expect(second.document.title).toBe("回答（续 2）");
+    expect(second.document.title).toBe("回答（第 2 页）");
   });
 });

@@ -45,36 +45,44 @@ export interface RichTextAnswerMetadata {
   workerName?: string | null | undefined;
 }
 
+export interface RichTextAnswerTerminalSummary {
+  state: "completed" | "failed" | "cancelled" | "dispatch-uncertain";
+  startedAt?: string | null;
+  finishedAt?: string | null;
+}
+
 export function richTextAnswerTitle(metadata: RichTextAnswerMetadata, pageIndex: number): string {
   const project = safeTitleSegment(metadata.projectId, 72, "未知项目");
   const pane = safeTitleSegment(displayPaneIdentity(metadata, "未知 Pane"), 64, "未知 Pane");
   const worker = metadata.workerName ? safeTitleSegment(metadata.workerName, 48, "Worker") : "";
-  const parts = [`🤖 ${project}`, pane, worker, pageIndex > 0 ? `续 ${pageIndex + 1}` : ""].filter(Boolean);
+  const parts = [`🤖 ${project}`, pane, worker, pageIndex > 0 ? `第 ${pageIndex + 1} 页` : ""].filter(Boolean);
   return truncateInline(parts.join(" · "), ANSWER_TITLE_LIMIT);
 }
 
 export function planRichTextAnswerPage(
   items: readonly AnswerTimelineItem[],
   cursor: AnswerTimelineCursor | null,
-  options: { active: boolean; pageIndex: number; limit?: number; prefixItems?: readonly AnswerTimelineItem[]; terminalNotice?: string | null; progressEvents?: readonly RunProgressEvent[]; metadata?: RichTextAnswerMetadata; activityFrame?: number }
+  options: { active: boolean; pageIndex: number; limit?: number; prefixItems?: readonly AnswerTimelineItem[]; terminalNotice?: string | null; progressEvents?: readonly RunProgressEvent[]; metadata?: RichTextAnswerMetadata; activityFrame?: number; terminalSummary?: RichTextAnswerTerminalSummary }
 ): RichTextAnswerPage {
   const safeItems = options.active ? items.map(safeStreamingItem) : [...items];
   const safePrefix = options.active ? (options.prefixItems ?? []).map(safeStreamingItem) : options.prefixItems ?? [];
   const footer = taskListMarkdown(options.progressEvents ?? []);
   const activityMarker = answerActivityMarker(options.activityFrame ?? 0);
-  const suffixBudget = footer.length + (options.active ? activityMarker.length + 4 : 0) + (options.terminalNotice?.length ?? 0) + 8;
+  const terminalSummary = options.active ? "" : terminalSummaryMarkdown(options.terminalSummary);
+  const suffixBudget = footer.length + terminalSummary.length + (options.active ? activityMarker.length + 4 : 0) + (options.terminalNotice?.length ?? 0) + 12;
   const pageLimit = Math.max(1, (options.limit ?? ANSWER_RICH_TEXT_PAGE_LIMIT) - suffixBudget);
   const page = planAnswerTimelinePage(safeItems, cursor, pageLimit, safePrefix);
   const body = markdownFromTimelineItems(page.items);
   const sections: string[] = [];
   if (body) sections.push(body);
   else if (options.active) sections.push("正在生成…");
+  if (terminalSummary) sections.push(terminalSummary);
   if (!options.active && options.terminalNotice) sections.push(`⚠️ ${safeInline(options.terminalNotice, TOOL_PREVIEW_LIMIT)}`);
   if (footer) sections.push(footer);
   if (options.active) sections.push(activityMarker);
   const markdown = sections.join("\n\n").trim() || "任务已结束，未生成可展示内容。";
   return {
-    document: { ...(options.metadata ? { title: richTextAnswerTitle(options.metadata, options.pageIndex) } : options.pageIndex > 0 ? { title: `回答（续 ${options.pageIndex + 1}）` } : {}), markdown },
+    document: { ...(options.metadata ? { title: richTextAnswerTitle(options.metadata, options.pageIndex) } : options.pageIndex > 0 ? { title: `回答（第 ${options.pageIndex + 1} 页）` } : {}), markdown },
     items: page.items,
     nextCursor: page.nextCursor
   };
@@ -153,7 +161,7 @@ function markdownFromTimelineItem(item: AnswerTimelineItem): string {
   const command = (item.category === "command" || item.category === "test") && item.command ? bashCommandBlock(item.command) : "";
   const source = safeInline(item.label, TOOL_LABEL_LIMIT);
   const summary = command ? `${category.icon} ${category.label} · ${TOOL_STATE[item.state]}` : `${category.icon} ${category.label} · ${source} · ${TOOL_STATE[item.state]}`;
-  const preview = compactPreview(item.resultPreview);
+  const preview = compactPreview(item.resultPreview, item.state);
   return [summary, command, preview ? `> └ ${preview}` : ""].filter(Boolean).join(command ? "\n\n" : "\n");
 }
 
@@ -165,12 +173,16 @@ function bashCommandBlock(value: string): string {
   return `${fence}bash\n${command}\n${fence}`;
 }
 
-function compactPreview(value: string | undefined): string {
+function compactPreview(value: string | undefined, state: "running" | "succeeded" | "failed"): string {
   if (!value) return "";
   const lines = redactSecrets(stripAnsi(value)).replace(/\r\n?/g, "\n").split("\n").map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   if (lines.length === 0) return "";
-  const suffix = lines.length > 1 ? ` …（省略 ${lines.length - 1} 行）` : "";
-  return truncateInline(`${lines[0]}${suffix}`, TOOL_PREVIEW_LIMIT);
+  if (state === "failed" && lines.length > 1) {
+    const omitted = Math.max(0, lines.length - 2);
+    return truncateMiddleInline(`${lines[0]}${omitted ? ` …（省略 ${omitted} 行）… ` : " … "}${lines.at(-1)!}`, TOOL_PREVIEW_LIMIT);
+  }
+  const omitted = lines.length - 1;
+  return truncateInline(`${lines.at(-1)!}${omitted ? ` （前 ${omitted} 行已省略）` : ""}`, TOOL_PREVIEW_LIMIT);
 }
 
 function taskListMarkdown(events: readonly RunProgressEvent[]): string {
@@ -183,12 +195,36 @@ function taskListMarkdown(events: readonly RunProgressEvent[]): string {
   const steps = [...latest.values()];
   if (steps.length === 0) return "";
   const completed = steps.filter((step) => step.state === "done").length;
-  const visible = steps.slice(-TASK_LIST_VISIBLE_STEPS);
+  const important = steps.filter((step) => step.state === "active" || step.state === "failed");
+  const visible = steps.length <= TASK_LIST_VISIBLE_STEPS ? steps : important.length ? important : steps.slice(-1);
   const hidden = steps.length - visible.length;
   const lines = [`---`, `📋 **任务 ${completed}/${steps.length}**`];
-  if (hidden > 0) lines.push(`- … ${hidden} 个较早步骤`);
+  if (hidden > 0) lines.push(`- … ${hidden} 个其他步骤`);
   for (const step of visible) lines.push(`- ${TASK_STATE[step.state]} ${safeInline(step.label, TASK_STEP_LIMIT)}`);
   return lines.join("\n");
+}
+
+function terminalSummaryMarkdown(summary: RichTextAnswerTerminalSummary | undefined): string {
+  if (!summary) return "";
+  const label = {
+    completed: "✅ 已完成",
+    failed: "❌ 执行失败",
+    cancelled: "⏹️ 已取消",
+    "dispatch-uncertain": "⚠️ 状态不确定"
+  }[summary.state];
+  const duration = elapsedDuration(summary.startedAt, summary.finishedAt);
+  return ["---", [label, duration ? `用时 ${duration}` : null].filter(Boolean).join(" · ")].join("\n");
+}
+
+function elapsedDuration(startedAt: string | null | undefined, finishedAt: string | null | undefined): string | null {
+  if (!startedAt || !finishedAt) return null;
+  const elapsed = Date.parse(finishedAt) - Date.parse(startedAt);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return null;
+  const seconds = Math.floor(elapsed / 1_000);
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return [hours ? `${hours}h` : null, minutes ? `${minutes}m` : null, `${remainder}s`].filter(Boolean).join(" ");
 }
 
 function safeInline(value: string, limit: number): string {
@@ -202,6 +238,13 @@ function safeTitleSegment(value: string | null | undefined, limit: number, fallb
 
 function truncateInline(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function truncateMiddleInline(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  const headLength = Math.ceil((limit - 1) / 2);
+  const tailLength = Math.floor((limit - 1) / 2);
+  return `${value.slice(0, headLength).trimEnd()}…${value.slice(-tailLength).trimStart()}`;
 }
 
 function stripAnsi(value: string): string {

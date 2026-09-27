@@ -19,7 +19,7 @@ export function initialRichTextAnswerPayload(pageIndex: number, pageStart: numbe
     pageStart,
     elementId,
     document: {
-      ...(title ? { title } : pageIndex > 0 ? { title: `回答（续 ${pageIndex + 1}）` } : {}),
+      ...(title ? { title } : pageIndex > 0 ? { title: `回答（第 ${pageIndex + 1} 页）` } : {}),
       markdown: "正在生成… 💭"
     }
   };

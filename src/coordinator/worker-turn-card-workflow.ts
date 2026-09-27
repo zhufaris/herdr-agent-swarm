@@ -101,7 +101,11 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     const active = !["completed", "failed", "cancelled", "dispatch-uncertain"].includes(view.phase);
     const instance = this.store.getAgentInstance(view.instanceId);
     const metadata = { projectId: instance?.projectId, paneId: instance?.runtimeRef?.paneId, paneToken: instance?.runtimeRef?.paneToken, workerName: view.workerName };
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents, metadata, activityFrame: view.viewVersion });
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, {
+      active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice,
+      progressEvents: view.progressEvents, metadata, activityFrame: view.viewVersion,
+      ...(active ? {} : { terminalSummary: { state: view.phase as "completed" | "failed" | "cancelled" | "dispatch-uncertain", startedAt: view.startedAt, finishedAt: view.finishedAt } })
+    });
     if (plan.nextCursor) {
       const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.pageLimit, metadata });
       const nextPageIndex = page.pageIndex + 1;
