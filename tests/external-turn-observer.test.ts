@@ -15,6 +15,60 @@ import { initialTopicView } from "../src/domain/topic-view.js";
 import { MAX_TURN_OUTPUT_CHARS, TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
 
 describe("ExternalTurnObserver", () => {
+  it("baselines an idle binding at the latest Core cursor instead of replaying historical turns", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1",
+      lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const cursor = { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } };
+    const transcriptReader = {
+      open: vi.fn(async () => ({ mode: "typed" as const, cursor })),
+      openActiveTurn: vi.fn(async () => { throw new Error("historical scan must not run"); })
+    };
+    const observer = new ExternalTurnObserver({
+      store, transcriptReader, bus: new BridgeEventBus(), outboundWork: { wake() {} },
+      logger: pino({ enabled: false }), presentation: primaryPresentation,
+      isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "historical-turn"
+    });
+
+    await observer.observe(store.getBinding("b1")!);
+
+    expect(transcriptReader.open).toHaveBeenCalledOnce();
+    expect(transcriptReader.openActiveTurn).not.toHaveBeenCalled();
+    expect(store.getPrompt("historical-turn")).toBeNull();
+    await observer.stop();
+    store.close();
+  });
+
+  it.each(["working", "blocked"] as const)("recovers the active Core turn when the Pane is %s", async (lastAgentState) => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState,
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const cursor = { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } };
+    const transcriptReader = {
+      open: vi.fn(async () => ({ mode: "typed" as const, cursor })),
+      openActiveTurn: vi.fn(async () => ({ mode: "typed" as const, cursor }))
+    };
+    const observer = new ExternalTurnObserver({
+      store, transcriptReader, bus: new BridgeEventBus(), outboundWork: { wake() {} },
+      logger: pino({ enabled: false }), presentation: primaryPresentation,
+      isBindingBusy: () => false, wakePrompt() {}
+    });
+
+    await observer.observe(store.getBinding("b1")!);
+
+    expect(transcriptReader.openActiveTurn).toHaveBeenCalledOnce();
+    expect(transcriptReader.open).not.toHaveBeenCalled();
+    await observer.stop();
+    store.close();
+  });
+
   it("converges both Primary cards from one direct Herdr turn after a pane hint", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
@@ -56,8 +110,8 @@ describe("ExternalTurnObserver", () => {
 
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
 
-    expect(transcriptReader.openActiveTurn).toHaveBeenCalledOnce();
-    expect(transcriptReader.open).not.toHaveBeenCalled();
+    expect(transcriptReader.open).toHaveBeenCalledOnce();
+    expect(transcriptReader.openActiveTurn).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", executionOrigin: "herdr", transcriptTurnId: "turn-1" }));
     await vi.waitFor(() => expect(answerUpdates.some((content) => content.includes("direct answer"))).toBe(true));
     await vi.waitFor(() => expect(mainUpdates.some((card) => JSON.stringify(card).includes("direct answer"))).toBe(true));

@@ -191,7 +191,9 @@ export class ExternalTurnObserver {
         source,
         boundary: durable?.transcriptTurnId && durable.transcriptTurnStartedAt
           ? { kind: "at", turnId: durable.transcriptTurnId, startedAt: durable.transcriptTurnStartedAt }
-          : { kind: "active" }
+          : binding.lastAgentState === "working" || binding.lastAgentState === "blocked"
+            ? { kind: "active" }
+            : { kind: "latest" }
       });
       if (opened.mode !== "typed") { this.bindings.delete(binding.id); return; }
       observed = { identity, cursor: opened.cursor, pendingStarts: new Map(), promptsByTurn: new Map(), idleWithoutTerminalConfirmations: 0, lastIdleObservedAt: null };

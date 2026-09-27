@@ -1187,9 +1187,12 @@ A transcript failure does not fail or replay the prompt.
 
 For a bound pane, reconciliation also keeps an independent external-turn cursor
 with a lightweight two-second Agent Events poll between full Herdr reconciliations.
-It adopts only a fresh retained turn so a process restart or late observer
-registration does not lose a direct Herdr request; unrelated completed history is
-never imported. Core does not expose prompt text, so a directly initiated turn
+When SQLite has no exact durable external turn, an `idle`, `done`, or `unknown`
+Pane establishes its cursor at Core's latest boundary and never scans retained
+history. Only a currently `working` or `blocked` Pane may recover Core's latest
+active turn. This prevents startup from importing completed history while still
+covering a direct Herdr request that was already in flight when the observer
+started. Core does not expose prompt text, so a directly initiated turn
 uses a fixed synthetic task description while its replies remain canonical.
 Background polling pauses while the binding worker owns the turn
 boundary. Before that worker claims each queued Lark prompt, it performs one
