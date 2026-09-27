@@ -162,6 +162,7 @@ describe("card context boundaries", () => {
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ paneId: "worker:pane", paneToken: "work", parentPaneId: "primary:pane", parentPaneToken: "prim", currentTask: { turnId: task.turnId, title: "Review durable boundary", requestText: task.requestText, taskCard: { messageId: null } }, queueCount: 1, frozenAt: null });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerId: worker.id, currentTaskTitle: "Review durable boundary" }] });
     expect(store.loadRunCard(answer.promptId)).toMatchObject({ workerActivity: [{ workerId: worker.id, taskCount: 1, latestTaskCard: { messageId: null } }], workerContextFrozenAt: null });
+    expect(store.listPendingOutboundReplies().some(({ promptId, cardRole, kind, intentKind }) => promptId === answer.promptId && cardRole === "answer" && kind === "card_update" && intentKind === "card")).toBe(false);
     const workerMainCreate = store.listPendingOutboundReplies().find(({ workerId }) => workerId === worker.id)!;
     expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(workerMainCreate.id)).toEqual({ lane_key: "gateway:feishu:primary:worker-thread:reviewer:1" });
     store.markOutboundReplyDelivered(workerMainCreate.id, "worker-main-message", "worker-main-card", "worker-topic");

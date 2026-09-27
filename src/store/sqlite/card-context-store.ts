@@ -156,12 +156,12 @@ export class SqliteCardContextStore {
         });
       } else {
         const previous = this.dependencies.loadRunCard(invalidation.targetId);
-        const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;
+        const page = previous ? this.database.prepare("SELECT state, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string; delivery_mode: string } | undefined : undefined;
         if (!previous || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null || page?.state === "frozen" || page?.state === "finished") return this.markStale(invalidation);
         const activity = selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(previous.promptId, invalidation.targetGeneration));
         const next = updateRunCardWorkerContext(previous, activity, invalidation.requestedDependencyRevision, now());
         if (next !== previous) this.dependencies.saveRunCard(next);
-        if (next.answerMessageId && next.viewVersion > next.answerDeliveredVersion) {
+        if (page?.delivery_mode !== "rich_post" && next.answerMessageId && next.viewVersion > next.answerDeliveredVersion) {
           this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(renderers.primaryAnswer(next)) });
           reserved = true;
         }

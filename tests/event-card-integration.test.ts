@@ -259,7 +259,7 @@ describe("event-driven card projection", () => {
     store.close();
   });
 
-  it("coalesces repeated queue-feedback ticks to the newest durable answer update", async () => {
+  it("persists repeated queue-feedback ticks without patching a rich-text Answer as a card", async () => {
     let clock = "2026-08-29T12:00:20.000Z";
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -279,9 +279,8 @@ describe("event-driven card projection", () => {
     await projector.refresh("b1");
 
     const updates = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1" && reply.kind === "card_update");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).toMatchObject({ viewVersion: 3, rootMessageId: "answer-1", cardRole: "answer" });
-    expect(updates[0]!.payload).toContain("当前任务已运行 31 秒");
+    expect(updates).toEqual([]);
+    expect(store.loadRunCard("p1")).toMatchObject({ viewVersion: 3, queueFeedback: { aheadCount: 0, elapsedBucket: 1 } });
     await projector.stop(); store.close();
   });
 

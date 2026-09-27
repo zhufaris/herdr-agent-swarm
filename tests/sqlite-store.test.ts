@@ -3774,7 +3774,7 @@ describe("SQLite store", () => {
     expect(duplicate.consumeEffects()).toEqual([]);
   });
 
-  it("durably catches up a queued Answer view advanced while its card create was in flight", () => {
+  it("keeps a rich-text Answer card-context invalidation current after create delivery", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-create-catch-up-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
@@ -3793,13 +3793,13 @@ describe("SQLite store", () => {
     expect(store.projectCardContext(invalidation, {
       primaryAnswer: (view) => ({ promptId: view.promptId, version: view.viewVersion }),
       primaryMain: () => { throw new Error("not used"); }, workerMain: () => { throw new Error("not used"); }, workerTask: () => { throw new Error("not used"); }
-    })).toBe("reserved");
-    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ promptId: "p1", kind: "card_update", viewVersion: 2, rootMessageId: "answer-1" }));
+    })).toBe("current");
+    expect(store.listPendingOutboundReplies()).not.toContainEqual(expect.objectContaining({ promptId: "p1", kind: "card_update", intentKind: "card", rootMessageId: "answer-1" }));
     expect(store.markOutboundReplyDelivered(create.id, "duplicate", "duplicate-card")).toBe(false);
   });
 
 
-  it("projects changed queued run cards in one batch with per-card answer lanes", () => {
+  it("projects changed queued run cards without patching rich-text Answers as cards", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     const views = ["p1", "p2", "p3"].map((promptId, index) => createQueuedRunCard({
@@ -3821,14 +3821,11 @@ describe("SQLite store", () => {
         { expectedViewVersion: first.viewVersion, view: firstNext, card: { promptId: "p1" } },
         { expectedViewVersion: third.viewVersion, view: thirdNext, card: { promptId: "p3" } }
       ]
-    })).toEqual({ projected: [firstNext, thirdNext], stalePromptIds: [], outboxReserved: true });
+    })).toEqual({ projected: [firstNext, thirdNext], stalePromptIds: [], outboxReserved: false });
     expect(store.loadRunCard("p1")).toMatchObject({ queuePosition: 2, viewVersion: first.viewVersion + 1 });
     expect(store.loadRunCard("p2")).toMatchObject({ queuePosition: 2, viewVersion: views[1]!.viewVersion });
     expect(store.loadRunCard("p3")).toMatchObject({ queuePosition: 4, viewVersion: third.viewVersion + 1 });
-    expect(store.database.prepare("SELECT idempotency_key, lane_key FROM outbound_replies WHERE kind = 'card_update' ORDER BY prompt_id").all()).toEqual([
-      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "gateway:feishu:primary:primary-answer:p1:1" },
-      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "gateway:feishu:primary:primary-answer:p3:1" }
-    ]);
+    expect(store.database.prepare("SELECT idempotency_key, lane_key FROM outbound_replies WHERE kind = 'card_update' ORDER BY prompt_id").all()).toEqual([]);
   });
 
   it("constructs prompt lanes from scalar generation state without the Run Card JSON view", () => {

@@ -82,7 +82,8 @@ export class SqlitePromptStore {
         if (!current || current.bindingId !== input.bindingId || current.phase !== "queued" || current.viewVersion !== projection.expectedViewVersion) { stalePromptIds.push(projection.view.promptId); continue; }
         const view = this.projections.saveRunCard(projection.view);
         projected.push(view);
-        if (view.answerMessageId && projection.card) {
+        const answerPage = this.projections.listAnswerPages(view.promptId).find(({ pageIndex }) => pageIndex === view.answerPageIndex);
+        if (view.answerMessageId && projection.card && answerPage?.deliveryMode !== "rich_post") {
           const reply = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${view.promptId}:answer:${view.viewVersion}`, bindingId: view.bindingId, promptId: view.promptId, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: view.answerMessageId, kind: "card_update", payload: JSON.stringify(projection.card) });
           outboxReserved ||= reply.state === "pending";
         }
