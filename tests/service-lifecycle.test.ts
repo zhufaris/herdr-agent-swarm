@@ -828,6 +828,30 @@ describe("service lifecycle", () => {
     expect(readFileSync(unavailable.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
   });
 
+  it("lets an explicitly forced restart stop an active unit whose status endpoint is unavailable", async () => {
+    const unavailable = createFixture({ port: 1 });
+    await runServiceLifecycle("install", unavailable.environment);
+    writeFileSync(unavailable.calls, "");
+
+    await expect(runServiceLifecycle("restart", {
+      ...unavailable.environment,
+      SWARM_SERVICE_RESTART_TIMEOUT_MS: "300"
+    }, { force: true })).rejects.toThrow();
+
+    expect(readFileSync(unavailable.calls, "utf8")).toContain("--user stop herdr-agent-swarm.service\n");
+  });
+
+  it("does not let an unreachable forced restart stop a unit with foreign listener ownership", async () => {
+    const unavailable = createFixture({ port: 1, mainPid: 4100, listenerPid: 4200 });
+    await runServiceLifecycle("install", unavailable.environment);
+    writeFileSync(unavailable.calls, "");
+
+    await expect(runServiceLifecycle("restart", unavailable.environment, { force: true }))
+      .rejects.toThrow(/listener ownership is not canonical/i);
+
+    expect(readFileSync(unavailable.calls, "utf8")).not.toContain("--user stop herdr-agent-swarm.service\n");
+  });
+
   it("refuses an unforced restart when active-unit work metrics are incomplete", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");

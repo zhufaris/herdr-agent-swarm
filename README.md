@@ -267,7 +267,10 @@ npm run swarm:restart -- --force
 ~~~
 
 A forced restart detaches observers and recovers durable work without replay;
-it does not bypass identity fences or workload correctness checks.
+it bypasses active-work checks. If the status endpoint is unreachable, force is
+accepted only when the configured listener is owned by the canonical user-systemd
+unit. It does not bypass a known foreign identity, failed SQLite quick check, or
+post-start build and listener ownership verification.
 
 ## Install from a GitHub Release
 

@@ -173,7 +173,15 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, f
   try {
     status = await getJson(config.http.host, config.http.port, "/status", true);
   } catch (error) {
-    throw new Error(`restart blocked: active service status is unreachable (${safeMessage(error)}); verify the running unit or retry with --force`);
+    if (!force) throw new Error(`restart blocked: active service status is unreachable (${safeMessage(error)}); verify the running unit or retry with --force`);
+    const unit = sampleUnitRuntime(paths.serviceName, base);
+    const ownership = unit.detail
+      ? unavailableListenerOwnership(unit.detail)
+      : probeListenerOwnershipForPid(unit.mainPid, config.http.host, config.http.port, base);
+    if (!unit.active || !ownership.matches) {
+      throw new Error(`restart blocked: active service status is unreachable and listener ownership is not canonical (${ownership.detail}); refusing forced restart`);
+    }
+    return;
   }
   restartSafety.evaluate(status, { force });
 }
