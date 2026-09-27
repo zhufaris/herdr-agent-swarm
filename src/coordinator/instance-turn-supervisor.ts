@@ -9,8 +9,9 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import type { WorkerTurnCardChange } from "../domain/worker-turn-card-view.js";
 import type { WorkerTurnObservationPort } from "../domain/ports/worker-turn-observation.js";
 
-interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: Pick<WorkerTurnObservationPort, "recover">; wake(instanceId: string): void; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "info" | "warn"> }
+interface Options { store: InstanceTurnSupervisionStore; paneHost: PaneHost; observer?: Pick<WorkerTurnObservationPort, "recover">; wake(instanceId: string): void; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "info" | "warn">; now?: () => Date }
 const OBSERVATION_CONCURRENCY = 4;
+const WORKER_RUNTIME_TURN_BIND_GRACE_MS = 15_000;
 
 export class InstanceTurnSupervisor {
   private timer: NodeJS.Timeout | null = null;
@@ -125,6 +126,15 @@ export class InstanceTurnSupervisor {
     }
     if (pane.agentState === "idle" || pane.agentState === "done") {
       if (turn.state === "running" || turn.state === "blocked") {
+        const view = this.options.store.loadWorkerTurnCard(turnId);
+        const startedAt = view?.startedAt ? Date.parse(view.startedAt) : Number.NaN;
+        if (Number.isFinite(startedAt)) {
+          const now = (this.options.now ?? (() => new Date()))();
+          if (now.getTime() - startedAt < WORKER_RUNTIME_TURN_BIND_GRACE_MS) return;
+          const notice = "Worker 已接收任务，但启动观察窗口内未确认精确 TraeX turn；系统不会自动重放。";
+          this.transition(turnId, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: now.toISOString(), notice }, notice);
+          return;
+        }
         this.transition(turnId, turn.instanceGeneration, "completed", "turn.completed", { type: "completed-without-output", occurredAt: new Date().toISOString(), notice: "任务已结束，但无法从当前恢复路径确认可信的结构化输出。" }, null, "");
         this.options.store.updateAgentInstanceObservation({ instanceId: instance.id, expectedGeneration: instance.generation, observedState: "idle" });
         this.options.wake(instance.id);

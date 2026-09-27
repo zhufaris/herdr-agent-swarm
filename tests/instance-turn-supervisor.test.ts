@@ -7,9 +7,9 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { workerPresentation } from "./helpers/presentation.js";
 
 let store: SqliteBindingStore | undefined;
-afterEach(() => { store?.close(); store = undefined; });
+afterEach(() => { store?.close(); store = undefined; vi.useRealTimers(); });
 
-function setup(state: "dispatching" | "running", options: { convergeWorkerTurn?: (turnId: string) => void } = {}) {
+function setup(state: "dispatching" | "running", options: { convergeWorkerTurn?: (turnId: string) => void; now?: () => Date; observer?: { recover(turnId: string): Promise<void> } } = {}) {
   store = new SqliteBindingStore(":memory:");
   store.createPendingBinding({ id: "binding", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root-1", title: "Primary", creatorOpenId: "ou_primary" });
   store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p0" });
@@ -19,14 +19,27 @@ function setup(state: "dispatching" | "running", options: { convergeWorkerTurn?:
   store.acceptInstanceTurnWithCard({ id: "turn", idempotencyKey: "turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
   store.claimNextInstanceTurn(instance.id, instance.generation);
   store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state, eventKind: `turn.${state}` });
+  if (state === "running") store.applyInstanceTurnProjection({ turnId: "turn", expectedGeneration: instance.generation, change: { type: "running", occurredAt: "2026-09-01T00:00:00.000Z" }, render: renderWorkerTurnCard });
   const inspectPane = vi.fn(async () => ({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" }));
   const wake = vi.fn();
   const wakeOutbound = vi.fn();
-  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, wake, wakeOutbound, convergeWorkerTurn: options.convergeWorkerTurn, presentation: workerPresentation });
+  const supervisor = new InstanceTurnSupervisor({ store, paneHost: { inspectPane } as unknown as PaneHost, observer: options.observer, wake, wakeOutbound, convergeWorkerTurn: options.convergeWorkerTurn, presentation: workerPresentation, now: options.now });
   return { supervisor, inspectPane, wake, wakeOutbound };
 }
 
 describe("InstanceTurnSupervisor", () => {
+  it("keeps a freshly dispatched Worker turn running while its exact transcript identity is starting", async () => {
+    const { supervisor, wake, wakeOutbound } = setup("running", { now: () => new Date("2026-09-01T00:00:05.000Z") });
+
+    await supervisor.reconcile();
+
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "running", runtimeTurnId: null });
+    expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "running", startedAt: "2026-09-01T00:00:00.000Z", answer: "" });
+    expect(store!.listInstanceEvents("worker").map(({ kind }) => kind)).not.toContain("turn.completed");
+    expect(wakeOutbound).not.toHaveBeenCalled();
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("re-converges durable Worker Task cards during startup recovery", () => {
     const convergeWorkerTurn = vi.fn();
     const { supervisor } = setup("running", { convergeWorkerTurn });
@@ -48,15 +61,27 @@ describe("InstanceTurnSupervisor", () => {
     expect(wake).not.toHaveBeenCalled();
   });
 
-  it("observes a proven running turn to completion without dispatching it again", async () => {
-    const { supervisor, wake, wakeOutbound } = setup("running");
+  it("marks a stale running turn dispatch-uncertain without replaying or claiming completion", async () => {
+    const { supervisor, wake, wakeOutbound } = setup("running", { now: () => new Date("2026-09-01T00:00:15.000Z") });
     supervisor.prepareRecovery();
     await supervisor.reconcile();
-    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed", result: "" });
-    expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "completed", resultCapture: "unavailable", answer: "" });
-    expect(JSON.stringify(store!.loadWorkerTurnCard("turn"))).not.toContain("observed:idle");
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "dispatch-uncertain", result: null, error: expect.stringContaining("不会自动重放") });
+    expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "dispatch-uncertain", resultCapture: "pending", answer: "", notice: expect.stringContaining("未确认精确 TraeX turn") });
+    expect(store!.listInstanceEvents("worker").map(({ kind }) => kind)).not.toContain("turn.completed");
     expect(wakeOutbound).toHaveBeenCalled();
-    expect(wake).toHaveBeenCalledWith("worker");
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("uses exact transcript recovery instead of idle-pane inference once the runtime turn is bound", async () => {
+    const recover = vi.fn(async () => undefined);
+    const { supervisor } = setup("running", { observer: { recover }, now: () => new Date("2026-09-01T00:01:00.000Z") });
+    const turn = store!.getInstanceTurn("turn")!;
+    store!.claimInstanceTurnTranscript({ turnId: "turn", expectedGeneration: turn.instanceGeneration, runtimeTurnId: "01a0e1d0-f5d4-7000-8000-000000000001", startedAt: "2026-09-01T00:00:01.000Z" });
+
+    await supervisor.reconcile();
+
+    expect(recover).toHaveBeenCalledWith("turn");
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "running", runtimeTurnId: "01a0e1d0-f5d4-7000-8000-000000000001" });
   });
 
   it("projects recovered blocked and uncertain states only to their own task card", async () => {
@@ -66,6 +91,20 @@ describe("InstanceTurnSupervisor", () => {
     expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "blocked" });
     expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "blocked" });
     expect(wakeOutbound).toHaveBeenCalled();
+  });
+
+  it("keeps a freshly blocked Worker turn observable when its pane briefly returns idle", async () => {
+    const { supervisor, inspectPane, wake } = setup("running", { now: () => new Date("2026-09-01T00:00:05.000Z") });
+    inspectPane.mockResolvedValueOnce({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "blocked", foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" });
+    await supervisor.reconcile();
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "blocked" });
+
+    inspectPane.mockResolvedValueOnce({ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: null, agentState: "idle", foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term" });
+    await supervisor.reconcile();
+
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "blocked", runtimeTurnId: null });
+    expect(store!.loadWorkerTurnCard("turn")).toMatchObject({ phase: "blocked", startedAt: "2026-09-01T00:00:00.000Z" });
+    expect(wake).not.toHaveBeenCalled();
   });
 
   it("wakes and logs once for one durable blocked episode without sensitive notification fields", async () => {
@@ -185,18 +224,19 @@ describe("InstanceTurnSupervisor", () => {
   });
 
   it("observes only turns attached to a targeted Pane", async () => {
-    const { supervisor, inspectPane } = setup("running");
+    const { supervisor, inspectPane } = setup("running", { now: () => new Date("2026-09-01T00:00:15.000Z") });
 
     await supervisor.requestObservationByPane(["w1:p1"]);
 
     expect(inspectPane).toHaveBeenCalledOnce();
     expect(inspectPane).toHaveBeenCalledWith("w1:p1");
-    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed" });
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "dispatch-uncertain" });
   });
 
   it("records a periodic scan failure and retries on the next interval", async () => {
     vi.useFakeTimers();
-    const { supervisor } = setup("running");
+    vi.setSystemTime(new Date("2026-09-01T00:00:15.000Z"));
+    const { supervisor } = setup("running", { now: () => new Date() });
     const warn = vi.fn();
     (supervisor as unknown as { options: { logger: object } }).options.logger = { warn, info: vi.fn() };
     vi.spyOn(store!, "listObservableInstanceTurns").mockImplementationOnce(() => { throw new Error("database busy"); });
@@ -207,7 +247,7 @@ describe("InstanceTurnSupervisor", () => {
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "instance-turn-scan-failed", outcome: "retry_later" }), "instance turn scan failed");
 
     await vi.advanceTimersByTimeAsync(100);
-    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "completed" });
+    expect(store!.getInstanceTurn("turn")).toMatchObject({ state: "dispatch-uncertain" });
     await supervisor.stop();
     vi.useRealTimers();
   });
