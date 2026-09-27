@@ -33,7 +33,7 @@ describe("rich-text Answer workflow", () => {
       expect(JSON.parse(update.payload)).toMatchObject({ pageState: "active", document: { markdown: expect.stringContaining("Hello **world**") } });
       expect(JSON.parse(update.payload).document.title).toBe("🤖 bridge · abcd");
       expect(JSON.parse(update.payload).document.markdown).toContain("📋 **任务 0/1**\n- ■ 实现正文");
-      expect(JSON.parse(update.payload).document.markdown).toMatch(/▌$/);
+      expect(JSON.parse(update.payload).document.markdown).toMatch(/💭$/u);
       store.markOutboundReplyDelivered(update.id, "answer-1");
 
       const live = store.loadRunCard("p1")!;
@@ -41,7 +41,7 @@ describe("rich-text Answer workflow", () => {
       await workflow.converge("p1");
       const terminal = store.listPendingOutboundReplies()[0]!;
       expect(JSON.parse(terminal.payload)).toMatchObject({ pageState: "finished", terminal: true, document: { markdown: expect.stringContaining("📋 **任务 0/1**\n- ■ 实现正文") } });
-      expect(JSON.parse(terminal.payload).document.markdown).not.toContain("▌");
+      expect(JSON.parse(terminal.payload).document.markdown).not.toContain("💭");
       store.markOutboundReplyDelivered(terminal.id, "answer-1");
       expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ state: "finished", cardId: null })]);
       expect(wake).toHaveBeenCalledTimes(2);
@@ -93,7 +93,7 @@ describe("rich-text Answer workflow", () => {
       const pending = store.listPendingOutboundReplies();
       const freeze = pending.find(({ intentKind }) => intentKind === "rich-text-update")!;
       const continuation = pending.find(({ intentKind }) => intentKind === "rich-text-reply")!;
-      expect(JSON.parse(freeze.payload)).toMatchObject({ pageState: "frozen", document: { markdown: expect.not.stringContaining("▌") } });
+      expect(JSON.parse(freeze.payload)).toMatchObject({ pageState: "frozen", document: { markdown: expect.not.stringContaining("💭") } });
       expect(continuation).toMatchObject({ idempotencyKey: "answer-post:p1:1", rootMessageId: "root-1" });
       store.markOutboundReplyDelivered(freeze.id, "answer-1");
       store.markOutboundReplyDelivered(continuation.id, "answer-2");

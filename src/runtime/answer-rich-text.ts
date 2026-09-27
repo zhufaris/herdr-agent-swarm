@@ -7,12 +7,13 @@ import { planAnswerTimelinePage } from "../cards/answer-timeline-page.js";
 import { redactSecrets } from "./redact-secrets.js";
 
 export const ANSWER_RICH_TEXT_PAGE_LIMIT = 9_000;
-export const ANSWER_TYPEWRITER_CURSOR = "▌";
+export const ANSWER_TYPEWRITER_CURSOR = "💭";
 export const ANSWER_PLACEHOLDER = `正在生成… ${ANSWER_TYPEWRITER_CURSOR}`;
 export const ANSWER_RICH_TEXT_MIN_INTERVAL_MS = 1_000;
 export const ANSWER_RICH_TEXT_MIN_DELTA = 48;
 
 const TOOL_LABEL_LIMIT = 160;
+const TOOL_COMMAND_LIMIT = 1_000;
 const TOOL_PREVIEW_LIMIT = 240;
 const TASK_STEP_LIMIT = 240;
 const TASK_LIST_VISIBLE_STEPS = 5;
@@ -122,7 +123,7 @@ export function shouldRefreshRichText(previousPayload: string, next: RichTextDoc
 }
 
 function withoutCursor(markdown: string): string {
-  return markdown.replace(/\s*▌\s*$/, "");
+  return markdown.replace(/\s*💭\s*$/u, "");
 }
 
 function safeStreamingItem(item: AnswerTimelineItem): AnswerTimelineItem {
@@ -144,10 +145,19 @@ function markdownFromTimelineItem(item: AnswerTimelineItem): string {
     return `${status} · ${safeInline(item.label, TOOL_LABEL_LIMIT)}`;
   }
   const category = TOOL_CATEGORY[item.category] ?? TOOL_CATEGORY.step;
-  const source = item.category === "command" && item.command ? inlineCode(item.command) : safeInline(item.label, TOOL_LABEL_LIMIT);
-  const summary = `${category.icon} ${category.label} · ${source} · ${TOOL_STATE[item.state]}`;
+  const command = (item.category === "command" || item.category === "test") && item.command ? bashCommandBlock(item.command) : "";
+  const source = safeInline(item.label, TOOL_LABEL_LIMIT);
+  const summary = command ? `${category.icon} ${category.label} · ${TOOL_STATE[item.state]}` : `${category.icon} ${category.label} · ${source} · ${TOOL_STATE[item.state]}`;
   const preview = compactPreview(item.resultPreview);
-  return preview ? `${summary}\n> └ ${preview}` : summary;
+  return [summary, command, preview ? `> └ ${preview}` : ""].filter(Boolean).join(command ? "\n\n" : "\n");
+}
+
+function bashCommandBlock(value: string): string {
+  const command = truncateInline(redactSecrets(stripAnsi(value)).replace(/\r\n?/g, "\n").trim(), TOOL_COMMAND_LIMIT);
+  if (!command) return "";
+  const longestBacktickRun = [...command.matchAll(/`+/g)].reduce((longest, match) => Math.max(longest, match[0].length), 0);
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}bash\n${command}\n${fence}`;
 }
 
 function compactPreview(value: string | undefined): string {
@@ -174,10 +184,6 @@ function taskListMarkdown(events: readonly RunProgressEvent[]): string {
   if (hidden > 0) lines.push(`- … ${hidden} 个较早步骤`);
   for (const step of visible) lines.push(`- ${TASK_STATE[step.state]} ${safeInline(step.label, TASK_STEP_LIMIT)}`);
   return lines.join("\n");
-}
-
-function inlineCode(value: string): string {
-  return `\`${safeInline(value, TOOL_LABEL_LIMIT).replace(/`/g, "'")}\``;
 }
 
 function safeInline(value: string, limit: number): string {

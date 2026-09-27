@@ -3,9 +3,9 @@ import { planRichTextAnswerPage, richTextAnswerTitle, safeStreamingMarkdown, sho
 
 describe("safe rich-text Answer streaming", () => {
   it("throttles small rapid snapshots but admits a useful later chunk", () => {
-    const previous = JSON.stringify({ document: { markdown: "hello\n\n▌" } });
-    expect(shouldRefreshRichText(previous, { markdown: "hello again\n\n▌" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(false);
-    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(60)}\n\n▌` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.000Z"))).toBe(true);
+    const previous = JSON.stringify({ document: { markdown: "hello\n\n💭" } });
+    expect(shouldRefreshRichText(previous, { markdown: "hello again\n\n💭" }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:00.500Z"))).toBe(false);
+    expect(shouldRefreshRichText(previous, { markdown: `hello ${"x".repeat(60)}\n\n💭` }, "2026-09-27T00:00:00.000Z", Date.parse("2026-09-27T00:00:01.000Z"))).toBe(true);
   });
   it("withholds an incomplete fenced block until it closes", () => {
     expect(safeStreamingMarkdown("Before\n\n```ts\nconst value = 1;")).toBe("Before");
@@ -20,7 +20,7 @@ describe("safe rich-text Answer streaming", () => {
 
   it("adds a cursor only to active pages", () => {
     const items = [{ kind: "agent_message" as const, id: "m1", sequence: 1, markdown: "Hello **world**" }];
-    expect(planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**\n\n▌" });
+    expect(planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**\n\n💭" });
     expect(planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document).toEqual({ markdown: "Hello **world**" });
   });
 
@@ -47,13 +47,28 @@ describe("safe rich-text Answer streaming", () => {
     expect(planRichTextAnswerPage([], null, { active: false, pageIndex: 2, metadata }).document.title).toBe("🤖 bridge · abcd · 续 3");
   });
 
-  it("renders tool activity inline and labels continuation pages", () => {
+  it("renders command tool activity as bash Markdown and labels continuation pages", () => {
     const items = [{ kind: "tool" as const, id: "t1", sequence: 1, category: "command" as const, label: "npm test", command: "npm test", resultPreview: "ok", state: "succeeded" as const }];
     const page = planRichTextAnswerPage(items, null, { active: true, pageIndex: 1 });
     expect(page.document.title).toBe("回答（续 2）");
-    expect(page.document.markdown).toContain("⚙️ Ran · `npm test` · ✓");
+    expect(page.document.markdown).toContain("⚙️ Ran · ✓\n\n```bash\nnpm test\n```");
     expect(page.document.markdown).toContain("> └ ok");
-    expect(page.document.markdown).not.toContain("```bash");
+    expect(page.document.markdown).not.toContain("`npm test`");
+  });
+
+  it("preserves multiline test commands and uses a fence longer than embedded backticks", () => {
+    const command = "npm test -- --runInBand\nprintf '```inside```'";
+    const items = [{ kind: "tool" as const, id: "t1", sequence: 1, category: "test" as const, label: "npm test", command, state: "running" as const }];
+    const markdown = planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document.markdown;
+    expect(markdown).toContain("🧪 Test · …\n\n````bash\n" + command + "\n````");
+  });
+
+  it("sanitizes and redacts command blocks", () => {
+    const items = [{ kind: "tool" as const, id: "t1", sequence: 1, category: "command" as const, label: "shell", command: "\u001b[32mecho ok\u001b[0m\nclient_secret=do-not-show", state: "succeeded" as const }];
+    const markdown = planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document.markdown;
+    expect(markdown).toContain("```bash\necho ok\nclient_secret=[REDACTED]\n```");
+    expect(markdown).not.toContain("do-not-show");
+    expect(markdown).not.toContain("\u001b");
   });
 
   it("uses distinct compact markers for tool and status activity", () => {
@@ -106,11 +121,11 @@ describe("safe rich-text Answer streaming", () => {
     expect(active).toContain("- ■ 步骤 5");
     expect(active).toContain("- ◻ 步骤 6");
     expect(active).toContain("- ✕ 步骤 7");
-    expect(active).toMatch(/📋 \*\*任务 4\/7\*\*[\s\S]*\n\n▌$/);
+    expect(active).toMatch(/📋 \*\*任务 4\/7\*\*[\s\S]*\n\n💭$/);
 
     const terminal = planRichTextAnswerPage([], null, { active: false, pageIndex: 0, progressEvents }).document.markdown;
     expect(terminal).toContain("📋 **任务 4/7**");
-    expect(terminal).not.toContain("▌");
+    expect(terminal).not.toContain("💭");
   });
 
   it("advances the canonical cursor across long Markdown without whitespace", () => {

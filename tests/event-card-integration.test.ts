@@ -361,7 +361,7 @@ describe("event-driven card projection", () => {
     expect(updates.some((update) => {
       if (update.messageId !== "request-answer-card") return false;
       const serialized = JSON.stringify(update.card);
-      return serialized.includes("live answer") && serialized.includes("▌");
+      return serialized.includes("live answer") && serialized.includes("💭");
     })).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
@@ -471,7 +471,7 @@ describe("event-driven card projection", () => {
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1");
     store.enqueueOutboundReply({
       id: "page-2", idempotencyKey: "answer-post:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "text", intentKind: "rich-text-reply",
-      payload: JSON.stringify({ pageIndex: 1, pageStart: 3_500, elementId: "answer_content_p1_1", pageState: "active", document: { title: "回答（续 2）", markdown: "正在生成… ▌" } })
+      payload: JSON.stringify({ pageIndex: 1, pageStart: 3_500, elementId: "answer_content_p1_1", pageState: "active", document: { title: "回答（续 2）", markdown: "正在生成… 💭" } })
     });
     const bus = new BridgeEventBus();
     const pendingWrites: string[] = [];
