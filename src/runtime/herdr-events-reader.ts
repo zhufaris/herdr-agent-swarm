@@ -18,7 +18,6 @@ import { normalizeToolOutput, projectToolCall, projectToolResultState, type Tool
 import { redactSecrets } from "./redact-secrets.js";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_SCAN_BATCHES = 512;
 const MAX_RENDERED_CHARS = 64_000;
 
 const sourceSchema = z.object({
@@ -71,14 +70,17 @@ const batchSchema = z.object({ result: z.object({
   earliest_cursor: z.string().max(1024),
   latest_cursor: z.string().max(1024)
 }) });
+const turnCursorSchema = z.object({ result: z.object({
+  type: z.literal("agent_events_turn_cursor"),
+  source_id: z.string().min(1).max(256),
+  found: z.boolean(),
+  after_cursor: z.string().max(1024)
+}) });
 
 type Boundary = { kind: "latest" } | { kind: "active" } | { kind: "first" } | { kind: "at" | "after"; turnId: string; startedAt: string };
 export type AgentTranscriptDescriptorResolver = (source: AgentTranscriptSource) => Promise<AgentTranscriptDescriptor | null>;
 
 export class HerdrEventsReader implements AgentTranscriptReaderPort {
-  private readonly histories = new Map<string, { events: AgentEvent[]; earliestCursor: string; latestCursor: string }>();
-  private readonly historyScans = new Map<string, Promise<{ events: AgentEvent[]; earliestCursor: string; latestCursor: string }>>();
-
   constructor(
     private readonly runner: CommandRunner,
     private readonly herdr: Pick<HerdrPort, "listAllPanes">,
@@ -94,15 +96,14 @@ export class HerdrEventsReader implements AgentTranscriptReaderPort {
 
   private async openBoundary(source: AgentTranscriptSource, boundary: Boundary): Promise<AgentTranscriptOpenResult> {
     try {
-      const attached = await this.attach(source, boundary.kind === "latest" ? "end" : "start");
+      const attached = await this.attach(source, "end");
       const liveRead = this.readFor(attached.source);
       if (boundary.kind === "latest") return typed(new HerdrEventCursor(liveRead, attached.source.source_id, attached.source.latest_cursor));
       if (boundary.kind === "first") return typed(new HerdrEventCursor(liveRead, attached.source.source_id, attached.source.earliest_cursor));
       for (const candidate of attached.recoverySources) {
         try {
-          const history = await this.scan(candidate);
-          const selected = selectBoundary(history.events, boundary);
-          if (selected) return typed(new HerdrEventCursor(this.readFor(candidate), candidate.source_id, history.latestCursor, selected));
+          const located = await this.locate(candidate, boundary);
+          if (located.found) return typed(new HerdrEventCursor(this.readFor(candidate), candidate.source_id, located.afterCursor));
         } catch {
           continue;
         }
@@ -148,40 +149,14 @@ export class HerdrEventsReader implements AgentTranscriptReaderPort {
     throw new Error("source unavailable");
   }
 
-  private async scan(source: z.infer<typeof sourceSchema>): Promise<{ events: AgentEvent[]; earliestCursor: string; latestCursor: string }> {
-    const cached = this.histories.get(source.source_id);
-    if (cached?.earliestCursor === source.earliest_cursor && cached.latestCursor === source.latest_cursor) return cached;
-    if (cached && cached.earliestCursor !== source.earliest_cursor) this.histories.delete(source.source_id);
-    const active = this.historyScans.get(source.source_id);
-    if (active) {
-      const scanned = await active;
-      if (scanned.earliestCursor === source.earliest_cursor && scanned.latestCursor === source.latest_cursor) return scanned;
+  private async locate(source: z.infer<typeof sourceSchema>, boundary: Exclude<Boundary, { kind: "latest" | "first" }>): Promise<{ found: boolean; afterCursor: string }> {
+    const args = ["locate", "--source", source.source_id, "--boundary", boundary.kind];
+    if (boundary.kind === "at" || boundary.kind === "after") {
+      args.push("--turn-id", boundary.turnId, "--started-at", boundary.startedAt);
     }
-    const scan = this.scanFrom(source);
-    this.historyScans.set(source.source_id, scan);
-    try {
-      return await scan;
-    } finally {
-      if (this.historyScans.get(source.source_id) === scan) this.historyScans.delete(source.source_id);
-    }
-  }
-
-  private async scanFrom(source: z.infer<typeof sourceSchema>): Promise<{ events: AgentEvent[]; earliestCursor: string; latestCursor: string }> {
-    const cached = this.histories.get(source.source_id);
-    let after = cached?.latestCursor ?? source.earliest_cursor;
-    const events = cached?.events.slice() ?? [];
-    for (let count = 0; count < MAX_SCAN_BATCHES; count += 1) {
-      const batch = await this.read(source.source_id, after, source);
-      events.push(...batch.events);
-      if (batch.nextCursor === batch.latestCursor) {
-        const history = { events, earliestCursor: batch.earliestCursor, latestCursor: batch.latestCursor };
-        this.histories.set(source.source_id, history);
-        return history;
-      }
-      if (batch.nextCursor === after) throw new Error("event cursor stalled");
-      after = batch.nextCursor;
-    }
-    throw new Error("event scan limit exceeded");
+    const parsed = turnCursorSchema.parse(await this.command(args)).result;
+    if (parsed.source_id !== source.source_id) throw new Error("event identity mismatch");
+    return { found: parsed.found, afterCursor: parsed.after_cursor };
   }
 
   private readFor(source: z.infer<typeof sourceSchema>) {
@@ -240,20 +215,6 @@ class HerdrEventCursor implements AgentTranscriptCursorPort {
   projectionState() { return { calls: this.calls, planCalls: this.planCalls, messages: this.messages, turnId: this.turnId, startedAt: this.startedAt, finalAnswer: this.finalAnswer }; }
   updateProjectionState(state: { turnId?: string; startedAt?: string; finalAnswer?: string }) { this.turnId = state.turnId; this.startedAt = state.startedAt; this.finalAnswer = state.finalAnswer; }
   resetTurn(): void { this.calls.clear(); this.planCalls.clear(); this.messages.clear(); this.sequence = 1; }
-}
-
-function selectBoundary(events: AgentEvent[], boundary: { kind: "active" } | { kind: "at" | "after"; turnId: string; startedAt: string }): AgentEvent[] | null {
-  const starts = events.flatMap((event, index) => event.payload.type === "turn_started" ? [{ event, index }] : []);
-  const selected = boundary.kind === "active"
-    ? [...starts].reverse().find(({ event }) => !events.some((candidate) => candidate.turn_id === event.turn_id && (candidate.payload.type === "turn_completed" || candidate.payload.type === "turn_aborted")))
-    : starts.find(({ event }) => event.turn_id === boundary.turnId && normalizeStartedAt(event.occurred_at) === normalizeStartedAt(boundary.startedAt));
-  if (!selected) return null;
-  if (boundary.kind === "after") {
-    const next = starts.find(({ index }) => index > selected.index);
-    return next ? events.slice(next.index) : [];
-  }
-  const next = starts.find(({ index }) => index > selected.index);
-  return events.slice(selected.index, next?.index ?? events.length);
 }
 
 function projectEvents(events: AgentEvent[], cursor: HerdrEventCursor): AgentTranscriptObservation {

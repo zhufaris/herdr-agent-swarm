@@ -87,14 +87,21 @@ describe("HerdrEventsReader", () => {
     await expect(reader.open(source)).resolves.toEqual({ mode: "unavailable", reason: "transcript_validation_failed" });
   });
 
-  it("starts recovery from the retained floor after Core prunes older events", async () => {
+  it("opens the active turn from Core's indexed cursor without scanning retained history", async () => {
     const run = vi.fn<CommandRunner["run"]>(async (_executable, args) => {
-      if (args.includes("attach")) return response({ type: "agent_events_attached", source_id: "source-1", attach_offset: 10, sources: [{ source_id: "source-1", terminal_id: "terminal-1", agent_kind: "traex", session_id: "session-1", state: "active", checkpoint_offset: 10, earliest_cursor: "c3", latest_cursor: "c5" }] });
-      expect(args[args.indexOf("--after") + 1]).toBe("c3");
+      if (args.includes("attach")) {
+        expect(args[args.indexOf("--from") + 1]).toBe("end");
+        return response({ type: "agent_events_attached", source_id: "source-1", attach_offset: 65_761_620, sources: [{ source_id: "source-1", terminal_id: "terminal-1", agent_kind: "traex", session_id: "session-1", state: "active", checkpoint_offset: 65_761_620, earliest_cursor: "c0", latest_cursor: "c168805" }] });
+      }
+      if (args.includes("locate")) {
+        expect(args).toEqual(["agent", "events", "locate", "--source", "source-1", "--boundary", "active"]);
+        return response({ type: "agent_events_turn_cursor", source_id: "source-1", found: true, after_cursor: "c168000" });
+      }
+      expect(args[args.indexOf("--after") + 1]).toBe("c168000");
       return response({ type: "agent_events_batch", events: [
-        event("c4", "turn-2", "2026-09-26T00:00:04.250Z", { type: "turn_started" }),
-        event("c5", "turn-2", "2026-09-26T00:00:05Z", { type: "message", message_id: "m2", channel: "commentary", text: "retained", truncated: false })
-      ], next_cursor: "c5", earliest_cursor: "c3", latest_cursor: "c5" });
+        event("c168001", "turn-2", "2026-09-26T00:00:04.250Z", { type: "turn_started" }),
+        event("c168002", "turn-2", "2026-09-26T00:00:05Z", { type: "message", message_id: "m2", channel: "commentary", text: "current", truncated: false })
+      ], next_cursor: "c168002", earliest_cursor: "c0", latest_cursor: "c168805" });
     });
     const reader = new HerdrEventsReader({ run }, { async listAllPanes() { return [pane]; } }, "herdr", async () => ({ sessionId: "session-1", path: "/tmp/session.jsonl" }));
 
@@ -102,9 +109,33 @@ describe("HerdrEventsReader", () => {
     if (opened.mode !== "typed" || !opened.cursor.readObservation) throw new Error("reader unavailable");
     await expect(opened.cursor.readObservation()).resolves.toMatchObject({
       freshTurnStart: true,
-      answerDelta: "retained",
+      answerDelta: "current",
       turnLifecycle: { turnId: "turn-2", startedAt: "2026-09-26T00:00:04.250Z" }
     });
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["at" as const, "c900", "c901"],
+    ["after" as const, "c999", "c1000"]
+  ])("opens the %s turn boundary with one locate and no retained-floor reads", async (boundary, locatedCursor, eventCursor) => {
+    const run = vi.fn<CommandRunner["run"]>(async (_executable, args) => {
+      if (args.includes("attach")) return response({ type: "agent_events_attached", source_id: "source-1", attach_offset: 65_761_620, sources: [{ source_id: "source-1", terminal_id: "terminal-1", agent_kind: "traex", session_id: "session-1", state: "active", checkpoint_offset: 65_761_620, earliest_cursor: "c0", latest_cursor: "c168805" }] });
+      if (args.includes("locate")) {
+        expect(args).toEqual(["agent", "events", "locate", "--source", "source-1", "--boundary", boundary, "--turn-id", "turn-1", "--started-at", "2026-09-26T00:00:00.000Z"]);
+        return response({ type: "agent_events_turn_cursor", source_id: "source-1", found: true, after_cursor: locatedCursor });
+      }
+      expect(args[args.indexOf("--after") + 1]).toBe(locatedCursor);
+      return response({ type: "agent_events_batch", events: [event(eventCursor, "turn-next", "2026-09-26T00:01:00Z", { type: "turn_started" })], next_cursor: eventCursor, earliest_cursor: "c0", latest_cursor: "c168805" });
+    });
+    const reader = new HerdrEventsReader({ run }, { async listAllPanes() { return [pane]; } }, "herdr", async () => ({ sessionId: "session-1", path: "/tmp/session.jsonl" }));
+
+    const opened = boundary === "at"
+      ? await reader.openAtTurn(source, "turn-1", "2026-09-26T00:00:00.000Z")
+      : await reader.openAfterTurn(source, "turn-1", "2026-09-26T00:00:00.000Z");
+    if (opened.mode !== "typed" || !opened.cursor.readObservation) throw new Error("reader unavailable");
+    await opened.cursor.readObservation();
+    expect(run).toHaveBeenCalledTimes(3);
   });
 
   it("rejects events whose agent or session identity differs from the attached source", async () => {
