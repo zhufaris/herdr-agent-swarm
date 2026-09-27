@@ -16,8 +16,12 @@ import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
 function richTextMarkdown(content: object): string {
-  const rows = (content as { zh_cn: { content: Array<Array<{ tag: string; text: string }>> } }).zh_cn.content;
-  return rows.flat().find(({ tag }) => tag === "md")?.text ?? "";
+  const rows = (content as { zh_cn: { content: Array<Array<{ tag: string; text: string; language?: string }>> } }).zh_cn.content;
+  return rows.flat().flatMap((element) => {
+    if (element.tag === "md") return [element.text];
+    if (element.tag === "code_block") return [`\`\`\`${element.language?.toLowerCase() ?? ""}\n${element.text}\n\`\`\``];
+    return [];
+  }).join("\n");
 }
 
 describe("event-driven card projection", () => {

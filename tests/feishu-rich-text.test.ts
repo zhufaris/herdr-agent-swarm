@@ -38,4 +38,35 @@ describe("Feishu rich-text materialization", () => {
       }
     });
   });
+
+  it("materializes fenced Bash, TypeScript, and Python as native highlighted code blocks", () => {
+    expect(materializeFeishuRichText({
+      title: "🤖 bridge · abcd",
+      markdown: [
+        "Before **code**",
+        "```bash",
+        "echo hello",
+        "```",
+        "```typescript",
+        "const answer: number = 42;",
+        "```",
+        "```python",
+        "print(42)",
+        "```",
+        "After code"
+      ].join("\n")
+    })).toEqual({
+      zh_cn: {
+        title: "🤖 bridge · abcd",
+        content: [
+          [{ tag: "text", text: "🤖 bridge · abcd", style: ["bold"] }],
+          [{ tag: "md", text: "Before **code**" }],
+          [{ tag: "code_block", language: "BASH", text: "echo hello" }],
+          [{ tag: "code_block", language: "TYPESCRIPT", text: "const answer: number = 42;" }],
+          [{ tag: "code_block", language: "PYTHON", text: "print(42)" }],
+          [{ tag: "md", text: "After code" }]
+        ]
+      }
+    });
+  });
 });
