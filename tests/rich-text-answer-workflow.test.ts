@@ -22,13 +22,14 @@ describe("rich-text Answer workflow", () => {
       expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-1", cardId: null, deliveryMode: "rich_post" });
 
       const running = store.loadRunCard("p1")!;
-      store.saveRunCard({ ...running, phase: "running", answer: "Hello **world**", timelineItems: [{ id: "message:1", sequence: 1, kind: "agent_message", markdown: "Hello **world**" }], viewVersion: running.viewVersion + 1 });
+      store.saveRunCard({ ...running, phase: "running", answer: "Hello **world**", timelineItems: [{ id: "message:1", sequence: 1, kind: "agent_message", markdown: "Hello **world**" }], progressEvents: [{ key: "plan:0", kind: "step", label: "实现正文", state: "active", occurredAt: "2026-09-27T00:00:01.000Z" }], viewVersion: running.viewVersion + 1 });
       const wake = vi.fn();
       const workflow = new AnswerPageWorkflow(store, wake, primaryPresentation);
       await workflow.converge("p1");
       const update = store.listPendingOutboundReplies()[0]!;
       expect(update).toMatchObject({ kind: "card_update", intentKind: "rich-text-update", rootMessageId: "answer-1" });
       expect(JSON.parse(update.payload)).toMatchObject({ pageState: "active", document: { markdown: expect.stringContaining("Hello **world**") } });
+      expect(JSON.parse(update.payload).document.markdown).toContain("📋 **任务 0/1**\n- ■ 实现正文");
       expect(JSON.parse(update.payload).document.markdown).toMatch(/▌$/);
       store.markOutboundReplyDelivered(update.id, "answer-1");
 
@@ -36,7 +37,8 @@ describe("rich-text Answer workflow", () => {
       store.saveRunCard({ ...live, phase: "completed", viewVersion: live.viewVersion + 1, finishedAt: "2026-09-27T00:01:00.000Z" });
       await workflow.converge("p1");
       const terminal = store.listPendingOutboundReplies()[0]!;
-      expect(JSON.parse(terminal.payload)).toMatchObject({ pageState: "finished", terminal: true, document: { markdown: "Hello **world**" } });
+      expect(JSON.parse(terminal.payload)).toMatchObject({ pageState: "finished", terminal: true, document: { markdown: expect.stringContaining("📋 **任务 0/1**\n- ■ 实现正文") } });
+      expect(JSON.parse(terminal.payload).document.markdown).not.toContain("▌");
       store.markOutboundReplyDelivered(terminal.id, "answer-1");
       expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ state: "finished", cardId: null })]);
       expect(wake).toHaveBeenCalledTimes(2);
@@ -58,12 +60,13 @@ describe("rich-text Answer workflow", () => {
       expect(create).toMatchObject({ kind: "text", intentKind: "rich-text-reply", workerTurnId: "turn-1" });
       store.markOutboundReplyDelivered(create.id, "worker-answer-1");
 
-      store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-27T00:00:01.000Z", answer: "Worker **answer**", timelineDeltas: [{ id: "message:1", sequence: 1, kind: "agent_message", markdown: "Worker **answer**" }] }, render: workerPresentation.workerTurn });
+      store.applyInstanceTurnProjection({ turnId: "turn-1", expectedGeneration: worker.generation, change: { type: "output", occurredAt: "2026-09-27T00:00:01.000Z", answer: "Worker **answer**", progressEvents: [{ key: "plan:0", kind: "step", label: "检查实现", state: "done", occurredAt: "2026-09-27T00:00:01.000Z" }], timelineDeltas: [{ id: "message:1", sequence: 1, kind: "agent_message", markdown: "Worker **answer**" }] }, render: workerPresentation.workerTurn });
       const wake = vi.fn();
       await new WorkerTurnCardWorkflow(store, wake, workerPresentation).converge("turn-1");
       const update = store.listPendingOutboundReplies()[0]!;
       expect(update).toMatchObject({ kind: "card_update", intentKind: "rich-text-update", rootMessageId: "worker-answer-1" });
       expect(JSON.parse(update.payload).document.markdown).toContain("Worker **answer**");
+      expect(JSON.parse(update.payload).document.markdown).toContain("📋 **任务 1/1**\n- ✔ 检查实现");
       expect(wake).toHaveBeenCalledOnce();
     } finally {
       store.close();

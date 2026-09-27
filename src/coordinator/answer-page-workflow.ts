@@ -94,7 +94,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
     if (checkpoint.pending) return;
     const active = view.phase !== "completed" && view.phase !== "failed";
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice });
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents });
     if (plan.nextCursor) {
       const binding = this.store.getBinding(view.bindingId);
       if (!binding?.rootMessageId) return;

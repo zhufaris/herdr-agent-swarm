@@ -99,7 +99,7 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     const checkpoint = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
     if (checkpoint.pending) return;
     const active = !["completed", "failed", "cancelled", "dispatch-uncertain"].includes(view.phase);
-    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice });
+    const plan = planRichTextAnswerPage(items, checkpoint.startCursor, { active, pageIndex: page.pageIndex, limit: this.pageLimit, terminalNotice: active ? null : view.notice, progressEvents: view.progressEvents });
     if (plan.nextCursor) {
       const frozen = planRichTextAnswerPage(items, checkpoint.startCursor, { active: false, pageIndex: page.pageIndex, limit: this.pageLimit });
       const nextPageIndex = page.pageIndex + 1;
