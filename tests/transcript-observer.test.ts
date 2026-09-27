@@ -98,6 +98,33 @@ describe("TranscriptObserver detached output recovery", () => {
 
     expect(publishObservation).toHaveBeenCalledWith("b1", "p1", expect.objectContaining({ answer: expect.objectContaining({ timelineDeltas }) }));
   });
+
+  it("replays fresh-turn and Agent message projections after a detached restart", async () => {
+    let read = false;
+    const agentMessages = [{ messageId: "m1", turnId, channel: "commentary" as const, markdown: "Recovered message", occurredAt: "2026-09-13T00:00:01.000Z" }];
+    const reader: AgentTranscriptReaderPort = {
+      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
+      async openAtTurn() { return { mode: "typed", cursor: {
+        async readDelta() { return ""; },
+        async readObservation() {
+          if (read) return { answerDelta: "" };
+          read = true;
+          return { turnId, freshTurnStart: true, answerDelta: "", agentMessages, turnLifecycle: { turnId, state: "active", startedAt } };
+        }
+      } }; }
+    };
+    const publishObservation = vi.fn(async () => {});
+    const observer = new TranscriptObserver({
+      store: { getBinding: () => binding(), getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => ({ answer: "" }) as never },
+      reader, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
+      isBindingActive: () => true, isStopping: () => false, publishObservation
+    });
+
+    await observer.openDetached(binding(), prompt());
+
+    expect(publishObservation).toHaveBeenCalledOnce();
+    expect(publishObservation).toHaveBeenCalledWith("b1", "p1", expect.objectContaining({ freshTurnStart: true, agentMessages }));
+  });
 });
 
 function binding(): Binding {

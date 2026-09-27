@@ -117,10 +117,10 @@ name or native token is unavailable, the card falls back to the remaining pane
 identity. The task title remains in the card body and notification summary, so
 changing task text does not hide which pane the card controls.
 
-When the binding is in a normal working state, **最近对话** shows the latest five
-individual messages across both roles in chronological order. A user request
-and its Agent response count separately. Streaming output updates the same Agent
-message instead of appending duplicates. The section is capped at 3,000
+When the binding is in a normal working state, **最新消息** shows the latest five
+Agent replies in chronological order. The current user request remains summarized
+by **当前任务**, so it is not repeated in the message window. Streaming updates
+replace the same Agent message instead of appending duplicates. The section is capped at 3,000
 characters, preserves the newest portion of long messages, and removes native
 Agent status text from the preview. The complete ordered output remains in the
 Answer Card.
@@ -392,10 +392,13 @@ close` remains accepted as a compatibility alias.
 
 Omitting `--agent` selects TraeX. The selected kind is durable: reset and pane
 replacement preserve it, while attach discovers the actual supported kind from
-Herdr. The Main Card shows the selected Agent. TraeX supports structured Answer
-streaming, model selection, and the Primary Worker tools. Pi, Codex, and Claude
-Code currently use fenced prompt delivery without structured Answer capture;
-their result card tells the operator to inspect the corresponding Herdr pane.
+Herdr. The Main Card shows the selected Agent. TraeX and Pi structured replies,
+tool activity, plans, and turn lifecycle come only from Herdr Core Agent Events;
+the bridge does not parse a transcript or pane scrollback as a second reply
+authority. TraeX additionally supports model selection and the Primary Worker
+tools. Codex and Claude Code currently use fenced prompt delivery without
+structured Answer capture; their result card tells the operator to inspect the
+corresponding Herdr pane.
 Unsupported model, steering, stop, transcript-recovery, and Primary-tool
 operations fail closed instead of falling back to TraeX or terminal input.
 

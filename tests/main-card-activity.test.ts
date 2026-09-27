@@ -12,8 +12,8 @@ describe("currentMainCardActivity", () => {
     expect(currentMainCardActivity(events, new Set(["plan:one"]))).toEqual([events[1]]);
   });
 
-  it("falls back to the newest activity when none remains active", () => {
-    expect(currentMainCardActivity(events.map((event) => ({ ...event, state: "done" as const })), new Set(["plan:one"]))).toEqual([expect.objectContaining({ key: "tool:test" })]);
+  it("omits completed activity when none remains active", () => {
+    expect(currentMainCardActivity(events.map((event) => ({ ...event, state: "done" as const })), new Set(["plan:one"]))).toEqual([]);
   });
 
   it("returns no summary when only plan events exist", () => {

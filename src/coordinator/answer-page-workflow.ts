@@ -101,7 +101,8 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const metadata = {
       projectId: binding?.projectId,
       paneId: binding?.paneId ?? view.paneId,
-      paneToken: binding?.paneToken ?? view.paneToken
+      paneToken: binding?.paneToken ?? view.paneToken,
+      taskTitle: view.title
     };
     const plan = planRichTextAnswerPage(items, checkpoint.startCursor, {
       active, pageIndex: page.pageIndex, limit: this.planning.pageLimit, terminalNotice: active ? null : view.notice,

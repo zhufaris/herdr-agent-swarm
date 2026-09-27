@@ -639,12 +639,12 @@ describe("coordinator concurrency controls", () => {
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "handoff-e1", messageId: "handoff-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "handoff cursor", mentionsBot: false, isRootMessage: false });
     const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "handoff cursor")!;
-    await vi.waitFor(() => expect(observed.map((event) => event.payload.observation.answer.snapshot)).toEqual(["First commentary after stall"]), { timeout: 2_000 });
+    await vi.waitFor(() => expect(observed.map((event) => event.payload.observation.answer.snapshot).filter(Boolean)).toEqual(["First commentary after stall"]), { timeout: 2_000 });
     expect(store.getPrompt(target().promptId)).toMatchObject({ state: "running", observationState: "detached", wasDetached: true, transcriptTurnId: turnId });
     finishTurn = true;
     await vi.waitFor(() => expect(target()).toMatchObject({ phase: "completed", answer: "First commentary after stall" }), { timeout: 2_000 });
     expect({
-      observed: observed.map((event) => event.payload.observation.answer.snapshot), reads, opens: open.mock.calls.length, dispatches: runPrompt.mock.calls.length,
+      observed: observed.map((event) => event.payload.observation.answer.snapshot).filter(Boolean), reads, opens: open.mock.calls.length, dispatches: runPrompt.mock.calls.length,
       prompt: store.getPrompt(target().promptId)
     }).toMatchObject({
       observed: ["First commentary after stall"], reads: expect.any(Number), opens: 1, dispatches: 1,
@@ -874,7 +874,7 @@ describe("coordinator concurrency controls", () => {
     }
   });
 
-  it("projects a Pi JSONL turn into the durable Answer Card without terminal fallback", async () => {
+  it("projects a Pi Core Agent Events turn into the durable Answer Card without terminal fallback", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-answer-integration-"));
     const descriptor = piTranscriptDescriptor(root, "b1", 1);
     const path = join(descriptor.sessionDir, `2026-09-25T12-00-00_${descriptor.sessionId}.jsonl`);
@@ -927,7 +927,7 @@ describe("coordinator concurrency controls", () => {
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Pi durable answer" }));
 
       const card = store.listRunCards("b1")[0]!;
-      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, nativeSession: null });
+      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, paneId: "w1:p1", nativeSession: null });
       expect(store.getPrompt(card.promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: expect.any(String) });
       expect(card.answer).not.toMatch(/不支持结构化输出|private chain of thought|SECRET_TERMINAL_SENTINEL/);
       expect(runPrompt).toHaveBeenCalledOnce();

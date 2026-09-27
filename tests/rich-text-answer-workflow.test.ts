@@ -18,7 +18,7 @@ describe("rich-text Answer workflow", () => {
 
       const create = store.listPendingOutboundReplies()[0]!;
       expect(create).toMatchObject({ kind: "text", intentKind: "rich-text-reply", idempotencyKey: "answer-post:p1:0" });
-      expect(JSON.parse(create.payload).document.title).toBe("🤖 bridge · abcd");
+      expect(JSON.parse(create.payload).document.title).toBe("🤖 bridge · abcd · Task");
       expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ deliveryMode: "rich_post", state: "creating", cardId: null })]);
       store.markOutboundReplyDelivered(create.id, "answer-1");
       expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-1", cardId: null, deliveryMode: "rich_post" });
@@ -31,7 +31,7 @@ describe("rich-text Answer workflow", () => {
       const update = store.listPendingOutboundReplies()[0]!;
       expect(update).toMatchObject({ kind: "card_update", intentKind: "rich-text-update", rootMessageId: "answer-1" });
       expect(JSON.parse(update.payload)).toMatchObject({ pageState: "active", document: { markdown: expect.stringContaining("Hello **world**") } });
-      expect(JSON.parse(update.payload).document.title).toBe("🤖 bridge · abcd");
+      expect(JSON.parse(update.payload).document.title).toBe("🤖 bridge · abcd · Task");
       expect(JSON.parse(update.payload).document.markdown).toContain("📋 **任务 0/1**\n- ■ 实现正文");
       expect(JSON.parse(update.payload).document.markdown).toMatch(/💭·{0,3}$/u);
       store.markOutboundReplyDelivered(update.id, "answer-1");
@@ -62,7 +62,7 @@ describe("rich-text Answer workflow", () => {
       store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: "worker-message", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "worker-message", view, render: workerPresentation.workerTurn });
       const create = store.listPendingOutboundReplies()[0]!;
       expect(create).toMatchObject({ kind: "text", intentKind: "rich-text-reply", workerTurnId: "turn-1" });
-      expect(JSON.parse(create.payload).document.title).toBe("🤖 p1 · wk9x · worker");
+      expect(JSON.parse(create.payload).document.title).toBe("🤖 p1 · wk9x · worker · review");
       store.markOutboundReplyDelivered(create.id, "worker-answer-1");
 
       store.transitionInstanceTurnWithProjection({ turnId: "turn-1", expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-27T00:00:01.000Z" }, render: workerPresentation.workerTurn });
@@ -73,7 +73,7 @@ describe("rich-text Answer workflow", () => {
       const update = store.listPendingOutboundReplies()[0]!;
       expect(update).toMatchObject({ kind: "card_update", intentKind: "rich-text-update", rootMessageId: "worker-answer-1" });
       expect(JSON.parse(update.payload).document.markdown).toContain("Worker **answer**");
-      expect(JSON.parse(update.payload).document.title).toBe("🤖 p1 · wk9x · worker");
+      expect(JSON.parse(update.payload).document.title).toBe("🤖 p1 · wk9x · worker · review");
       expect(JSON.parse(update.payload).document.markdown).toContain("📋 **任务 1/1**\n- ✔ 检查实现");
       expect(wake).toHaveBeenCalledOnce();
       store.markOutboundReplyDelivered(update.id, "worker-answer-1");

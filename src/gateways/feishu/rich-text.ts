@@ -1,15 +1,19 @@
 import type { RichTextDocument } from "../../domain/rich-text.js";
 
 export function materializeFeishuRichText(document: RichTextDocument): object {
+  const heading: FeishuPostElement[][] = document.title
+    ? [[{ tag: "text", text: document.title, style: ["bold"] }]]
+    : [];
   return {
     zh_cn: {
       title: document.title ?? "",
-      content: materializeMarkdown(document.markdown)
+      content: [...heading, ...materializeMarkdown(document.markdown)]
     }
   };
 }
 
 type FeishuPostElement =
+  | { tag: "text"; text: string; style?: string[] }
   | { tag: "md"; text: string }
   | { tag: "code_block"; text: string; language?: string };
 

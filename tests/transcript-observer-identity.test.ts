@@ -10,13 +10,14 @@ describe("transcript observer identity", () => {
       agentKind: "traex",
       bindingId: "b1",
       generation: 2,
+      paneId: "w1:p1",
       nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session:one" },
     });
   });
 
   it("preserves native session data without making it the Agent-neutral owner identity", () => {
     const pi = { ...binding, agentKind: "pi" as const, agentSessionSource: null, agentSessionAgent: null, agentSessionKind: null, agentSessionValue: null };
-    expect(transcriptSourceFor(pi)).toEqual({ agentKind: "pi", bindingId: "b1", generation: 2, nativeSession: null });
+    expect(transcriptSourceFor(pi)).toEqual({ agentKind: "pi", bindingId: "b1", generation: 2, paneId: "w1:p1", nativeSession: null });
     expect(transcriptObserverIdentity(pi)).toBe("2:b12:pi1:25:w1:p10:0:0:0:");
   });
 

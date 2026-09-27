@@ -40,8 +40,10 @@ export function projectOwnedTranscriptOutput(input: {
       ...(input.observation.mainStatus.tokenCount !== undefined ? { tokenCount: input.observation.mainStatus.tokenCount } : {})
     }
     : undefined;
-  const observation = answerChanged || input.observation.timelineDeltas?.length || input.observation.toolActivities?.length || mainStatus
+  const observation = answerChanged || input.observation.timelineDeltas?.length || input.observation.toolActivities?.length || input.observation.agentMessages?.length || input.observation.freshTurnStart || mainStatus
     ? {
+      ...(input.observation.freshTurnStart ? { freshTurnStart: true } : {}),
+      ...(input.observation.agentMessages?.length ? { agentMessages: input.observation.agentMessages } : {}),
       answer: { snapshot: answerSnapshot, update: answerUpdate, toolActivities: input.observation.toolActivities ?? [], ...(input.observation.timelineDeltas?.length ? { timelineDeltas: input.observation.timelineDeltas } : {}) },
       main: { ...(mainStatus ? { status: mainStatus } : {}) }
     }

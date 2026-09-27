@@ -323,7 +323,7 @@ describe("event-driven card projection", () => {
     await publisher.drain();
     expect(updates).toHaveLength(2);
     expect(JSON.stringify(updates.at(-1))).toContain("已完成");
-    expect(JSON.stringify(updates.at(-1))).toContain("Finished");
+    expect(JSON.stringify(updates.at(-1))).not.toContain("Finished");
     stop(); stopPublisher(); store.close();
   });
 
@@ -462,7 +462,7 @@ describe("event-driven card projection", () => {
     expect(firstPageContent).toContain("| Key | Value |");
     expect(firstPageContent).toContain("[literal](javascript:alert(1))");
     expect(firstPageContent).not.toContain("<b>Result</b>");
-    expect(JSON.stringify(created[1])).toContain("🤖 bridge · abcd · 第 2 页");
+    expect(JSON.stringify(created[1])).toContain("🤖 bridge · abcd · Long answer · 第 2 页");
     expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: null, answerMessageId: "answer-2", answerPageIndex: 1, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();

@@ -2,6 +2,7 @@ import type { AgentState, EventOrigin } from "./types.js";
 import type { AgentKind } from "./agent-instance.js";
 import type { MainCardLiveStatus, RunProgressEvent } from "./run-card-view.js";
 import type { AnswerTimelineDelta } from "./answer-timeline.js";
+import type { MainCardAgentMessage } from "./ports/external.js";
 
 interface EventBase<T extends string, P> {
   eventId: string;
@@ -13,6 +14,8 @@ interface EventBase<T extends string, P> {
 }
 
 export interface TurnOutputObservation {
+  freshTurnStart?: boolean;
+  agentMessages?: MainCardAgentMessage[];
   answer: {
     snapshot: string;
     previousSnapshot?: string;
@@ -31,10 +34,12 @@ export interface TurnOutputObservation {
 export function normalizeTurnOutputObservation(payload: unknown): TurnOutputObservation {
   const value = payload as {
     observation?: TurnOutputObservation; answerSnapshot?: string; previousAnswerSnapshot?: string; answerUpdate?: TurnOutputObservation["answer"]["update"];
-    progressEvents?: TurnOutputObservation["answer"]["toolActivities"]; timelineDeltas?: AnswerTimelineDelta[]; hasProgressSnapshot?: boolean; mainStatus?: TurnOutputObservation["main"]["status"]; model?: string; context?: string;
+    progressEvents?: TurnOutputObservation["answer"]["toolActivities"]; timelineDeltas?: AnswerTimelineDelta[]; hasProgressSnapshot?: boolean; mainStatus?: TurnOutputObservation["main"]["status"]; model?: string; context?: string; freshTurnStart?: boolean; agentMessages?: MainCardAgentMessage[];
   };
   if (value.observation) return value.observation;
   return {
+    ...(value.freshTurnStart === undefined ? {} : { freshTurnStart: value.freshTurnStart }),
+    ...(value.agentMessages?.length ? { agentMessages: value.agentMessages } : {}),
     answer: {
       snapshot: value.answerSnapshot ?? "",
       ...(value.previousAnswerSnapshot === undefined ? {} : { previousSnapshot: value.previousAnswerSnapshot }),

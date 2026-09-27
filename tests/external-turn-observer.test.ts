@@ -21,7 +21,7 @@ describe("ExternalTurnObserver", () => {
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", statusMessageId: "main-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", spaceName: "repo", paneId: "w1:p1", phase: "ready", agentState: "idle" });
     const observations: AgentTranscriptObservation[] = [
-      { turnId: "turn-1", freshTurnStart: true, requestText: "direct request", answerDelta: "direct answer", mainStatus: { statusTitle: "Working directly", tokenCount: 42 }, turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-09-12T00:00:00.000Z" } },
+      { turnId: "turn-1", freshTurnStart: true, answerDelta: "direct answer", agentMessages: [{ messageId: "message-1", turnId: "turn-1", channel: "commentary", markdown: "direct answer", occurredAt: "2026-09-12T00:00:01.000Z" }], timelineDeltas: [{ kind: "agent_message", id: "message:message-1", sequence: 1, markdown: "direct answer" }, { kind: "tool", id: "tool:call-1", sequence: 2, category: "command", label: "npm test", command: "npm test", state: "running" }], mainStatus: { statusTitle: "Working directly", tokenCount: 42 }, turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-09-12T00:00:00.000Z" } },
       { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-09-12T00:00:00.000Z", finalAnswer: "direct answer" } },
       { answerDelta: "" }
     ];
@@ -61,8 +61,15 @@ describe("ExternalTurnObserver", () => {
     await vi.waitFor(() => expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", executionOrigin: "herdr", transcriptTurnId: "turn-1" }));
     await vi.waitFor(() => expect(answerUpdates.some((content) => content.includes("direct answer"))).toBe(true));
     await vi.waitFor(() => expect(mainUpdates.some((card) => JSON.stringify(card).includes("direct answer"))).toBe(true));
-    expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "direct answer" });
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "direct answer", activePromptId: null });
+    expect(store.loadRunCard("external-1")).toMatchObject({
+      phase: "completed",
+      answer: "direct answer",
+      timelineItems: [
+        { id: "message:message-1", kind: "agent_message", markdown: "direct answer" },
+        { id: "tool:call-1", kind: "tool", command: "npm test" }
+      ]
+    });
+    expect(store.loadTopicView("b1")).toMatchObject({ phase: "done", answer: "direct answer", activePromptId: null, recentAgentMessages: [{ messageId: "message-1", markdown: "direct answer" }] });
     expect(store.listRunCards("b1")).toHaveLength(1);
     const deliveryCount = store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get() as { count: number };
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
@@ -146,15 +153,12 @@ describe("ExternalTurnObserver", () => {
     store.close();
   });
 
-  it("keeps a pending turn start across reads and projects a direct Herdr turn to completion", async () => {
+  it("adopts a Core-shaped direct Herdr turn without exposing request text", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const observations: AgentTranscriptObservation[] = [
       { turnId: "turn-1", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
-      { turnId: "turn-1", requestText: "direct task", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
-      { turnId: "turn-1", answerDelta: "answer", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
-      { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-08-31T10:00:00.000Z", finalAnswer: "answer" } },
       { answerDelta: "" }
     ];
     const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
@@ -166,12 +170,19 @@ describe("ExternalTurnObserver", () => {
     const observer = new ExternalTurnObserver({ store, transcriptReader, bus, outboundWork: { wake }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}, idFactory: () => "external-1" });
 
     await observer.observe(store.getBinding("b1")!);
-    expect(store.getPrompt("external-1")).toBeNull();
+    await observer.observe(store.getBinding("b1")!);
+    expect(store.getPrompt("external-1")).toMatchObject({ executionOrigin: "herdr", state: "running" });
+
+    observations.push(
+      { turnId: "turn-1", answerDelta: "answer", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
+      { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-08-31T10:00:00.000Z", finalAnswer: "answer" } },
+      { answerDelta: "" }
+    );
     await observer.observe(store.getBinding("b1")!);
 
-    expect(store.getPrompt("external-1")).toMatchObject({ executionOrigin: "herdr", state: "delivered", observationState: "completed", transcriptTurnId: "turn-1" });
+    expect(store.getPrompt("external-1")).toMatchObject({ executionOrigin: "herdr", state: "delivered", observationState: "completed", transcriptTurnId: "turn-1", body: "Herdr Pane 中直接发起的任务" });
     expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "answer" });
-    expect(events).toEqual(["TurnStarted", "TurnOutputObserved", "TurnCompleted"]);
+    expect(events).toEqual(["TurnStarted", "TurnOutputObserved", "TurnOutputObserved", "TurnCompleted"]);
     expect(wake).toHaveBeenCalledOnce();
     store.close();
   });
@@ -328,7 +339,7 @@ describe("ExternalTurnObserver", () => {
     await observer.observe(binding);
 
     expect(store.getPrompt("external-aborted")).toMatchObject({ state: "failed", observationState: "completed" });
-    expect(events).toEqual(["TurnStarted", "TurnFailed"]);
+    expect(events).toEqual(["TurnStarted", "TurnOutputObserved", "TurnFailed"]);
     expect(wakePrompt).toHaveBeenCalledWith("b1");
     await observer.stop();
     store.close();

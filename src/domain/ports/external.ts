@@ -72,6 +72,14 @@ export interface AgentTranscriptMainStatus {
   tokenCount?: number;
 }
 
+export interface MainCardAgentMessage {
+  messageId: string;
+  turnId: string;
+  channel: "commentary" | "final";
+  markdown: string;
+  occurredAt: string;
+}
+
 export interface AgentTranscriptObservation {
   turnId?: string;
   freshTurnStart?: boolean;
@@ -80,6 +88,7 @@ export interface AgentTranscriptObservation {
   timelineDeltas?: AnswerTimelineDelta[];
   toolActivities?: Omit<RunProgressEvent, "occurredAt">[];
   mainStatus?: AgentTranscriptMainStatus;
+  agentMessages?: MainCardAgentMessage[];
   turnLifecycle?: { turnId: string; state: "active" | "completed" | "aborted"; startedAt: string; finalAnswer?: string; reason?: string };
 }
 
@@ -89,6 +98,7 @@ export interface AgentTranscriptSource {
   agentKind: AgentKind;
   bindingId: string;
   generation: number;
+  paneId?: string | null;
   nativeSession: HerdrAgentSession | null;
 }
 

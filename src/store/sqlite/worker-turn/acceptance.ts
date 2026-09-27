@@ -185,7 +185,7 @@ export class WorkerTurnAcceptance {
           rootMessageId: acceptedView.rootMessageId,
           kind: "text",
           intentKind: "rich-text-reply",
-          payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, acceptedView.elementId, richTextAnswerTitle({ projectId: current?.projectId, paneId: current?.runtimeRef?.paneId, paneToken: current?.runtimeRef?.paneToken, workerName: acceptedView.workerName }, 0))),
+          payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, acceptedView.elementId, richTextAnswerTitle({ projectId: current?.projectId, paneId: current?.runtimeRef?.paneId, paneToken: current?.runtimeRef?.paneToken, workerName: acceptedView.workerName, taskTitle: acceptedView.requestText }, 0))),
         });
       this.dependencies.invalidateWorkerCardContexts(
         acceptedView,

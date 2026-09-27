@@ -35,7 +35,7 @@ projections. Feishu is the only production Gateway in this milestone.
 │ Gateway / Feishu            Herdr / TraeX                  user systemd │
 │ messages and views          panes, sessions, turns         process owner │
 └──────────────┬──────────────────────┬───────────────────────────┬────────┘
-               │ SDK / WebSocket      │ CLI / Socket / JSONL      │ lifecycle
+               │ SDK / WebSocket      │ CLI / Socket / Agent Events│ lifecycle
                v                      v                           v
 ┌──────────────────────── Infrastructure adapters ────────────────────────┐
 │ Gateway plugin · Herdr adapter · PaneHost · TranscriptReader · health  │
@@ -339,7 +339,7 @@ creator and generation checks remain additional fences for stateful operations.
 | Concern | Authority | Why |
 | --- | --- | --- |
 | Pane identity, terminal identity, native Agent session reference, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
-| Typed turn output, live status heading, structured plan, and token counters for an active turn | Exactly identified TraeX JSONL transcript | The transcript is parsed once into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
+| Typed turn output, tool activity, lifecycle, and structured plan for a supported Agent turn | Exactly identified Herdr Core Agent Events source | Core decodes the native transcript once into a durable cursor stream. Swarm projects that stream into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
 | Process lifecycle | user systemd service | The standalone `npm run swarm:*` commands control the service; the application does not manage PID files. |
@@ -370,17 +370,16 @@ its Run Card and outbox intent, records an audit entry, and then wakes the FIFO.
 The prior runtime outcome remains explicitly uncertain; skip never sends terminal
 input, interrupts TraeX, or replays the prompt.
 
-### TraeX transcript reader boundary
+### Herdr Core Agent Events boundary
 
-`TraexTranscriptReader` is the stable runtime facade used by coordinators. It
-validates session and turn identities, selects an opening strategy, maps failures
-to the public unavailable reasons, and assembles a cursor. Its private runtime
-participants separate path discovery and trust validation, exact turn-boundary
-scanning, baseline recovery, record decoding, and incremental file reads. These
-participants are not application ports and must not be imported around the
-facade. Canonical byte offsets, bounded recovery windows, cache policy, and the
-exact `turnId + startedAt` fence remain one reader protocol; the decomposition
-does not introduce another persistence or replay authority.
+`HerdrEventsReader` is the sole structured reply facade used by coordinators.
+The bridge supplies the pane plus native Agent session identity and a descriptor
+that lets Core attach the source; only Core decodes TraeX or Pi records. Every
+read is fenced by source ID, Agent kind, session ID, exact turn ID, and canonical
+start time. Cursor expiration after journal pruning restarts bounded recovery at
+Core's advertised retained floor. Unknown future payloads and unavailable or
+mismatched identities fail closed; neither legacy JSONL readers nor pane
+scrollback become a fallback reply authority.
 
 ## Architecture and dependency direction
 
@@ -992,8 +991,8 @@ change during the target decomposition without changing these steps.
 ### Turn output projection
 
 `PromptRunWorkflow` and passive `HerdrRuntimeReconciler` observations normalize
-their source into `TurnOutputObservation`. The validated active-turn JSONL path
-is the only Answer source; when it is unavailable, the Answer uses a fixed safe
+Herdr Core Agent Events into `TurnOutputObservation`. The exactly identified
+Core event source is the only Answer source; when it is unavailable, the Answer uses a fixed safe
 notice and never terminal text. One observation has
 two explicit consumer payloads: `answer` supplies answer text and tool activity
 to `RunCardView`, while `main` supplies the status heading, plan snapshot, model,
@@ -1153,70 +1152,28 @@ once on the active page by deterministic `late:<tool-id>` projection. Both timel
 tables participate in the instance write fence and are rebuilt through additive
 migration 50/51 rather than rewriting legacy Answer content.
 
-Managed TraeX startup uses Herdr 0.9's native `agent start --kind traex`
-surface. Herdr publishes the canonical TraeX thread UUID through the
-`herdr:traex` integration source and owns Agent lifecycle state. Normal Herdr
-reconciliation persists `agent_session_source`,
-`agent_session_agent`, `agent_session_kind`, and `agent_session_value` in SQLite.
-This canonical Herdr tuple is the only transcript identity; the bridge has no
-session-report socket or fallback identity.
+Managed Agent startup uses Herdr's native Agent surfaces. Herdr owns pane,
+process, terminal, and native Agent session identity; reconciliation persists
+that canonical tuple in SQLite. Before dispatch, Swarm attaches Core Agent
+Events at the current end. A fresh `turn_started` event establishes the durable
+turn fence. Messages, paired tool calls/results, plan updates, and terminal
+lifecycle events then retain Core order and stable IDs. Core redacts and bounds
+content before journaling; Swarm applies its presentation-specific bounds again
+before projection. `update_plan` updates the task list but is not rendered as a
+normal tool row. Running tools may appear in Main Card **当前活动**; completed
+tools remain only in the Answer timeline.
 
-`PromptTurnExecutor` opens the corresponding transcript at EOF before dispatch,
-but only when exactly one filename matches
-the UUID and its `session_meta` record carries the same ID. It reads complete
-newline-terminated records from a byte cursor. While `agent prompt --wait` owns
-submission and settlement, one attached
-observer polls that cursor every 250 ms so exact-turn Answer deltas do not wait
-for the Herdr command to return. A fresh `task_started` record first establishes
-the durable dispatch and transcript-turn fence; inherited or unscoped output is
-never published. Command settlement stops the observer before the bounded final
-drain, and their shared observation signature suppresses duplicate publication.
-If the Herdr waiter becomes uncertain after dispatch, the same binding worker
-hands its live cursor and accumulated Answer state directly to
-`DetachedPromptObserver`. This closes the EOF reopen gap without replaying the
-prompt. After restart, `observe(prompt)` reloads the durable Prompt and Binding,
-opens a new cursor, and fences output with the persisted turn ID and start
-timestamp because cursor internals are deliberately process-local.
-`history_mutation.payload.items`
-in append mutations is the canonical typed Answer-content source. Assistant
-`message` items contribute only their ordered `output_text` parts. A
-`function_call` stores a compact descriptor but emits no Answer content. Its
-exact paired `function_call_output` emits one consistently ordered row such as
-<code>✓ Command · `npm test` · 70 files / 680 tests passed</code> or
-`✓ Read · application entrypoint`. Generic completion words are omitted because `✓` already
-expresses success. Successful tool stdout, file contents, serialized arguments,
-patch bodies, and agent payloads never enter the Answer. Explicit failures
-contribute `✗ <Type> · <Target> · <Summary>` plus only the last 20 non-empty,
-redacted diagnostic lines, with the whole failure entry capped at 4,000
-characters. Running asynchronous results use
-`… <Type> · <Target> · 运行中`; a later terminal result may append its completion
-row because Answer delivery is append-only. Calls are classified as Skill, Read, Search, Edit,
-Command, Wait, Agent, or the generic Tool fallback from their declared name and
-bounded structured fields; displayed targets are single-line, redacted, and at
-most 160 characters. Command targets are rendered as Markdown inline code;
-other activity targets remain plain text.
-
-Absolute `SKILL.md` reads under configured TraeX or agent skill roots
-are deferred until their exact result arrives. A successful load emits only
-`✓ Skill · <name>` and discards the skill document output completely; a
-failed load follows the same bounded diagnostic policy as other failures.
-Ordinary file reads, relative or untrusted paths, and assistant prose that
-mentions `SKILL.md` are not reclassified. Item IDs are deduplicated, and the
-compact call descriptor is retained across reads so later results can pair by
-exact `call_id`. Reasoning, developer, system, and user messages; unmatched or
-malformed results; metadata; and unknown items are ignored. Top-level
-`event_msg` records are not streamed Answer-content authority. The bounded
-`task_started` / matching `task_complete` pair is lifecycle authority for
-detached recovery; `last_agent_message` is redacted and bounded before it may
-replace the recovered final Answer. A reopened cursor reconstructs only the
-latest lifecycle pair from its bounded tail scan. Completion must also fall in
-the detached prompt's Run Card start window, so an older completed turn cannot
-advance the FIFO.
-`TRAEX_SESSIONS_ROOT` selects the transcript root and defaults to
-`~/.trae/cli/sessions`.
+If command settlement becomes uncertain, the binding worker hands its live
+cursor and accumulated Answer state to `DetachedPromptObserver`. After restart,
+the observer reopens the exact persisted `turnId + startedAt`, replays retained
+Agent messages, timeline items, plan state, and lifecycle, and publishes only a
+proven missing answer suffix or an explicit replace-all recovery. It never
+replays the prompt. Core journal pruning may remove older events; recovery starts
+at the advertised retained floor and fails closed when the exact boundary no
+longer exists.
 
 Each turn selects one Answer source mode before dispatch. An exact, validated
-transcript selects typed mode; otherwise structured output is unavailable and the
+Core Agent Events source selects typed mode; otherwise structured output is unavailable and the
 turn logs one bounded reason: `missing_session_identity`,
 `unsupported_session_identity`, `transcript_not_found`,
 `ambiguous_transcript`, or `transcript_validation_failed`. These diagnostics do
@@ -1229,16 +1186,18 @@ content exists, completion uses the fixed safe notice
 A transcript failure does not fail or replay the prompt.
 
 For a bound pane, reconciliation also keeps an independent external-turn cursor
-with a lightweight two-second transcript poll between full Herdr reconciliations.
-It boundedly replays only the latest active turn so a process restart or late
-observer registration does not lose a direct Herdr request; completed history is
-never imported. Background polling pauses while the binding worker owns the turn
+with a lightweight two-second Agent Events poll between full Herdr reconciliations.
+It adopts only a fresh retained turn so a process restart or late observer
+registration does not lose a direct Herdr request; unrelated completed history is
+never imported. Core does not expose prompt text, so a directly initiated turn
+uses a fixed synthetic task description while its replies remain canonical.
+Background polling pauses while the binding worker owns the turn
 boundary. Before that worker claims each queued Lark prompt, it performs one
 serialized handoff scan so external transcript work is adopted before the next
 bridge dispatch; external completion wakes the binding worker to resume its FIFO.
 
-TraeX can return to `idle` without writing a matching `task_complete` or
-`turn_aborted` record. That absence is not success evidence. For an exact external
+An Agent can return to `idle` without Core observing a matching `turn_completed`
+or `turn_aborted` event. That absence is not success evidence. For an exact external
 turn that remains `running` and `attached`, the observer requires two distinct
 durable Herdr observations later than the turn start, both `idle` or `done`, with
 no intervening transcript observation. Any transcript activity or non-idle state
@@ -1248,30 +1207,26 @@ state, exact turn ID/start time, Run Card generation, and durable runtime state.
 The Prompt and Run Card become failed with an explicitly unknown outcome, a
 `TurnFailed` event updates durable projections, and the Prompt FIFO is woken. The
 request is never replayed and the bridge never fabricates a successful answer.
-The scan reads only durable active bindings and their transcript files; it does
-not perform a Herdr snapshot or treat socket payloads as authoritative state. A
-new `task_started` plus its scoped user message may adopt exactly one queued
-ordinary prompt only when binding generation, pane, native session, request
-body (apart from line-ending normalization), and creation time all match. An
-ambiguous or absent match creates a separate durable prompt and Answer Card.
+The scan reads only durable active bindings and their Core Agent Events sources;
+it does not treat socket payloads as authoritative state. A new `turn_started`
+event may create one external durable prompt when binding generation, pane, and
+native session all match. Core intentionally does not expose prompt text, so the
+external prompt uses a fixed synthetic task description and never claims a queued
+Lark prompt by comparing request bodies.
 The atomic SQLite transition records `execution_origin = 'herdr'`, claims the
-full transcript turn ID, and reserves any initial card delivery before events
-enter the normal `BridgeEventBus` projection path; it never submits the request
-to TraeX again. A newer external turn may terminalize an identity-less detached
-prompt as uncertain. It may also supersede an exact-owned detached prompt, but
-only when the same cursor observes a different `task_started` with a strictly
-later start time and its scoped `user_message`. That handoff atomically fails
+full Core turn ID, and reserves any initial card delivery before events enter the
+normal `BridgeEventBus` projection path; it never submits the request to the Agent
+again. A newer external turn may terminalize an identity-less detached prompt as
+uncertain. It may also supersede an exact-owned detached prompt, but only when the
+same cursor observes a different `turn_started` with a strictly later start time.
+That handoff atomically fails
 the old prompt without replay, creates a separate external prompt and Answer
 Card, and retains the new exact turn fence. It never consumes a queued Lark
-prompt even when the request text matches. `PromptRunWorkflow` keeps the live
-cursor through this handoff so the start or request record cannot be lost
+prompt. `PromptRunWorkflow` keeps the live cursor through this handoff so the
+start event cannot be lost
 between observers. Other turn conflicts remain ignored. Periodic scans and
 explicit handoffs are serialized per binding so two external cursor reads
 cannot race.
-The transcript projector accepts both the legacy `user_message` event and the
-current `history_mutation` user message plus `item_completed/UserMessage` pair.
-The current formats share a message ID and are deduplicated before adoption.
-System/developer messages and user messages outside an active turn remain ignored.
 
 Herdr pane hints explicitly observe Primary external turns after the affected
 Binding reconciliation completes. Instance reconciliation, Worker turn
@@ -1287,15 +1242,14 @@ only the latest active turn within its bounded scan window; it never imports
 completed history. Lost or failed hints retain the periodic observer scan as the
 convergence path.
 
-After a service restart, a detached prompt that already owns an exact transcript
-turn ID and start time reopens that turn instead of establishing a new EOF
-baseline. Exact-turn lookup scans only the final 64 MiB of a larger transcript
-and ignores the partial record at the beginning of that bounded window. The
-replay keeps the durable RunCard answer as its baseline, appends transcript text
-only when the replay proves a strict missing suffix, and independently publishes
-the latest Main status snapshot. A Run Card ending at the legacy 64 KiB
+After a service restart, a detached prompt that already owns an exact Agent
+Events turn ID and start time reopens that turn instead of establishing a new
+tail baseline. The replay keeps the durable RunCard answer as its baseline,
+appends event text only when it proves a strict missing suffix, and republishes
+the retained Agent messages, Answer timeline, fresh-turn marker, and latest Main
+status snapshot. A Run Card ending at the legacy 64 KiB
 truncation marker is the narrow exception: replay removes only that exact marker,
-requires the exact owned transcript to match the remaining prefix, and then
+requires the exact owned event stream to match the remaining prefix, and then
 publishes the longer bounded snapshot as one `replace-all` update. If the prefix
 does not match, the old truncation fence remains intact. This restores plan steps
 and phase text written before the restart without duplicating Answer content or
@@ -1403,14 +1357,14 @@ token, pane ID, or provisioning label as data becomes available. A terminal
 title is not used as the pane name. The same named identity appears in the
 compact pane metric, while the task title remains in the body and card summary.
 
-The normal-state conversation preview follows this durable projection path:
+The normal-state message preview follows this durable projection path:
 
 ~~~text
-Run Card request + streamed/final answer
+Core Agent Events message observations
                   |
                   v
-recent conversation reducer in TopicViewState
-  key = <promptId>:<user|agent>, latest five messages
+recent Agent-message reducer in TopicViewState
+  key = messageId, latest five Agent replies
                   |
                   v
 Primary Main Card renderer, 3,000-character shared budget
@@ -1419,23 +1373,21 @@ Primary Main Card renderer, 3,000-character shared budget
 versioned session_status outbox intent -> Lark CardKit update
 ~~~
 
-User and Agent messages are separate entries. Entries are ordered by their
-durable occurrence time, with the user entry before the Agent entry for the same
-prompt. A streaming answer repeatedly replaces the same `<promptId>:agent`
-entry, so partial observations cannot create duplicate messages. The reducer
-keeps at most five individual messages across both roles and bounds each stored
+The current user request is represented by **当前任务** and is not duplicated in
+the message window. Agent messages are ordered by their durable occurrence time.
+An update with the same `messageId` replaces that entry, so streaming and final
+promotion cannot create duplicates. The reducer retains ten messages for durable
+topic context; the Main Card renders only the newest five and bounds each stored
 message to its newest 2,000 characters. At render time the five entries share a
 3,000-character budget, including role labels and separators; truncation again
 preserves the newest content. Native Agent console-status text is removed from
 Agent previews before display.
 
-The live projector mirrors every changed Run Card into the Topic View before it
-schedules Main Card convergence. On startup, the view converger reads the five
-newest durable Run Cards for each binding and idempotently reconstructs the same
-conversation projection. Legacy Topic Views without the field hydrate with an
-empty list; until history is available, the renderer can use the previous
-single latest-output fallback. Neither path reads terminal scrollback or the
-visible Lark card as history.
+The live projector persists changed Agent-message observations into Topic View
+before it schedules Main Card convergence. Detached restart replay rebuilds the
+same projection from the exact retained Core event turn. Legacy Topic Views
+without the field hydrate with an empty list. Neither path reads terminal
+scrollback, native transcript files, or the visible Lark card as history.
 
 SQLite saves the desired TopicView and reserves its `session_status` outbox row
 in one transaction. Initial creation uses `status-card:<bindingId>`; subsequent

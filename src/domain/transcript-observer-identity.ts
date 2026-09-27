@@ -15,8 +15,8 @@ export function transcriptObserverIdentity(binding: Pick<Binding, "id" | "agentK
     .join("");
 }
 
-export function transcriptSourceFor(binding: Pick<Binding, "id" | "agentKind" | "generation" | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue">): AgentTranscriptSource {
-  return { agentKind: binding.agentKind, bindingId: binding.id, generation: binding.generation, nativeSession: nativeSessionFor(binding) };
+export function transcriptSourceFor(binding: Pick<Binding, "id" | "agentKind" | "generation" | "paneId" | "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue">): AgentTranscriptSource {
+  return { agentKind: binding.agentKind, bindingId: binding.id, generation: binding.generation, paneId: binding.paneId, nativeSession: nativeSessionFor(binding) };
 }
 
 function nativeSessionFor(binding: Pick<Binding, "agentSessionSource" | "agentSessionAgent" | "agentSessionKind" | "agentSessionValue">): HerdrAgentSession | null {

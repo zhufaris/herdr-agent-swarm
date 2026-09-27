@@ -155,5 +155,5 @@ function transcriptSourceForInstance(instance: ReturnType<WorkerTurnObservationS
   const nativeSession = instance.runtimeRef?.nativeSessionId && instance.agentKind === "traex"
     ? { source: "herdr:traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId }
     : null;
-  return { agentKind: instance.agentKind, bindingId: instance.id, generation, nativeSession };
+  return { agentKind: instance.agentKind, bindingId: instance.id, generation, paneId: instance.runtimeRef?.paneId ?? null, nativeSession };
 }

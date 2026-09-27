@@ -114,6 +114,7 @@ export class SqliteProjectionStore {
       ...view,
       recentProgress: Array.isArray(view.recentProgress) ? view.recentProgress : [],
       recentConversation: Array.isArray(view.recentConversation) ? view.recentConversation : [],
+      recentAgentMessages: Array.isArray(view.recentAgentMessages) ? view.recentAgentMessages : [],
       liveStatus: normalizeLiveStatus(view.liveStatus),
       viewVersion: Number.isInteger(stored.viewVersion) ? stored.viewVersion! : 1,
       deliveredVersion: Number.isInteger(stored.deliveredVersion) ? stored.deliveredVersion! : 0

@@ -6,10 +6,13 @@ import type { PrimaryWorkerSummary } from "./card-context-summary.js";
 import type { ModelPreference, ModelPreferenceState } from "./model-selection.js";
 import type { AgentKind } from "./agent-instance.js";
 import { sameCardTargetRef, type CardTargetRef } from "./card-target-ref.js";
+import type { MainCardAgentMessage } from "./ports/external.js";
 
 const TOPIC_ANSWER_TAIL_LIMIT = 9_000;
 const RECENT_CONVERSATION_LIMIT = 5;
 const RECENT_CONVERSATION_MESSAGE_LIMIT = 2_000;
+const RECENT_AGENT_MESSAGE_LIMIT = 10;
+const RECENT_AGENT_MESSAGE_CHARACTER_LIMIT = 4_000;
 
 export type TopicViewPhase = "provisioning" | "ready" | "queued" | "running" | "blocked" | "done" | "error" | "degraded" | "draining" | "archived" | "orphaned";
 export interface TopicModelPreference { model: string; revision: number; state: ModelPreferenceState; }
@@ -23,13 +26,14 @@ export interface TopicViewState {
   primaryToolsAvailable: boolean | null; primaryToolsNotice: string | null;
   workers: PrimaryWorkerSummary[]; workerOverflowCount: number; workerDependencyRevision: number;
   recentConversation: RecentConversationMessage[];
+  recentAgentMessages: MainCardAgentMessage[];
   activityAt: string | null;
   viewVersion: number; deliveredVersion: number;
 }
 
 export function initialTopicView(bindingId: string): TopicViewState {
   return { bindingId, bindingGeneration: 1, title: "Agent task", agentKind: "traex", workspaceId: "unknown", spaceName: "unknown", tabId: null, paneId: null, paneToken: null, paneName: null, worktreeName: null, phase: "provisioning",
-    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, currentAnswer: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, recentConversation: [], activityAt: null, viewVersion: 0, deliveredVersion: 0 };
+    agentState: "unknown", queueDepth: 0, answer: null, notice: null, lastEventId: null, activePromptId: null, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, model: null, context: null, modelPreference: null, liveStatus: null, currentAnswer: null, primaryToolsAvailable: null, primaryToolsNotice: null, workers: [], workerOverflowCount: 0, workerDependencyRevision: 0, recentConversation: [], recentAgentMessages: [], activityAt: null, viewVersion: 0, deliveredVersion: 0 };
 }
 
 export function updateTopicCurrentAnswer(state: TopicViewState, currentAnswer: CardTargetRef | null): TopicViewState {
@@ -74,7 +78,7 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
       : { ...base, phase: "queued", queueDepth: event.payload.queueDepth, notice: null };
     case "PromptCancelled": return state;
     case "RunQueuePositionChanged": return state;
-    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, liveStatus: null };
+    case "TurnStarted": return { ...base, phase: "running", agentState: "working", queueDepth: event.payload.queueDepth, answer: null, notice: null, activePromptId: event.payload.promptId, recentProgress: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, liveStatus: null, recentAgentMessages: [] };
     case "TurnOutputObserved": {
       if (base.activePromptId && base.activePromptId !== event.payload.promptId) return state;
       const observation = normalizeTurnOutputObservation(event.payload);
@@ -87,8 +91,9 @@ function reduceTopicViewSnapshot(state: TopicViewState, event: BridgeEvent): Top
       const model = observation.main.model ?? state.model;
       const context = observation.main.context ?? state.context;
       const liveStatus = mergeLiveStatus(state.liveStatus, observation.main.status, event.occurredAt);
-      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && sameProgressSummary(progress.summary, state.progressSummary) && sameLiveStatus(liveStatus, state.liveStatus) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
-      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, progressSummary: progress.summary, liveStatus, model, context };
+      const recentAgentMessages = mergeRecentAgentMessages(observation.freshTurnStart ? [] : state.recentAgentMessages ?? [], observation.agentMessages ?? []);
+      if (answer === (state.answer ?? "") && sameVisibleProgress(recentProgress, state.recentProgress ?? []) && sameProgressSummary(progress.summary, state.progressSummary) && sameLiveStatus(liveStatus, state.liveStatus) && sameAgentMessages(recentAgentMessages, state.recentAgentMessages ?? []) && state.activePromptId === event.payload.promptId && model === state.model && context === state.context) return state;
+      return { ...base, activePromptId: event.payload.promptId, answer, recentProgress, progressSummary: progress.summary, liveStatus, recentAgentMessages, model, context };
     }
     case "PaneOutputObserved": {
       const observation = event.payload.observation;
@@ -176,6 +181,7 @@ function sameTopicPresentation(left: TopicViewState, right: TopicViewState): boo
     && left.primaryToolsAvailable === right.primaryToolsAvailable && left.primaryToolsNotice === right.primaryToolsNotice
     && left.workerOverflowCount === right.workerOverflowCount && sameWorkerSummaries(left.workers, right.workers)
     && sameRecentConversation(left.recentConversation, right.recentConversation)
+    && sameAgentMessages(left.recentAgentMessages, right.recentAgentMessages)
     && sameLiveStatus(left.liveStatus, right.liveStatus)
     && sameVisibleProgress(left.recentProgress, right.recentProgress) && sameProgressSummary(left.progressSummary, right.progressSummary);
 }
@@ -187,6 +193,36 @@ function sameRecentConversation(left: readonly RecentConversationMessage[], righ
   return left.length === right.length && left.every((message, index) => {
     const other = right[index];
     return other !== undefined && message.key === other.key && message.promptId === other.promptId && message.role === other.role && message.content === other.content && message.occurredAt === other.occurredAt;
+  });
+}
+function mergeRecentAgentMessages(current: readonly MainCardAgentMessage[], updates: readonly MainCardAgentMessage[]): MainCardAgentMessage[] {
+  const messages = current.slice();
+  for (const update of updates) {
+    const bounded = { ...update, markdown: boundAgentMessageMarkdown(update.markdown) };
+    if (!bounded.markdown) continue;
+    const existing = messages.findIndex((message) => message.messageId === bounded.messageId);
+    if (existing >= 0) {
+      messages[existing] = bounded;
+      continue;
+    }
+    const previous = messages.at(-1);
+    if (bounded.channel === "final" && previous?.channel === "commentary" && normalizeAgentMessage(previous.markdown) === normalizeAgentMessage(bounded.markdown)) messages.pop();
+    messages.push(bounded);
+  }
+  return messages.slice(-RECENT_AGENT_MESSAGE_LIMIT);
+}
+function boundAgentMessageMarkdown(value: string): string {
+  const normalized = value.trim();
+  if (normalized.length <= RECENT_AGENT_MESSAGE_CHARACTER_LIMIT) return normalized;
+  const marker = "\n\n…（中间内容已省略）…\n\n";
+  const available = RECENT_AGENT_MESSAGE_CHARACTER_LIMIT - marker.length;
+  return `${normalized.slice(0, Math.ceil(available / 2)).trimEnd()}${marker}${normalized.slice(-Math.floor(available / 2)).trimStart()}`;
+}
+function normalizeAgentMessage(value: string): string { return value.replace(/\s+/g, " ").trim(); }
+function sameAgentMessages(left: readonly MainCardAgentMessage[], right: readonly MainCardAgentMessage[]): boolean {
+  return left.length === right.length && left.every((message, index) => {
+    const other = right[index];
+    return other !== undefined && message.messageId === other.messageId && message.turnId === other.turnId && message.channel === other.channel && message.markdown === other.markdown && message.occurredAt === other.occurredAt;
   });
 }
 function sameProgressSummary(left: RunProgressSummary, right: RunProgressSummary): boolean { return left.total === right.total && left.stepTotal === right.stepTotal && left.stepDone === right.stepDone; }

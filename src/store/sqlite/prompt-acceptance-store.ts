@@ -60,7 +60,7 @@ export class SqlitePromptAcceptanceStore {
       this.dependencies.enqueueOutboundReply({
         id: randomUUID(), idempotencyKey: `answer-post:${input.prompt.id}:0`, bindingId: input.prompt.bindingId,
         promptId: input.prompt.id, viewVersion: view.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId,
-        kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId, richTextAnswerTitle({ projectId: binding?.projectId, paneId: binding?.paneId ?? view.paneId, paneToken: binding?.paneToken ?? view.paneToken }, 0)))
+        kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId, richTextAnswerTitle({ projectId: binding?.projectId, paneId: binding?.paneId ?? view.paneId, paneToken: binding?.paneToken ?? view.paneToken, taskTitle: view.title }, 0)))
       });
       const prompt = this.getPrompt(input.prompt.id);
       if (!prompt) throw new Error(`Prompt not found: ${input.prompt.id}`);

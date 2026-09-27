@@ -38,6 +38,13 @@ export class TraexTranscriptReader implements AgentTranscriptReaderPort {
     this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? DEFAULT_MAX_RENDERED_DELTA_CHARS;
   }
 
+  async resolveTranscriptDescriptor(source: AgentTranscriptSource): Promise<{ sessionId: string; path: string } | null> {
+    const identity = validateSession(source);
+    if (typeof identity !== "string") return null;
+    const path = await this.locator.resolveTranscriptPath(identity);
+    return path ? { sessionId: identity, path } : null;
+  }
+
   async open(source: AgentTranscriptSource | HerdrAgentSession | null | undefined): Promise<AgentTranscriptOpenResult> {
     const identity = validateSession(source);
     if (typeof identity !== "string") return identity;

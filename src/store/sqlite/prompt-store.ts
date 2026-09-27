@@ -101,7 +101,7 @@ export class SqlitePromptStore {
     const prompt = this.context.database.prepare("SELECT binding_id FROM prompt_jobs WHERE id = ?").get(promptId) as { binding_id: string } | undefined;
     if (!prompt) throw new Error(`Prompt not found: ${promptId}`);
     const binding = this.dependencies.listBindings().find(({ id }) => id === prompt.binding_id);
-    const title = richTextAnswerTitle({ projectId: binding?.projectId, paneId: binding?.paneId ?? view.paneId, paneToken: binding?.paneToken ?? view.paneToken }, 0);
+    const title = richTextAnswerTitle({ projectId: binding?.projectId, paneId: binding?.paneId ?? view.paneId, paneToken: binding?.paneToken ?? view.paneToken, taskTitle: view.title }, 0);
     this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${promptId}:0`, bindingId: prompt.binding_id, promptId, viewVersion: view.viewVersion, cardRole: "answer", ...(existing ? { workClass: existing.work_class } : workClass ? { workClass } : {}), rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, view.answerElementId, title)) });
   }
 

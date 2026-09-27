@@ -4,6 +4,7 @@ import type { AnswerTimelineDelta, AnswerTimelineToolCategory } from "../domain/
 import { boundTranscriptMarkdown } from "./agent-transcript-codec.js";
 import { normalizeToolOutput, projectToolCall, projectToolResult, projectToolResultState, type ToolActivityDescriptor } from "./tool-activity-projector.js";
 import { redactSecrets } from "./redact-secrets.js";
+import { parsePlanToolCall } from "./plan-snapshot.js";
 
 const MAX_EPOCH_SECONDS = 10_000_000_000;
 const envelopeSchema = z.object({ type: z.string(), payload: z.unknown() }).passthrough();
@@ -29,7 +30,6 @@ const completedCommandExecutionEventSchema = z.object({
     status: z.string().optional(), exit_code: z.number().int().nullable().optional()
   }).passthrough()
 }).passthrough();
-const planArgumentsSchema = z.object({ plan: z.array(z.object({ step: z.string(), status: z.enum(["pending", "in_progress", "completed"]) })).max(100) }).passthrough();
 
 export class TraexTranscriptProjector {
   private readonly emittedItemIds = new Set<string>();
@@ -77,7 +77,8 @@ export class TraexTranscriptProjector {
           if (text) requestText = text;
           continue;
         }
-        const plan = parsePlanSnapshot(item);
+        const planCall = functionCallSchema.safeParse(item);
+        const plan = planCall.success ? parsePlanToolCall(planCall.data.name, planCall.data.arguments) : null;
         if (plan) { planSteps = plan; const call = functionCallSchema.safeParse(item); if (call.success) this.emittedItemIds.add(call.data.id); continue; }
         const timelineEnabled = observationTurnId !== undefined && lifecycle?.turnId === observationTurnId;
         const rendered = this.renderItem(item, toolActivities, timelineDeltas, timelineEnabled, input.maxRenderedDeltaChars); if (rendered) blocks.push(rendered);
@@ -178,5 +179,3 @@ function projectActivity(callId: string, descriptor: ToolActivityDescriptor, sta
 function reduceTurnLifecycle(current: AgentTranscriptObservation["turnLifecycle"], envelope: z.infer<typeof envelopeSchema>, max: number): AgentTranscriptObservation["turnLifecycle"] { if (envelope.type !== "event_msg") return current; const started = taskStartedEventSchema.safeParse(envelope.payload); if (started.success) return { turnId: started.data.turn_id, state: "active", startedAt: eventTime(started.data.started_at) }; const completed = taskCompleteEventSchema.safeParse(envelope.payload); if (completed.success) { if (current?.state !== "active" || current.turnId !== completed.data.turn_id) return current; const finalAnswer = completed.data.last_agent_message ? boundTranscriptMarkdown(redactSecrets(completed.data.last_agent_message.trim()), max) : ""; return { turnId: completed.data.turn_id, state: "completed", startedAt: current.startedAt, ...(finalAnswer ? { finalAnswer } : {}) }; } const aborted = turnAbortedEventSchema.safeParse(envelope.payload); if (!aborted.success || current?.state !== "active" || current.turnId !== aborted.data.turn_id) return current; return { turnId: aborted.data.turn_id, state: "aborted", startedAt: current.startedAt, ...(aborted.data.reason ? { reason: boundTranscriptMarkdown(redactSecrets(aborted.data.reason), max) } : {}) }; }
 function eventTime(seconds: number): string { return new Date(seconds * 1_000).toISOString(); }
 function extractStatusTitle(text: string): string | null { const match = /^\s*\*\*([^*\n]+)\*\*/.exec(text); const title = match?.[1]?.replace(/\s+/g, " " ).trim(); return title ? title.slice(0, 160) : null; }
-function parsePlanSnapshot(item: unknown): AgentTranscriptPlanStep[] | null { const call = functionCallSchema.safeParse(item); if (!call.success) return null; try { const outer = JSON.parse(call.data.arguments) as unknown; const parsed = call.data.name === "update_plan" ? planArgumentsSchema.safeParse(outer) : call.data.name === "exec" ? parseWrappedPlan(outer) : null; if (!parsed?.success) return null; const states = { pending: "pending", in_progress: "active", completed: "done" } as const; return parsed.data.plan.map((step, index) => ({ key: `plan:${index}`, label: step.step.replace(/\s+/g, " " ).trim().slice(0, 300) || "未命名步骤", state: states[step.status] })); } catch { return null; } }
-function parseWrappedPlan(value: unknown): ReturnType<typeof planArgumentsSchema.safeParse> | null { if (!value || typeof value !== "object" || Array.isArray(value)) return null; const input = (value as Record<string, unknown>).input; if (typeof input !== "string" || !/tools\.update_plan\s*\(/.test(input)) return null; const steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }> = []; const pattern = /"?step"?\s*:\s*("(?:\\.|[^"\\])*")\s*,\s*"?status"?\s*:\s*"(pending|in_progress|completed)"/g; for (const match of input.matchAll(pattern)) { try { steps.push({ step: JSON.parse(match[1]!) as string, status: match[2]! as "pending" | "in_progress" | "completed" }); } catch { return null; } } return steps.length ? planArgumentsSchema.safeParse({ plan: steps }) : null; }

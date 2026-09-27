@@ -26,6 +26,16 @@ export class PiTranscriptReader implements AgentTranscriptReaderPort {
   private readonly maxRenderedDeltaChars: number;
   constructor(private readonly options: PiTranscriptReaderOptions) { this.maxRenderedDeltaChars = options.maxRenderedDeltaChars ?? MAX_TURN_OUTPUT_CHARS; }
 
+  async resolveTranscriptDescriptor(source: AgentTranscriptSource): Promise<{ sessionId: string; path: string } | null> {
+    if (source.agentKind !== "pi" || !source.bindingId || !Number.isInteger(source.generation)) return null;
+    const descriptor = piTranscriptDescriptor(this.options.root, source.bindingId, source.generation);
+    const paths = await readdir(descriptor.sessionDir).then(
+      (names) => names.filter((name) => name.endsWith(`_${descriptor.sessionId}.jsonl`)),
+      (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; }
+    );
+    return paths.length === 1 ? { sessionId: descriptor.sessionId, path: join(descriptor.sessionDir, paths[0]!) } : null;
+  }
+
   open(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult> { return this.openBoundary(source, { kind: "latest" }); }
   openActiveTurn(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult> { return this.openBoundary(source, { kind: "active" }); }
   openFirstTurn(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult> { return this.openBoundary(source, { kind: "first" }); }

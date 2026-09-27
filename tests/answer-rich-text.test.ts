@@ -73,9 +73,9 @@ describe("safe rich-text Answer streaming", () => {
   });
 
   it("attaches metadata titles to active and terminal page documents", () => {
-    const metadata = { projectId: "bridge", paneId: "w1:p1", paneToken: "abcd" };
-    expect(planRichTextAnswerPage([], null, { active: true, pageIndex: 0, metadata }).document.title).toBe("🤖 bridge · abcd");
-    expect(planRichTextAnswerPage([], null, { active: false, pageIndex: 2, metadata }).document.title).toBe("🤖 bridge · abcd · 第 3 页");
+    const metadata = { projectId: "bridge", paneId: "w1:p1", paneToken: "abcd", taskTitle: "Fix Markdown" };
+    expect(planRichTextAnswerPage([], null, { active: true, pageIndex: 0, metadata }).document.title).toBe("🤖 bridge · abcd · Fix Markdown");
+    expect(planRichTextAnswerPage([], null, { active: false, pageIndex: 2, metadata }).document.title).toBe("🤖 bridge · abcd · Fix Markdown · 第 3 页");
   });
 
   it("renders command tool activity as bash Markdown and labels continuation pages", () => {

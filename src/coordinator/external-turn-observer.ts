@@ -46,6 +46,7 @@ const MAX_AWAKE_OBSERVATIONS = 256;
 const ACTIVE_BINDING_OBSERVATION_CONCURRENCY = 4;
 const IDLE_WITHOUT_TERMINAL_CONFIRMATIONS = 2;
 const MISSING_TERMINAL_EVENT_ERROR = "TraeX returned idle without a terminal transcript event; the outcome is unknown and the prompt was not replayed";
+const DIRECT_HERDR_REQUEST = "Herdr Pane 中直接发起的任务";
 
 export class ExternalTurnObserver {
   private readonly bindings = new Map<string, ObservedBinding>();
@@ -268,17 +269,18 @@ export class ExternalTurnObserver {
     if (!turnId) return "ignored";
     if (lifecycle && !supersede && !observed.pendingStarts.has(turnId)) observed.pendingStarts.set(turnId, lifecycle.startedAt);
     let owned = observed.promptsByTurn.get(turnId);
-    if (!owned && observation.requestText !== undefined) {
+    const requestText = observation.requestText ?? (observation.freshTurnStart ? DIRECT_HERDR_REQUEST : undefined);
+    if (!owned && requestText !== undefined) {
       const startedAt = observed.pendingStarts.get(turnId) ?? (supersede ? undefined : lifecycle?.startedAt);
       if (!startedAt) return "ignored";
       const externalPromptId = this.idFactory();
       const externalView = createQueuedRunCard({
-        promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(observation.requestText),
-        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, paneToken: binding.paneToken, requestText: observation.requestText, queuePosition: 0, occurredAt: startedAt
+        promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(requestText),
+        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, paneToken: binding.paneToken, requestText, queuePosition: 0, occurredAt: startedAt
       });
       const result = this.options.store.adoptExternalTurn({
         bindingId: binding.id, expectedGeneration: binding.generation, expectedPaneId: binding.paneId!, expectedSession: session,
-        turnId, startedAt, requestText: observation.requestText, externalPromptId, externalMessageId: `herdr-turn:${session.value}:${turnId}`,
+        turnId, startedAt, requestText, externalPromptId, externalMessageId: `herdr-turn:${session.value}:${turnId}`,
         ...(supersede ? { supersede } : {}),
         externalView, answerCardFor: this.options.presentation.answerCard
       });
@@ -305,10 +307,17 @@ export class ExternalTurnObserver {
     owned.output = appendTurnOutput(previousOutput, observation.answerDelta);
     const answerChanged = Boolean(observation.answerDelta) && !previousOutput.truncated;
     const answerSnapshot = answerChanged ? (owned.output.truncated ? owned.output.text : observation.answerDelta) : "";
-    if (answerChanged || observation.toolActivities?.length || observation.mainStatus) {
+    if (answerChanged || observation.timelineDeltas?.length || observation.toolActivities?.length || observation.agentMessages?.length || observation.freshTurnStart || observation.mainStatus) {
       await this.publish(binding.id, "TurnOutputObserved", "herdr", {
         promptId: owned.promptId, observation: {
-          answer: { snapshot: answerSnapshot, update: answerChanged && owned.output.truncated ? "replace-all" : "append", toolActivities: observation.toolActivities ?? [] },
+          ...(observation.freshTurnStart ? { freshTurnStart: true } : {}),
+          ...(observation.agentMessages?.length ? { agentMessages: observation.agentMessages } : {}),
+          answer: {
+            snapshot: answerSnapshot,
+            update: answerChanged && owned.output.truncated ? "replace-all" : "append",
+            toolActivities: observation.toolActivities ?? [],
+            ...(observation.timelineDeltas?.length ? { timelineDeltas: observation.timelineDeltas } : {})
+          },
           main: { ...(observation.mainStatus ? { status: {
             ...(observation.mainStatus.statusTitle ? { statusTitle: observation.mainStatus.statusTitle } : {}),
             ...(observation.mainStatus.planSteps ? { planSteps: observation.mainStatus.planSteps.map((step) => ({ ...step, kind: "step" as const })) } : {}),

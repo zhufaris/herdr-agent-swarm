@@ -87,30 +87,41 @@ export class TranscriptObserver {
       const source: TurnOutputSource = { mode: "typed", cursor: opened.cursor, emitted: Boolean(persistedAnswer), output: createBoundedTurnOutput(persistedAnswer) };
       let replayedAnswer = createBoundedTurnOutput();
       let replayedTimeline: AnswerTimelineItem[] = [];
+      const replayedAgentMessages: NonNullable<AgentTranscriptObservation["agentMessages"]> = [];
+      let replayedFreshTurnStart = false;
       let latestMainStatus: AgentTranscriptObservation["mainStatus"];
       await opened.cursor.drain({ limit: DETACHED_REPLAY_DRAIN_LIMIT, onObservation: async (observation) => {
         replayedAnswer = appendTurnOutput(replayedAnswer, observation.answerDelta);
         replayedTimeline = applyAnswerTimelineDeltas(replayedTimeline, observation.timelineDeltas ?? []);
+        if (observation.agentMessages?.length) replayedAgentMessages.push(...observation.agentMessages);
+        if (observation.freshTurnStart) replayedFreshTurnStart = true;
         if (observation.mainStatus) latestMainStatus = mergeMainStatus(latestMainStatus, observation.mainStatus);
         if (observation.turnLifecycle?.state === "completed" || observation.turnLifecycle?.state === "aborted") source.terminalLifecycle = observation.turnLifecycle;
         return "continue" as const;
       } });
       const persistedPrefix = legacyPrefix ?? persistedAnswer;
+      const replayPresentation = {
+        turnId: prompt.transcriptTurnId,
+        ...(replayedFreshTurnStart ? { freshTurnStart: true } : {}),
+        ...(replayedAgentMessages.length ? { agentMessages: replayedAgentMessages } : {}),
+        ...(replayedTimeline.length ? { timelineDeltas: replayedTimeline } : {}),
+        ...(latestMainStatus ? { mainStatus: latestMainStatus } : {})
+      };
       if (!replayedAnswer.truncated && replayedAnswer.text.startsWith(persistedPrefix) && replayedAnswer.text.length > persistedPrefix.length) {
         source.output = replayedAnswer;
         if (legacyPrefix !== null) {
-          await this.options.publishObservation(binding.id, prompt.id, {
-            answer: { snapshot: replayedAnswer.text, update: "replace-all", toolActivities: [], ...(replayedTimeline.length ? { timelineDeltas: replayedTimeline } : {}) },
-            main: {}
+          const projected = projectOwnedTranscriptOutput({ state: { emitted: false, output: createBoundedTurnOutput() }, observation: { ...replayPresentation, answerDelta: replayedAnswer.text }, elapsedSeconds: Date.now() / 1_000 - Date.parse(prompt.transcriptTurnStartedAt) / 1_000 });
+          if (projected.observation) await this.options.publishObservation(binding.id, prompt.id, {
+            ...projected.observation,
+            answer: { ...projected.observation.answer, snapshot: replayedAnswer.text, update: "replace-all" }
           });
         } else {
           const suffix = replayedAnswer.text.slice(persistedAnswer.length).trimStart();
-          if (suffix || replayedTimeline.length) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: suffix, ...(replayedTimeline.length ? { timelineDeltas: replayedTimeline } : {}) }, Date.parse(prompt.transcriptTurnStartedAt));
+          await this.publishOwned(binding.id, prompt.id, { ...replayPresentation, answerDelta: suffix }, Date.parse(prompt.transcriptTurnStartedAt));
         }
-      } else if (replayedTimeline.length) {
-        await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: "", timelineDeltas: replayedTimeline }, Date.parse(prompt.transcriptTurnStartedAt));
+      } else if (replayedTimeline.length || replayedAgentMessages.length || replayedFreshTurnStart || latestMainStatus) {
+        await this.publishOwned(binding.id, prompt.id, { ...replayPresentation, answerDelta: "" }, Date.parse(prompt.transcriptTurnStartedAt));
       }
-      if (latestMainStatus) await this.publishOwned(binding.id, prompt.id, { turnId: prompt.transcriptTurnId, answerDelta: "", mainStatus: latestMainStatus }, Date.parse(prompt.transcriptTurnStartedAt));
       return source;
     } catch (error) {
       this.options.logger.warn({ event: "detached-transcript-replay-failed", err: safeLogError(error), bindingId: binding.id, promptId: prompt.id, paneId: binding.paneId, outcome: "live_tail_only" }, "could not replay detached transcript state; continuing from the live tail");

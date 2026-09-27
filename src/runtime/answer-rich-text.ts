@@ -44,6 +44,7 @@ export interface RichTextAnswerMetadata {
   paneId?: string | null | undefined;
   paneToken?: string | null | undefined;
   workerName?: string | null | undefined;
+  taskTitle?: string | null | undefined;
 }
 
 export interface RichTextAnswerTerminalSummary {
@@ -56,7 +57,8 @@ export function richTextAnswerTitle(metadata: RichTextAnswerMetadata, pageIndex:
   const project = safeTitleSegment(metadata.projectId, 72, "未知项目");
   const pane = safeTitleSegment(displayPaneIdentity(metadata, "未知 Pane"), 64, "未知 Pane");
   const worker = metadata.workerName ? safeTitleSegment(metadata.workerName, 48, "Worker") : "";
-  const parts = [`🤖 ${project}`, pane, worker, pageIndex > 0 ? `第 ${pageIndex + 1} 页` : ""].filter(Boolean);
+  const task = metadata.taskTitle ? safeTitleSegment(metadata.taskTitle, 80, "") : "";
+  const parts = [`🤖 ${project}`, pane, worker, task, pageIndex > 0 ? `第 ${pageIndex + 1} 页` : ""].filter(Boolean);
   return truncateInline(parts.join(" · "), ANSWER_TITLE_LIMIT);
 }
 

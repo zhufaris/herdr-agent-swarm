@@ -4,7 +4,7 @@ import type { RunProgressEvent } from "./run-card-view.js";
 export function currentMainCardActivity(events: readonly RunProgressEvent[], excludedKeys: ReadonlySet<string> = new Set(), visibleLabels: readonly string[] = []): RunProgressEvent[] {
   const normalizedLabels = visibleLabels.map(normalizeComparableLabel).filter(Boolean);
   const candidates = events.filter((event) => !excludedKeys.has(event.key) && !duplicatesVisibleLabel(event.label, normalizedLabels));
-  const current = candidates.findLast(({ state }) => state === "active") ?? candidates.at(-1);
+  const current = candidates.findLast(({ state }) => state === "active");
   return current ? [current] : [];
 }
 

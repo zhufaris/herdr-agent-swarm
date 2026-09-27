@@ -75,7 +75,7 @@ describe("Worker Main card", () => {
     expect(rendered).toContain("🧭 Worker · reviewer");
     expect(rendered).toContain("Review auth boundary and summarize findings");
     expect(rendered).toContain("Inspecting ownership fences");
-    expect(rendered).toContain("Read ownership policy");
+    expect(rendered).not.toContain("Read ownership policy");
     expect(rendered).toContain("Current bounded output");
     expect(rendered).toContain("Run recovery tests");
     expect(rendered).toContain("worker_task_instruction_form");
@@ -101,7 +101,7 @@ describe("Worker Main card", () => {
 
     expect(progress?.elements?.map(({ content }) => content).join("\n")).toContain("Inspect current state");
     expect(progress?.elements?.map(({ content }) => content).join("\n")).not.toMatch(/Read ownership policy|Legacy activity/);
-    expect(activity?.elements?.map(({ content }) => content).join("\n")).toBe("✓ • Legacy activity");
+    expect(activity).toBeUndefined();
   });
 
   it("groups state, elapsed time, tokens, and plan under current task before latest message and activity", () => {
@@ -111,7 +111,7 @@ describe("Worker Main card", () => {
       statusTitle: "Inspecting ownership fences", answer: "Latest bounded message",
       progressEvents: [
         { key: "plan:inspect", kind: "step", label: "Inspect current state", state: "active", occurredAt: "now" },
-        { key: "tool:read", kind: "read", label: "Read ownership policy", state: "done", occurredAt: "now" }
+        { key: "tool:read", kind: "read", label: "Read ownership policy", state: "active", occurredAt: "now" }
       ]
     }, queueCount: 0, nextTaskTitle: null, recentTasks: [], occurredAt: "now" });
     const elements = (renderWorkerMainCard(projected) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } }; elements?: Array<{ content?: string }> }> } }).body.elements;

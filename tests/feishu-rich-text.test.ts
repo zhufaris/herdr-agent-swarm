@@ -8,6 +8,7 @@ describe("Feishu rich-text materialization", () => {
       zh_cn: {
         title: "回答（续 2）",
         content: [
+          [{ tag: "text", text: "回答（续 2）", style: ["bold"] }],
           [{ tag: "md", text: "Hello **world** 💭" }]
         ]
       }
@@ -26,11 +27,12 @@ describe("Feishu rich-text materialization", () => {
     });
   });
 
-  it("keeps metadata only in the native title without duplicating it in content", () => {
+  it("keeps the Answer title visible when Feishu hides a thread reply's native post title", () => {
     expect(materializeFeishuRichText({ title: "🤖 bridge · abcd", markdown: "Answer body" })).toEqual({
       zh_cn: {
         title: "🤖 bridge · abcd",
         content: [
+          [{ tag: "text", text: "🤖 bridge · abcd", style: ["bold"] }],
           [{ tag: "md", text: "Answer body" }]
         ]
       }
@@ -57,6 +59,7 @@ describe("Feishu rich-text materialization", () => {
       zh_cn: {
         title: "🤖 bridge · abcd",
         content: [
+          [{ tag: "text", text: "🤖 bridge · abcd", style: ["bold"] }],
           [{ tag: "md", text: "Before **code**" }],
           [{ tag: "code_block", language: "BASH", text: "echo hello" }],
           [{ tag: "code_block", language: "TYPESCRIPT", text: "const answer: number = 42;" }],

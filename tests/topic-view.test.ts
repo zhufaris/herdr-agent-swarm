@@ -81,6 +81,42 @@ describe("topic view reducer", () => {
     expect(view.liveStatus).toBeNull();
   });
 
+  it("keeps the latest ten Core Agent messages and updates stable message IDs in place", () => {
+    let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    for (let index = 0; index < 11; index += 1) {
+      view = reduceTopicView(view, event("TurnOutputObserved", {
+        promptId: "p1",
+        observation: {
+          answer: { snapshot: "", toolActivities: [] }, main: {},
+          agentMessages: [{ messageId: `m${index}`, turnId: "t1", channel: "commentary", markdown: `message ${index}`, occurredAt: `2026-09-27T00:00:${String(index).padStart(2, "0")}Z` }]
+        }
+      }));
+    }
+    expect(view.recentAgentMessages).toHaveLength(10);
+    expect(view.recentAgentMessages[0]?.messageId).toBe("m1");
+
+    view = reduceTopicView(view, event("TurnOutputObserved", {
+      promptId: "p1",
+      observation: {
+        answer: { snapshot: "", toolActivities: [] }, main: {},
+        agentMessages: [{ messageId: "m10", turnId: "t1", channel: "final", markdown: "updated final", occurredAt: "2026-09-27T00:01:00Z" }]
+      }
+    }));
+    expect(view.recentAgentMessages.at(-1)).toMatchObject({ messageId: "m10", channel: "final", markdown: "updated final" });
+  });
+
+  it("replaces an adjacent duplicate commentary message with its final form and clears on a new turn", () => {
+    let view = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
+    view = reduceTopicView(view, event("TurnOutputObserved", {
+      promptId: "p1", observation: { answer: { snapshot: "", toolActivities: [] }, main: {}, agentMessages: [
+        { messageId: "commentary", turnId: "t1", channel: "commentary", markdown: "Done **well**", occurredAt: "one" },
+        { messageId: "final", turnId: "t1", channel: "final", markdown: "Done **well**", occurredAt: "two" }
+      ] }
+    }));
+    expect(view.recentAgentMessages).toEqual([expect.objectContaining({ messageId: "final", channel: "final" })]);
+    expect(reduceTopicView(view, event("TurnStarted", { promptId: "p2", queueDepth: 1 })).recentAgentMessages).toEqual([]);
+  });
+
   it("keeps a running main card running when reconciliation observes more terminal output", () => {
     const running = reduceTopicView(initialTopicView("b1"), event("TurnStarted", { promptId: "p1", queueDepth: 1 }));
     const observed = reduceTopicView(running, event("PaneOutputObserved", { answer: "still working" }));

@@ -15,6 +15,34 @@ function findTaggedNodes(value: unknown, tag: string): Array<Record<string, unkn
 }
 
 describe("run card", () => {
+  it("renders five Core Agent messages as separate Markdown blocks before active tools and Workers", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", paneName: "nxmz", paneToken: "abcd",
+      liveStatus: { statusTitle: null, planSteps: [{ key: "plan:0", kind: "step", label: "Implement", state: "active", occurredAt: "now" }], elapsedSeconds: 12, tokenCount: null },
+      recentAgentMessages: Array.from({ length: 6 }, (_, index) => ({
+        messageId: `m${index}`, turnId: "turn-1", channel: index === 5 ? "final" as const : "commentary" as const,
+        markdown: index === 5 ? "```bash\nnpm test\n```" : `**message ${index}**`, occurredAt: `time-${index}`
+      })),
+      recentProgress: [
+        { key: "tool:done", kind: "read", label: "old", state: "done", occurredAt: "one" },
+        { key: "tool:active", kind: "test", label: "npm test", state: "active", occurredAt: "two" }
+      ]
+    }) as { header: { title: { content: string } }; body: { elements: Array<Record<string, unknown>> } };
+    const serialized = JSON.stringify(card);
+    expect(card.header.title.content).toContain("nxmz · abcd");
+    expect(serialized).not.toContain("message 0");
+    expect(serialized).toContain("message 1");
+    expect(serialized).toContain("```bash\\nnpm test\\n```");
+    const elements = card.body.elements;
+    const task = elements.findIndex((element) => JSON.stringify(element).includes("当前任务"));
+    const messages = elements.findIndex((element) => JSON.stringify(element).includes("最新消息 · 5"));
+    const activity = elements.findIndex((element) => JSON.stringify(element).includes("当前操作"));
+    const workers = elements.findIndex((element) => JSON.stringify(element).includes("Workers ·"));
+    const runtime = elements.findIndex((element) => JSON.stringify(element).includes("Runtime ·"));
+    expect([task, messages, activity, workers, runtime].every((index) => index >= 0)).toBe(true);
+    expect([task, messages, activity, workers, runtime]).toEqual([...new Set([task, messages, activity, workers, runtime])].sort((a, b) => a - b));
+    expect(serialized).not.toContain('"content":"old"');
+  });
   afterEach(() => vi.useRealTimers());
 
   it("renders attach success without a navigation button when no topic URL exists", () => {
@@ -53,14 +81,14 @@ describe("run card", () => {
     expect(JSON.stringify(renderProjectEntryCard({ ...initialTopicView("b1"), currentAnswer: { ...target, messageId: null } }))).not.toContain("打开实时 Answer");
   });
 
-  it("places the Answer entry before recent conversation", () => {
+  it("places the Answer entry before recent Agent messages", () => {
     const target = { aggregateKind: "primary-turn" as const, aggregateId: "prompt-1", generation: 1, messageId: "answer-1" };
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running", currentAnswer: target,
-      recentConversation: [{ key: "p1:user", promptId: "p1", role: "user", content: "continue", occurredAt: "now" }]
+      recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "commentary", markdown: "continue", occurredAt: "now" }]
     }) as { body: { elements: Array<{ tag?: string; content?: string; behaviors?: Array<{ value?: { action?: string } }> }> } };
     const answerIndex = card.body.elements.findIndex((element) => element.tag === "button" && element.behaviors?.[0]?.value?.action === "card_target_open");
-    const conversationIndex = card.body.elements.findIndex((element) => element.content?.startsWith("**💬 最近对话**"));
+    const conversationIndex = card.body.elements.findIndex((element) => element.content?.startsWith("**💬 最新消息 · 1**"));
 
     expect(answerIndex).toBeGreaterThanOrEqual(0);
     expect(conversationIndex).toBeGreaterThan(answerIndex);
@@ -294,6 +322,7 @@ describe("run card", () => {
       spaceName: "datasage", tabId: "w5:t2", paneId: "w5:p4E", worktreeName: "feat/query-log",
       model: "GPT-5.4", context: "36%", queueDepth: 0, activityAt: "2026-08-27T12:00:00Z",
       answer: "line-1\nline-2\nline-3\nline-4\nline-5\nline-6",
+      recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "commentary", markdown: "line-1\nline-2\nline-3\nline-4\nline-5\nline-6", occurredAt: "now" }],
       liveStatus: {
         statusTitle: "Checking deployment state", elapsedSeconds: 177, tokenCount: 4_570,
         planSteps: [
@@ -311,7 +340,7 @@ describe("run card", () => {
     const liveIndex = elements.findIndex((element) => element.header?.title?.content === "🎯 当前任务 · 1/2");
     const workersIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("🤖 Workers ·"));
     const activityIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("⚙️ 当前操作"));
-    const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息**"));
+    const previewIndex = elements.findIndex((element) => element.content?.startsWith("**💬 最新消息 · 1**"));
     const footerIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("🖥️ Runtime ·"));
 
     expect(liveIndex).toBeGreaterThanOrEqual(0);
@@ -323,7 +352,7 @@ describe("run card", () => {
     expect(serialized).not.toContain("当前进展");
     expect(serialized).not.toContain("最近活动");
     expect(serialized.match(/确认部署版本/g)).toHaveLength(1);
-    expect(elements[previewIndex]?.content?.split("\n").slice(2)).toEqual(["line-1", "line-2", "line-3", "line-4", "line-5", "line-6"]);
+    expect(serialized).toContain("line-1\\nline-2\\nline-3\\nline-4\\nline-5\\nline-6");
     expect(serialized).toContain("`GPT-5.4` · context `36%` · queue `0`");
     expect(serialized).toContain("worktree `feat/query-log`");
   });
@@ -357,17 +386,19 @@ describe("run card", () => {
     });
   });
 
-  it("shows the newest compact answer preview and current activity on the group project entry card", () => {
+  it("shows a Core Agent message and active current activity on the group project entry card", () => {
     const answer = `old answer ${"x".repeat(2_700)} newest conclusion`;
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "datasage / Fix login", spaceName: "datasage_semantic_knowledge", paneId: "wD:p9",
-      phase: "running", queueDepth: 2, answer, recentProgress: [{ key: "edit:a", kind: "edit", label: "changed secret.ts", state: "done", occurredAt: "now" }]
+      phase: "running", queueDepth: 2, answer,
+      recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "commentary", markdown: answer, occurredAt: "now" }],
+      recentProgress: [{ key: "edit:a", kind: "edit", label: "changed secret.ts", state: "active", occurredAt: "now" }]
     });
     const serialized = JSON.stringify(card);
 
     expect(card).toMatchObject({
       config: { summary: { content: "datasage / Fix login" } },
-      header: { title: { content: "🧭 datasage / Fix login" } }
+      header: { title: { content: "TraeX · datasage_semantic_knowledge / wD:p9" } }
     });
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).toContain("wD:p9");
@@ -376,13 +407,13 @@ describe("run card", () => {
     expect(serialized).toContain("最新消息");
     expect(serialized).toContain("newest conclusion");
     expect(serialized).toContain("old answer");
-    expect(serialized).toContain("✓ 🛠️ changed secret.ts");
+    expect(serialized).toContain("◌ 🛠️ changed secret.ts");
     expect(serialized).toContain("当前操作");
   });
 
   it("keeps both ends of a long JSON message in main-card previews without mutating state", () => {
     const answer = ["{", "  \"head-field\": true,", ...Array.from({ length: 180 }, (_, index) => `  \"middle-${index}\": ${index},`), "  \"tail-field\": true", "}"].join("\n");
-    const input = { ...initialTopicView("b1"), phase: "done" as const, answer };
+    const input = { ...initialTopicView("b1"), phase: "done" as const, answer, recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "final" as const, markdown: answer, occurredAt: "now" }] };
 
     const runCard = JSON.stringify(renderRunCard(input));
     expect(runCard).toContain("head-field");
@@ -390,16 +421,18 @@ describe("run card", () => {
     expect(runCard).toContain("已省略中间");
 
     const projectCard = JSON.stringify(renderProjectEntryCard(input));
-    expect(projectCard).not.toContain("head-field");
+    expect(projectCard).toContain("head-field");
     expect(projectCard).toContain("tail-field");
     expect(projectCard).toContain("middle-178");
+    expect(projectCard).toContain("已省略中间");
     expect(input.answer).toBe(answer);
   });
 
   it("does not render subagent console status in the project card preview", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "bridge task", phase: "running",
-      answer: "◆ Reviewing changes\n5 agents running… · /ps to manage\n● Main [default] running · 20m\n◆ Review complete"
+      answer: "◆ Reviewing changes\n5 agents running… · /ps to manage\n● Main [default] running · 20m\n◆ Review complete",
+      recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "commentary", markdown: "◆ Reviewing changes\n5 agents running… · /ps to manage\n● Main [default] running · 20m\n◆ Review complete", occurredAt: "now" }]
     });
     const serialized = JSON.stringify(card);
 
@@ -424,11 +457,11 @@ describe("run card", () => {
     expect(progress.length).toBeLessThanOrEqual(220);
   });
 
-  it("shows one current activity and up to six latest answer lines on the project card", () => {
-    const lines = Array.from({ length: 24 }, (_, index) => `message-${index + 1}`);
+  it("shows one active current activity and the latest five Agent messages on the project card", () => {
+    const messages = Array.from({ length: 6 }, (_, index) => ({ messageId: `m${index + 1}`, turnId: "t1", channel: "commentary" as const, markdown: `message-${index + 1}`, occurredAt: String(index + 1) }));
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), title: "Inspect project", spaceName: "datasage", paneId: "w5:p3G", phase: "running",
-      answer: lines.join("\n"),
+      recentAgentMessages: messages,
       recentProgress: [
         { key: "read:old", kind: "read", label: "读取旧配置", state: "done", occurredAt: "1" },
         { key: "edit:new", kind: "edit", label: "修改卡片渲染", state: "done", occurredAt: "2" },
@@ -437,89 +470,71 @@ describe("run card", () => {
       ]
     });
     const serialized = JSON.stringify(card);
-    const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content ?? "";
-
     expect(serialized).toContain("🧪 运行聚焦测试");
     expect(serialized).not.toContain("🛠️ 修改卡片渲染");
     expect(serialized).not.toContain("🔎 检查调用位置");
     expect(serialized).not.toContain("读取旧配置");
-    expect(latestMessage.split("\n").slice(2)).toEqual(lines.slice(-6));
+    expect(serialized).not.toContain("message-1");
+    for (let index = 2; index <= 6; index += 1) expect(serialized).toContain(`message-${index}`);
     expect(serialized).not.toContain("**项目任务**");
   });
 
-  it("renders the latest five user and Agent messages in chronological order", () => {
-    const recentConversation = Array.from({ length: 7 }, (_, index) => ({
-      key: `p${index}:${index % 2 === 0 ? "user" : "agent"}`,
-      promptId: `p${index}`,
-      role: index % 2 === 0 ? "user" as const : "agent" as const,
-      content: `conversation-${index}`,
+  it("renders only the latest five Agent messages in Core event order", () => {
+    const recentAgentMessages = Array.from({ length: 7 }, (_, index) => ({
+      messageId: `m${index}`, turnId: "t1", channel: "commentary" as const,
+      markdown: `conversation-${index}`,
       occurredAt: `2026-08-27T12:0${index}:00Z`
     }));
-    const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", answer: "legacy answer", recentConversation });
-    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+    const card = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", answer: "legacy answer", recentAgentMessages });
+    const preview = JSON.stringify(card);
 
-    expect(preview).not.toContain("最新消息");
     expect(preview).not.toContain("legacy answer");
     expect(preview).not.toContain("conversation-1");
-    expect(preview).toContain("**用户**\nconversation-2");
-    expect(preview).toContain("**Agent**\nconversation-3");
+    expect(preview).toContain("conversation-2");
+    expect(preview).toContain("conversation-3");
     expect([...preview.matchAll(/conversation-(\d)/g)].map((match) => Number(match[1]))).toEqual([2, 3, 4, 5, 6]);
   });
 
-  it("bounds the five-message conversation preview while retaining each message tail", () => {
-    const recentConversation = Array.from({ length: 5 }, (_, index) => ({
-      key: `p${index}:user`, promptId: `p${index}`, role: "user" as const,
-      content: `head-${index} ${"x".repeat(1_500)} tail-${index}`,
+  it("bounds the five-message preview while retaining both ends of each message", () => {
+    const recentAgentMessages = Array.from({ length: 5 }, (_, index) => ({
+      messageId: `m${index}`, turnId: "t1", channel: "commentary" as const,
+      markdown: `head-${index} ${"x".repeat(1_500)} tail-${index}`,
       occurredAt: `2026-08-27T12:0${index}:00Z`
     }));
-    const card = renderProjectEntryCard({ ...initialTopicView("b1"), recentConversation });
-    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+    const card = renderProjectEntryCard({ ...initialTopicView("b1"), recentAgentMessages });
+    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements.filter((element) => element.content?.includes("**Agent**")).map((element) => element.content).join("\n");
 
     expect(preview.length).toBeLessThanOrEqual(3_000);
     for (let index = 0; index < 5; index += 1) expect(preview).toContain(`tail-${index}`);
   });
 
-  it("caps each recent message at four lines and gives the newest message more character budget", () => {
+  it("preserves Markdown boundaries for each recent Agent message", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"),
-      recentConversation: [
-        { key: "p1:user", promptId: "p1", role: "user", content: `old-head\nold-2\nold-3\nold-4\n${"o".repeat(2_000)} old-tail`, occurredAt: "one" },
-        { key: "p1:agent", promptId: "p1", role: "agent", content: `new-head\nnew-2\nnew-3\nnew-4\n${"n".repeat(2_000)} new-tail`, occurredAt: "two" }
+      recentAgentMessages: [
+        { messageId: "m1", turnId: "t1", channel: "commentary", markdown: "Before\n\n```bash\necho ok\n```", occurredAt: "one" },
+        { messageId: "m2", turnId: "t1", channel: "final", markdown: "**Done**", occurredAt: "two" }
       ]
     });
-    const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
-    const oldBody = preview.split("**用户**\n")[1]!.split("\n\n**Agent**")[0]!;
-    const newestBody = preview.split("**Agent**\n")[1]!;
-
-    expect(oldBody.split("\n").length).toBeLessThanOrEqual(4);
-    expect(newestBody.split("\n").length).toBeLessThanOrEqual(4);
-    expect(oldBody).not.toContain("old-head");
-    expect(newestBody).not.toContain("new-head");
-    expect(oldBody).toContain("old-tail");
-    expect(newestBody).toContain("new-tail");
-    expect(newestBody.length).toBeGreaterThan(oldBody.length);
+    const blocks = (card as { body: { elements: Array<{ content?: string }> } }).body.elements.filter((element) => element.content?.includes("**Agent**") || element.content?.includes("**Final**"));
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.content).toContain("```bash\necho ok\n```");
+    expect(blocks[1]?.content).toContain("**Done**");
   });
 
   it("keeps native Agent console status out of the recent conversation preview", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",
-      recentConversation: [
-        { key: "p1:user", promptId: "p1", role: "user", content: "check", occurredAt: "one" },
-        { key: "p1:agent", promptId: "p1", role: "agent", content: "◆ Reviewing changes\n5 agents running… · /ps to manage\n◆ Review complete", occurredAt: "two" }
-      ]
+      recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "commentary", markdown: "◆ Reviewing changes\n5 agents running… · /ps to manage\n◆ Review complete", occurredAt: "two" }]
     });
     const preview = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**💬 最近对话**"))?.content ?? "";
+      .filter((element) => element.content).map((element) => element.content).join("\n");
 
     expect(preview).toContain("Review complete");
     expect(preview).not.toContain("agents running");
   });
 
-  it("keeps only the newest activity summary on the project card", () => {
+  it("omits current activity when all tools have completed", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",
       recentProgress: Array.from({ length: 10 }, (_, index) => ({
@@ -529,20 +544,19 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
     const visibleActivities = [...serialized.matchAll(/activity-(\d+)/g)].map((match) => Number(match[1]));
 
-    expect([...new Set(visibleActivities)]).toEqual([10]);
+    expect([...new Set(visibleActivities)]).toEqual([]);
   });
 
-  it("bounds the six-line project-card preview at 3000 characters", () => {
+  it("bounds a long Core Agent message preview at 3000 characters", () => {
     const lines = Array.from({ length: 25 }, (_, index) => `line-${index + 1}: ${String(index % 10).repeat(700)}`);
     const card = renderProjectEntryCard({
-      ...initialTopicView("b1"), phase: "running", answer: lines.join("\n")
+      ...initialTopicView("b1"), phase: "running", recentAgentMessages: [{ messageId: "m1", turnId: "t1", channel: "commentary", markdown: lines.join("\n"), occurredAt: "now" }]
     });
     const latestMessage = (card as { body: { elements: Array<{ content?: string }> } }).body.elements
-      .find((element) => element.content?.startsWith("**💬 最新消息**"))?.content ?? "";
-    const previewBody = latestMessage.split("\n").slice(2).join("\n");
+      .filter((element) => element.content?.includes("**Agent**")).map((element) => element.content).join("\n");
+    const previewBody = latestMessage;
 
-    expect(previewBody).not.toContain("line-19:");
-    expect(previewBody).toContain("line-20:");
+    expect(previewBody).toContain("line-1:");
     expect(previewBody).toContain("line-25:");
     expect(previewBody).toContain("已省略中间");
     expect(previewBody.length).toBeLessThanOrEqual(3_000);
