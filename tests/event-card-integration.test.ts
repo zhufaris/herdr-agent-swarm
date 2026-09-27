@@ -15,6 +15,11 @@ import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { applicationPresentation } from "./helpers/presentation.js";
 
+function richTextMarkdown(content: object): string {
+  const rows = (content as { zh_cn: { content: Array<Array<{ tag: string; text: string }>> } }).zh_cn.content;
+  return rows.flat().find(({ tag }) => tag === "md")?.text ?? "";
+}
+
 describe("event-driven card projection", () => {
   it("persists the newest Main view immediately and coalesces delivery within the Main budget", async () => {
     vi.useFakeTimers();
@@ -492,7 +497,7 @@ describe("event-driven card projection", () => {
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
       async replyRichText() { return { messageId: "answer-1" }; },
-      async updateRichText(_messageId, content) { streamed.push((content as { zh_cn: { content: Array<Array<{ text: string }>> } }).zh_cn.content[0]![0]!.text); }
+      async updateRichText(_messageId, content) { streamed.push(richTextMarkdown(content)); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
@@ -522,7 +527,7 @@ describe("event-driven card projection", () => {
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
       async replyRichText(_rootMessageId, content) { created.push(content); return { messageId: `answer-${created.length}` }; },
-      async updateRichText(_messageId, content) { streamed.push((content as { zh_cn: { content: Array<Array<{ text: string }>> } }).zh_cn.content[0]![0]!.text); }
+      async updateRichText(_messageId, content) { streamed.push(richTextMarkdown(content)); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
