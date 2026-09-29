@@ -85,7 +85,7 @@ describe("instance cards", () => {
     expect(card).toMatchObject({ schema: "2.0", config: { update_multi: true }, body: { elements: expect.any(Array) } });
     expect(text).toContain("🎯 reviewer · Task turn:uns");
     expect(text).toContain("**💬 请求**");
-    expect(text).toContain(phase === "completed" ? "**✅ 结果**" : "**📈 进度**");
+    expect(text).not.toContain("**📈 进度**");
     expect(text).toContain("承接 `parent-turn`");
     expect(text).toContain("parent-turn");
     expect(text).not.toContain("View Worker Main");
@@ -167,7 +167,7 @@ describe("instance cards", () => {
 
     expect(JSON.stringify(renderWorkerTurnCard(completed))).toContain("无法获取可信的结构化输出");
   });
-  it("renders Worker live status and bounded trusted progress", () => {
+  it("renders only semantic Worker plan steps in a bottom Task List", () => {
     const queued = createQueuedWorkerTurnCard({ turnId: "turn-live", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
     const running = reduceWorkerTurnCard(queued, { type: "output", occurredAt: "2026-09-01T00:00:01.000Z", answer: "", statusTitle: "Checking durable state", progressEvents: [
       { key: "plan:one", kind: "step", label: "Inspect schema", state: "active", occurredAt: "now" },
@@ -175,9 +175,12 @@ describe("instance cards", () => {
     ] });
     const text = JSON.stringify(renderWorkerTurnCard(running));
 
-    expect(text).toContain("Checking durable state");
+    expect(text).toContain("📋 Task List");
     expect(text).toContain("Inspect schema");
-    expect(text).toContain("Read store");
+    expect(text).not.toContain("Checking durable state");
+    expect(text).not.toContain("Read store");
+    const card = renderWorkerTurnCard(running) as { body: { elements: object[] } };
+    expect(JSON.stringify(card.body.elements.at(-1))).toContain("📋 Task List");
   });
 
   it("decorates only structured Worker activity outside fenced code", () => {
@@ -201,9 +204,31 @@ describe("instance cards", () => {
     const text = JSON.stringify(renderWorkerTurnCard(completed));
 
     expect(text).toContain("Worker before");
-    expect(text).toContain("✏️ Edit · src/store.ts · ✓ 完成");
+    expect(text).toContain("✏️ Edited · src/store.ts · ✅");
     expect(text).toContain("Worker after");
     expect(text).not.toContain("legacy duplicate");
+  });
+
+  it("keeps Edited in the Worker timeline and places Task List after the answer", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-edited", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "edit", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const view = {
+      ...reduceWorkerTurnCard(queued, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "done" }),
+      progressEvents: [
+        { key: "tool:read", kind: "read" as const, label: "Read hidden.ts", state: "done" as const, occurredAt: "now" },
+        { key: "plan:verify", kind: "step" as const, label: "Verify edit", state: "done" as const, occurredAt: "now" }
+      ],
+      timelineItems: [
+        { kind: "tool" as const, id: "tool:edit", sequence: 1, category: "edit" as const, label: "src/edited.ts", resultPreview: "updated", state: "succeeded" as const },
+        { kind: "final_answer" as const, id: "final:done", sequence: 2, markdown: "Finished" }
+      ]
+    };
+    const card = renderWorkerTurnCard(view) as { body: { elements: object[] } };
+    const text = JSON.stringify(card);
+
+    expect(text).toContain("✏️ Edited · src/edited.ts · ✅");
+    expect(text).toContain("Verify edit");
+    expect(text).not.toContain("Read hidden.ts");
+    expect(JSON.stringify(card.body.elements.at(-1))).toContain("📋 Task List");
   });
   it("renders the current thread as Primary and counts only Workers", () => {
     const card = renderInstanceDirectoryCard({ project: { id: "p1", displayName: "Product", description: "x", workspaceId: "w1", cwd: "/repo" }, entries: [{ instance, workspace, capabilities, queueDepth: 3 }], target: { kind: "instance", instanceId: "i1" }, primary });

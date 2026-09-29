@@ -102,10 +102,12 @@ export interface AgentTranscriptSource {
   nativeSession: HerdrAgentSession | null;
 }
 
+export type AgentTranscriptBoundary =
+  | { kind: "latest" }
+  | { kind: "active" }
+  | { kind: "first" }
+  | { kind: "at" | "after"; turnId: string; startedAt: string };
+
 export interface AgentTranscriptReaderPort {
-  open(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult>;
-  openActiveTurn?(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult>;
-  openFirstTurn?(source: AgentTranscriptSource): Promise<AgentTranscriptOpenResult>;
-  openAtTurn?(source: AgentTranscriptSource, turnId: string, startedAt: string): Promise<AgentTranscriptOpenResult>;
-  openAfterTurn?(source: AgentTranscriptSource, turnId: string, startedAt: string): Promise<AgentTranscriptOpenResult>;
+  open(source: AgentTranscriptSource, boundary: AgentTranscriptBoundary): Promise<AgentTranscriptOpenResult>;
 }

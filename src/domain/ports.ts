@@ -1,4 +1,4 @@
-export type { HerdrPort, LarkPort, TraexControlPort, TraexModelPromptDispatchOptions, AgentTranscriptCursorPort, AgentTranscriptMainStatus, AgentTranscriptObservation, AgentTranscriptOpenResult, AgentTranscriptPlanStep, AgentTranscriptReaderPort, AgentTranscriptSource, AgentTranscriptUnavailableReason } from "./ports/external.js";
+export type { HerdrPort, LarkPort, TraexControlPort, TraexModelPromptDispatchOptions, AgentTranscriptBoundary, AgentTranscriptCursorPort, AgentTranscriptMainStatus, AgentTranscriptObservation, AgentTranscriptOpenResult, AgentTranscriptPlanStep, AgentTranscriptReaderPort, AgentTranscriptSource, AgentTranscriptUnavailableReason } from "./ports/external.js";
 export type { AcceptInstanceTurnWithCardInput, InstanceLifecycleStore, InstanceStore, InstanceTurnStore, TransitionInstanceTurnWithProjectionInput, TransitionInstanceTurnWithProjectionResult } from "./ports/instance.js";
 export type { InstanceControlPort, InstanceConversationView, InstanceMessagingPort } from "./ports/instance-workflows.js";
 export type { TurnControlStore } from "./ports/turn-control.js";

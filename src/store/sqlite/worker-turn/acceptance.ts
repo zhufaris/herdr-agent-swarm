@@ -14,8 +14,6 @@ import { turnActorProvenance } from "../turn-actor-provenance.js";
 import type { WorkerTurnProjection } from "./projection.js";
 import type { WorkerTurnQueue } from "./queue.js";
 import { mapInstanceTurn } from "./records.js";
-import { initialRichTextAnswerPayload } from "../../../domain/rich-text.js";
-import { richTextAnswerTitle } from "../../../runtime/answer-rich-text.js";
 
 type BasicInput = {
   id: string;
@@ -178,14 +176,13 @@ export class WorkerTurnAcceptance {
       if (current?.workerSessionLifecycle === "active")
         this.dependencies.enqueueOutboundReply({
           id: randomUUID(),
-          idempotencyKey: `answer-post:${turn.id}:0`,
+          idempotencyKey: `stream-card:${turn.id}:0`,
           bindingId: null,
           workerTurnId: turn.id,
           viewVersion: acceptedView.viewVersion,
           rootMessageId: acceptedView.rootMessageId,
-          kind: "text",
-          intentKind: "rich-text-reply",
-          payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, acceptedView.elementId, richTextAnswerTitle({ projectId: current?.projectId, paneId: current?.runtimeRef?.paneId, paneToken: current?.runtimeRef?.paneToken, workerName: acceptedView.workerName, taskTitle: acceptedView.requestText }, 0))),
+          kind: "stream_card_create",
+          payload: JSON.stringify({ card: input.render(acceptedView), stream: { pageIndex: 0, pageStart: 0, elementId: acceptedView.elementId } }),
         });
       this.dependencies.invalidateWorkerCardContexts(
         acceptedView,

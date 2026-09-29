@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { initialRichTextAnswerPayload } from "../domain/rich-text.js";
 import type { OutboundIntentPort, OutboundIntentStore } from "../domain/ports/outbox.js";
 import type { OutboundWorkClass } from "../domain/types.js";
 import type { OutboundWorkNotifier } from "./outbound-work-notifier.js";
 import { assertAnswerCardTarget, assertAnswerStreamTarget } from "./outbound-target-validation.js";
-import { richTextAnswerTitle } from "../runtime/answer-rich-text.js";
 
 export class OutboundIntentWriter implements OutboundIntentPort {
   constructor(private readonly store: OutboundIntentStore, private readonly work: OutboundWorkNotifier) {}
@@ -31,10 +29,7 @@ export class OutboundIntentWriter implements OutboundIntentPort {
   }
 
   async enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void> {
-    const binding = this.store.getBinding(input.bindingId);
-    const view = this.store.loadRunCard(input.promptId);
-    const title = richTextAnswerTitle({ projectId: binding?.projectId, paneId: binding?.paneId ?? view?.paneId, paneToken: binding?.paneToken ?? view?.paneToken, taskTitle: view?.title }, input.pageIndex);
-    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${input.promptId}:${input.pageIndex}`, bindingId: input.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(input.pageIndex, input.pageStart, input.elementId, title)) });
+    this.store.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${input.promptId}:${input.pageIndex}`, bindingId: input.bindingId, promptId: input.promptId, viewVersion: input.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.pageIndex, pageStart: input.pageStart, elementId: input.elementId } }) });
     this.work.wake();
   }
 

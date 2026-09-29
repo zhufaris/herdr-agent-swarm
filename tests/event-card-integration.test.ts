@@ -6,7 +6,8 @@ import { TestConversationViewProjector as ConversationViewProjector } from "./he
 import { QueueFeedbackProjector } from "../src/events/queue-feedback-projector.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { initialRichTextAnswerPayload } from "../src/domain/rich-text.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { ANSWER_STREAM_PAGE_LIMIT } from "../src/runtime/answer-stream.js";
 import { primaryPresentation } from "./helpers/presentation.js";
@@ -274,7 +275,7 @@ describe("event-driven card projection", () => {
     store.close();
   });
 
-  it("persists repeated queue-feedback ticks without patching a rich-text Answer as a card", async () => {
+  it("persists repeated queue-feedback ticks and refreshes the queued CardKit Answer", async () => {
     let clock = "2026-08-29T12:00:20.000Z";
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -294,7 +295,9 @@ describe("event-driven card projection", () => {
     await projector.refresh("b1");
 
     const updates = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1" && reply.kind === "card_update");
-    expect(updates).toEqual([]);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ intentKind: "card", rootMessageId: "answer-1" });
+    expect(updates[0]!.payload).toContain("前方 0 条");
     expect(store.loadRunCard("p1")).toMatchObject({ viewVersion: 3, queueFeedback: { aheadCount: 0, elapsedBucket: 1 } });
     await projector.stop(); store.close();
   });
@@ -329,12 +332,15 @@ describe("event-driven card projection", () => {
 
   it("previews live output on the primary card and prioritizes a blocked notice", async () => {
     const updates: Array<{ messageId: string; card: object }> = [];
+    const streamed: string[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; },
       async replyCard() { return { messageId: "request-card" }; },
-      async updateCard(messageId, card) { updates.push({ messageId, card }); }
+      async updateCard(messageId, card) { updates.push({ messageId, card }); },
+      async updateCardKit(messageId, card) { updates.push({ messageId, card }); },
+      async streamCardContent(_cardId, _elementId, content) { streamed.push(content); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
@@ -342,7 +348,7 @@ describe("event-driven card projection", () => {
     const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) {
-      store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
+      store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card", reply.cardRole === "answer" ? "request-answer-surface" : undefined);
     }
     store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
@@ -353,22 +359,29 @@ describe("event-driven card projection", () => {
     const stopProjector = projector.start();
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
-    await bus.publish({ eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: "live answer", progressEvents: [{ key: "edit:card", kind: "edit", label: "更新主卡片", state: "active" }] } });
+    await bus.publish({ eventId: "output", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", observation: { answer: { snapshot: "live answer", toolActivities: [{ key: "edit:card", kind: "edit", label: "更新主卡片", state: "active" }] }, main: { status: { planSteps: [{ key: "plan:0", kind: "step", label: "修复卡片", state: "active" }] } } } } });
     await bus.publish({ eventId: "blocked", bindingId: "b1", type: "AgentStateChanged", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", state: "blocked", queueDepth: 1 } });
     await publisher.drain();
 
-    expect(store.loadTopicView("b1")).toMatchObject({ phase: "blocked", answer: "live answer", recentProgress: [expect.objectContaining({ key: "edit:card" })] });
+    expect(store.loadTopicView("b1")).toMatchObject({
+      phase: "blocked",
+      answer: "live answer",
+      recentProgress: [
+        expect.objectContaining({ key: "edit:card" }),
+        expect.objectContaining({ key: "plan:0", kind: "step", label: "修复卡片" })
+      ]
+    });
+    expect(store.loadRunCard("p1")?.progressEvents).toEqual([
+      expect.objectContaining({ key: "edit:card", kind: "edit" }),
+      expect.objectContaining({ key: "plan:0", kind: "step", label: "修复卡片" })
+    ]);
     const latestPrimary = updates.filter((update) => update.messageId === "primary-card").at(-1)!;
     expect(JSON.stringify(latestPrimary.card)).toContain("等待用户处理");
     expect(JSON.stringify(latestPrimary.card)).toContain("TraeX 需要人工审批");
     expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
     expect(JSON.stringify(latestPrimary.card)).toContain("🛠️ 更新主卡片");
     expect(updates.some((update) => update.messageId === "request-task-card")).toBe(false);
-    expect(updates.some((update) => {
-      if (update.messageId !== "request-answer-card") return false;
-      const serialized = JSON.stringify(update.card);
-      return serialized.includes("live answer") && serialized.includes("💭");
-    })).toBe(true);
+    expect(streamed.some((content) => content.includes("live answer"))).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
   });
@@ -376,19 +389,23 @@ describe("event-driven card projection", () => {
   it("updates the same answer card with the accumulated live message window", async () => {
     vi.useFakeTimers();
     const updates: Array<{ messageId: string; card: object }> = [];
+    const streamed: string[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; },
       async replyCard() { return { messageId: "request-card" }; },
-      async updateCard(messageId, card) { updates.push({ messageId, card }); }
+      async updateCard(messageId, card) { updates.push({ messageId, card }); },
+      async updateCardKit(messageId, card) { updates.push({ messageId, card }); },
+      async streamCardContent(_cardId, _elementId, content) { streamed.push(content); },
+      async finishStreamingCard() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "primary-card" });
     const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card", reply.cardRole === "answer" ? "request-answer-surface" : undefined);
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation);
     const stopPublisher = publisher.start();
@@ -397,23 +414,21 @@ describe("event-driven card projection", () => {
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: "第一条", answerUpdate: "replace", progressEvents: [] } });
-    await vi.waitFor(() => expect(updates.filter((update) => update.messageId === "request-answer-card")).toHaveLength(1));
+    await vi.waitFor(() => expect(streamed).toHaveLength(1));
     await bus.publish({ eventId: "first-grown", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", answerSnapshot: "第一条中间消息。", answerUpdate: "replace", progressEvents: [] } });
     await bus.publish({ eventId: "second", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:03Z", payload: { promptId: "p1", answerSnapshot: "第二条", answerUpdate: "append", progressEvents: [] } });
     await bus.publish({ eventId: "second-grown", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:04Z", payload: { promptId: "p1", answer: "第一条中间消息。\n\n第二条中间消息。", queueDepth: 0 } });
     await vi.advanceTimersByTimeAsync(1_500);
     await publisher.drain();
-    await vi.waitFor(() => expect(updates.filter((update) => update.messageId === "request-answer-card").length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(streamed.length).toBeGreaterThanOrEqual(2));
 
-    const answerUpdates = updates.filter((update) => update.messageId === "request-answer-card");
-    expect(answerUpdates.length).toBeGreaterThan(0);
-    const latest = JSON.stringify(answerUpdates.at(-1)!.card);
+    const latest = streamed.at(-1)!;
     expect(latest).toContain("第一条中间消息。");
     expect(latest).toContain("第二条中间消息。");
     expect(store.loadRunCard("p1")).toMatchObject({ phase: "completed" });
     expect(store.loadRunCard("p1")?.answer).toContain("第一条中间消息。");
     expect(store.loadRunCard("p1")?.answer).toContain("第二条中间消息。");
-    expect(new Set(answerUpdates.map((update) => update.messageId))).toEqual(new Set(["request-answer-card"]));
+    expect(store.listAnswerPages("p1").at(-1)?.cardId).toBe("request-answer-surface");
 
     stopProjector(); stopPublisher(); store.close(); vi.useRealTimers();
   });
@@ -433,6 +448,7 @@ describe("event-driven card projection", () => {
     store.updateBinding("b1", { paneId: "w1:p1", paneToken: "abcd" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", paneToken: "abcd", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
@@ -474,6 +490,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1");
     store.enqueueOutboundReply({
       id: "page-2", idempotencyKey: "answer-post:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "text", intentKind: "rich-text-reply",
@@ -513,6 +530,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
@@ -543,6 +561,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
@@ -583,6 +602,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
@@ -619,6 +639,7 @@ describe("event-driven card projection", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
@@ -777,3 +798,10 @@ describe("event-driven card projection", () => {
     await projector.stop(); await publisher.stop(); store.close();
   });
 });
+
+function seedHistoricalRichPost(store: SqliteBindingStore, promptId: string, rootMessageId: string): void {
+  const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId && reply.cardRole === "answer")!;
+  store.database.prepare("DELETE FROM outbound_replies WHERE id = ?").run(create.id);
+  store.database.prepare("UPDATE answer_pages SET delivery_mode = 'rich_post', card_id = NULL WHERE prompt_id = ? AND page_index = 0").run(promptId);
+  store.enqueueOutboundReply({ id: `historical-${promptId}`, idempotencyKey: `answer-post:${promptId}:0`, bindingId: "b1", promptId, viewVersion: 1, cardRole: "answer", rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, answerElementId(promptId, 0))) });
+}

@@ -21,6 +21,10 @@ export function createTestPublisher(store: SqliteBindingStore, lark: LarkPort, l
   let richTextSequence = 0;
   const transport: LarkPort = {
     ...lark,
+    replyStreamingCard: lark.replyStreamingCard ?? (async (rootMessageId, card) => {
+      const receipt = await lark.replyCard(rootMessageId, card);
+      return { ...receipt, cardId: `cardkit-${receipt.messageId}` };
+    }),
     replyRichText: lark.replyRichText ?? (async () => ({ messageId: `rich-text-${++richTextSequence}` })),
     updateRichText: lark.updateRichText ?? (async (messageId, content) => lark.updateCard(messageId, content))
   };

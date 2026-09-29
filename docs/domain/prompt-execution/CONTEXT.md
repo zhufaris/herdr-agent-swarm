@@ -24,6 +24,7 @@ _Avoid_: Live polling
 Observation of a possibly dispatched turn without resubmitting its prompt.
 _Avoid_: Retry, replay
 
-**Transcript Identity**:
-The exact session and turn identity used to fence transcript output from unrelated or superseded work.
-_Avoid_: Cursor, latest output
+**Core Event Turn Identity**:
+The exact Core source, native session, turn ID, and canonical start time used to
+fence structured output from unrelated or superseded work.
+_Avoid_: Cursor alone, latest output, newest JSONL

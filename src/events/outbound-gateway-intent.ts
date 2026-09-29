@@ -3,7 +3,7 @@ import type { OutboundReply } from "../domain/types.js";
 import type { GatewayDeliveryIntent, GatewayDeliveryPurpose } from "../gateways/contract/plugin.js";
 import { isGatewayView, legacyGatewayView } from "../gateways/contract/view.js";
 import { materializeOutboundReply } from "./outbound-intent-materializer.js";
-import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerRichTextCreateTarget, assertAnswerRichTextUpdateTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerProgressTarget, assertWorkerRichTextCreateTarget, assertWorkerRichTextUpdateTarget, PermanentDeliveryError } from "./outbound-target-validation.js";
+import { assertAnswerCardCreateTarget, assertAnswerCardTarget, assertAnswerMessageTarget, assertAnswerRichTextCreateTarget, assertAnswerRichTextUpdateTarget, assertAnswerStreamTarget, assertWorkerCardCreateTarget, assertWorkerCardTarget, assertWorkerMainCreateTarget, assertWorkerMainMessageTarget, assertWorkerMessageTarget, assertWorkerRichTextCreateTarget, assertWorkerRichTextUpdateTarget, PermanentDeliveryError } from "./outbound-target-validation.js";
 
 export interface PreparedOutboundGatewayIntent { intent: GatewayDeliveryIntent; streamMetadata: boolean; emptyStreamContent: boolean; }
 
@@ -33,7 +33,7 @@ export function prepareOutboundGatewayIntent(store: OutboundDeliveryStore, reply
     if (reply.cardRole === "answer") assertAnswerMessageTarget(store, reply.bindingId, reply.promptId, rootMessageId);
     if (reply.workerTurnId) assertWorkerMessageTarget(store, reply.workerTurnId, rootMessageId);
     if (reply.workerId && reply.workerSessionGeneration !== null) assertWorkerMainMessageTarget(store, reply.workerId, reply.workerSessionGeneration, rootMessageId);
-    return { intent: { kind: "surface.replace", purpose, messageId: rootMessageId, view: renderableView(payload), ...(reply.targetRole === "session_status" ? { sequence: reply.cardSequence ?? 1 } : {}) }, streamMetadata: false, emptyStreamContent: false };
+    return { intent: { kind: "surface.replace", purpose, messageId: rootMessageId, view: renderableView(payload), ...(reply.cardSequence !== null ? { sequence: reply.cardSequence } : reply.targetRole === "session_status" ? { sequence: 1 } : {}) }, streamMetadata: false, emptyStreamContent: false };
   }
   if (reply.kind === "stream_card_create") {
     const decoded = decodeStreamingCardPayload(payload);
@@ -42,15 +42,12 @@ export function prepareOutboundGatewayIntent(store: OutboundDeliveryStore, reply
     return { intent: { kind: "stream.create", purpose, rootMessageId, view: gatewayView(decoded.card), idempotencyKey: reply.idempotencyKey }, streamMetadata: Boolean(decoded.stream), emptyStreamContent: false };
   }
   if (reply.kind === "stream_content") {
-    const decoded = parseObject(payload) as { elementId?: unknown; content?: unknown; sequence?: unknown; pageIndex?: unknown; workerElement?: unknown };
+    const decoded = parseObject(payload) as { elementId?: unknown; content?: unknown; sequence?: unknown };
     const slot = typeof decoded.elementId === "string" ? decoded.elementId : "";
     const content = typeof decoded.content === "string" ? decoded.content : "";
     const sequence = typeof decoded.sequence === "number" ? decoded.sequence : -1;
-    const pageIndex = typeof decoded.pageIndex === "number" ? decoded.pageIndex : -1;
-    if (reply.workerTurnId) {
-      if (decoded.workerElement === "progress") assertWorkerProgressTarget(store, reply.workerTurnId, rootMessageId, slot, pageIndex);
-      else assertWorkerCardTarget(store, reply.workerTurnId, rootMessageId, slot);
-    } else assertAnswerStreamTarget(store, reply.bindingId, reply.promptId, rootMessageId, slot);
+    if (reply.workerTurnId) assertWorkerCardTarget(store, reply.workerTurnId, rootMessageId, slot);
+    else assertAnswerStreamTarget(store, reply.bindingId, reply.promptId, rootMessageId, slot);
     return { intent: { kind: "stream.append", purpose, surfaceId: rootMessageId, slot, content, sequence }, streamMetadata: true, emptyStreamContent: content.length === 0 };
   }
   if (reply.kind === "stream_finish") {

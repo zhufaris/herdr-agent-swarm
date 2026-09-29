@@ -135,7 +135,7 @@ describe("StartupViewConverger", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "task", workspaceId: "wH", paneId: "wH:p1", requestText: "request", queuePosition: 0, occurredAt: "2026-09-27T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "message", actorOpenId: "u1", body: "request" }, view: queued, rootMessageId: "root", answerCard: {} });
     const created = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(created.id, "answer", null);
+    store.markOutboundReplyDelivered(created.id, "answer", "answer-card");
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "running", viewVersion: 2, answerDeliveredVersion: 0 });
     const answerPages = { converge: vi.fn(async () => { throw new Error("answer deferred"); }) };
     const mainCards = { project: vi.fn(async () => undefined) };
@@ -303,23 +303,31 @@ describe("StartupViewConverger", () => {
     store.close();
   });
 
-  it("rebuilds a missing terminal rich-text update from a durable completed run", async () => {
+  it("rebuilds a missing terminal CardKit update from a durable completed run", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "wH", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "task" });
     store.updateBinding("b1", { paneId: "wH:p1", statusMessageId: "root", state: "active" });
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "work", workspaceId: "wH", paneId: "wH:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "request", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
     const create = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(create.id, "answer-message");
-    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "durable answer", answerSegments: ["durable answer"], viewVersion: 3, answerDeliveredVersion: 1 });
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.saveRunCard({
+      ...store.loadRunCard("p1")!,
+      phase: "completed",
+      answer: "durable answer",
+      answerSegments: ["durable answer"],
+      timelineItems: [{ id: "final:1", sequence: 1, kind: "final_answer", markdown: "durable answer" }],
+      viewVersion: 3,
+      answerDeliveredVersion: 1,
+    });
     const outbound = { enqueueCardUpdate: vi.fn() } as unknown as OutboundIntentPort;
 
     await createConverger(store, { outbound }).converge();
 
     const pending = store.listPendingOutboundReplies();
     const answer = pending.find((reply) => reply.promptId === "p1");
-    expect(answer).toMatchObject({ kind: "card_update", intentKind: "rich-text-update", promptId: "p1", rootMessageId: "answer-message", workClass: "history" });
-    expect(JSON.parse(answer!.payload)).toMatchObject({ terminal: true, pageState: "finished", document: { markdown: expect.stringContaining("durable answer") }, pageIndex: 0 });
+    expect(answer).toMatchObject({ kind: "card_update", intentKind: "card", promptId: "p1", rootMessageId: "answer-message", workClass: "history", cardSequence: 1 });
+    expect(JSON.stringify(JSON.parse(answer!.payload))).toContain("durable answer");
     expect(pending).toContainEqual(expect.objectContaining({ kind: "card_update", bindingId: "b1", targetRole: "session_status", workClass: "history" }));
     store.close();
   });

@@ -648,6 +648,29 @@ export class CardOutboxMigrations {
     if (!columns.some((column) => column.name === "space_name")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN space_name TEXT NOT NULL DEFAULT 'unknown'");
   }
 
+  ensureRunCardPaneToken(): void {
+    const columns = this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "pane_token")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN pane_token TEXT");
+    this.context.database.exec(`UPDATE run_cards SET pane_token = (
+      SELECT binding.pane_token FROM bindings AS binding
+      WHERE binding.id = run_cards.binding_id AND binding.generation = run_cards.binding_generation
+    ) WHERE (pane_token IS NULL OR pane_token = '') AND EXISTS (
+      SELECT 1 FROM bindings AS binding
+      WHERE binding.id = run_cards.binding_id AND binding.generation = run_cards.binding_generation
+        AND binding.pane_token IS NOT NULL AND binding.pane_token <> ''
+    )`);
+  }
+
+  ensureRunCardRequestOrigin(): void {
+    const columns = this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "request_origin")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN request_origin TEXT NOT NULL DEFAULT 'lark' CHECK(request_origin IN ('lark','herdr-pane'))");
+    this.context.database.exec(`UPDATE run_cards SET request_origin = 'herdr-pane'
+      WHERE request_origin = 'lark' AND EXISTS (
+        SELECT 1 FROM prompt_jobs AS prompt
+        WHERE prompt.id = run_cards.prompt_id AND prompt.actor_open_id = 'herdr'
+      )`);
+  }
+
   ensureRunCardSessionTitle(): void {
     const columns = this.context.database.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "session_title")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN session_title TEXT");
@@ -657,8 +680,8 @@ export class CardOutboxMigrations {
     this.context.database.exec(`
       DROP VIEW IF EXISTS run_cards_view;
       CREATE VIEW run_cards_view AS SELECT *, json_object(
-        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'sessionTitle', session_title, 'requestText', request_text,
-        'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END,
+        'promptId', prompt_id, 'bindingId', binding_id, 'bindingGeneration', binding_generation, 'conversionParentPromptId', conversion_parent_prompt_id, 'queueFeedback', CASE WHEN queue_feedback_json IS NULL THEN NULL ELSE json(queue_feedback_json) END, 'larkMessageId', lark_message_id, 'answerMessageId', answer_message_id, 'answerCardId', answer_card_id, 'answerElementId', answer_element_id, 'answerSequence', answer_sequence, 'answerPageIndex', answer_page_index, 'answerPageStart', answer_page_start, 'phase', phase, 'title', title, 'requestOrigin', request_origin, 'sessionTitle', session_title, 'requestText', request_text,
+        'workspaceId', workspace_id, 'spaceName', space_name, 'paneId', pane_id, 'paneToken', pane_token, 'answer', answer, 'answerSegments', json(answer_segments_json), 'answerDraft', answer_draft, 'answerDraftTransient', CASE WHEN answer_draft_transient = 1 THEN json('true') ELSE json('false') END,
         'timelineItems', json(COALESCE((SELECT json_group_array(json(item_json)) FROM (SELECT item_json FROM answer_timeline_items WHERE aggregate_kind = 'primary-run' AND aggregate_id = run_cards.prompt_id ORDER BY sequence, item_id)), '[]')),
         'progressEvents', json(progress_events_json), 'progressSummary', json(progress_summary_json),
         'queuePosition', queue_position, 'startedAt', started_at, 'finishedAt', finished_at, 'notice', notice, 'workerActivity', json(worker_activity_json), 'workerDependencyRevision', worker_dependency_revision, 'workerContextFrozenAt', worker_context_frozen_at, 'activityAt', activity_at,
@@ -676,7 +699,7 @@ export class CardOutboxMigrations {
     return [
       "binding_generation", "conversion_parent_prompt_id", "queue_feedback_json",
       "answer_message_id", "answer_card_id", "answer_element_id", "answer_sequence", "answer_page_index", "answer_page_start",
-      "request_text", "space_name", "session_title", "answer_segments_json", "answer_draft", "answer_draft_transient", "progress_summary_json", "worker_activity_json", "worker_dependency_revision", "worker_context_frozen_at", "activity_at", "answer_delivered_version"
+      "request_text", "request_origin", "space_name", "session_title", "pane_token", "answer_segments_json", "answer_draft", "answer_draft_transient", "progress_summary_json", "worker_activity_json", "worker_dependency_revision", "worker_context_frozen_at", "activity_at", "answer_delivered_version"
     ].some((column) => !columns.has(column));
   }
 

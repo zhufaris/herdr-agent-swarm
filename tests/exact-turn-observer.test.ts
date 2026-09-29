@@ -3,17 +3,14 @@ import { ExactTurnObserver } from "../src/runtime/exact-turn-observer.js";
 import type { AgentTranscriptObservation, AgentTranscriptReaderPort } from "../src/domain/ports.js";
 
 const session = { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" };
+const transcriptSource = { agentKind: "traex" as const, bindingId: "binding-1", generation: 1, paneId: "pane-1", nativeSession: session };
 const exact = { turnId: "turn-1", startedAt: "2026-09-07T00:00:00.000Z" };
 
 function reader(observations: AgentTranscriptObservation[]): AgentTranscriptReaderPort {
   const readObservation = vi.fn(async () => observations.shift() ?? { answerDelta: "" });
   const opened = { mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } };
   return {
-    open: vi.fn(async () => opened),
-    openActiveTurn: vi.fn(async () => opened),
-    openFirstTurn: vi.fn(async () => opened),
-    openAtTurn: vi.fn(async () => opened),
-    openAfterTurn: vi.fn(async () => opened)
+    open: vi.fn(async () => opened)
   };
 }
 
@@ -22,17 +19,21 @@ describe("ExactTurnObserver", () => {
     const source = reader([]);
     const observer = new ExactTurnObserver(source);
 
-    expect((await observer.open({ session, boundary: { kind: "latest" } })).mode).toBe("typed");
-    expect((await observer.open({ session, boundary: { kind: "active" } })).mode).toBe("typed");
-    expect((await observer.open({ session, boundary: { kind: "first" } })).mode).toBe("typed");
-    expect((await observer.open({ session, boundary: { kind: "at", ...exact } })).mode).toBe("typed");
-    expect((await observer.open({ session, boundary: { kind: "after", ...exact } })).mode).toBe("typed");
+    for (const boundary of [
+      { kind: "latest" as const },
+      { kind: "active" as const },
+      { kind: "first" as const },
+      { kind: "at" as const, ...exact },
+      { kind: "after" as const, ...exact }
+    ]) {
+      expect((await observer.open({ source: transcriptSource, boundary })).mode).toBe("typed");
+    }
 
-    expect(source.open).toHaveBeenCalledWith(session);
-    expect(source.openActiveTurn).toHaveBeenCalledWith(session);
-    expect(source.openFirstTurn).toHaveBeenCalledWith(session);
-    expect(source.openAtTurn).toHaveBeenCalledWith(session, exact.turnId, exact.startedAt);
-    expect(source.openAfterTurn).toHaveBeenCalledWith(session, exact.turnId, exact.startedAt);
+    expect(source.open).toHaveBeenNthCalledWith(1, transcriptSource, { kind: "latest" });
+    expect(source.open).toHaveBeenNthCalledWith(2, transcriptSource, { kind: "active" });
+    expect(source.open).toHaveBeenNthCalledWith(3, transcriptSource, { kind: "first" });
+    expect(source.open).toHaveBeenNthCalledWith(4, transcriptSource, { kind: "at", ...exact });
+    expect(source.open).toHaveBeenNthCalledWith(5, transcriptSource, { kind: "after", ...exact });
   });
 
   it("accepts each exact observation once and rejects foreign turn identities", async () => {
@@ -43,7 +44,7 @@ describe("ExactTurnObserver", () => {
       { turnId: "turn-2", answerDelta: "foreign", turnLifecycle: { turnId: "turn-2", startedAt: exact.startedAt, state: "completed" } },
       { turnId: exact.turnId, answerDelta: "wrong start", turnLifecycle: { turnId: exact.turnId, startedAt: "2026-09-07T00:00:01.000Z", state: "completed" } }
     ]);
-    const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" }, expected: exact });
+    const opened = await new ExactTurnObserver(source).open({ source: transcriptSource, boundary: { kind: "latest" }, expected: exact });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
 
     expect(await opened.cursor.read()).toEqual({ kind: "accepted", observation: matching });
@@ -52,11 +53,33 @@ describe("ExactTurnObserver", () => {
     expect(await opened.cursor.read()).toMatchObject({ kind: "foreign", observedTurnId: exact.turnId });
   });
 
+  it("compares rolling-upgrade start timestamps at canonical second precision", async () => {
+    const sameSecond = { turnId: exact.turnId, answerDelta: "trusted", turnLifecycle: { turnId: exact.turnId, startedAt: "2026-09-07T00:00:00Z", state: "active" as const } };
+    const nextSecond = { turnId: exact.turnId, answerDelta: "foreign", turnLifecycle: { turnId: exact.turnId, startedAt: "2026-09-07T00:00:01Z", state: "active" as const } };
+    const opened = await new ExactTurnObserver(reader([sameSecond, nextSecond])).open({ source: transcriptSource, boundary: { kind: "latest" }, expected: { ...exact, startedAt: "2026-09-07T00:00:00.987Z" } });
+    if (opened.mode !== "typed") throw new Error("expected typed cursor");
+
+    await expect(opened.cursor.read()).resolves.toEqual({ kind: "accepted", observation: sameSecond });
+    await expect(opened.cursor.read()).resolves.toMatchObject({ kind: "foreign", observedStartedAt: "2026-09-07T00:00:01Z" });
+  });
+
+  it("fails closed when matching turn start timestamps are malformed", async () => {
+    const malformed = { turnId: exact.turnId, answerDelta: "untrusted", turnLifecycle: { turnId: exact.turnId, startedAt: "not-a-time", state: "completed" as const } };
+    const opened = await new ExactTurnObserver(reader([malformed])).open({
+      source: transcriptSource,
+      boundary: { kind: "latest" },
+      expected: { ...exact, startedAt: "not-a-time" }
+    });
+    if (opened.mode !== "typed") throw new Error("expected typed cursor");
+
+    await expect(opened.cursor.read()).resolves.toMatchObject({ kind: "foreign", observedStartedAt: "not-a-time" });
+  });
+
   it("drains bounded accepted observations and stops at terminal lifecycle", async () => {
     const active = { turnId: exact.turnId, answerDelta: "one", turnLifecycle: { ...exact, state: "active" as const } };
     const completed = { turnId: exact.turnId, answerDelta: "two", turnLifecycle: { ...exact, state: "completed" as const } };
     const source = reader([active, completed, { turnId: exact.turnId, answerDelta: "late" }]);
-    const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "after", ...exact }, expected: exact });
+    const opened = await new ExactTurnObserver(source).open({ source: transcriptSource, boundary: { kind: "after", ...exact }, expected: exact });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
     const observed: AgentTranscriptObservation[] = [];
 
@@ -69,7 +92,7 @@ describe("ExactTurnObserver", () => {
   it("stops a final drain when the transcript repeats the last accepted observation", async () => {
     const active = { turnId: exact.turnId, answerDelta: "one", turnLifecycle: { ...exact, state: "active" as const } };
     const source = reader([active, active, { turnId: exact.turnId, answerDelta: "must not be reached" }]);
-    const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" } });
+    const opened = await new ExactTurnObserver(source).open({ source: transcriptSource, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
     const observed: AgentTranscriptObservation[] = [];
 
@@ -81,7 +104,7 @@ describe("ExactTurnObserver", () => {
 
   it("preserves an explicitly empty request as an observation", async () => {
     const source = reader([{ turnId: exact.turnId, requestText: "", answerDelta: "" }]);
-    const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" } });
+    const opened = await new ExactTurnObserver(source).open({ source: transcriptSource, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
 
     await expect(opened.cursor.read()).resolves.toEqual({
@@ -92,19 +115,19 @@ describe("ExactTurnObserver", () => {
 
   it("preserves a timeline-only observation", async () => {
     const observation = { turnId: exact.turnId, answerDelta: "", timelineDeltas: [{ kind: "tool" as const, id: "tool:1", sequence: 1, category: "read" as const, label: "config", state: "running" as const }] };
-    const opened = await new ExactTurnObserver(reader([observation])).open({ session, boundary: { kind: "latest" } });
+    const opened = await new ExactTurnObserver(reader([observation])).open({ source: transcriptSource, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
 
     await expect(opened.cursor.read()).resolves.toEqual({ kind: "accepted", observation });
   });
 
-  it("reports an unsupported recovery cursor without falling back to latest", async () => {
+  it("preserves an unavailable boundary result without falling back to latest", async () => {
     const source: AgentTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
 
-    await expect(new ExactTurnObserver(source).open({ session, boundary: { kind: "first" } }))
-      .resolves.toEqual({ mode: "unavailable", reason: "recovery_cursor_unavailable" });
-    await expect(new ExactTurnObserver(source).open({ session, boundary: { kind: "after", ...exact } }))
-      .resolves.toEqual({ mode: "unavailable", reason: "recovery_cursor_unavailable" });
-    expect(source.open).not.toHaveBeenCalled();
+    await expect(new ExactTurnObserver(source).open({ source: transcriptSource, boundary: { kind: "first" } }))
+      .resolves.toEqual({ mode: "unavailable", reason: "transcript_not_found" });
+    await expect(new ExactTurnObserver(source).open({ source: transcriptSource, boundary: { kind: "after", ...exact } }))
+      .resolves.toEqual({ mode: "unavailable", reason: "transcript_not_found" });
+    expect(source.open).toHaveBeenCalledTimes(2);
   });
 });

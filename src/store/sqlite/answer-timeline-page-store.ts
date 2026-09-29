@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { AnswerTimelineItem } from "../../domain/answer-timeline.js";
+import { answerTimelineItemFingerprint } from "../../domain/answer-timeline-late-results.js";
 import type { AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint } from "../../domain/delivery.js";
 import type { AnswerTimelineCursor } from "../../domain/delivery.js";
 import type { SqliteContext } from "./context.js";
@@ -46,7 +46,7 @@ export function settleAnswerTimelinePageCheckpoint(context: SqliteContext, reply
 }
 
 function itemFingerprints(items: readonly AnswerTimelineItem[]): AnswerTimelinePageCheckpoint["deliveredItems"] {
-  return items.map((item) => ({ id: item.id, fingerprint: createHash("sha256").update(JSON.stringify(item)).digest("hex") }));
+  return items.map((item) => ({ id: item.id, fingerprint: answerTimelineItemFingerprint(item) }));
 }
 
 function now(): string { return new Date().toISOString(); }

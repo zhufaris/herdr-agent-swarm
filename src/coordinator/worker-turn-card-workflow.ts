@@ -3,11 +3,12 @@ import { continuationSummary } from "../domain/card-page-handoff.js";
 import type { WorkerTurnCardConvergencePort } from "../domain/ports/card-convergence.js";
 import type { WorkerTurnCardStore } from "../domain/ports/instance.js";
 import type { WorkerPresentation } from "../domain/ports/presentation.js";
-import { workerTurnElementId, workerTurnProgressElementId } from "../domain/worker-turn-card-view.js";
+import { workerTurnElementId } from "../domain/worker-turn-card-view.js";
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
 import { planRichTextAnswerPage, richTextAnswerTitle } from "../runtime/answer-rich-text.js";
 import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
+import { isPureAgentMarkdownUpdate } from "../domain/answer-timeline-convergence.js";
 
 type WorkerTurnCardPresentation = Pick<WorkerPresentation, "workerTurn" | "workerTurnPage" | "workerTurnProgress" | "answerTimelinePage">;
 
@@ -46,10 +47,9 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     let reserved = false;
     const reserve = (outcome: "reserved" | "waiting" | "stale") => { reserved ||= outcome === "reserved"; return outcome; };
     if (["queued", "preparing", "running", "blocked"].includes(view.phase)) {
-      reserve(this.store.reserveWorkerTurnProgress({
-        turnId, pageIndex: page.pageIndex, cardId: page.cardId,
-        elementId: workerTurnProgressElementId(turnId, page.pageIndex),
-        content: this.presentation.workerTurnProgress(view)
+      reserve(this.store.reserveWorkerTurnCardHydration({
+        turnId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId,
+        card: this.presentation.workerTurn(view, page)
       }));
       if (reserved) this.wakeOutbound();
       this.log(turnId, page.pageIndex, "progress", reserved ? "reserved" : "waiting");
@@ -123,8 +123,10 @@ export class WorkerTurnCardWorkflow implements WorkerTurnCardConvergencePort {
     const checkpoint = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
     const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenWorkerAnswerTimelineItems(view.turnId, page.pageIndex), page.pageIndex);
     const plan = this.presentation.answerTimelinePage(view.timelineItems, checkpoint.startCursor, this.pageLimit, lateResults);
-    const card = this.presentation.workerTurn(view, page, { timelineItems: plan.items });
-    const outcome = this.store.reserveWorkerAnswerTimelineCard({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId!, card, cursor: plan.nextCursor, items: plan.items });
+    const tail = plan.items.at(-1);
+    const outcome = isPureAgentMarkdownUpdate(checkpoint, plan.items) && tail?.kind === "agent_message"
+      ? this.store.reserveWorkerTurnContent({ turnId: view.turnId, pageIndex: page.pageIndex, cardId: page.cardId!, elementId: page.elementId, content: tail.markdown, sourceEnd: view.answer.length, timelineCursor: plan.nextCursor, timelineItems: plan.items })
+      : this.store.reserveWorkerAnswerTimelineCard({ turnId: view.turnId, pageIndex: page.pageIndex, messageId: page.messageId!, card: this.presentation.workerTurn(view, page, { timelineItems: plan.items }), cursor: plan.nextCursor, items: plan.items });
     if (outcome === "reserved") { this.wakeOutbound(); return; }
     const delivered = this.store.getWorkerAnswerTimelinePage(view.turnId, page.pageIndex);
     if (delivered.pending || !sameCursor(delivered.deliveredCursor, plan.nextCursor)) return;

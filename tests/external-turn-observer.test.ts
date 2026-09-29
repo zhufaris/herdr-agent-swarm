@@ -25,8 +25,7 @@ describe("ExternalTurnObserver", () => {
     });
     const cursor = { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } };
     const transcriptReader = {
-      open: vi.fn(async () => ({ mode: "typed" as const, cursor })),
-      openActiveTurn: vi.fn(async () => { throw new Error("historical scan must not run"); })
+      open: vi.fn(async () => ({ mode: "typed" as const, cursor }))
     };
     const observer = new ExternalTurnObserver({
       store, transcriptReader, bus: new BridgeEventBus(), outboundWork: { wake() {} },
@@ -37,7 +36,7 @@ describe("ExternalTurnObserver", () => {
     await observer.observe(store.getBinding("b1")!);
 
     expect(transcriptReader.open).toHaveBeenCalledOnce();
-    expect(transcriptReader.openActiveTurn).not.toHaveBeenCalled();
+    expect(transcriptReader.open).toHaveBeenCalledWith(expect.anything(), { kind: "latest" });
     expect(store.getPrompt("historical-turn")).toBeNull();
     await observer.stop();
     store.close();
@@ -52,8 +51,7 @@ describe("ExternalTurnObserver", () => {
     });
     const cursor = { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } };
     const transcriptReader = {
-      open: vi.fn(async () => ({ mode: "typed" as const, cursor })),
-      openActiveTurn: vi.fn(async () => ({ mode: "typed" as const, cursor }))
+      open: vi.fn(async () => ({ mode: "typed" as const, cursor }))
     };
     const observer = new ExternalTurnObserver({
       store, transcriptReader, bus: new BridgeEventBus(), outboundWork: { wake() {} },
@@ -63,8 +61,8 @@ describe("ExternalTurnObserver", () => {
 
     await observer.observe(store.getBinding("b1")!);
 
-    expect(transcriptReader.openActiveTurn).toHaveBeenCalledOnce();
-    expect(transcriptReader.open).not.toHaveBeenCalled();
+    expect(transcriptReader.open).toHaveBeenCalledOnce();
+    expect(transcriptReader.open).toHaveBeenCalledWith(expect.anything(), { kind: "active" });
     await observer.stop();
     store.close();
   });
@@ -80,7 +78,7 @@ describe("ExternalTurnObserver", () => {
       { answerDelta: "" }
     ];
     const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
-    const transcriptReader = { open: vi.fn(async () => ({ mode: "typed" as const, cursor })), openActiveTurn: vi.fn(async () => ({ mode: "typed" as const, cursor })) };
+    const transcriptReader = { open: vi.fn(async () => ({ mode: "typed" as const, cursor })) };
     const mainUpdates: object[] = [];
     const answerUpdates: string[] = [];
     const lark: LarkPort = {
@@ -88,9 +86,11 @@ describe("ExternalTurnObserver", () => {
       async createTopic() { return { topicId: "topic", rootMessageId: "root" }; },
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "card" }; },
-      async replyRichText() { return { messageId: "answer-1" }; },
-      async updateRichText(_messageId, content) { answerUpdates.push(JSON.stringify(content)); },
+      async replyStreamingCard() { return { messageId: "answer-1", cardId: "answer-surface-1" }; },
+      async streamCardContent(_cardId, _elementId, content) { answerUpdates.push(content); },
+      async finishStreamingCard() {},
       async updateCard(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
+      async updateCardKit(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); else answerUpdates.push(JSON.stringify(card)); },
       async shareThread() { return { messageId: "shared" }; }
     };
     const logger = pino({ enabled: false });
@@ -111,7 +111,7 @@ describe("ExternalTurnObserver", () => {
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });
 
     expect(transcriptReader.open).toHaveBeenCalledOnce();
-    expect(transcriptReader.openActiveTurn).not.toHaveBeenCalled();
+    expect(transcriptReader.open).toHaveBeenCalledWith(expect.anything(), { kind: "latest" });
     await vi.waitFor(() => expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", executionOrigin: "herdr", transcriptTurnId: "turn-1" }));
     await vi.waitFor(() => expect(answerUpdates.some((content) => content.includes("direct answer"))).toBe(true));
     await vi.waitFor(() => expect(mainUpdates.some((card) => JSON.stringify(card).includes("direct answer"))).toBe(true));
@@ -153,14 +153,16 @@ describe("ExternalTurnObserver", () => {
       async createTopic() { return { topicId: "topic", rootMessageId: "root" }; },
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "card" }; },
-      async replyRichText() {
+      async replyStreamingCard() {
         const page = createdMessages.length + 1;
         const messageId = `answer-${page}`;
         createdMessages.push(messageId);
-        return { messageId };
+        return { messageId, cardId: `answer-surface-${page}` };
       },
-      async updateRichText() {},
+      async streamCardContent() {},
+      async finishStreamingCard() {},
       async updateCard(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
+      async updateCardKit(messageId, card) { if (messageId === "main-1") mainUpdates.push(card); },
       async shareThread() { return { messageId: "shared" }; }
     };
     const logger = pino({ enabled: false });
@@ -202,17 +204,18 @@ describe("ExternalTurnObserver", () => {
     await observer.observeByPane(["w1:p2"]);
 
     expect(open).toHaveBeenCalledOnce();
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: expect.objectContaining({ value: "session-b2" }) }));
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: expect.objectContaining({ value: "session-b2" }) }), { kind: "latest" });
     await observer.stop();
     store.close();
   });
 
-  it("adopts a Core-shaped direct Herdr turn without exposing request text", async () => {
+  it("adopts a Core-shaped direct Herdr turn with native identity and a separate Pane request", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", paneToken: "yx0c", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", spaceName: "herdr-agent-swarm", paneId: "w1:p1", paneToken: "yx0c", phase: "ready" });
     const observations: AgentTranscriptObservation[] = [
-      { turnId: "turn-1", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
+      { turnId: "turn-1", freshTurnStart: true, requestText: "check the cards", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "active", startedAt: "2026-08-31T10:00:00.000Z" } },
       { answerDelta: "" }
     ];
     const cursor = { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } };
@@ -234,8 +237,16 @@ describe("ExternalTurnObserver", () => {
     );
     await observer.observe(store.getBinding("b1")!);
 
-    expect(store.getPrompt("external-1")).toMatchObject({ executionOrigin: "herdr", state: "delivered", observationState: "completed", transcriptTurnId: "turn-1", body: "Herdr Pane 中直接发起的任务" });
-    expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "answer" });
+    expect(store.getPrompt("external-1")).toMatchObject({ executionOrigin: "herdr", state: "delivered", observationState: "completed", transcriptTurnId: "turn-1", body: "check the cards" });
+    const view = store.loadRunCard("external-1")!;
+    expect(view).toMatchObject({ phase: "completed", answer: "answer", title: "Herdr Pane 中直接发起的任务", requestOrigin: "herdr-pane", spaceName: "herdr-agent-swarm", paneToken: "yx0c", requestText: "check the cards" });
+    const rendered = JSON.stringify(primaryPresentation.answerCard(view));
+    const finalized = JSON.stringify(primaryPresentation.finalAnswer(view, { initialContent: "answer" }));
+    expect(rendered).toContain("herdr-agent-swarm / yx0c · Herdr Pane 中直接发起的任务");
+    expect(rendered).toContain("💬 Pane 请求");
+    expect(rendered).toContain("check the cards");
+    expect(finalized).toContain("💬 Pane 请求");
+    expect(finalized).toContain("check the cards");
     expect(events).toEqual(["TurnStarted", "TurnOutputObserved", "TurnOutputObserved", "TurnCompleted"]);
     expect(wake).toHaveBeenCalledOnce();
     store.close();
@@ -258,11 +269,12 @@ describe("ExternalTurnObserver", () => {
       turnLifecycle: { turnId: "turn-1", state: "completed", startedAt, finalAnswer: "recovered answer" }
     };
     const wakePrompt = vi.fn();
-    const open = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { turnId: "later-turn", answerDelta: "", turnLifecycle: { turnId: "later-turn", state: "completed" as const, startedAt, finalAnswer: "later answer" } }; } } }));
-    const openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return completed; } } }));
+    const open = vi.fn(async (_source, boundary) => boundary.kind === "at"
+      ? { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return completed; } } }
+      : { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { turnId: "later-turn", answerDelta: "", turnLifecycle: { turnId: "later-turn", state: "completed" as const, startedAt, finalAnswer: "later answer" } }; } } });
     const observer = new ExternalTurnObserver({
       store,
-      transcriptReader: { open, openAtTurn },
+      transcriptReader: { open },
       bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => true, wakePrompt
     });
 
@@ -271,8 +283,7 @@ describe("ExternalTurnObserver", () => {
 
     expect(store.getPrompt("external-1")).toMatchObject({ state: "delivered", observationState: "completed" });
     expect(store.loadRunCard("external-1")).toMatchObject({ phase: "completed", answer: "recovered answer" });
-    expect(open).not.toHaveBeenCalled();
-    expect(openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: expect.objectContaining({ value: "session-1" }) }), "turn-1", startedAt);
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: expect.objectContaining({ value: "session-1" }) }), { kind: "at", turnId: "turn-1", startedAt });
     expect(wakePrompt).toHaveBeenCalledWith("b1");
     await observer.stop();
     store.close();
@@ -297,8 +308,9 @@ describe("ExternalTurnObserver", () => {
     const wakePrompt = vi.fn();
     const observer = new ExternalTurnObserver({
       store, transcriptReader: {
-        open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }),
-        openAtTurn: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } } })
+        open: async (_source, boundary) => boundary.kind === "at"
+          ? { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } } }
+          : { mode: "typed" as const, cursor: { async readDelta() { return ""; } } }
       },
       bus, outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt
     });
@@ -328,7 +340,7 @@ describe("ExternalTurnObserver", () => {
     const view = createQueuedRunCard({ promptId: "external-1", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: startedAt });
     store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "turn-1", startedAt, requestText: "direct", externalPromptId: "external-1", externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({}) });
     const observations: AgentTranscriptObservation[] = [{ answerDelta: "" }, { turnId: "turn-1", answerDelta: "late output", turnLifecycle: { turnId: "turn-1", state: "active", startedAt } }, { answerDelta: "" }];
-    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }), openAtTurn: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }) }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
+    const observer = new ExternalTurnObserver({ store, transcriptReader: { open: async (_source, boundary) => boundary.kind === "at" ? { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } } : { mode: "typed" as const, cursor: { async readDelta() { return ""; } } } }, bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {} });
 
     await observer.observe(store.getBinding("b1")!);
     await observer.observe(store.getBinding("b1")!);
@@ -347,15 +359,17 @@ describe("ExternalTurnObserver", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     let releaseOpen!: (value: { mode: "typed"; cursor: { readDelta(): Promise<string> } }) => void;
-    const openAfterTurn = vi.fn(() => new Promise<{ mode: "typed"; cursor: { readDelta(): Promise<string> } }>((resolve) => { releaseOpen = resolve; }));
+    const open = vi.fn((_source, boundary) => boundary.kind === "after"
+      ? new Promise<{ mode: "typed"; cursor: { readDelta(): Promise<string> } }>((resolve) => { releaseOpen = resolve; })
+      : Promise.resolve({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }));
     const observer = new ExternalTurnObserver({
       store,
-      transcriptReader: { open: async () => ({ mode: "typed" as const, cursor: { async readDelta() { return ""; } } }), openAfterTurn },
+      transcriptReader: { open },
       bus: new BridgeEventBus(), outboundWork: { wake() {} }, logger: pino({ enabled: false }), presentation: primaryPresentation, isBindingBusy: () => false, wakePrompt() {}
     });
     const binding = store.getBinding("b1")!;
     const recovery = observer.recoverAfterDetachedTurn(binding, { id: "old", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-08-31T10:00:00.000Z" } as never);
-    expect(openAfterTurn).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledWith(expect.anything(), { kind: "after", turnId: "turn-1", startedAt: "2026-08-31T10:00:00.000Z" });
 
     let stopSettled = false;
     const stopping = observer.stop().then(() => { stopSettled = true; });

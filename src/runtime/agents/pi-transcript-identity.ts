@@ -3,9 +3,13 @@ import { resolve } from "node:path";
 
 export interface PiTranscriptDescriptor { sessionId: string; sessionDir: string }
 
-export function piTranscriptDescriptor(root: string, ownerId: string, generation: number): PiTranscriptDescriptor {
+export function piSessionId(ownerId: string, generation: number): string {
   const digest = createHash("sha256").update(`herdr-agent-swarm:pi:${ownerId}:${generation}`).digest("hex");
-  const sessionId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+export function piTranscriptDescriptor(root: string, ownerId: string, generation: number): PiTranscriptDescriptor {
+  const sessionId = piSessionId(ownerId, generation);
   return { sessionId, sessionDir: resolve(root, safeSegment(ownerId), String(generation)) };
 }
 

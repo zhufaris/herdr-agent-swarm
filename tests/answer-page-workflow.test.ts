@@ -34,7 +34,8 @@ describe("AnswerPageWorkflow", () => {
       await workflow.converge("p1");
       const [update] = store.listPendingOutboundReplies();
       expect(update).toMatchObject({ kind: "card_update", rootMessageId: "answer-1" });
-      expect(update!.payload).toContain("📖 Read · src/store.ts · ✓ 完成");
+      expect(update!.payload).toContain("📖 Read · src/store.ts · ✅");
+      expect(update).toMatchObject({ cardSequence: 1, laneKey: "gateway:feishu:primary:answer:p1" });
       expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ deliveredCursor: null, pending: true });
 
       await workflow.converge("p1");
@@ -60,12 +61,34 @@ describe("AnswerPageWorkflow", () => {
       expect(store.reserveAnswerTimelineCard({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "after" }, cursor: null, items: changedItems })).toBe("reserved");
 
       expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
-        idempotencyKey: `${first.idempotencyKey}:revision:2`,
+        idempotencyKey: "answer-timeline:p1:0:2",
+        cardSequence: 2,
         payload: JSON.stringify({ content: "after" })
       })]);
-      expect(store.database.prepare("SELECT projection_key, snapshot_revision FROM outbound_replies WHERE idempotency_key = ?").get(`${first.idempotencyKey}:revision:2`)).toEqual({
-        projection_key: "answer-timeline:p1:0", snapshot_revision: 2
-      });
+      expect(store.database.prepare("SELECT card_sequence FROM outbound_replies WHERE idempotency_key = ?").get("answer-timeline:p1:0:2")).toEqual({ card_sequence: 2 });
+    } finally { store.close(); }
+  });
+
+  it("uses the shared page sequence for a pure trailing Agent markdown update", async () => {
+    const store = readyStore();
+    try {
+      const initial = store.loadRunCard("p1")!;
+      store.saveRunCard({ ...initial, phase: "running", timelineItems: [{ kind: "agent_message", id: "message:one", sequence: 1, markdown: "draft" }], viewVersion: initial.viewVersion + 1 });
+      const workflow = new AnswerPageWorkflow(store, vi.fn(), primaryPresentation);
+      await workflow.converge("p1");
+      const structural = store.listPendingOutboundReplies()[0]!;
+      store.markOutboundReplyDelivered(structural.id, "answer-1");
+
+      const current = store.loadRunCard("p1")!;
+      store.saveRunCard({ ...current, timelineItems: [{ kind: "agent_message", id: "message:one", sequence: 1, markdown: "draft extended" }], viewVersion: current.viewVersion + 1 });
+      await workflow.converge("p1");
+
+      const [content] = store.listPendingOutboundReplies();
+      expect(content).toMatchObject({ kind: "stream_content", rootMessageId: "card-1", cardSequence: null, laneKey: "gateway:feishu:primary:answer:p1" });
+      expect(JSON.parse(content!.payload)).toMatchObject({ content: "draft extended", sequence: 2 });
+      expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ pending: true });
+      store.markOutboundReplyDelivered(content!.id, "answer-1");
+      expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ pending: false, deliveredItems: [expect.objectContaining({ id: "message:one" })] });
     } finally { store.close(); }
   });
 
@@ -123,14 +146,14 @@ describe("AnswerPageWorkflow", () => {
 
       const [lateUpdate] = store.listPendingOutboundReplies();
       expect(lateUpdate).toMatchObject({ kind: "card_update", rootMessageId: "answer-2" });
-      expect(lateUpdate!.payload).toContain("npm test（更新自第 1 页）");
+      expect(lateUpdate!.payload).toContain("🖥️ Ran · npm test · ✅");
       expect(lateUpdate!.payload).toContain("all tests passed");
       expect(lateUpdate!.payload).not.toContain('"rootMessageId":"answer-1"');
       store.markOutboundReplyDelivered(lateUpdate!.id, "answer-2");
       await workflow.converge("p1");
       const later = store.listPendingOutboundReplies();
       expect(later.some((reply) => reply.rootMessageId === "answer-1")).toBe(false);
-      expect(later.filter((reply) => reply.payload.includes("更新自第 1 页"))).toHaveLength(1);
+      expect(later.filter((reply) => reply.payload.includes("all tests passed"))).toHaveLength(1);
     } finally { store.close(); }
   });
 
@@ -547,7 +570,7 @@ describe("AnswerPageWorkflow", () => {
     const expectedElementId = answerElementId("p1", 1);
     expect(replacement).toMatchObject({ kind: "stream_card_create", cardRole: "answer", rootMessageId: "root-1" });
     expect(payload.stream.elementId).toBe(expectedElementId);
-    expect(payload.card.body.elements).toEqual(expect.arrayContaining([expect.objectContaining({ tag: "markdown", element_id: expectedElementId })]));
+    expect(payload.card.body.elements).not.toEqual(expect.arrayContaining([expect.objectContaining({ tag: "markdown", element_id: expectedElementId })]));
 
     store.markOutboundReplyFailedWithQuarantine(replacement!.id, "invalid legacy payload", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "invalid_card" });
     await workflow.converge("p1");

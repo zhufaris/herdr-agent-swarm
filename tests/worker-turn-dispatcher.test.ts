@@ -264,4 +264,44 @@ describe("WorkerTurnDispatcher", () => {
     expect(detach).toHaveBeenCalledOnce();
     expect(stop).not.toHaveBeenCalled();
   });
+
+  it("contains and reports a rejected detached Worker observation", async () => {
+    const exactTurn = {
+      ...turn,
+      state: "running",
+      runtimeTurnId: "runtime-1",
+      runtimeTurnStartedAt: "2026-09-24T00:00:00.000Z",
+    };
+    const store = {
+      getAgentInstance: vi.fn(() => instance),
+      claimNextInstanceTurn: vi.fn().mockReturnValueOnce(turn).mockReturnValue(undefined),
+      loadWorkerTurnCard: vi.fn(() => null),
+      updateInstanceTurn: vi.fn(),
+      getInstanceTurn: vi.fn(() => exactTurn),
+      transitionInstanceTurnWithProjection: vi.fn(),
+      updateAgentInstanceLifecycle: vi.fn(),
+    } satisfies WorkerTurnDispatchStore;
+    const drivers = {
+      get: vi.fn(() => ({
+        kind: "traex" as const,
+        describe: () => ({ ...capabilities, structuredEvents: true }),
+        start: vi.fn(async () => undefined),
+        submit: vi.fn(async () => ({ status: "confirmed-delivered" as const })),
+        steer: vi.fn(),
+        interrupt: vi.fn(),
+      })),
+      describe: vi.fn(() => ({ ...capabilities, structuredEvents: true })),
+    } satisfies AgentDriverCatalog;
+    const detach = vi.fn(async () => { throw new Error("event cursor failed"); });
+    const observer = { watch: vi.fn(async () => ({ flush: vi.fn(async () => undefined), stop: vi.fn(async () => undefined), detach })) } satisfies Pick<WorkerTurnObservationPort, "watch">;
+    const logger = { error: vi.fn() };
+    const dispatcher = new WorkerTurnDispatcher({ store, drivers, observer, presentation, logger });
+
+    await dispatcher.drain("worker-1");
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "instance-turn-dispatch-failed", instanceId: "worker-1", turnId: "turn-1" }),
+      "instance turn dispatch failed"
+    ));
+    expect(dispatcher.snapshot()).toMatchObject({ state: "idle", lastFailure: "event cursor failed" });
+  });
 });

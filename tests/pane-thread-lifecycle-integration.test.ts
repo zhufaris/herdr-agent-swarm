@@ -427,7 +427,6 @@ describe("pane/thread lifecycle integration", () => {
       } };
     };
     const transcriptReader = {
-      async openAtTurn() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, readObservation } }; },
       async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, readObservation } }; }
     };
     const secondRuntime = runtime(store, herdr, lark, 30_000, transcriptReader);
@@ -438,10 +437,13 @@ describe("pane/thread lifecycle integration", () => {
     await vi.waitFor(() => expect(store.loadTopicView("b1")?.liveStatus?.planSteps).toMatchObject([{ key: "plan:0", label: "Recovered plan", state: "active" }]));
     expect(store.loadRunCard(firstPrompt.id)!.answer).toBe("LEGACY_UNPROVEN_ANSWER_SENTINEL");
 
-    answerDelta = "Live detached JSONL update";
+    answerDelta = "Live detached Core event update";
     toolActivities = [{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }];
-    await vi.waitFor(() => expect(store.loadRunCard(firstPrompt.id)!.answer).toContain("Live detached JSONL update"), { timeout: 2_000 });
-    expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }]);
+    await vi.waitFor(() => expect(store.loadRunCard(firstPrompt.id)!.answer).toContain("Live detached Core event update"), { timeout: 2_000 });
+    expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([
+      { key: "plan:0", kind: "step", label: "Recovered plan", state: "active" },
+      { key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "active" }
+    ]);
     expect(store.listDetachedPrompts()).toMatchObject([{ id: firstPrompt.id, state: "running", observationState: "detached" }]);
     expect(submitted).toEqual(["first"]);
 
@@ -450,7 +452,10 @@ describe("pane/thread lifecycle integration", () => {
     await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
     expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
     expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: "Recovered answer" });
-    expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "done" }]);
+    expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([
+      { key: "plan:0", kind: "step", label: "Recovered plan", state: "active" },
+      { key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "done" }
+    ]);
     expect(store.loadRunCard(firstPrompt.id)!.answer).not.toMatch(/SECRET_DETACHED_TERMINAL_SENTINEL|LEGACY_UNPROVEN_ANSWER_SENTINEL/);
 
     await secondRuntime.coordinator.stop(); await secondRuntime.projector.stop(); await secondRuntime.publisher.stop(); store.close();
@@ -515,11 +520,14 @@ describe("pane/thread lifecycle integration", () => {
     store.markPromptObservationDetached("p1", "recovering");
     let releaseRead!: () => void; let reads = 0;
     const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
-    const transcriptReader = { async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() {
-      await readGate; reads += 1;
-      const observedTurnId = reads < 4 ? "01a052d3-9c14-70e1-a375-397e2ecb55e9" : "01a052d3-9c14-70e1-a375-397e2ecb55ea";
-      return { turnId: observedTurnId, answerDelta: "manual output", mainStatus: { statusTitle: "manual" }, turnLifecycle: { turnId: observedTurnId, state: "completed" as const, startedAt: "2026-08-30T00:00:02.000Z" } };
-    } } }; } };
+    const transcriptReader = { async open(_source: unknown, boundary: { kind: string }) {
+      if (boundary.kind !== "latest") return { mode: "unavailable" as const, reason: "turn_boundary_not_found" as const };
+      return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() {
+        await readGate; reads += 1;
+        const observedTurnId = reads < 4 ? "01a052d3-9c14-70e1-a375-397e2ecb55e9" : "01a052d3-9c14-70e1-a375-397e2ecb55ea";
+        return { turnId: observedTurnId, answerDelta: "manual output", mainStatus: { statusTitle: "manual" }, turnLifecycle: { turnId: observedTurnId, state: "completed" as const, startedAt: "2026-08-30T00:00:02.000Z" } };
+      } } };
+    } };
     const warnings: Array<Record<string, unknown>> = [];
     const logger = pino({ level: "warn" }, { write(chunk: string) { warnings.push(JSON.parse(chunk) as Record<string, unknown>); } });
     const active = runtime(store, herdr, lark, 10, transcriptReader, logger);
@@ -561,7 +569,11 @@ describe("pane/thread lifecycle integration", () => {
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "new answer", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "new answer" } }
     ];
-    const transcriptReader = { async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; } };
+    const transcriptReader = { async open(_source: unknown, boundary: { kind: string }) {
+      return boundary.kind === "latest"
+        ? { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }
+        : { mode: "unavailable" as const, reason: "turn_boundary_not_found" as const };
+    } };
     const active = runtime(store, herdr, lark, 10, transcriptReader, pino({ enabled: false }), true);
 
     await active.coordinator.start();
@@ -601,8 +613,11 @@ describe("pane/thread lifecycle integration", () => {
       { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", freshTurnStart: true, requestText: "external two", answerDelta: "answer two", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", state: "completed", startedAt: "2026-08-30T00:00:03.000Z", finalAnswer: "answer two" } }
     ];
     const transcriptReader = {
-      async open() { return { mode: "unavailable" as const, reason: "transcript_not_found" as const }; },
-      async openAfterTurn() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; }
+      async open(_source: unknown, boundary: { kind: string }) {
+        return boundary.kind === "after"
+          ? { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }
+          : { mode: "unavailable" as const, reason: "transcript_not_found" as const };
+      }
     };
     const active = runtime(store, herdr, lark, 10, transcriptReader, pino({ enabled: false }), true);
     await active.coordinator.start();

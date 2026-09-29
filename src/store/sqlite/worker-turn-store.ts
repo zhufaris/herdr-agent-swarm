@@ -220,20 +220,11 @@ export class SqliteWorkerTurnStore {
     elementId: string;
     content: string;
     sourceEnd: number;
+    timelineCursor?: AnswerTimelineCursor | null;
+    timelineItems?: readonly AnswerTimelineItem[];
   }): AnswerPageReservationOutcome {
     return this.context.transaction(() =>
       this.projection.reserveContent(input),
-    );
-  }
-  reserveWorkerTurnProgress(input: {
-    turnId: string;
-    pageIndex: number;
-    cardId: string;
-    elementId: string;
-    content: string;
-  }): AnswerPageReservationOutcome {
-    return this.context.transaction(() =>
-      this.projection.reserveProgress(input),
     );
   }
   reserveWorkerTurnFinish(input: {

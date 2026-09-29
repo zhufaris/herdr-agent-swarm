@@ -23,6 +23,7 @@ import { createWorkerMainView } from "../src/domain/worker-main-view.js";
 import type { OutboundWorkNotifier } from "../src/events/outbound-work-notifier.js";
 import { GatewayDeliveryError, type GatewayDeliveryPort, type PreparedGatewayDelivery } from "../src/gateways/contract/plugin.js";
 import { createFeishuCompatibilityDelivery } from "../src/gateways/feishu/plugin.js";
+import { initialRichTextAnswerPayload } from "../src/domain/rich-text.js";
 
 class LarkOutboxDispatcher extends ProductionLarkOutboxDispatcher {
   constructor(store: SqliteBindingStore, lark: LarkPort, logger: Logger, work: OutboundWorkNotifier = new InProcessOutboundWorkNotifier(logger), safetyScanIntervalMs = 30_000) {
@@ -113,6 +114,7 @@ describe("Lark channel publisher", () => {
 
     await publisher.requestScan(true);
 
+    expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE worker_turn_id = 'turn-1'").get()).toEqual({ state: "delivered", error: null });
     expect(create).toHaveBeenCalledOnce();
     expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ messageId: "worker-message-1", cardId: "worker-card-1", deliveredVersion: 1 });
     expect(store.listWorkerTurnCardPages("turn-1")).toEqual([expect.objectContaining({ pageIndex: 0, messageId: "worker-message-1", cardId: "worker-card-1", state: "active" })]);
@@ -302,7 +304,8 @@ describe("Lark channel publisher", () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: primaryPresentation.answerCard(view) });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
     await publisher.requestScan();
     store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: "Working\nDone", answerSegments: ["Working\nDone"], viewVersion: 2 });
@@ -629,6 +632,7 @@ describe("Lark channel publisher", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyRichText: reply }), pino({ enabled: false }));
 
     await publisher.requestScan();
@@ -655,6 +659,7 @@ describe("Lark channel publisher", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    seedHistoricalRichPost(store, "p1", "root-1");
     const publisher = new LarkOutboxDispatcher(store, fakeLark({ replyRichText: reply }), pino({ enabled: false }));
 
     await publisher.requestScan();
@@ -1176,7 +1181,7 @@ describe("Lark channel publisher", () => {
     const started: string[] = [];
     const lark = fakeLark({
       async updateCard(messageId) { started.push(messageId); await oldGate; },
-      async replyRichText() { started.push("interactive-answer"); return { messageId: "answer-message" }; }
+      async replyStreamingCard() { started.push("interactive-answer"); return { messageId: "answer-message", cardId: "answer-card" }; }
     });
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old-binding", workspaceId: "old-workspace", chatId: "old-chat", topicId: "old-topic", rootMessageId: "old-root", title: "Old task" });
@@ -1192,7 +1197,7 @@ describe("Lark channel publisher", () => {
     }
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: primaryPresentation.answerCard(view) });
     const publisher = new LarkOutboxDispatcher(store, lark, pino({ enabled: false }));
 
     const draining = publisher.requestScan();
@@ -1200,7 +1205,7 @@ describe("Lark channel publisher", () => {
     releaseOld();
     await draining;
 
-    expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-message", cardId: null, deliveryMode: "rich_post" });
+    expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-message", cardId: "answer-card", deliveryMode: "streaming" });
     expect(store.listPendingOutboundReplies()).toEqual([]);
     store.close();
   });
@@ -1235,11 +1240,11 @@ describe("Lark channel publisher", () => {
 
     store.createPendingBinding({ id: "live-binding", workspaceId: "wH", chatId: "chat", topicId: "live-topic", rootMessageId: "live-root", title: "Live" });
     const liveView = createQueuedRunCard({ promptId: "live-prompt", bindingId: "live-binding", title: "Live", workspaceId: "wH", paneId: "wH:live", requestText: "now", queuePosition: 1, occurredAt: "2026-09-12T00:00:00.000Z" });
-    store.acceptPrompt({ prompt: { id: "live-prompt", bindingId: "live-binding", larkMessageId: "live-message", actorOpenId: "u1", body: "now" }, view: liveView, rootMessageId: "live-root", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "live-prompt", bindingId: "live-binding", larkMessageId: "live-message", actorOpenId: "u1", body: "now" }, view: liveView, rootMessageId: "live-root", answerCard: primaryPresentation.answerCard(liveView) });
     const publisher = new LarkOutboxDispatcher(store, fakeLark({
       async updateCard(messageId) { started.push(messageId); await historyGate; },
       async updateRichText(messageId) { started.push(messageId); await historyGate; },
-      async replyRichText(rootMessageId) { started.push(rootMessageId); return { messageId: "live-answer-message" }; }
+      async replyStreamingCard(rootMessageId) { started.push(rootMessageId); return { messageId: "live-answer-message", cardId: "live-answer-card" }; }
     }), pino({ enabled: false }));
 
     const draining = publisher.requestScan();
@@ -1584,6 +1589,13 @@ function fakeLark(overrides: Partial<LarkPort>): LarkPort {
     async updateRichText() {},
     ...overrides
   };
+}
+
+function seedHistoricalRichPost(store: SqliteBindingStore, promptId: string, rootMessageId: string): void {
+  const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId && reply.cardRole === "answer")!;
+  store.database.prepare("DELETE FROM outbound_replies WHERE id = ?").run(create.id);
+  store.database.prepare("UPDATE answer_pages SET delivery_mode = 'rich_post', card_id = NULL WHERE prompt_id = ? AND page_index = 0").run(promptId);
+  store.enqueueOutboundReply({ id: `historical-${promptId}`, idempotencyKey: `answer-post:${promptId}:0`, bindingId: "b1", promptId, viewVersion: 1, cardRole: "answer", rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, answerElementId(promptId, 0))) });
 }
 
 function connectedWriter(store: SqliteBindingStore, dispatcher: LarkOutboxDispatcher): OutboundIntentPort {

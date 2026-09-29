@@ -6,8 +6,6 @@ import { mapPrompt, type BindingRow, type PromptRow } from "../sqlite-records.js
 import type { SqliteContext } from "./context.js";
 import type { SqliteProjectionStore } from "./projection-store.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import { initialRichTextAnswerPayload } from "../../domain/rich-text.js";
-import { richTextAnswerTitle } from "../../runtime/answer-rich-text.js";
 
 export class SqliteExternalTurnAdoptionStore {
   constructor(
@@ -71,7 +69,7 @@ export class SqliteExternalTurnAdoptionStore {
         this.context.database.prepare(`UPDATE prompt_jobs SET execution_origin = 'herdr', state = 'running', observation_state = 'attached', dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ?, error = NULL, updated_at = ? WHERE id = ?`).run(input.startedAt, input.turnId, input.startedAt, timestamp, promptId);
         const queuedView = this.projections.loadRunCard(promptId)!;
         const runningView = reduceRunCard(queuedView, { type: "started", occurredAt: input.startedAt });
-        outboxReserved = Number(this.context.database.prepare("UPDATE outbound_replies SET view_version = ?, updated_at = ? WHERE prompt_id = ? AND card_role = 'answer' AND state = 'pending' AND intent_kind = 'rich-text-reply' AND first_claimed_at IS NULL AND attempt_count = 0").run(runningView.viewVersion, timestamp, promptId).changes) > 0;
+        outboxReserved = Number(this.context.database.prepare("UPDATE outbound_replies SET payload = ?, view_version = ?, updated_at = ? WHERE prompt_id = ? AND kind = 'stream_card_create' AND card_role = 'answer' AND state = 'pending' AND first_claimed_at IS NULL AND attempt_count = 0 AND card_id_checkpoint IS NULL").run(JSON.stringify({ card: input.answerCardFor(runningView), stream: { pageIndex: 0, pageStart: 0, elementId: runningView.answerElementId } }), runningView.viewVersion, timestamp, promptId).changes) > 0;
       } else {
         promptId = input.externalPromptId;
         outcome = "created_external";
@@ -79,8 +77,7 @@ export class SqliteExternalTurnAdoptionStore {
         const view = { ...input.externalView, promptId, bindingId: input.bindingId, bindingGeneration: input.expectedGeneration, paneId: input.expectedPaneId, requestText: input.requestText, queuePosition: 0 };
         const runningView = reduceRunCard(view, { type: "started", occurredAt: input.startedAt });
         this.projections.insertRunCard(view);
-        const title = richTextAnswerTitle({ projectId: binding.project_id, paneId: binding.pane_id ?? runningView.paneId, paneToken: binding.pane_token ?? runningView.paneToken, taskTitle: runningView.title }, 0);
-        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `answer-post:${promptId}:0`, gatewayId, bindingId: input.bindingId, promptId, viewVersion: runningView.viewVersion, cardRole: "answer", rootMessageId: binding.root_message_id, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, runningView.answerElementId, title)) });
+        this.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `stream-card:${promptId}:0`, gatewayId, bindingId: input.bindingId, promptId, viewVersion: runningView.viewVersion, cardRole: "answer", rootMessageId: binding.root_message_id, kind: "stream_card_create", payload: JSON.stringify({ card: input.answerCardFor(runningView), stream: { pageIndex: 0, pageStart: 0, elementId: runningView.answerElementId } }) });
         outboxReserved = true;
       }
       const prompt = this.getPrompt(promptId);

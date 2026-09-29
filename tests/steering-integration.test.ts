@@ -310,7 +310,7 @@ describe("ordinary continuation messages", () => {
 
     const prompt = harness.store.database.prepare("SELECT id, state FROM prompt_jobs WHERE lark_message_id = ?").get("nonblocking-dispatch") as { id: string; state: string };
     expect(["queued", "running"]).toContain(prompt.state);
-    expect(harness.store.database.prepare("SELECT kind, intent_kind, state FROM outbound_replies WHERE prompt_id = ? AND intent_kind = 'rich-text-reply'").get(prompt.id)).toEqual({ kind: "text", intent_kind: "rich-text-reply", state: "pending" });
+    expect(harness.store.database.prepare("SELECT kind, intent_kind, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.id)).toEqual({ kind: "stream_card_create", intent_kind: "stream-card", state: "pending" });
     expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
     await vi.waitFor(() => expect(harness.turns).toContain("investigate another issue"));
 

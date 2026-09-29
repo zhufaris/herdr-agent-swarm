@@ -12,7 +12,7 @@ const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
 const startedAt = "2026-09-01T00:00:01.000Z";
 let store: SqliteBindingStore | undefined;
 
-afterEach(() => { store?.close(); store = undefined; });
+afterEach(() => { vi.useRealTimers(); store?.close(); store = undefined; });
 
 function setup() {
   store = new SqliteBindingStore(":memory:");
@@ -62,6 +62,20 @@ describe("WorkerTurnObserver", () => {
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted final" });
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted final", tokenCount: 5_000, resultCapture: "captured", timelineItems: [{ kind: "final_answer", markdown: "trusted final" }] });
+  });
+
+  it("completes a rolling-upgrade turn when Core drops legacy subsecond precision", async () => {
+    const { observer } = setup();
+    await observer.observe("turn-1", {
+      turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "partial",
+      turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt: "2026-09-01T00:00:01.987Z" }
+    });
+    await observer.observe("turn-1", {
+      turnId: runtimeTurnId, answerDelta: "",
+      turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt: "2026-09-01T00:00:01Z", finalAnswer: "done" }
+    });
+
+    expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "done", runtimeTurnStartedAt: "2026-09-01T00:00:01.987Z" });
   });
 
   it("persists and publishes visible progress only for the exact owned transcript", async () => {
@@ -145,12 +159,12 @@ describe("WorkerTurnObserver", () => {
     const readObservation = vi.fn()
       .mockResolvedValueOnce({ turnId: runtimeTurnId, answerDelta: "recovered", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt } })
       .mockResolvedValue({ answerDelta: "" });
-    transcriptReader.openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
+    transcriptReader.open = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
     const submit = vi.fn();
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }), runtimeTurnId, startedAt);
+    expect(transcriptReader.open).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }), { kind: "at", turnId: runtimeTurnId, startedAt });
     expect(submit).not.toHaveBeenCalled();
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "recovered" });
   });
@@ -158,7 +172,7 @@ describe("WorkerTurnObserver", () => {
   it("does not infer completion when the exact recovery cursor has no terminal lifecycle", async () => {
     const { observer, transcriptReader } = setup();
     await observer.observe("turn-1", { turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "persisted answer", turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
-    transcriptReader.openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => "") } }));
+    transcriptReader.open = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => "") } }));
 
     await observer.recover("turn-1");
 
@@ -174,12 +188,28 @@ describe("WorkerTurnObserver", () => {
     }));
     observations.push({ turnId: runtimeTurnId, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "completed" as const, startedAt, finalAnswer: "full recovered answer" } });
     const readObservation = vi.fn(async () => observations.shift() ?? { answerDelta: "" });
-    transcriptReader.openAtTurn = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
+    transcriptReader.open = vi.fn(async () => ({ mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } }));
 
     await observer.recover("turn-1");
 
-    expect(transcriptReader.openAtTurn).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }), runtimeTurnId, startedAt);
+    expect(transcriptReader.open).toHaveBeenCalledWith(expect.objectContaining({ nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionId } }), { kind: "at", turnId: runtimeTurnId, startedAt });
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "full recovered answer" });
     expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "full recovered answer", resultCapture: "captured" });
+  });
+
+  it("ends a detached watch with the cursor failure instead of polling forever", async () => {
+    vi.useFakeTimers();
+    const { observer, transcriptReader } = setup();
+    transcriptReader.open = vi.fn(async () => ({ mode: "typed" as const, cursor: {
+      readDelta: vi.fn(async () => ""),
+      readObservation: vi.fn(async () => { throw new Error("Core event read failed"); })
+    } }));
+    const watch = await observer.watch("turn-1");
+    if (!watch) throw new Error("expected Worker watch");
+    const detached = expect(watch.detach()).rejects.toThrow("Core event read failed");
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    await detached;
   });
 });

@@ -859,6 +859,10 @@ describe("application composition boundaries", () => {
     for (const file of ["transcript-observer.ts", "worker-turn-observer.ts", "external-turn-observer.ts"]) {
       expect(sources.find((source) => source.file === file)?.source).toContain("ExactTurnObserver");
     }
+    const observer = readFileSync(new URL("../src/runtime/exact-turn-observer.ts", import.meta.url), "utf8");
+    const port = readFileSync(new URL("../src/domain/ports/external.ts", import.meta.url), "utf8");
+    expect(observer).not.toMatch(/LegacyCompatibleTranscriptReader|openActiveTurn|openFirstTurn|openAtTurn|openAfterTurn/);
+    expect(port).toContain("open(source: AgentTranscriptSource, boundary: AgentTranscriptBoundary)");
   });
 
   it("keeps reconciliation metrics behind one runtime module", () => {
@@ -1113,26 +1117,21 @@ describe("application composition boundaries", () => {
     }
   });
 
-  it("keeps transcript mechanics behind the stable reader facade", () => {
-    const facade = readFileSync(new URL("../src/runtime/traex-transcript.ts", import.meta.url), "utf8");
-    for (const participant of [
-      "TranscriptLocator",
-      "FileTraexTranscriptCursor",
-      "latestTranscriptBaseline",
-      "latestActiveTranscriptBaseline",
-      "findCompletedTurnBoundary",
-      "findTurnStartBoundary",
-    ]) expect(facade).toContain(participant);
-    expect(facade).toContain("implements AgentTranscriptReaderPort");
-    expect(facade).toContain('export { scanTranscriptPaths } from "./traex-transcript/locator.js"');
+  it("keeps Agent JSONL source discovery out of the Swarm process", () => {
+    const composition = readFileSync(new URL("../src/composition/create-infrastructure-runtime.ts", import.meta.url), "utf8");
+    const smoke = readFileSync(new URL("../scripts/smoke-headless-multi-agent.ts", import.meta.url), "utf8");
+    expect(composition).toContain("new HerdrEventsReader");
+    expect(smoke).toContain("new HerdrEventsReader");
+    for (const productionEntry of [composition, smoke]) expect(productionEntry).not.toMatch(/new (?:Traex|Pi)TranscriptReader/);
 
     const srcDir = fileURLToPath(new URL("../src", import.meta.url));
     for (const entry of readdirSync(srcDir, { recursive: true, withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
       const path = join(entry.parentPath, entry.name);
       const relativePath = relative(srcDir, path);
-      if (relativePath === "runtime/traex-transcript.ts" || relativePath.startsWith("runtime/traex-transcript/")) continue;
-      expect(readFileSync(path, "utf8"), relativePath).not.toMatch(/runtime\/traex-transcript\/[^"]+\.js/);
+      const source = readFileSync(path, "utf8");
+      expect(source, relativePath).not.toContain("traex-event-source-discovery.js");
+      expect(source, relativePath).not.toContain("agent-event-source-descriptor.js");
     }
   });
 

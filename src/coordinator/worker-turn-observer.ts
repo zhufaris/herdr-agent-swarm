@@ -5,6 +5,7 @@ import type { RunProgressEvent } from "../domain/run-card-view.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
 import { appendTurnOutput, createBoundedTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 import type { WorkerTurnObservationPort, WorkerTurnWatch } from "../domain/ports/worker-turn-observation.js";
+import { sameCanonicalTurnStart } from "../domain/turn-identity.js";
 
 interface Options {
   store: WorkerTurnObservationStore;
@@ -33,7 +34,7 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
       });
     }
     if (!turn?.runtimeTurnId || observation.turnId !== turn.runtimeTurnId) return;
-    if (lifecycle && (lifecycle.turnId !== turn.runtimeTurnId || lifecycle.startedAt !== turn.runtimeTurnStartedAt)) return;
+    if (lifecycle && (lifecycle.turnId !== turn.runtimeTurnId || !turn.runtimeTurnStartedAt || !sameCanonicalTurnStart(lifecycle.startedAt, turn.runtimeTurnStartedAt))) return;
     let view = this.options.store.loadWorkerTurnCard(turnId);
     const expected = { expectedRuntimeTurnId: turn.runtimeTurnId, expectedRuntimeTurnStartedAt: turn.runtimeTurnStartedAt! };
     const delta = this.safeOutput(observation.answerDelta);
@@ -89,10 +90,12 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
     let timer: NodeJS.Timeout | null = null;
     let active = Promise.resolve();
     let resolveDetached!: () => void;
+    let detachedFailure: unknown;
     const detached = new Promise<void>((resolve) => { resolveDetached = resolve; });
-    const finish = () => {
+    const finish = (failure?: unknown) => {
       if (stopping) return;
       stopping = true;
+      detachedFailure = failure;
       if (timer) clearInterval(timer);
       timer = null;
       resolveDetached();
@@ -104,7 +107,7 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
         if (result.kind === "accepted") await this.observe(turnId, result.observation);
         const current = this.options.store.getInstanceTurn(turnId);
         if (!current || ["completed", "failed", "cancelled"].includes(current.state)) finish();
-      }).catch(() => undefined);
+      }).catch((error) => finish(error));
     };
     timer = setInterval(poll, this.options.pollIntervalMs ?? 250);
     timer.unref?.();
@@ -118,7 +121,10 @@ export class WorkerTurnObserver implements WorkerTurnObservationPort {
         await active;
         await this.drain(turnId, opened.cursor, FINAL_DRAIN_LIMIT);
       },
-      detach: () => detached
+      detach: async () => {
+        await detached;
+        if (detachedFailure !== undefined) throw detachedFailure;
+      }
     };
   }
 

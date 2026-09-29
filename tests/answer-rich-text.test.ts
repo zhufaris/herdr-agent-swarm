@@ -82,7 +82,7 @@ describe("safe rich-text Answer streaming", () => {
     const items = [{ kind: "tool" as const, id: "t1", sequence: 1, category: "command" as const, label: "npm test", command: "npm test", resultPreview: "ok", state: "succeeded" as const }];
     const page = planRichTextAnswerPage(items, null, { active: true, pageIndex: 1 });
     expect(page.document.title).toBe("回答（第 2 页）");
-    expect(page.document.markdown).toContain("⚙️ Ran · ✓\n\n```bash\nnpm test\n```");
+    expect(page.document.markdown).toContain("🖥️ Ran · npm test · ✅\n\n```bash\nnpm test\n```");
     expect(page.document.markdown).toContain("> └ ok");
     expect(page.document.markdown).not.toContain("`npm test`");
   });
@@ -91,7 +91,7 @@ describe("safe rich-text Answer streaming", () => {
     const command = "npm test -- --runInBand\nprintf '```inside```'";
     const items = [{ kind: "tool" as const, id: "t1", sequence: 1, category: "test" as const, label: "npm test", command, state: "running" as const }];
     const markdown = planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document.markdown;
-    expect(markdown).toContain("🧪 Test · …\n\n````bash\n" + command + "\n````");
+    expect(markdown).toContain("🧪 Tested · npm test -- --runInBand · ⏳\n\n````bash\n" + command + "\n````");
   });
 
   it("sanitizes and redacts command blocks", () => {
@@ -107,19 +107,22 @@ describe("safe rich-text Answer streaming", () => {
       { kind: "tool" as const, id: "read", sequence: 1, category: "read" as const, label: "src/main.ts", state: "running" as const },
       { kind: "tool" as const, id: "search", sequence: 2, category: "search" as const, label: "planRichText", state: "succeeded" as const },
       { kind: "tool" as const, id: "edit", sequence: 3, category: "edit" as const, label: "answer-rich-text.ts", state: "failed" as const },
-      { kind: "tool" as const, id: "test", sequence: 4, category: "test" as const, label: "vitest", state: "succeeded" as const },
-      { kind: "tool" as const, id: "step", sequence: 5, category: "step" as const, label: "deploy", state: "running" as const },
-      { kind: "status" as const, id: "running", sequence: 6, label: "正在分析", state: "running" as const },
-      { kind: "status" as const, id: "blocked", sequence: 7, label: "需要授权", state: "blocked" as const },
-      { kind: "status" as const, id: "failed", sequence: 8, label: "连接中断", state: "failed" as const }
+      { kind: "tool" as const, id: "input", sequence: 4, category: "input" as const, label: "session 263", command: "echo first\necho second", state: "succeeded" as const },
+      { kind: "tool" as const, id: "test", sequence: 5, category: "test" as const, label: "vitest", state: "succeeded" as const },
+      { kind: "tool" as const, id: "step", sequence: 6, category: "step" as const, label: "deploy", state: "running" as const },
+      { kind: "status" as const, id: "running", sequence: 7, label: "正在分析", state: "running" as const },
+      { kind: "status" as const, id: "blocked", sequence: 8, label: "需要授权", state: "blocked" as const },
+      { kind: "status" as const, id: "failed", sequence: 9, label: "连接中断", state: "failed" as const }
     ];
     const markdown = planRichTextAnswerPage(items, null, { active: true, pageIndex: 0 }).document.markdown;
-    expect(markdown).toContain("📖 Read · src/main.ts · …");
-    expect(markdown).toContain("🔍 Search · planRichText · ✓");
-    expect(markdown).toContain("✏️ Edit · answer-rich-text.ts · ✗");
-    expect(markdown).toContain("🧪 Test · vitest · ✓");
-    expect(markdown).toContain("🛠️ Step · deploy · …");
-    expect(markdown).toContain("⏳ 处理中 · 正在分析");
+    expect(markdown).toContain("📖 Read · src/main.ts · ⏳");
+    expect(markdown).toContain("🔎 Search · planRichText · ✅");
+    expect(markdown).toContain("✏️ Edited · answer-rich-text.ts · ❌");
+    expect(markdown).toContain("⌨️ Input · session 263 · ✅");
+    expect(markdown).toContain("```bash\necho first\necho second\n```");
+    expect(markdown).toContain("🧪 Tested · vitest · ✅");
+    expect(markdown).toContain("🔧 Tool · deploy · ⏳");
+    expect(markdown).toContain("💭 正在生成 · 正在分析");
     expect(markdown).toContain("⚠️ 等待用户处理 · 需要授权");
     expect(markdown).toContain("❌ 执行失败 · 连接中断");
   });
@@ -131,7 +134,7 @@ describe("safe rich-text Answer streaming", () => {
       { kind: "tool" as const, id: "failed", sequence: 3, category: "test" as const, label: "failed", resultPreview: "error header\ndetail one\ndetail two\nfinal cause", state: "failed" as const }
     ];
     const markdown = planRichTextAnswerPage(items, null, { active: false, pageIndex: 0 }).document.markdown;
-    expect(markdown).toContain("📖 Read · src/config.ts · ✓");
+    expect(markdown).toContain("📖 Read · src/config.ts · ✅");
     expect(markdown).toContain("> └ latest （前 1 行已省略）");
     expect(markdown).toContain("> └ third line （前 2 行已省略）");
     expect(markdown).toContain("> └ error header …（省略 2 行）… final cause");

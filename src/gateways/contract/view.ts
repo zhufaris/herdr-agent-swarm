@@ -18,6 +18,8 @@ export interface GatewayView {
   nodes: readonly GatewayViewNode[];
   mutable: boolean;
   streaming: boolean;
+  width?: "standard" | "wide";
+  streamPresentation?: { printFrequencyMs: number; printStep: number; printStrategy: "fast" };
 }
 
 /** Read-only compatibility envelope for provider-materialized payloads written before Gateway views. */

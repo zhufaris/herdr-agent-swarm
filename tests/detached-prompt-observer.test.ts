@@ -8,7 +8,7 @@ describe("DetachedPromptObserver", () => {
     const settle = vi.fn(() => true);
     const publish = vi.fn(async () => undefined);
     const observer = new DetachedPromptObserver({
-      store: { getPrompt: vi.fn(() => prompt), getBinding: vi.fn(() => binding), settleDetachedPrompt: settle, countPendingPrompts: () => 0 },
+      store: { getPrompt: vi.fn(() => prompt), getBinding: vi.fn(() => binding), settleDetachedPrompt: settle, markPromptObservationDetached: vi.fn(), countPendingPrompts: () => 0 },
       herdr: { async observeRuntime() { return { pane: { paneId: "w1:p1", workspaceId: "w1", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true }; } },
       transcript: {
         async openDetached() { return { mode: "typed", output: { text: "answer" } }; },
@@ -24,6 +24,42 @@ describe("DetachedPromptObserver", () => {
 
     expect(settle).toHaveBeenCalledWith(expect.objectContaining({ promptId: "p1", bindingId: "b1", runtime: "idle", terminal: expect.objectContaining({ kind: "completed", answer: "answer" }) }));
     expect(publish).toHaveBeenCalledWith("b1", "TurnCompleted", "herdr", expect.objectContaining({ promptId: "p1", answer: "answer" }));
+  });
+
+  it("settles a terminal lifecycle already consumed by exact-turn replay before reading again", async () => {
+    const prompt = { id: "p1", bindingId: "b1", state: "running", observationState: "detached", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-09-24T00:00:00.000Z" };
+    const binding = { id: "b1", paneId: "w1:p1", state: "active", lifecycle: "active", lastAgentState: "working" };
+    const settle = vi.fn(() => true);
+    const publish = vi.fn(async () => undefined);
+    const read = vi.fn(async () => { throw new Error("terminal replay should settle before another read"); });
+    const observer = new DetachedPromptObserver({
+      store: { getPrompt: vi.fn(() => prompt), getBinding: vi.fn(() => binding), settleDetachedPrompt: settle, markPromptObservationDetached: vi.fn(), countPendingPrompts: () => 0 },
+      herdr: { async observeRuntime() { return { pane: { paneId: "w1:p1", workspaceId: "w1", agentState: "idle", foregroundExecutables: ["traex"] }, traexProcess: true }; } },
+      transcript: {
+        async openDetached() {
+          return {
+            mode: "typed",
+            emitted: true,
+            output: { text: "replayed answer", truncated: false },
+            terminalLifecycle: { turnId: "turn-1", state: "completed", startedAt: "2026-09-24T00:00:00.000Z", finalAnswer: "replayed answer" }
+          };
+        },
+        read,
+        own() { throw new Error("terminal replay should not require re-owning the already exact-fenced lifecycle"); },
+        retain() {}, async publishOwned() {}
+      },
+      registry: { attachTurn: () => new AbortController(), updateTurnState: vi.fn(), detachTurn: vi.fn() },
+      logger: { info: vi.fn(), warn: vi.fn() }, isBindingActive: () => true, isStopping: () => false, publish
+    } as never);
+
+    await observer.observe(prompt as never);
+
+    expect(read).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledWith(expect.objectContaining({
+      promptId: "p1", bindingId: "b1", runtime: "idle", terminal: expect.objectContaining({ kind: "completed", answer: "replayed answer" })
+    }));
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish).toHaveBeenCalledWith("b1", "TurnCompleted", "herdr", expect.objectContaining({ promptId: "p1", answer: "replayed answer" }));
   });
 
   it("releases turn ownership and remains detached when the exact transcript cannot open", async () => {

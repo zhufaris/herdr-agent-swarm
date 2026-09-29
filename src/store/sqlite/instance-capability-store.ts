@@ -60,7 +60,6 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   reserveWorkerRichTextContinuation: InstanceStore["reserveWorkerRichTextContinuation"] = (input) => this.turns.reserveWorkerRichTextContinuation(input);
   reserveWorkerTurnContent: InstanceStore["reserveWorkerTurnContent"] = (input) => this.turns.reserveWorkerTurnContent(input);
   listActionableWorkerTurnCardIds: InstanceStore["listActionableWorkerTurnCardIds"] = () => this.turns.listActionableWorkerTurnCardIds();
-  reserveWorkerTurnProgress: InstanceStore["reserveWorkerTurnProgress"] = (input) => this.turns.reserveWorkerTurnProgress(input);
   reserveWorkerTurnFinish: InstanceStore["reserveWorkerTurnFinish"] = (input) => this.turns.reserveWorkerTurnFinish(input);
   reserveWorkerTurnCardHydration: InstanceStore["reserveWorkerTurnCardHydration"] = (input) => this.turns.reserveWorkerTurnCardHydration(input);
   reserveWorkerTurnContinuation: InstanceStore["reserveWorkerTurnContinuation"] = (input) => this.turns.reserveWorkerTurnContinuation(input);

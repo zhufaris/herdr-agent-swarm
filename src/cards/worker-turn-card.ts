@@ -1,11 +1,12 @@
-import { workerTurnProgressElementId, workerTurnStreamContent, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
+import { workerTurnStreamContent, type WorkerTurnCardPage, type WorkerTurnCardView } from "../domain/worker-turn-card-view.js";
 import { normalizeLarkPreview, renderLarkMarkdownPage, truncateLarkMarkdown } from "../runtime/lark-markdown.js";
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { callbackButton } from "./cardkit-button.js";
-import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems } from "./card-style.js";
+import { actionRow, cardSection, compactMetadata } from "./card-style.js";
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 import { renderAnswerTimeline } from "./answer-timeline.js";
-import type { FinalAnswerElement } from "./final-answer-content.js";
+import { renderTaskList } from "./progress-timeline.js";
+import { attachActiveAnswerSlot } from "./active-answer-slot.js";
 
 const STATE = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -20,12 +21,13 @@ const STATE = {
 
 const REQUEST_PREVIEW_LIMIT = 2_000;
 
-export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] } = {}): object {
+export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[]; showTaskList?: boolean } = {}): object {
   const state = STATE[view.phase];
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
   const actionMessageId = page ? page.messageId : view.messageId;
   const firstPage = pageIndex === 0;
+  const streaming = !options.snapshot && ["queued", "preparing", "running", "blocked"].includes(view.phase);
   const showOutput = view.phase === "completed" || view.timelineItems.length > 0 || (options.timelineItems?.length ?? 0) > 0;
   const content = showOutput
     ? options.initialContent !== undefined
@@ -43,14 +45,14 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
   ]);
   const elements: object[] = [{ tag: "markdown", content: metadata }];
   if (firstPage) elements.push({ tag: "markdown", content: `${cardSection("💬", "请求")}\n\n${truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(view.requestText)), REQUEST_PREVIEW_LIMIT)}` });
-  elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view, showOutput && Boolean(content)) });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
-  if (showOutput) {
+  if (showOutput || streaming) {
     const timelineItems = options.timelineItems ?? view.timelineItems;
-    const outputElements = timelineItems.length > 0 && options.initialContent === undefined
+    const usesTimeline = timelineItems.length > 0 && options.initialContent === undefined;
+    const outputElements = usesTimeline
       ? renderAnswerTimeline(timelineItems)
       : [{ tag: "markdown", content }];
-    attachElementId(outputElements, elementId);
+    attachActiveAnswerSlot(outputElements, elementId, streaming, !usesTimeline || timelineItems.at(-1)?.kind === "agent_message");
     elements.push(...outputElements);
   }
   const interaction = workerTaskInteraction(view.phase);
@@ -65,9 +67,14 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
     view.primaryAnswer?.messageId ? callbackButton("View Primary Answer", { action: "card_target_open", ...view.primaryAnswer }, "default") : null
   ].filter((button): button is object => button !== null);
   if (targets.length > 0) elements.push({ tag: "column_set", flex_mode: "none", horizontal_spacing: "8px", columns: targets.map((button) => ({ tag: "column", width: "auto", elements: [button] })) });
+  if (options.showTaskList !== false) elements.push(...renderTaskList(view.progressEvents, view.phase));
   return {
     schema: "2.0",
-    config: { update_multi: true, streaming_mode: !options.snapshot && ["preparing", "running", "blocked"].includes(view.phase), summary: { content: `${view.workerName} · ${state.label}` } },
+    config: {
+      update_multi: true, wide_screen_mode: true, streaming_mode: streaming,
+      ...(streaming ? { streaming_config: { print_frequency_ms: 70, print_step: 1, print_strategy: "fast" } } : {}),
+      summary: { content: `${view.workerName} · ${state.label}` }
+    },
     header: {
       title: { tag: "plain_text", content: `🎯 ${view.workerName} · Task ${view.turnId.slice(0, 8)}` },
       subtitle: { tag: "plain_text", content: "HERDR WORKER TASK" },
@@ -104,12 +111,9 @@ function workerTurnStatusContent(view: WorkerTurnCardView): string {
 }
 
 export function workerTurnProgressContent(view: WorkerTurnCardView, statusOnly = false): string {
-  const status = view.statusTitle ? `${cardSection("📈", "进度")}  ${normalizeLarkPreview(redactSecrets(view.statusTitle))}` : cardSection("📈", "进度");
+  const status = view.statusTitle ? `${cardSection("📋", "Task List")}  ${normalizeLarkPreview(redactSecrets(view.statusTitle))}` : cardSection("📋", "Task List");
   if (statusOnly) return `${cardSection("✅", "结果")}  已完成`;
-  const steps = recentItems(view.progressEvents, 3).map((event) => {
-    const icon = lifecycleMarker(event.state === "done" ? "completed" : event.state === "active" ? "running" : event.state);
-    return `${icon} ${normalizeLarkPreview(redactSecrets(event.label))}`;
-  });
+  const steps = view.progressEvents.filter((event) => event.kind === "step").slice(-5).map((event) => `${{ pending: "☐", active: "◌", done: "✓", failed: "✕" }[event.state]} ${normalizeLarkPreview(redactSecrets(event.label))}`);
   return steps.length > 0 ? [status, ...steps].join("\n") : `${status}\n\n等待 Worker 更新。`;
 }
 
@@ -118,12 +122,3 @@ function callout(type: "orange" | "red", content: string): object {
 }
 
 function escapeCode(value: string): string { return value.replace(/`/g, "'"); }
-
-function attachElementId(elements: FinalAnswerElement[], elementId: string): boolean {
-  for (const element of elements) {
-    if (element.tag === "markdown") { element.element_id = elementId; return true; }
-    const nested = element.elements;
-    if (Array.isArray(nested) && attachElementId(nested as FinalAnswerElement[], elementId)) return true;
-  }
-  return false;
-}

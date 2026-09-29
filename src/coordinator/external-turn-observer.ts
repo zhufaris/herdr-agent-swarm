@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { createBridgeEvent } from "../domain/create-bridge-event.js";
-import { formatPromptTitle } from "../domain/prompt-title.js";
 import { transcriptObserverIdentity, transcriptSourceFor } from "../domain/transcript-observer-identity.js";
 import type { ExternalTurnObservationStore } from "../domain/ports/workflow.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
@@ -271,14 +270,16 @@ export class ExternalTurnObserver {
     if (!turnId) return "ignored";
     if (lifecycle && !supersede && !observed.pendingStarts.has(turnId)) observed.pendingStarts.set(turnId, lifecycle.startedAt);
     let owned = observed.promptsByTurn.get(turnId);
-    const requestText = observation.requestText ?? (observation.freshTurnStart ? DIRECT_HERDR_REQUEST : undefined);
+    const hasPostStartEvidence = Boolean(observation.answerDelta || observation.timelineDeltas?.length || observation.toolActivities?.length || observation.agentMessages?.length || observation.mainStatus || lifecycle?.state === "completed" || lifecycle?.state === "aborted");
+    const requestText = observation.requestText ?? (!owned && observed.pendingStarts.has(turnId) && hasPostStartEvidence ? DIRECT_HERDR_REQUEST : undefined);
     if (!owned && requestText !== undefined) {
       const startedAt = observed.pendingStarts.get(turnId) ?? (supersede ? undefined : lifecycle?.startedAt);
       if (!startedAt) return "ignored";
       const externalPromptId = this.idFactory();
+      const topic = this.options.store.loadTopicView(binding.id);
       const externalView = createQueuedRunCard({
-        promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: formatPromptTitle(requestText),
-        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, paneToken: binding.paneToken, requestText, queuePosition: 0, occurredAt: startedAt
+        promptId: externalPromptId, bindingId: binding.id, bindingGeneration: binding.generation, title: DIRECT_HERDR_REQUEST, requestOrigin: "herdr-pane",
+        sessionTitle: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, ...(topic?.spaceName ? { spaceName: topic.spaceName } : {}), paneId: binding.paneId, paneToken: binding.paneToken ?? topic?.paneToken ?? null, requestText, queuePosition: 0, occurredAt: startedAt
       });
       const result = this.options.store.adoptExternalTurn({
         bindingId: binding.id, expectedGeneration: binding.generation, expectedPaneId: binding.paneId!, expectedSession: session,

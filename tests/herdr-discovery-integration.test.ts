@@ -380,9 +380,10 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE, larkMessageId: "rich-text-1", answerMessageId: "rich-text-1" }));
+    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE, larkMessageId: null, answerMessageId: "request-card-1" }));
     expect(JSON.stringify(updates)).not.toContain("thread reply");
-    expect(cards).toHaveLength(0);
+    expect(cards).toHaveLength(1);
+    expect(JSON.stringify(cards[0])).toContain("wide_screen_mode");
     expect(updates.some((update) => JSON.stringify(update.card).includes("HERDR REQUEST"))).toBe(false);
     expect(replies).toEqual([]);
     expect(inboundEvents).toEqual(["InboundMessageReceived"]);

@@ -162,7 +162,7 @@ describe("card context boundaries", () => {
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ paneId: "worker:pane", paneToken: "work", parentPaneId: "primary:pane", parentPaneToken: "prim", currentTask: { turnId: task.turnId, title: "Review durable boundary", requestText: task.requestText, taskCard: { messageId: null } }, queueCount: 1, frozenAt: null });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerId: worker.id, currentTaskTitle: "Review durable boundary" }] });
     expect(store.loadRunCard(answer.promptId)).toMatchObject({ workerActivity: [{ workerId: worker.id, taskCount: 1, latestTaskCard: { messageId: null } }], workerContextFrozenAt: null });
-    expect(store.listPendingOutboundReplies().some(({ promptId, cardRole, kind, intentKind }) => promptId === answer.promptId && cardRole === "answer" && kind === "card_update" && intentKind === "card")).toBe(false);
+    expect(store.listPendingOutboundReplies().some(({ promptId, cardRole, kind, intentKind }) => promptId === answer.promptId && cardRole === "answer" && kind === "card_update" && intentKind === "card")).toBe(true);
     const workerMainCreate = store.listPendingOutboundReplies().find(({ workerId }) => workerId === worker.id)!;
     expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(workerMainCreate.id)).toEqual({ lane_key: "gateway:feishu:primary:worker-thread:reviewer:1" });
     store.markOutboundReplyDelivered(workerMainCreate.id, "worker-main-message", "worker-main-card", "worker-topic");
@@ -170,9 +170,9 @@ describe("card context boundaries", () => {
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ messageId: "worker-main-message", cardId: "worker-main-card" });
     expect(store.loadTopicView("binding")).toMatchObject({ workers: [{ workerMain: { messageId: "worker-main-message" } }] });
     expect(store.loadWorkerTurnCard(task.turnId)).toMatchObject({ workerMain: { messageId: null }, primaryAnswer: { messageId: null } });
-    expect(store.listPendingOutboundReplies().some(({ workerTurnId, kind, intentKind }) => workerTurnId === task.turnId && kind === "text" && intentKind === "rich-text-reply")).toBe(true);
-    const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId, kind, intentKind }) => workerTurnId === task.turnId && kind === "text" && intentKind === "rich-text-reply")!;
-    store.markOutboundReplyDelivered(taskCreate.id, "worker-task-page-1");
+    expect(store.listPendingOutboundReplies().some(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")).toBe(true);
+    const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(taskCreate.id, "worker-task-page-1", "worker-task-card-1");
     await rebuilder.requestScan();
     expect(store.loadWorkerMainView(worker.id, 1)).toMatchObject({ currentTask: { taskCard: { messageId: "worker-task-page-1" } } });
     const workerMainUpdate = store.listPendingOutboundReplies().find(({ workerId, kind }) => workerId === worker.id && kind === "card_update")!;
@@ -217,27 +217,28 @@ describe("card context boundaries", () => {
 
     const workerMainCreate = store.listPendingOutboundReplies().find(({ workerId }) => workerId === worker.id)!;
     store.markOutboundReplyDelivered(workerMainCreate.id, "worker-main-message", "worker-main-card", "worker-topic");
-    const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId, kind, intentKind }) => workerTurnId === task.turnId && kind === "text" && intentKind === "rich-text-reply")!;
-    store.markOutboundReplyDelivered(taskCreate.id, "worker-task-page-1");
+    const taskCreate = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === task.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(taskCreate.id, "worker-task-page-1", "worker-task-card-1");
     await rebuilder.requestScan();
 
     const completed = store.transitionInstanceTurnWithProjection({
       turnId: task.turnId, expectedGeneration: worker.generation, state: "completed", result: "long result", eventKind: "turn.completed",
       change: { type: "completed", occurredAt: "2026-09-05T00:01:00.000Z", answer: "long result" }, render: renderWorkerTurnCard
     })!;
-    expect(store.reserveWorkerRichTextContinuation({
-      turnId: task.turnId, pageIndex: 0, messageId: "worker-task-page-1", document: { markdown: "long result" },
-      cursor: { itemIndex: 0, markdownOffset: 1_234 }, items: completed.view.timelineItems,
-      sourceEnd: 1_234, nextPageIndex: 1, nextPageStart: 1_234, nextElementId: workerTurnElementId(task.turnId, 1), rootMessageId: task.rootMessageId, viewVersion: completed.view.viewVersion
+    expect(store.reserveWorkerTurnContinuation({
+      turnId: task.turnId, pageIndex: 0, cardId: "worker-task-card-1", summary: "继续第 2 页",
+      nextPageIndex: 1, nextPageStart: 1_234, nextElementId: workerTurnElementId(task.turnId, 1), rootMessageId: task.rootMessageId, viewVersion: completed.view.viewVersion,
+      timelineStartCursor: { itemIndex: 0, markdownOffset: 1_234 }, timelineEndCursor: null, timelineItems: completed.view.timelineItems,
+      card: renderWorkerTurnCard({ ...completed.view, elementId: workerTurnElementId(task.turnId, 1), pageIndex: 1, pageStart: 1_234 }, { pageNumber: 2, streaming: true, initialContent: "long result" })
     })).toBe("reserved");
 
     const continuationIntents = store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === task.turnId);
-    const finish = continuationIntents.find(({ kind, intentKind }) => kind === "card_update" && intentKind === "rich-text-update")!;
-    const continuation = continuationIntents.find(({ kind, intentKind }) => kind === "text" && intentKind === "rich-text-reply")!;
-    store.markOutboundReplyDelivered(finish.id, "worker-task-page-1");
+    const finish = continuationIntents.find(({ kind }) => kind === "stream_finish")!;
+    const continuation = continuationIntents.find(({ kind }) => kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(finish.id, "worker-task-page-1", "worker-task-card-1");
     expect(store.listWorkerTurnCardPages(task.turnId)).toEqual(expect.arrayContaining([expect.objectContaining({ pageIndex: 0, pageStart: 0, state: "frozen" })]));
 
-    store.markOutboundReplyDelivered(continuation.id, "worker-task-page-2");
+    store.markOutboundReplyDelivered(continuation.id, "worker-task-page-2", "worker-task-card-2");
     expect(store.listWorkerTurnCardPages(task.turnId)).toEqual([
       expect.objectContaining({ pageIndex: 0, pageStart: 0, messageId: "worker-task-page-1", state: "frozen" }),
       expect.objectContaining({ pageIndex: 1, pageStart: 1_234, messageId: "worker-task-page-2", state: "active" })

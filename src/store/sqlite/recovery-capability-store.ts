@@ -79,7 +79,8 @@ export class SqliteExternalTurnCapabilityStore implements ExternalTurnObservatio
     private readonly prompts: SqlitePromptStore,
     private readonly dispatch: SqlitePromptDispatchStore,
     private readonly adoption: SqliteExternalTurnAdoptionStore,
-    private readonly bindings: SqliteBindingLifecycleStore
+    private readonly bindings: SqliteBindingLifecycleStore,
+    private readonly projections: SqliteProjectionStore
   ) {}
 
   adoptExternalTurn: ExternalTurnObservationStore["adoptExternalTurn"] = (input) => this.adoption.adoptExternalTurn(input);
@@ -92,4 +93,5 @@ export class SqliteExternalTurnCapabilityStore implements ExternalTurnObservatio
   getBinding: ExternalTurnObservationStore["getBinding"] = (id) => this.bindings.getBinding(id);
   getPrompt: ExternalTurnObservationStore["getPrompt"] = (id) => this.dispatch.getPrompt(id);
   listBindingsByState: ExternalTurnObservationStore["listBindingsByState"] = (state) => this.bindings.listBindingsByState(state);
+  loadTopicView: ExternalTurnObservationStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
 }

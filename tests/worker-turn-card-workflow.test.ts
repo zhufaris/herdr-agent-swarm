@@ -4,6 +4,7 @@ import { continuationSummary } from "../src/domain/card-page-handoff.js";
 import type { WorkerTurnCardStore } from "../src/domain/ports/instance.js";
 import { createQueuedWorkerTurnCard, reduceWorkerTurnCard, workerTurnElementId, type WorkerTurnCardPage } from "../src/domain/worker-turn-card-view.js";
 import { workerPresentation } from "./helpers/presentation.js";
+import { answerTimelineItemFingerprint } from "../src/domain/answer-timeline-late-results.js";
 
 function fixture(answer: string, phase: "running" | "completed" = "completed") {
   const queued = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: "worker-1", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-24T00:00:00.000Z" });
@@ -22,7 +23,7 @@ function setup(answer: string, phase: "running" | "completed" = "completed", pag
     getWorkerTurnCardDeliveryFacts: vi.fn(() => facts),
     getWorkerAnswerTimelinePage: vi.fn(() => ({ startCursor: { itemIndex: 0, markdownOffset: 0 }, deliveredCursor: null, deliveredItems: [], pending: false })),
     listFrozenWorkerAnswerTimelineItems: vi.fn(() => []), reserveWorkerAnswerTimelineCard: vi.fn(() => "reserved" as const),
-    reserveWorkerTurnContent: vi.fn(() => "reserved" as const), reserveWorkerTurnProgress: vi.fn(() => "reserved" as const),
+    reserveWorkerTurnContent: vi.fn(() => "reserved" as const),
     reserveWorkerTurnFinish: vi.fn(() => "reserved" as const), reserveWorkerTurnCardHydration: vi.fn(() => "waiting" as const),
     reserveWorkerTurnContinuation: vi.fn(() => "reserved" as const)
   } satisfies WorkerTurnCardStore;
@@ -32,10 +33,11 @@ function setup(answer: string, phase: "running" | "completed" = "completed", pag
 }
 
 describe("WorkerTurnCardWorkflow", () => {
-  it("projects live progress through a durable stream reservation", async () => {
+  it("projects live progress through a durable whole-card reservation", async () => {
     const { workflow, store, wake } = setup("partial", "running");
+    store.reserveWorkerTurnCardHydration.mockReturnValue("reserved");
     await workflow.converge("turn-1");
-    expect(store.reserveWorkerTurnProgress).toHaveBeenCalledOnce();
+    expect(store.reserveWorkerTurnCardHydration).toHaveBeenCalledOnce();
     expect(store.reserveWorkerTurnContent).not.toHaveBeenCalled();
     expect(wake).toHaveBeenCalledOnce();
   });
@@ -59,9 +61,26 @@ describe("WorkerTurnCardWorkflow", () => {
       turnId: "turn-1", pageIndex: 0, cursor: null, items: expect.arrayContaining([expect.objectContaining({ id: "tool:one" })])
     }));
     const card = store.reserveWorkerAnswerTimelineCard.mock.calls[0]![0].card;
-    expect(JSON.stringify(card)).toContain("🧪 Test · npm test · … 运行中");
-    expect(store.reserveWorkerTurnProgress).not.toHaveBeenCalled();
+    expect(JSON.stringify(card)).toContain("🧪 Tested · npm test · ⏳");
     expect(store.reserveWorkerTurnContent).not.toHaveBeenCalled();
+  });
+
+  it("uses the mutable Answer slot for a pure trailing Agent markdown update", async () => {
+    const { workflow, store, view } = setup("legacy", "running", 2_000);
+    const previous = { kind: "agent_message" as const, id: "message:one", sequence: 1, markdown: "Checking" };
+    const current = { ...previous, markdown: "Checking the result" };
+    view.timelineItems = [current];
+    store.getWorkerAnswerTimelinePage.mockReturnValue({
+      startCursor: { itemIndex: 0, markdownOffset: 0 }, deliveredCursor: null,
+      deliveredItems: [{ id: previous.id, fingerprint: answerTimelineItemFingerprint(previous) }], pending: false
+    });
+
+    await workflow.converge("turn-1");
+
+    expect(store.reserveWorkerTurnContent).toHaveBeenCalledWith(expect.objectContaining({
+      turnId: "turn-1", pageIndex: 0, content: "Checking the result", timelineItems: [current]
+    }));
+    expect(store.reserveWorkerAnswerTimelineCard).not.toHaveBeenCalled();
   });
 
   it("keeps a fully delivered live Worker timeline open", async () => {
@@ -125,7 +144,7 @@ describe("WorkerTurnCardWorkflow", () => {
 
     const update = store.reserveWorkerAnswerTimelineCard.mock.calls[0]![0];
     expect(update.messageId).toBe("message-2");
-    expect(JSON.stringify(update.card)).toContain("npm test（更新自第 1 页）");
+    expect(JSON.stringify(update.card)).toContain("🖥️ Ran · npm test · ✅");
     expect(JSON.stringify(update.card)).toContain("all tests passed");
     expect(update.items.filter(({ id }) => id === "late:tool:late")).toHaveLength(1);
   });

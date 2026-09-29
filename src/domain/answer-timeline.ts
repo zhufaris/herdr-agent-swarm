@@ -1,4 +1,4 @@
-export type AnswerTimelineToolCategory = "read" | "search" | "edit" | "command" | "test" | "step";
+export type AnswerTimelineToolCategory = "skill" | "read" | "search" | "edit" | "command" | "input" | "test" | "agent" | "step";
 export type AnswerTimelineToolState = "running" | "succeeded" | "failed";
 
 interface AnswerTimelineItemBase { id: string; sequence: number }

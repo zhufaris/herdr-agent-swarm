@@ -4,436 +4,302 @@
 
 本文面向第一次维护 Herdr Agent Swarm 的工程师。读完后，你应该能够：
 
-- 判断一项状态由 Herdr、SQLite、Lark 还是 systemd 负责；
-- 从飞书输入追踪到 TraeX 执行和 CardKit 投递；
-- 找到新增命令、状态转换、运行时观测或投递行为应进入的模块；
-- 在修改代码时保护 FIFO、no-replay、事务性 outbox 和 CardKit 顺序等核心不变量。
+- 判断一项事实由 Herdr、Herdr Core Agent Events、SQLite、Lark 还是 user systemd 负责；
+- 从 Lark 输入追踪到 Agent 执行、结构化观察、持久化投影和 CardKit 投递；
+- 判断新行为应进入哪个 context、workflow、port 或 adapter；
+- 在改动代码时保护 FIFO、no-replay、identity fence、durable outbox 和有序分页等不变量。
 
-本文提供代码结构的心智模型。精确的运行行为和运维约束以
-[Architecture](architecture.md) 与 [Feishu group usage](feishu-group-usage.md) 为准。
+本文是代码结构的导航。精确行为以 [Architecture](architecture.md) 为准，用户命令以
+[Feishu group usage](feishu-group-usage.md) 为准，领域词汇以
+[Context Map](../CONTEXT-MAP.md) 为准。
 
 ## 1. 系统本质
 
-Herdr Agent Swarm 不是简单的消息转发器，而是一个持久化、多项目、多 Agent
-工作流协调器。它管理项目级 Primary 和 Worker 实例，把 Lark 话题绑定到真实
-Herdr Pane 中的 Agent 进程，同时保留 Herdr 作为本地观察、接管和高风险审批入口。
+Herdr Agent Swarm 是一个独立部署、持久化、由人控制的多 Agent 工作流协调器。它把
+Lark 话题绑定到真实 Herdr Pane 中的 Primary Agent，把 Worker 任务绑定到受管 Worker
+Pane，并通过 retryable outbox 把 durable projection 投递到 Lark。
 
 ```text
-Lark message
-     │
-     ▼
-durable inbound → application workflow → durable prompt/control intent
-                                             │
-                                             ▼
-                                      Herdr Pane / TraeX
-                                             │
-                                  authoritative observation
-                                             ▼
-                                  durable view + Lark outbox
-                                             │
-                                             ▼
-                                      Lark CardKit delivery
+Lark message or card action
+  -> durable inbound
+  -> application workflow
+  -> durable prompt/control intent
+  -> Herdr Agent
+  -> Herdr Core Agent Events
+  -> SQLite projection + outbox
+  -> Lark CardKit / rich-text delivery
 ```
 
-这个系统面对的主要问题不是如何调用两个外部接口，而是如何在进程重启、网络失败、
-重复事件、迟到回调和不确定执行之间保持业务语义不变。
+它的核心问题不是消息转发，而是在进程重启、网络失败、重复事件、迟到结果、Core
+journal retention 和不确定执行之间保持业务语义不变。
 
-## 2. 权威源
+## 2. 权威源与边界
 
-系统有四个不同的权威源。修改代码前，应先判断正在处理的是哪一类事实。
-
-| 事实 | 权威源 | 典型内容 |
+| 事实 | 权威源 | Swarm 的责任 |
 | --- | --- | --- |
-| 运行时事实 | Herdr | Pane、terminal、前台进程、Agent session、Agent 状态 |
-| 工作流事实 | SQLite | Binding、Prompt FIFO、控制操作、投递意图、审计、实例租约 |
-| 展示事实 | Lark | 消息、话题、CardKit 卡片和外部投递结果 |
-| 进程事实 | user systemd | 服务启动、停止、重启和进程守护 |
+| Pane、terminal、前台进程、Agent kind/session、实时状态 | fresh Herdr snapshot 与 targeted observation | 验证 identity/generation 后收敛 durable binding |
+| 支持 Agent 的 turn lifecycle、Agent message、tool call/result、plan | exact Herdr Core Agent Events source | 读取有序 cursor，投影为 Answer/Main Card 状态 |
+| Binding、Prompt FIFO、Worker task、控制操作、read model、outbox、lease | SQLite | 在事务和 fencing token 内推进状态 |
+| 可见消息、CardKit 卡片和 delivery receipt | Lark | 作为投递目标；不得反推工作流事实 |
+| 服务进程、启停和守护 | user systemd | 通过 `npm run swarm:*` 操作 |
 
-由此得到四条规则：
+必须保持以下规则：
 
-1. 不根据 Lark 卡片内容修复 SQLite。
-2. 不根据 Herdr 事件 payload 直接修改 Binding；事件只触发一次新的 Herdr 对账。
-3. Lark 投递失败只重试 outbox，不能重新执行 TraeX prompt。
-4. 应用不自行管理服务进程；生命周期由 user systemd 与 `npm run swarm:*` 负责。
+1. 不从 Lark 卡片修复 SQLite，也不把卡片文本当作执行状态。
+2. Herdr socket event 只是 bounded wake-up hint；fresh snapshot 才是收敛依据。
+3. 支持 Agent 的结构化回复只来自 Core Agent Events；不回退到 pane scrollback 或 Swarm
+   自行解析的 JSONL。
+4. 所有外部投递先持久化 intent；重试 Lark outbox 绝不重放 Agent prompt。
+5. 一旦 prompt 可能到达 Agent，只能精确观察、detached recovery 或显式 skip，不能自动重放。
 
 ## 3. 分层与依赖方向
 
-项目使用 Ports and Adapters 结构，并在应用层使用 DDD 状态机和 CQRS 风格的投影。
-依赖方向始终指向领域契约。
-
 ```text
-┌──────────────────────── External systems ────────────────────────┐
-│ Lark / CardKit             Herdr / TraeX             user systemd │
-└─────────────┬────────────────────┬────────────────────────┬───────┘
-              │                    │                        │
-              ▼                    ▼                        ▼
-┌──────────────────── Infrastructure and adapters ─────────────────┐
-│ Lark adapter · Herdr adapter · SQLite store · command runner      │
-│ Socket subscriber · cache · health · lease · shutdown             │
-└────────────────────────────┬──────────────────────────────────────┘
-                             │ implements ports
-                             ▼
-┌────────────────────── Application workflows ─────────────────────┐
-│ inbound routing · provisioning · prompt execution · reconciliation│
-│ pane control · session administration · projection · delivery     │
-└────────────────────────────┬──────────────────────────────────────┘
-                             │ depends on contracts
-                             ▼
-┌──────────────────────────── Domain ───────────────────────────────┐
-│ entities · value states · transitions · events · capability ports │
-│ FIFO · no-replay · identity fences · delivery ordering invariants │
-└───────────────────────────────────────────────────────────────────┘
+External systems
+  Lark / CardKit | Herdr / Core Agent Events | user systemd
+           |
+Adapters and infrastructure
+  gateway plugin | Herdr adapter | event reader | SQLite stores | command runner
+           |
+Application workflows
+  inbound | sessions | prompts | workers | reconciliation | projection | delivery
+           |
+Domain contracts
+  states | transitions | events | capability ports | reducers | invariants
 ```
 
-`main` 是 composition root。它负责构造具体 adapter、store、workflow、event bus、
-lease、health server 和 shutdown controller。其他模块不应自行读取部署路径或创建
-另一套基础设施实例。
+`src/main.ts` 是唯一 composition root。`src/composition/` 构造 adapter、capability store、
+workflow、runtime event integration、lease、health 和 shutdown ownership。领域和应用层只依赖
+consumer-shaped port；它们不能读取部署路径、调用具体 SQLite module 或自行创建另一套基础设施。
 
-## 4. 领域模型
+## 4. 五个业务 Context 与一个观察边界
 
-### 4.1 TopicPaneBinding
-
-代码中简称 `Binding`。它表示一个受控的 Lark 话题与 Herdr Pane 的关联，而不是简单
-的数据库映射。Binding 同时携带三个彼此独立的状态轴：
-
-| 状态轴 | 值 | 回答的问题 |
+| Context / boundary | Owns | Does not own |
 | --- | --- | --- |
-| Lifecycle | provisioning、active、draining、archived、closed、failed | 会话处于哪个业务阶段？ |
-| Attachment | unattached、attached、degraded、orphaned | 持久化会话与 Pane 的连接是否可信？ |
-| Runtime | idle、working、blocked、done、unknown | TraeX 当前正在做什么？ |
+| Primary Session | Lark topic 到 Primary pane/session 的 durable binding、generation、provisioning | Prompt FIFO、回复内容、Lark delivery |
+| Prompt Execution | ordinary prompt FIFO、steering、dispatch evidence、attached/detached observation | Pane 事实、卡片渲染 |
+| Worker Runtime | Worker identity/generation、task FIFO、turn ownership、worktree 生命周期 | Primary conversation binding |
+| Conversation Projection | Topic/Main/Run/Worker/Answer read models、timeline、page cursor | 执行决策 |
+| Delivery and Operations | gateway intent、lane ordering、retry/dead letter、delivery checkpoint、lease/status | Agent 执行结果 |
+| Agent Observation boundary | exact pane/session/turn 对应的 Core event cursor | Binding lifecycle 或 presentation policy |
 
-三轴组合比一个巨大的枚举更准确。例如：
+Agent Observation 当前是跨 Context 的 anti-corruption boundary，而不是第六个 durable aggregate。
+Core 拥有 source discovery、producer-specific decode 和 journal；Swarm 的 `HerdrEventsReader` 只用
+pane、Agent kind 和 expected session ID attach，再把 versioned events 转换为
+`AgentTranscriptObservation`，Prompt/Worker/Projection 消费这个稳定 port。
+现存 `AgentTranscript*` 类型名是兼容中的领域词汇，表示归一化的 Agent 输出观察；它们不表示
+Swarm 直接打开或解析 Agent JSONL。新的 filesystem integration 必须使用 event-source 命名。
 
-- `active + attached + working`：正常执行中；
-- `active + degraded + unknown`：暂时无法确认运行时；
-- `active + orphaned + unknown`：Pane 已确认失联；
-- `draining + attached + working`：等待当前 turn 完成后归档。
+## 5. 关键领域对象
 
-生命周期只能通过 `transitionSession` 定义的转换推进。普通 metadata 更新不得修改
-lifecycle、attachment、generation 等受保护字段。
+### TopicPaneBinding
 
-### 4.2 PromptJob、Turn 与 Steering
+Binding 是一个 Lark topic 与 Primary Agent session 的 durable 关系。它有三条独立状态轴：
 
-`PromptJob` 是一项持久化工作。它有两个 dispatch kind：
+| 轴 | 示例 | 回答的问题 |
+| --- | --- | --- |
+| lifecycle | provisioning, active, draining, archived, closed, failed | 会话处于哪个业务阶段？ |
+| attachment | unattached, attached, degraded, orphaned | durable identity 与 live pane 是否可信？ |
+| runtime | idle, working, blocked, done, unknown | fresh Herdr observation 看到什么？ |
 
-- `turn`：普通请求，在同一个 Binding 内严格 FIFO；
-- `steering`：针对一个正在执行的父 Prompt，优先注入该 turn。
+生命周期只能经领域 transition 推进。普通 metadata 更新不能修改 lifecycle、attachment、
+generation 或 exact-session fence。
 
-Prompt 的执行状态和观测状态分开记录。`observationState` 用来表达请求是否尚未开始、
-仍被当前进程观察、已与观察者脱离，或已经完成。这个区分支持最重要的 no-replay
-规则：一旦请求可能已送达 TraeX，bridge 就只能继续观察或标记不确定，不能自动重放。
+### PromptJob、WorkerTurn 与控制操作
 
-### 4.3 PaneControlOperation 与 ModelPreference
+普通 Prompt 在一个 Binding 内严格 FIFO；一个 Binding 同时至多执行一个 ordinary turn。
+Steering 和 stop 是 exact-turn control，不是另一条普通 Prompt。WorkerTurn 在一个 Worker generation
+内也保持单 owner、可恢复 claim 和不确定投递语义。
 
-stop 与历史 steering 操作使用持久化 Pane control queue。运行时 model selection 使用独立的
-generation-scoped ModelPreference：catalog 查询和选择不写 terminal，也不占用 Pane control
-队列；pending revision 在下一条普通 Prompt claim 时原子绑定。典型旧 control 状态为：
+执行状态与 observation state 分开记录。`queued` 工作可以重试 dispatch；已经越过 dispatch
+fence 的工作只能继续观察。所有控制结果必须匹配 pane、terminal、session、generation 和 exact turn。
 
-```text
-accepted → running → applied → confirmed
-                     ├────────→ rejected
-                     ├────────→ failed
-                     └────────→ uncertain
-```
+### TopicView、RunCard、AnswerPage
 
-操作记录保留 `paneId`、`terminalId` 和 `bindingGeneration`。执行和完成回调必须同时
-匹配这些身份，防止旧 Pane 的迟到结果覆盖 replacement Pane 的状态。
+这些是 durable read model，不是执行状态的 authority：
 
-模型偏好使用 `pending → applying → effective`，任何可能已执行但无法确认的路径进入
-`uncertain`。模型与 prompt 通过同一次结构化 `turn/start` 提交；越过 durable dispatch
-fence 后不允许自动重放。
+- `TopicViewState` 驱动 Primary Main Card；最近消息只保留 Agent 回复的 bounded window。
+- `RunCardView` 记录一个 Prompt 的请求摘要、计划、状态和 Answer projection。
+- `answer_timeline_items` 保存有序 Agent Markdown、tool、status 和 final answer 项。
+- `AnswerPage` 保存 rich-text message、页 cursor、fingerprint 和 delivery checkpoint。
 
-### 4.4 RunCard、TopicView 与 AnswerPage
+Answer 以最终 Markdown budget 分页。当前默认单页预算为 12,000 字符；tool panel 的 JSON 大小
+不是分页依据。旧页冻结后不再 patch，更新写入 active/continuation page。
 
-这些对象是 projection/read model，不是和 Binding、Prompt 同层级的领域实体。
+## 6. 当前深模块地图
 
-- `TopicViewState` 描述一个话题当前的主卡片。
-- `RunCardView` 描述一个 Prompt 的排队、执行、输出和完成状态。
-- `AnswerPage` 描述流式答案当前使用的 Lark message、CardKit card、element、source
-  offset 和 sequence。
+### 接入
 
-AnswerPage 的生命周期是：
+`DurableInboundPipeline` 是外部输入进入应用的统一持久化入口。它负责 allowlist 后的 compact
+admission、去重、scope FIFO claim/release、retry 和 startup recovery。
+`InboundMessageRoutingWorkflow` 只做冻结路由上下文下的命令/普通消息分派；
+`PromptAdmissionWorkflow` 原子创建 Prompt、初始 projection 和 outbound intent。
 
-```text
-creating → active → frozen
-                    或
-                  finished
-```
+### Primary 执行
 
-内容超过单卡安全上限时创建 continuation page。旧页进入 frozen 后不得再 patch；
-所有 stream sequence 必须在对应 element 内单调增加。
+`PromptRunWorkflow` 是 Primary 生命周期 facade。它协调：
 
-## 5. 主要模块地图
+- `PrimaryPromptDispatcher`：从 SQLite 原子 claim ordinary FIFO；
+- `PromptTurnExecutor`：执行单个受 fence 的 turn；
+- `DetachedPromptObserver`：重启或不确定 settlement 后恢复 exact turn；
+- `ExternalTurnObserver`：采用直接在 Herdr 发起且可证明属于当前 session 的 turn；
+- `TurnControlWorkflow` / `TurnControlDispatcher`：持久化并串行执行 exact-turn control。
 
-### 5.1 接入与命令路由
+进程内 worker 只优化调度；互斥、claim 和恢复依据都在 SQLite。
 
-`InboundRouter` 是标准化 Lark 输入的入口。它负责 allowlist、去重、持久化接收、
-命令解析和 workflow 分派。它不负责真正运行 Prompt、操作 Pane 或调用 CardKit。
+### Worker 执行
 
-普通输入遵循“先记录 inbound，再接受业务工作”的顺序。进程在业务处理前退出时，
-未完成的 inbound record 可以重新进入 acceptance queue。
+`WorkerTurnDispatcher` claim Worker task 并调用 Agent driver；`WorkerTurnObserver` 读取 exact Core
+event turn；`InstanceTurnSupervisor` 保证一个 Worker generation 的 dispatch/observe ownership。
+Worker 生命周期、worktree 和 pane 操作由 instance/session workflows 管理，不由卡片 projector 管理。
 
-### 5.2 Binding provisioning
+### Agent Observation
 
-`BindingProvisioningWorkflow` 负责创建、发现和重新连接会话：
+生产 composition 只把 `HerdrEventsReader` 交给 Primary 和 Worker workflows。它执行：
 
-- 选择项目；
-- 创建或认领 Pane；
-- 启动 TraeX；
-- 创建 Lark topic；
-- 激活 Binding；
-- attach、reattach、replace；
-- 恢复中断的 provisioning。
+1. 用 pane、Agent kind 和 expected native session ID attach Core source；source path 由 Core 唯一定位；
+2. 从当前 end、active turn、exact turn 或 previous-turn boundary 打开 cursor；
+3. 将 Core event 映射为 Agent message、tool activity/timeline、累计唯一 edited-file count、plan、status 和 lifecycle；其中 edited-file event 只携带计数，不暴露路径；
+4. 对 source/session/turn/start-time 做 fence，并对输出再次做 presentation-side bound/redaction；
+5. 在 cursor retention floor 前的边界不可证明时 fail closed。
 
-这个流程跨越 SQLite、Herdr 和 Lark，无法使用一个分布式事务。因此它以持久化
-checkpoint 实现 saga 式恢复。每一步都必须可判定“已经完成”“可以安全继续”或
-“结果不确定”。
+协调器不读取 JSONL，不解析 pane 文本，也不根据“看起来 idle”推断 exact turn 成功。
 
-### 5.3 Prompt execution
+### Runtime reconciliation
 
-`PromptRunWorkflow` 是 Prompt 执行的唯一 owner。它负责：
+`HerdrRuntimeReconciler` 通过 `BindingReconciliationPass` 和 `BindingRuntimeConverger` 收敛 fresh
+snapshot。Socket 与周期触发都进入同一条路径；workspace failure 隔离且通过 health/status 暴露。
+reconciliation 只拥有 live binding facts，不拥有 Core reply projection。
 
-- 扫描持久化 work；
-- 为每个 Binding 启动至多一个普通 turn worker；
-- 原子 claim 下一条 FIFO Prompt；
-- 管理当前 `TurnSupervisor`；
-- 执行 steering；
-- 恢复 detached observer；
-- 完成、失败或归档 draining Binding。
+### Projection
 
-内存 worker 只负责执行。真正的互斥和可恢复 claim 存在 SQLite 中，因此重启不会
-把内存状态误当成业务事实。
+纯 reducer 生成 desired view；`ConversationViewProjector`、`AnswerPageWorkflow`、
+`MainCardWorkflow` 和 `WorkerTurnCardWorkflow` 把 lifecycle/Core observations 收敛到 SQLite。
+Main Card 不是第二份 Answer：它展示当前任务、完整计划、当前活动、最近五条 Agent 回复和运行环境；
+完整 Agent/tool 历史留在 Answer 或 Worker Task surface。
 
-### 5.4 Runtime reconciliation
+### Delivery
 
-`HerdrRuntimeReconciler` 是运行时事实进入领域状态的唯一收敛路径。它：
+`OutboundIntentWriter` 先写 durable gateway intent。`GatewayOutboxDispatcher` 把扫描调度委托给
+`OutboundLaneDrain`，把单次 effect 委托给 `OutboundDeliveryExecutor`。同一 target lane 串行，
+不同 lane 有界并发。成功 receipt 与 page/card checkpoint 在同一 SQLite transition 中提交。
 
-1. 获取权威 Herdr snapshot；
-2. 限定到配置允许的 workspace；
-3. 检查 Pane、terminal 和 native Agent session identity；
-4. 应用 generation 和 identity fence；
-5. 必要时读取经过裁剪、清洗和脱敏的终端输出；
-6. 原子更新 Binding observation 和 output checkpoint；
-7. 发布 lifecycle event，并在确有 durable work 时发出 wake-up。
+### SQLite capability graph
 
-Socket event 和周期任务都只请求 reconciliation。丢失一个事件会
-增加延迟，但不会改变最终状态。
+`SqliteCapabilityGraph` 在一个 `SqliteContext` 上构造 capability stores，`SqliteStoreBundle` 只暴露
+consumer-shaped ports。migration 由一个 ordered runner 执行。跨表业务转换保持一个 transaction 和
+write fence；不能为了“一表一个 repository”拆散原子性。`SqliteBindingStore`/`SqliteStoreKernel`
+仅是测试和 headless smoke 的 compatibility facade，不是生产 composition owner。
 
-### 5.5 控制、管理和查询
+### Runtime lifecycle
 
-| Module | 职责 |
-| --- | --- |
-| `PaneControlWorkflow` | stop、steer、model control queue 的唯一 owner |
-| `ModelSelectionWorkflow` | model/mode 交互状态机、超时和恢复 |
-| `PaneClosureWorkflow` | 带二次确认的破坏性 Pane 关闭 |
-| `SessionAdministrationWorkflow` | status、rename、archive、resume |
-| `OperationsQueryWorkflow` | spaces、sessions、failures 只读查询 |
-| `DeliveryRecoveryWorkflow` | 打开话题以及 retry/dismiss dead letter |
-| `RetiredPaneCleanupWorkflow` | replacement 后旧 Pane 的持久化清理流程 |
+`ManagedBridgeRuntime`、`RuntimeLifecycleLedger`、`BridgeRuntimeShutdown` 和 instance lease 共同拥有
+startup/shutdown。`HealthSnapshotCollector` 产生 `/health`、`/ready`、`/status` 所需的 bounded snapshot；
+HTTP server 不自行推断 readiness。
 
-这些 workflow 分离了查询、可逆管理、运行中控制、破坏性操作和 delivery recovery。
-新增行为应进入最接近其业务能力的 workflow，而不是继续扩大 router。
+## 7. 三条主链路
 
-### 5.6 Projection 与 Lark delivery
-
-`ConversationViewProjector` 消费 lifecycle event，通过纯 reducer 更新 TopicView 和
-RunCard，再记录 outbound intent。卡片 renderer 只处理展示，不决定生命周期。
-
-`LarkOutboxDispatcher` 从 SQLite 读取 durable outbox，并负责：
-
-- Card reply、update、stream create、stream content 和 stream finish；
-- transient retry 和指数退避；
-- permanent failure 和 dead letter；
-- 成功投递后的 message/CardKit/page checkpoint；
-- 每条 target lane 内严格串行，不同 lane 之间有限并发。
-
-### 5.7 SQLite transaction owner
-
-`SqliteBindingStore` 同时实现多个 capability-focused store port，但只有它拥有底层
-SQLite transaction。它负责的不是简单 CRUD，而是业务原子转换，例如：
-
-- 接受 Prompt 时同时创建 Prompt、RunCard、AnswerPage 和初始 outbox intent；
-- 完成 Turn 时同时更新 Prompt、Binding 和终态 read model；
-- 完成 Pane control 时同时保存结果状态和结果卡片 intent；
-- Lark 投递成功时同时推进 outbox 与对应 delivery/page checkpoint。
-
-可以继续缩小调用方看到的 port，但不能为了“按表分 repository”而拆散这些事务。
-
-### 5.8 Adapters 与运行时模块
-
-- `HerdrCliAdapter` 隔离 CLI/Socket、数据校验、运行时观察和兼容 fallback。
-- `LarkSdkAdapter` 隔离 SDK、事件标准化和 CardKit transport。
-- `WorkspaceSnapshotCache` 合并短时间内重复的 snapshot 请求。
-- `HerdrSocketSubscriber` 通过原生 Socket event 提供低延迟 wake-up；周期对账负责兜底。
-- `InstanceLeaseController` 保证只有一个实例可写同一数据库。
-- `BridgeRuntimeShutdown` 按依赖顺序停止 ingress、workflow、projection、delivery 和 store。
-- health server 区分进程存活、依赖就绪和脱敏后的运行状态。
-
-## 6. 三条核心链路
-
-### 6.1 普通 Prompt
+### 普通 Lark Prompt
 
 ```text
-Lark event
-  → normalize and allowlist
-  → durable inbound record
-  → InboundRouter
-  → atomic Prompt + RunCard + AnswerPage + outbox acceptance
-  → prompt-ready wake-up
-  → PromptRunWorkflow atomic claim
-  → Herdr runPrompt
-  → runtime observations and lifecycle events
-  → view projection
-  → durable outbox
-  → ordered CardKit delivery
-  → delivery/page checkpoint
+Gateway callback
+  -> normalize + authorize
+  -> DurableInboundPipeline
+  -> InboundMessageRoutingWorkflow
+  -> PromptAdmissionWorkflow transaction
+  -> prompt-ready hint
+  -> PromptRunWorkflow claim
+  -> Agent driver / Herdr
+  -> Core Agent Events exact turn
+  -> Answer/Main projection transaction
+  -> gateway outbox lane
+  -> Lark delivery + checkpoint
 ```
 
-### 6.2 Herdr 状态变化
+### Herdr/Core observation
 
 ```text
-native Socket event / periodic timer
-  → invalidate relevant snapshot cache
-  → request reconciliation
-  → fresh Herdr snapshot and targeted observation
-  → identity-fenced SQLite transition
-  → lifecycle projection and optional work wake-up
+Herdr socket hint or periodic timer
+  -> fresh snapshot reconciliation
+  -> binding identity convergence
+
+Core event polling
+  -> exact source cursor
+  -> exact turn observation
+  -> durable timeline/plan/message projection
+  -> card convergence
 ```
 
-事件只降低收敛延迟。即使所有事件丢失，周期 reconciliation 仍应得到相同终态。
+两条链路共享 identity，但职责不同：snapshot 回答“哪个 Agent 在哪个 Pane、现在什么状态”；
+Core event 回答“这个 exact turn 产生了哪些结构化内容”。
 
-### 6.3 Lark 投递失败
+### Lark delivery failure
 
 ```text
 outbox lane head
-  → target validation
-  → Lark request
-       ├── success   → delivered checkpoint
-       ├── transient → scheduled retry
-       └── permanent / exhausted → dead letter
+  -> target/version validation
+  -> gateway effect
+       success   -> durable receipt/checkpoint
+       transient -> bounded backoff retry
+       permanent or exhausted -> dead letter
 ```
 
-任何分支都不会重新触发 Prompt。用户或自动恢复只能改变 delivery intent 的状态。
+任一分支都不会再次提交 Prompt。
 
-## 7. 事件、通知和持久化的区别
+## 8. JSONL 与 Core Agent Events 清理边界
 
-项目中有三种容易混淆的异步信号：
+“不再由 Swarm 解析 JSONL”不等于“删除 JSONL”。当前边界分三层：
 
-| 类型 | 是否持久化 | 用途 | 丢失后的结果 |
-| --- | --- | --- | --- |
-| Lifecycle event | 否，进程内 | 通知 projection 业务结果 | startup convergence 从 durable state 补齐终态展示 |
-| Workflow wake-up | 否，进程内 | 提醒 worker 重新读取 durable work | 周期扫描或下一次事件重新唤醒 |
-| Lark outbox row | 是 | 表达必须执行的外部投递 | 重启后继续 retry 或进入 dead letter |
+| 分类 | 当前用途 | 决策 |
+| --- | --- | --- |
+| Agent 原始 JSONL 历史 | Core source 输入、Agent 自身恢复/审计 | 保留；不由 Swarm 删除或改写 |
+| Core `events.db` journal | versioned cursor、retention、source 状态 | 保留；由 Core 管理 retention |
+| Swarm TraeX/Pi direct parser、file cursor、projector | 旧的 reply decode 路径 | 已删除；smoke 与测试使用 Core Events/Core-shaped observations |
+| pane scrollback parser | bounded diagnostics only | 绝不作为 reply fallback；诊断用途按现有边界保留 |
 
-必须遵守 durable-before-wake：
+清理已完成：Core 根据 pane、Agent kind 和 authoritative native session，在 allowlisted roots 内进行
+bounded、exactly-one source discovery；Swarm 不再传 filesystem path，也不扫描 Agent sessions root。
+Agent 原始 JSONL 和 Core journal 仍完整保留，删除它们会破坏 Core source、Agent 历史与恢复能力。
 
-1. 先提交 SQLite 状态；
-2. 再发 scoped wake-up；
-3. 不假设 wake-up 一定被消费。
+## 9. 并发、恢复与一致性
 
-`lifecycle_events` 和进程内 event bus 都不是完整 Event Store。当前系统属于状态持久化
-加可重建投影，不属于 Event Sourcing。
+- **Durable before wake**：先提交 SQLite，再发进程内 scoped hint；hint 丢失只增加延迟。
+- **FIFO and exclusion**：同 Binding 一个 ordinary turn；同 Worker generation 一个 turn owner。
+- **No replay**：dispatch 结果不确定时 detached，不回到 queued。
+- **Exact identity**：pane、terminal、session、generation、turn ID、canonical start time 必须匹配。
+- **Replay idempotency**：timeline 用稳定 item ID；answer replay 只追加可证明缺失 suffix 或 replace-all。
+- **Outbox ordering**：每 lane 串行，冻结页不 patch，checkpoint 与 receipt 原子推进。
+- **Instance fencing**：SQLite lease token 失效后旧实例停止写入并 shutdown。
+- **Retention failure**：Core cursor/boundary 不再保留时 fail closed，不能改读 pane 或原始 JSONL。
 
-## 8. 一致性和并发机制
+## 10. 改动放置指南
 
-### FIFO 与单 turn
+| 要改什么 | 首选位置 |
+| --- | --- |
+| Lark/Feishu SDK normalization 或 materialization | `src/gateways/feishu/` |
+| Herdr CLI/Socket parsing | `src/adapters/`、`src/runtime/herdr/` |
+| Core event contract adapter | `src/runtime/herdr-events-reader.ts` 与 domain observation port |
+| Prompt/Worker/Session 决策 | 对应 `src/coordinator/` workflow |
+| 状态转换和 consumer contract | `src/domain/` |
+| durable projection/outbox transition | capability store + `src/events/` workflow |
+| Card/rich-text 纯渲染 | `src/cards/`、presentation/gateway materializer |
+| migration/transaction | `src/store/sqlite/` |
+| 构造和 shutdown ownership | `src/composition/` |
 
-每个 Binding 至多有一个普通 turn 处于执行状态。后续普通 Prompt 留在 SQLite FIFO。
-不同 Binding 可以并行执行。
+新增跨边界行为时，先写清 authority、pre-effect durable fact、identity fence、uncertain outcome 和
+recovery path，再选择模块。不要把这些判断塞进 router、renderer 或 adapter callback。
 
-### No-replay
+## 11. 验证清单
 
-worker 先在 SQLite 中原子 claim Prompt；adapter 在确认提交动作已经发生，或错误语义
-无法排除已经提交时，记录 dispatched checkpoint。此后的异常会让 Prompt 转为
-detached observation，而不是回到 queued。
+涉及边界的改动至少验证：
 
-### Identity fencing
+1. focused unit/integration test 覆盖 success、duplicate、stale identity、failure 和 recovery；
+2. `npm run architecture:check`；
+3. `npm run docs:audit`；
+4. `npm run typecheck`；
+5. `npm run build`；
+6. 跨 workflow、persistence 或 shared runtime 的改动运行 `npm test`。
 
-运行时 observation 和 control result 必须匹配预期的 Pane、terminal 和 Binding
-generation。迟到的旧结果不能推进当前 Binding。
-
-### Instance fencing
-
-进程启动时获取 SQLite lease 和 fencing token。租约丢失会触发 shutdown；旧实例失去
-写权限，避免两个进程同时调度同一份 durable work。
-
-### Outbox ordering
-
-每个 outbound target 都有稳定 lane。只有 lane head 可以投递；失败的 head 只阻塞自己
-的 lane。这个规则同时提供 CardKit sequence 顺序和跨卡片并行。
-
-### Projection recovery
-
-终态 Prompt、Binding 和 read model 持久化后，即使进程在 lifecycle notification 与
-outbox 写入之间退出，startup convergence 也会比较 view/delivery version 并补建缺失
-intent。
-
-## 9. 如何放置新功能
-
-使用下面的判断顺序：
-
-1. **是否是纯状态转换？** 放入 domain transition 或 reducer。
-2. **是否是一个用户用例？** 放入 capability-focused workflow。
-3. **是否访问 Herdr、Lark、SQLite 或操作系统？** 通过 port，在 adapter 中实现。
-4. **是否改变多个 durable record？** 在 SQLite store 提供一个原子 transaction method。
-5. **是否只是通知 worker 检查状态？** 使用 wake-up，不把 payload 当事实。
-6. **是否产生用户可见结果？** 先写 outbound intent，再由 dispatcher 投递。
-7. **是否只是展示变化？** 修改 projection/reducer 和纯 card renderer。
-
-举例：
-
-- 新增 `/swarm pause`：先定义业务语义和状态转换，再增加 workflow；router 只分派。
-- 新增 Herdr observation 字段：adapter 负责标准化，reconciler 负责应用，projection 决定展示。
-- 新增卡片按钮：card renderer 产生 action，router 校验 action，具体决策进入对应 workflow。
-- 新增投递类型：扩展 outbox kind、lane/target validation 和 Lark adapter，不从 workflow
-  直接调用 SDK。
-
-## 10. 修改前检查清单
-
-### 工作流与持久化
-
-- 是否先持久化 intent，再触发外部副作用？
-- 重启后能否区分“未开始”和“可能已执行”？
-- 多行状态变化是否在同一 SQLite transaction？
-- 重复消息、重复 action 和重复 wake-up 是否幂等？
-
-### Herdr 与并发
-
-- 是否通过 fresh observation 验证 Pane，而不是信任事件 payload？
-- 是否校验 pane、terminal、session 和 generation？
-- 是否保持每 Binding 单 ordinary turn？
-- 不确定 dispatch 是否保持 no-replay？
-
-### Lark 与 CardKit
-
-- 是否通过 durable outbox 投递？
-- target lane 和 idempotency key 是否稳定？
-- AnswerPage 冻结后是否仍可能被 patch？
-- sequence 是否只在对应 CardKit element 内递增？
-
-### 安全与运维
-
-- 是否保留 configured-chat 和 user-originated allowlist？
-- 日志、错误和终端输出是否经过脱敏？
-- 是否意外增加了远程审批或高风险控制能力？
-- shutdown、lease loss 和恢复路径是否仍然可收敛？
-
-## 11. 当前架构演进方向
-
-当前结构已经形成稳定的领域和应用边界。后续演进应优先加深现有模块，而不是增加
-更多薄包装层：
-
-1. 使用结构化 Pane/Workspace identity，消除对复合 Pane ID 格式的推断。
-2. 用 composition-root 级 deadline 或 `AbortSignal` 协调 shutdown。
-3. 将 Herdr timeout、fallback、退避和 circuit protection 收敛为一个深模块。
-4. 仅把确实需要运维调节的 poll、debounce 和 size limit 放入验证配置。
-5. 继续收窄 workflow 所见的 store port，同时保留跨表事务的单一 owner。
-6. 明确哪些 projection 必须事务内生成，哪些允许由 startup convergence 重建。
-
-判断一次重构是否改善架构，可以使用三个问题：
-
-- 删除这个模块后，复杂度会消失，还是扩散到多个调用者？
-- 调用者需要知道多少内部顺序、错误和一致性细节？
-- 能否只通过模块接口测试完整业务行为？
-
-复杂度被隐藏、规则更集中、调用者知识更少，才是更深的模块。
+部署前先 `./install.sh` 生成 immutable release，再检查 `npm run swarm:status` 的 active-work safety
+gate。正常 restart 不允许越过活跃工作；`--force` 也不应被理解为修复 degraded recovery 或放宽
+identity/no-replay fence。

@@ -5,7 +5,8 @@ import pino from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
 import { primaryPresentation } from "./helpers/presentation.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { initialRichTextAnswerPayload } from "../src/domain/rich-text.js";
 import type { LarkPort } from "../src/domain/ports.js";
 import { LarkOutboxDispatcher } from "../src/events/lark-outbox-dispatcher.js";
 import { createFeishuCompatibilityDelivery } from "../src/gateways/feishu/plugin.js";
@@ -36,6 +37,21 @@ describe("Answer page crash recovery", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-26T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root-1", answerCard: {} });
+    const cardkitCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1" && reply.cardRole === "answer")!;
+    store.database.prepare("DELETE FROM outbound_replies WHERE id = ?").run(cardkitCreate.id);
+    store.database.prepare("UPDATE answer_pages SET delivery_mode = 'rich_post', card_id = NULL WHERE prompt_id = 'p1' AND page_index = 0").run();
+    store.enqueueOutboundReply({
+      id: "historical-rich-p1",
+      idempotencyKey: "answer-post:p1:0",
+      bindingId: "b1",
+      promptId: "p1",
+      viewVersion: 1,
+      cardRole: "answer",
+      rootMessageId: "root-1",
+      kind: "text",
+      intentKind: "rich-text-reply",
+      payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, answerElementId("p1", 0))),
+    });
 
     const answer = `${"a".repeat(ANSWER_STREAM_PAGE_LIMIT)}\n${"b".repeat(ANSWER_STREAM_PAGE_LIMIT)}\n${"c".repeat(2_000)}`;
     const logger = pino({ enabled: false });

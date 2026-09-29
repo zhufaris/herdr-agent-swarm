@@ -122,7 +122,8 @@ Worker 状态，也不会重放 Worker 任务。若 Primary generation、pane、
 identity 已过期，系统只跳过通知，避免发到错误会话，Worker 的 blocked 状态仍会正常提交。
 
 Worker Main Card 上的任务结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
-TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。
+Herdr Core Agent Events turn。终端 scrollback、Agent JSONL、另一轮任务的输出和仅表示“已投递”
+的回执都不会被当成结果。
 
 在旧式未绑定会话中，实例详情卡的“设为当前目标”仍可保留兼容行为；若目标为 symbolic
 Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
@@ -174,7 +175,7 @@ generation，不支持接管。成功操作以 Toast 和原卡刷新反馈；确
 
 - 项目主卡和 Worker Main Card 展示状态、最新可读消息，以及最多一条 `当前活动`：优先显示仍在执行的工具，否则显示最近一条非计划活动。完整 Agent/Tool 顺序只在 Answer/Worker Task Card 展示；Main Card 不是终端输出的事实来源。
 - 每条普通请求拥有一个 Answer 卡片。原始飞书消息就是请求记录，Bridge 不再创建独立 Request 卡。
-- 新的结构化 Answer 卡按 Herdr transcript 的顺序交错展示 Agent 文本和 Tool 调用。Tool 默认折叠；展开后只显示经过脱敏和长度限制的 command/result。旧任务没有结构化时间线时继续使用原有安全 Markdown 展示。
+- 新的结构化 Answer 卡按 Herdr Core Agent Events 的顺序交错展示 Agent 文本和 Tool 调用。Tool 默认折叠；展开后只显示经过脱敏和长度限制的 command/result。带可读 `chars` 的 `write_stdin` 显示为 Input 面板，并像 Herdr Pane 一样保留少量多行代码；空输入和控制键不展示，后台命令输出也不会在该面板重复。旧任务没有结构化时间线时继续使用原有安全 Markdown 展示。
 - 内容接近 CardKit 限制时，Agent Markdown 可在安全边界分页，Tool 面板不会跨页。当前 Answer 卡被冻结后，后续内容会在新的“继续回复”卡片中显示；早期卡片不会被改写或删除。冻结页中的 Tool 若较晚返回结果，当前页会新增一条带原页引用的完成项。
 - Bridge 不显示模型 reasoning、内部控制标记、prompt 回显、终端装饰或敏感值。高风险审批仍只能在 Herdr 中完成。
 - Human Review 继续以橙色“需要处理”和单独飞书通知呈现；Command Status Card 继续只表示 Swarm 指令的受理与执行，不会混入 Agent Answer 时间线。
@@ -255,7 +256,7 @@ Primary 为 `idle` 时，Bridge 持久化一个 priority turn 并立即唤醒调
 所有路径都会校验 binding generation、pane 和 Agent session；`blocked`、unknown、session 缺失
 或身份变化时会明确拒绝。
 
-可先用 `/swarm awake` 观察恢复已完成的 transcript；若当前任务已经 detached 且无法恢复，
+可先用 `/swarm awake` 观察恢复已完成的 exact Core event turn；若当前任务已经 detached 且无法恢复，
 由话题创建者明确使用 `/swarm skip` 释放 blocker。
 
 该命令只作用于当前话题的 Primary。Worker 的 `/steer <worker> <文本>` 使用相同语义：
@@ -279,10 +280,12 @@ Bridge 会继续重试。
 或额外参数都会显示帮助且不会创建选择记录。Agent 类型会持久化到项目选择与 Binding；
 `/swarm reset` 和 `/swarm replace` 继承它，不会在启动失败时回退到 TraeX。
 
-TraeX Primary 支持结构化 Answer 流、`/swarm model` 和 Primary Worker 工具。Pi、Codex 与
-Claude Code 当前支持有围栏的普通任务投递，但不捕获结构化 Answer；完成卡会提示前往对应
-Herdr pane 查看本地结果。各 Agent 不支持的 model、steer、stop、transcript recovery 或
-Primary-tool 操作会明确拒绝，不会模拟终端输入。主卡 Runtime 区会显示实际 Agent 类型。
+TraeX Primary 支持结构化 Answer 流、`/swarm model` 和 Primary Worker 工具。配置了受管
+session directory 的 Pi 也通过 Herdr Core Agent Events 捕获结构化 Answer，但不支持 TraeX
+专属的 model、Primary Worker tools 或 native resume。未配置该目录的 Pi，以及 Codex 与
+Claude Code，仍只有带 identity fence 的普通任务投递；完成卡会提示前往对应 Herdr pane
+查看本地结果。各 Agent 不支持的 model、steer、stop、event recovery 或 Primary-tool 操作会
+明确拒绝，不会模拟终端输入。主卡 Runtime 区会显示实际 Agent 类型。
 
 如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
 `/swarm new` 始终在选择项目后使用短随机 Pane 名，例如 `lark_7kq2`；
@@ -464,11 +467,11 @@ Pane。请先检查对应 Space；已有 Pane 时发送
 /swarm awake
 ```
 
-Bridge 会从 detached turn 的精确 transcript 边界（完成记录或 interrupt 后
+Bridge 会从 detached turn 的精确 Core event 边界（完成记录或 interrupt 后
 下一个 turn 的开始）开始，按时间顺序把遗漏的
 Herdr turn 投影为新的 Answer Card，然后继续原有飞书 FIFO。该命令不会向
 TraeX 重发旧任务，不会写入 terminal；重复执行不会重复创建已接管的 turn。
-如果找不到完整且带用户请求的后续 turn，原 detached 状态保持不变。
+如果找不到可由 Core event identity 证明的后续 turn，原 detached 状态保持不变。
 `/swarm awake` 只负责观察和恢复，绝不会把无法确认的 detached prompt 标记为完成或失败。
 
 ### `/swarm skip`

@@ -170,7 +170,7 @@ export class SqlitePromptRecoveryStore {
       } else if (input.rootMessageId) {
         const pendingCreate = this.context.database.prepare("SELECT idempotency_key, kind, payload, intent_kind FROM outbound_replies WHERE prompt_id = ? AND card_role = 'answer' AND state = 'pending' AND (kind = 'stream_card_create' OR intent_kind = 'rich-text-reply') ORDER BY delivery_order LIMIT 1").get(next.promptId) as { idempotency_key: string; kind: "stream_card_create" | "text"; payload: string; intent_kind: "rich-text-reply" | null } | undefined;
         if (pendingCreate) {
-          if (pendingCreate.intent_kind !== "rich-text-reply") this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: pendingCreate.idempotency_key, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.renderRunCard(next)) });
+          if (pendingCreate.intent_kind !== "rich-text-reply") this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: pendingCreate.idempotency_key, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: replacePendingStreamCard(pendingCreate.payload, input.renderRunCard(next)) });
           outboxReserved = true;
         }
       }
@@ -195,3 +195,9 @@ export class SqlitePromptRecoveryStore {
 }
 
 function now(): string { return new Date().toISOString(); }
+
+function replacePendingStreamCard(payload: string, card: object): string {
+  const decoded = JSON.parse(payload) as { card?: unknown; stream?: unknown };
+  if (!decoded || typeof decoded !== "object" || !decoded.stream || typeof decoded.stream !== "object") throw new Error("Pending Answer stream payload is invalid");
+  return JSON.stringify({ ...decoded, card });
+}

@@ -35,8 +35,8 @@ Each seam must satisfy all of the following before it is marked complete:
 | 1 | Runtime events and work scheduling | SQLite or fresh Herdr state; never the in-process bus | `RuntimeEventBus` behind lifecycle, inbound, work, and Herdr-specific interfaces | Complete | Closed typed channels, named subscribers, startup buffering, keyed coalescing, failure diagnostics, awaited shutdown, and architecture checks. `runtime-event-bus.test.ts` covers the engine. |
 | 2 | Exact-turn control and steering | SQLite operation state plus fresh exact Herdr turn identity | `TurnControlWorkflow` for validation/acceptance; `TurnControlDispatcher` for owner-serialized effects | Complete | Active control returns after durable acceptance; dispatcher revalidates and claims before effect. Same-owner order, cross-owner independence, and accepted-versus-dispatching recovery are covered by `turn-control-dispatcher.test.ts`. |
 | 3 | Inbound admission and routing | Durable inbound rows and frozen routing context | `DurableInboundPipeline`, `InboundMessageRoutingWorkflow`, and `PromptAdmissionWorkflow` | Complete | The pipeline owns authorization, compact durable admission, scope-FIFO claim/release, retry, recovery, shutdown settlement, and the sole completion log. Routing returns one structured disposition, while ordinary and initial Prompt acceptance share one atomic workflow. Runtime hints contain only `eventId` and are best-effort; SQLite scanning remains authoritative. |
-| 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact transcript identity | `PromptRunWorkflow` lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver` | Complete | The facade owns scheduling, safety, process-local exclusion, recovery controls, and shutdown. `drain(bindingId)` hides durable FIFO claim, fresh-pane preflight, fenced release, execution, and archive policy; `observe(prompt)` hides exact-turn reopening, ownership, polling, settlement, and uncertain no-replay recovery. |
-| 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` behind dispatch and observation ports | Complete | Durable FIFO execution now lives in coordinator rather than events and consumes `WorkerTurnDispatchStore`. Exact live/restart observation stays behind `WorkerTurnObservationPort`; process-local single flight and watches remain non-durable hints while uncertain delivery never replays. |
+| 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact Core event turn identity | `PromptRunWorkflow` lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver` | Complete | The facade owns scheduling, safety, process-local exclusion, recovery controls, and shutdown. `drain(bindingId)` hides durable FIFO claim, fresh-pane preflight, fenced release, execution, and archive policy; `observe(prompt)` hides exact-turn reopening, ownership, polling, settlement, and uncertain no-replay recovery. |
+| 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact Core event turn identity | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` behind dispatch and observation ports | Complete | Durable FIFO execution now lives in coordinator rather than events and consumes `WorkerTurnDispatchStore`. Exact live/restart observation stays behind `WorkerTurnObservationPort`; process-local single flight and watches remain non-durable hints while uncertain delivery never replays. |
 | 6 | Card projection and convergence | Durable Run Card, Worker Turn Card, Main Card, page, and delivery-version state | Pure view reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` | Complete | Primary and Worker continuation share one handoff policy; frozen-page offsets, checkpoint-gated Main Card retargeting, direct-Herdr pagination, duplicate convergence, stale targets, and startup recovery are covered through domain, workflow, SQLite, renderer, and context-rebuild tests. |
 | 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` lifecycle facade over `OutboundLaneDrain`, `OutboundDeliveryExecutor`, and `GatewayDeliveryPort` | Complete | The facade owns notifier subscription, safety/retry timers, dead-letter recovery, diagnostics, and shutdown. The drain engine owns bounded 3:1 lane scheduling, per-scan exclusion, same-reply protection, and fatal checkpoint convergence through `OutboundScanStore`; the executor owns one frozen claim-to-checkpoint attempt through `OutboundDeliveryStore`. |
 | 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` lifecycle facade over `BindingReconciliationPass` and `BindingRuntimeConverger` | Complete | The facade owns cooldown, priority coalescing, periodic lifecycle, diagnostics, and shutdown. The pass owns targeted/full authoritative observation, classification, discovery, failure isolation, and pruning; the converger retains generation-fenced per-Binding transitions and downstream effects. |
@@ -109,7 +109,7 @@ It retains scheduler subscription, safety scans, process-local worker exclusion,
 manual awake/skip controls, diagnostics, and shutdown. `PrimaryPromptDispatcher`
 owns the per-Binding durable FIFO loop and permits claim release only before
 dispatch evidence. `DetachedPromptObserver` reloads durable identity and settles
-only the exact persisted transcript turn; uncertain observation remains detached
+only the exact persisted Core event turn; uncertain observation remains detached
 and never submits the Prompt again. `PromptTurnExecutor` remains the single live
 attempt module and hands its process-local cursor directly to the detached
 observer when an attached wait becomes uncertain.
@@ -126,7 +126,7 @@ The Worker pass is complete because durable FIFO execution now belongs to
 and the consumer-shaped `WorkerTurnDispatchStore`. The dispatcher retains
 per-instance single flight, Agent receipt classification, exact watch handoff,
 uncertain no-replay behavior, and shutdown fencing as one deep module.
-`WorkerTurnObserver` remains the sole exact transcript owner for both live watch
+`WorkerTurnObserver` remains the sole exact Core event turn owner for both live watch
 and restart recovery, while `InstanceTurnSupervisor` owns durable recovery scans
 and fresh Herdr Pane validation.
 
@@ -224,3 +224,40 @@ requirement to current artifacts and executable evidence.
 | Runtime lifecycle, health, and operations | `ManagedBridgeRuntime`, `RuntimeLifecycleLedger`, and `BridgeRuntimeShutdown` own fenced lifecycle; `HealthSnapshotCollector` owns readiness/status policy behind a transport-only server. | Lifecycle, shutdown, health collector/server, service lifecycle, and architecture tests cover partial startup, writer settlement, lease loss, redaction, fail-closed readiness, caching, and diagnostics. |
 | SQLite capability graph and migrations | `SqliteCapabilityGraph` and `SqliteStoreBundle` publish consumer ports over one context; migration modules execute through one ordered runner. | Capability graph, context, StoreLink, SQLite store/migration, and architecture tests cover aliases, fencing, atomic nesting, receipts, historical upgrades, and concrete-import prohibition. |
 | Repository-wide quality gates | Architecture records describe current implementations and the import checker enforces dependency direction. | `npm run typecheck`, `npm run build`, `npm run architecture:check`, `npm run docs:audit`, `npm test`, and `git diff --check` are the final required gates. |
+
+## 2026-09-27 Core Events and card-flow review
+
+The earlier “Complete” labels mean that the named ownership seams and dependency
+direction are implemented. They do not mean that every failure mode at the new
+Herdr Core Agent Events boundary is closed. A source-backed review of the full
+Lark -> durable inbound -> workflow -> Herdr/Core -> SQLite projection/outbox ->
+CardKit path identified the following follow-up work.
+
+| Priority | Boundary | Finding | Recommended owner |
+| --- | --- | --- | --- |
+| Verified resolved | Core event confidentiality | Core applies bounded secret-shape redaction while constructing message, tool-call, and tool-result payloads, before the journal commit. Its codec regression test verifies credentials and email-shaped values are absent. | Herdr Core codec/journal. |
+| Verified resolved | Core source identity | Core attach requires authoritative pane `terminal_id` and `agent_session`, checks Agent kind plus ID/path identity, validates the source root/header, and fences collection to the foreground process. | Herdr Core attach/collection API. |
+| Resolved | Cursor retention recovery | Swarm preserves bounded `cursor_expired` metadata and retries exactly once from Core's advertised retained floor; unrelated failures and repeated expiry remain fail-closed. | `HerdrEventsReader` plus command-runner error contract. |
+| Resolved | Rolling-upgrade exact-turn fence | One shared identity rule canonicalizes valid timestamps to UTC seconds across cursor filtering, Primary ownership/terminal settlement, and Worker projection; it accepts legacy subsecond persistence without accepting malformed values or a different second. | Agent observation domain contract. |
+| Resolved | Rich-text Answer title | Rich-text content begins with one bounded bold title row while retaining native title metadata for clients that render it. | Feishu rich-text materializer. |
+| Resolved | JSONL ownership | Production and smoke use Core Events; Core owns bounded exactly-one source discovery from authoritative pane/session identity. Swarm direct decoders, cursors, projectors, path locators, and parser-only tests are removed. | Core locate/attach API. |
+| Verified resolved | Core producer compatibility | Unknown producer record, response-item, Pi role, stop-reason, and history-mutation values become bounded `record_skipped` events. Unknown protocol schema versions remain intentionally fail-closed. | Herdr Core codec/source. |
+| Verified resolved | Core collection fairness | Complete or incomplete oversized records advance a separate scan checkpoint by at most roughly 1 MiB per collection poll; after finding the terminating newline, that poll emits only the skip event and defers later records to the next poll. The durable event offset advances only after the newline is found. | Herdr Core source reader. |
+| Verified resolved | Reattach semantics | Journal reattach returns the persisted checkpoint for an existing identical source and rejects a changed source definition, so the reported attach offset matches durable collection state. | Herdr Core journal/attach API. |
+| Verified resolved | Discovery traversal | Canonical directory identities deduplicate overlapping allowlisted roots, so one subtree consumes the bounded discovery budget only once. | Herdr Core source reader. |
+| Verified resolved | Edited-file replay | Core emits cumulative edited-file events only when the unique count grows; Swarm ignores duplicate or decreasing replay values and upserts one stable Answer timeline item per turn. | Herdr Core codec plus `HerdrEventsReader`. |
+| Verified resolved | Source registry retention | Core preserves active sources and failed sources with retained events, then reclaims failed source rows after their final event reaches the retention floor so restarts cannot permanently exhaust the bounded registry. | Herdr Core journal. |
+
+### JSONL cleanup decision
+
+The cleanup unit is Swarm's duplicate decoder, not the underlying history:
+
+- **Keep:** Agent-owned JSONL files, Core `events.db`, and all configured retention;
+  they are runtime history and Core source material, not generated Swarm build output.
+- **Removed:** Swarm direct file cursors, boundary scanners, producer-specific
+  projectors, broad `open*` reader methods, descriptor/path discovery, and parser-only fixtures/tests.
+
+The target interface is intentionally deeper: Swarm asks Core for an exact
+pane/session/turn event cursor, while Core alone owns bounded filesystem discovery,
+producer decoding, journal retention, and source health. This removes duplicate
+parsing and path knowledge without deleting recoverable history.

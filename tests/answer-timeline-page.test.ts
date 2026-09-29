@@ -63,4 +63,25 @@ describe("answer timeline page planner", () => {
     expect(page.items).toEqual([{ kind: "agent_message", id: "message:all", sequence: 1, markdown }]);
     expect(page.elements).toEqual([{ tag: "markdown", content: markdown }]);
   });
+
+  it("continues before the renderer budget could replace Agent Markdown with an omission", () => {
+    const markdown = "x".repeat(11_500);
+    const page = planAnswerTimelinePage([{ kind: "agent_message", id: "message:large", sequence: 1, markdown }], null, 12_000);
+
+    expect(page.nextCursor).not.toBeNull();
+    expect(page.items[0]).toMatchObject({ id: "message:large" });
+    expect(page.items[0]!.kind === "agent_message" && page.items[0]!.markdown.length).toBeLessThan(markdown.length);
+  });
+
+  it("advances past hidden status items without dropping following Edited tools", () => {
+    const page = planAnswerTimelinePage([
+      { kind: "status", id: "status:one", sequence: 1, label: "thinking", state: "running" },
+      { kind: "tool", id: "tool:edit", sequence: 2, category: "edit", label: "3 files", state: "succeeded" }
+    ], null, 9_000);
+
+    expect(page.nextCursor).toBeNull();
+    expect(page.projectedItemIds).toEqual(["status:one", "tool:edit"]);
+    expect(JSON.stringify(page.elements)).not.toContain("thinking");
+    expect(JSON.stringify(page.elements)).toContain("✏️ Edited · 3 files · ✅");
+  });
 });

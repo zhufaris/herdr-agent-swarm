@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AnswerPageWorkflow } from "../src/coordinator/answer-page-workflow.js";
-import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { initialRichTextAnswerPayload } from "../src/domain/rich-text.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 import { workerPresentation } from "./helpers/presentation.js";
@@ -15,10 +16,10 @@ describe("rich-text Answer workflow", () => {
       store.updateBinding("b1", { paneId: "w1:p1", paneToken: "abcd", state: "active", lifecycle: "active", attachment: "attached" });
       const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", paneToken: "abcd", requestText: "go", queuePosition: 1, occurredAt: "2026-09-27T00:00:00.000Z" });
       store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root-1", answerCard: {} });
+      seedHistoricalPrimaryRichPost(store, "p1", "root-1");
 
       const create = store.listPendingOutboundReplies()[0]!;
       expect(create).toMatchObject({ kind: "text", intentKind: "rich-text-reply", idempotencyKey: "answer-post:p1:0" });
-      expect(JSON.parse(create.payload).document.title).toBe("🤖 bridge · abcd · Task");
       expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ deliveryMode: "rich_post", state: "creating", cardId: null })]);
       store.markOutboundReplyDelivered(create.id, "answer-1");
       expect(store.getActiveAnswerPage("p1")).toMatchObject({ messageId: "answer-1", cardId: null, deliveryMode: "rich_post" });
@@ -60,9 +61,9 @@ describe("rich-text Answer workflow", () => {
       const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "worker-pane", paneToken: "wk9x", nativeSessionId: "worker-session" })!;
       const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-27T00:00:00.000Z" });
       store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: "worker-message", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "worker-message", view, render: workerPresentation.workerTurn });
+      seedHistoricalWorkerRichPost(store, "turn-1", "root-1", view.elementId);
       const create = store.listPendingOutboundReplies()[0]!;
       expect(create).toMatchObject({ kind: "text", intentKind: "rich-text-reply", workerTurnId: "turn-1" });
-      expect(JSON.parse(create.payload).document.title).toBe("🤖 p1 · wk9x · worker · review");
       store.markOutboundReplyDelivered(create.id, "worker-answer-1");
 
       store.transitionInstanceTurnWithProjection({ turnId: "turn-1", expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-27T00:00:01.000Z" }, render: workerPresentation.workerTurn });
@@ -96,6 +97,7 @@ describe("rich-text Answer workflow", () => {
       store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
       const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-09-27T00:00:00.000Z" });
       store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root-1", answerCard: {} });
+      seedHistoricalPrimaryRichPost(store, "p1", "root-1");
       store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1");
       const running = store.loadRunCard("p1")!;
       const markdown = "paragraph\n\n".repeat(80);
@@ -119,3 +121,17 @@ describe("rich-text Answer workflow", () => {
     }
   });
 });
+
+function seedHistoricalPrimaryRichPost(store: SqliteBindingStore, promptId: string, rootMessageId: string): void {
+  const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId && reply.cardRole === "answer")!;
+  store.database.prepare("DELETE FROM outbound_replies WHERE id = ?").run(create.id);
+  store.database.prepare("UPDATE answer_pages SET delivery_mode = 'rich_post', card_id = NULL WHERE prompt_id = ? AND page_index = 0").run(promptId);
+  store.enqueueOutboundReply({ id: `historical-${promptId}`, idempotencyKey: `answer-post:${promptId}:0`, bindingId: "b1", promptId, viewVersion: 1, cardRole: "answer", rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, answerElementId(promptId, 0))) });
+}
+
+function seedHistoricalWorkerRichPost(store: SqliteBindingStore, turnId: string, rootMessageId: string, elementId: string): void {
+  const create = store.listPendingOutboundReplies().find((reply) => reply.workerTurnId === turnId)!;
+  store.database.prepare("DELETE FROM outbound_replies WHERE id = ?").run(create.id);
+  store.database.prepare("UPDATE worker_turn_card_pages SET delivery_mode = 'rich_post', card_id = NULL WHERE turn_id = ? AND page_index = 0").run(turnId);
+  store.enqueueOutboundReply({ id: `historical-${turnId}`, idempotencyKey: `answer-post:${turnId}:0`, workerTurnId: turnId, viewVersion: 1, rootMessageId, kind: "text", intentKind: "rich-text-reply", payload: JSON.stringify(initialRichTextAnswerPayload(0, 0, elementId)) });
+}

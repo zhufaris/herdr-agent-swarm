@@ -93,6 +93,7 @@ export interface ExternalTurnObservationStore {
   getBinding(id: string): Binding | null;
   getPrompt(id: string): PromptJob | null;
   listBindingsByState(state: Binding["state"]): Binding[];
+  loadTopicView(bindingId: string): TopicViewState | null;
 }
 
 export interface SessionOperationStore {

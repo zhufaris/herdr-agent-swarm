@@ -18,6 +18,12 @@ export function renderProgressTimeline(events: RunProgressEvent[], phase: Timeli
   }];
 }
 
+export function renderTaskList(events: RunProgressEvent[], phase: TimelinePhase): object[] {
+  const steps = events.filter((event) => event.kind === "step" && event.key.startsWith("plan:"));
+  if (steps.length === 0) return [];
+  return renderProgressTimeline(steps, phase, { title: "📋 Task List", summary: summarizeProgress(steps), visibleCount: 5 });
+}
+
 function activityTitle(title: string, summary: RunProgressSummary, phase: TimelinePhase): string {
   if (phase === "blocked" || phase === "failed" || phase === "error") return `${title} · 需要处理 · ${summary.total} 项`;
   return `${title} · ${summary.total} 项`;

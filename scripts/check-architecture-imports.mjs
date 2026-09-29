@@ -36,11 +36,6 @@ for (const file of files) {
     if (importer.startsWith("src/gateways/") && /^(src\/(?:composition|coordinator)\/|src\/runtime\/(?:herdr|traex)|src\/(?:domain|events)\/.*prompt)/.test(target)) {
       violations.push(`${importer} may not depend on workflow or Agent runtime module ${target}`);
     }
-    if (target.startsWith("src/runtime/traex-transcript/")
-      && importer !== "src/runtime/traex-transcript.ts"
-      && !importer.startsWith("src/runtime/traex-transcript/")) {
-      violations.push(`${importer} may not bypass the TraexTranscriptReader facade to import ${target}`);
-    }
     if (target.startsWith("src/cli/service-lifecycle/")
       && importer !== "src/cli/service-lifecycle.ts"
       && !importer.startsWith("src/cli/service-lifecycle/")) {

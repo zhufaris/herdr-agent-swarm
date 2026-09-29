@@ -8,12 +8,16 @@ export function cardKitToGatewayView(value: object): GatewayView {
   const title = textContent(optionalRecord(header?.title)) ?? fallbackText(card);
   const subtitle = textContent(optionalRecord(header?.subtitle));
   const summary = textContent(optionalRecord(config?.summary));
+  const streaming = config?.streaming_mode === true;
+  const streamPresentation = streamingPresentation(optionalRecord(config?.streaming_config));
   const body = record(card.body, "CardKit body");
   const elements = array(body.elements, "CardKit body elements");
   return {
     schemaVersion: 1, fallbackText: summary ?? title ?? (plainText(elements) || "Herdr update"),
     heading: header ? { title: title ?? "Herdr", ...(subtitle ? { subtitle } : {}), ...(tone(header.template) ? { tone: tone(header.template)! } : {}) } : null,
-    nodes: elements.map(parseNode), mutable: config?.update_multi !== false, streaming: config?.streaming_mode === true
+    nodes: elements.map(parseNode), mutable: config?.update_multi !== false, streaming,
+    ...(config?.wide_screen_mode === true ? { width: "wide" as const } : {}),
+    ...(streamPresentation ? { streamPresentation } : {})
   };
 }
 
@@ -30,7 +34,17 @@ export function materializeFeishuView(view: GatewayRenderableView): object {
   } : null;
   return {
     schema: "2.0",
-    config: { update_multi: view.mutable, ...(view.streaming ? { streaming_mode: true } : {}), summary: { content: view.fallbackText } },
+    config: {
+      update_multi: view.mutable,
+      ...(view.width === "wide" ? { wide_screen_mode: true } : {}),
+      ...(view.streaming ? { streaming_mode: true } : {}),
+      ...(view.streaming && view.streamPresentation ? { streaming_config: {
+        print_frequency_ms: { default: view.streamPresentation.printFrequencyMs },
+        print_step: { default: view.streamPresentation.printStep },
+        print_strategy: view.streamPresentation.printStrategy
+      } } : {}),
+      summary: { content: view.fallbackText }
+    },
     ...(header ? { header } : {}),
     body: { elements: view.nodes.map(materializeNode) }
   };
@@ -78,6 +92,12 @@ function plainText(values: readonly unknown[]): string { return values.flatMap((
 function textContent(value: Record<string, unknown> | null | undefined): string | null { return typeof value?.content === "string" ? value.content : null; }
 function tone(value: unknown): GatewayTone | null { return value === "blue" || value === "green" || value === "orange" || value === "red" || value === "purple" || value === "grey" || value === "turquoise" ? value : null; }
 function buttonStyle(value: unknown): "primary" | "default" | "danger" | null { return value === "primary" || value === "default" || value === "danger" ? value : null; }
+function streamingPresentation(value: Record<string, unknown> | null): GatewayView["streamPresentation"] | null {
+  if (!value || !Number.isInteger(value.print_frequency_ms) || !Number.isInteger(value.print_step) || value.print_strategy !== "fast") return null;
+  const printFrequencyMs = Number(value.print_frequency_ms);
+  const printStep = Number(value.print_step);
+  return printFrequencyMs > 0 && printStep > 0 ? { printFrequencyMs, printStep, printStrategy: "fast" } : null;
+}
 function record(value: unknown, label: string): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`); return value as Record<string, unknown>; }
 function optionalRecord(value: unknown): Record<string, unknown> | null { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function array(value: unknown, label: string): unknown[] { if (!Array.isArray(value)) throw new Error(`${label} must be an array`); return value; }

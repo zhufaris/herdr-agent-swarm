@@ -9,11 +9,11 @@ export function lateAnswerTimelineResults(items: readonly AnswerTimelineItem[], 
   return frozen.flatMap((previous) => {
     const item = byId.get(previous.id);
     const lateId = `late:${previous.id}`;
-    if (!item || item.kind !== "tool" || item.state === "running" || fingerprint(item) === previous.fingerprint || frozenIds.has(lateId)) return [];
+    if (!item || item.kind !== "tool" || item.state === "running" || answerTimelineItemFingerprint(item) === previous.fingerprint || frozenIds.has(lateId)) return [];
     return [{ ...item, id: lateId, sequence: -1, label: `${item.label}（更新自第 ${previous.pageIndex + 1} 页）` }];
   });
 }
 
-function fingerprint(item: AnswerTimelineItem): string {
+export function answerTimelineItemFingerprint(item: AnswerTimelineItem): string {
   return createHash("sha256").update(JSON.stringify(item)).digest("hex");
 }

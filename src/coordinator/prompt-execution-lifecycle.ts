@@ -1,6 +1,7 @@
 import type { AgentTranscriptObservation } from "../domain/ports/external.js";
 import type { PromptJob } from "../domain/types.js";
 import { classifyPromptSubmissionFailure } from "../domain/prompt-submission.js";
+import { sameCanonicalTurnStart } from "../domain/turn-identity.js";
 
 export type PromptExecutionFailureDisposition =
   | { kind: "detach"; notice: string }
@@ -46,7 +47,7 @@ export function decideDetachedTurnTerminalOutcome(
 ): DetachedTurnTerminalOutcome {
   const lifecycle = observation.turnLifecycle;
   if (!traexProcessPresent || !lifecycle) return { kind: "pending" };
-  if (lifecycle.turnId !== prompt.transcriptTurnId || lifecycle.startedAt !== prompt.transcriptTurnStartedAt) return { kind: "pending" };
+  if (lifecycle.turnId !== prompt.transcriptTurnId || !prompt.transcriptTurnStartedAt || !sameCanonicalTurnStart(lifecycle.startedAt, prompt.transcriptTurnStartedAt)) return { kind: "pending" };
   if (lifecycle.state === "completed") {
     return lifecycle.finalAnswer === undefined
       ? { kind: "completed" }

@@ -6,6 +6,7 @@ export interface ToolActivityDescriptor {
   category: ToolActivityCategory;
   target: string;
   skillNames: string[];
+  inputPreview?: string;
 }
 
 export interface ProjectedToolCall {
@@ -18,6 +19,7 @@ const FAILURE_DETAIL_LIMIT = 4_000;
 const COMMAND_OUTPUT_LIMIT = 4_000;
 const FAILURE_LINE_LIMIT = 20;
 const NESTED_TOOL_INPUT_LIMIT = 64 * 1024;
+const INPUT_PREVIEW_LIMIT = 480;
 const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s"']+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
 export function projectToolCall(name: string, argumentsJson: string): ProjectedToolCall {
@@ -91,7 +93,15 @@ function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
   if (normalized === "exec_command" || normalized === "shell" || normalized === "bash" || normalized === "exec") {
     return descriptor("Command", firstValue(record, ["cmd", "command"]) ?? "");
   }
-  if (normalized === "wait" || normalized === "write_stdin" || normalized.includes("wait_agent")) {
+  if (normalized === "write_stdin") {
+    const session = firstValue(record, ["session_id", "cell_id", "target"]);
+    const inputPreview = typeof record?.chars === "string" ? boundInputPreview(record.chars) : "";
+    return {
+      ...descriptor("Wait", session ? "session " + session : name),
+      ...(inputPreview ? { inputPreview } : {})
+    };
+  }
+  if (normalized === "wait" || normalized.includes("wait_agent")) {
     const session = firstValue(record, ["session_id", "cell_id", "target"]);
     return descriptor("Wait", session ? "session " + session : name);
   }
@@ -110,7 +120,7 @@ function nestedToolCall(value: string): { name: string; arguments: unknown } | n
   const invocation = findToolInvocation(input);
   if (!invocation) return null;
   const fields: Record<string, unknown> = {};
-  for (const key of ["cmd", "command", "path", "query", "pattern", "task_name", "target"]) {
+  for (const key of ["cmd", "command", "chars", "session_id", "cell_id", "path", "query", "pattern", "task_name", "target"]) {
     const field = findStringField(input, invocation.bodyStart, invocation.bodyEnd, key);
     if (field) fields[key] = field;
   }
@@ -181,7 +191,13 @@ function findStringField(input: string, bodyStart: number, bodyEnd: number, key:
 }
 
 function decodeQuotedField(value: string): string {
-  return value.replace(/\\([\\"'])/g, "$1");
+  return value.replace(/\\(u[0-9a-fA-F]{4}|[\\"'nrt])/g, (_match, escape: string) => {
+    if (escape === "n") return "\n";
+    if (escape === "r") return "\r";
+    if (escape === "t") return "\t";
+    if (escape.startsWith("u")) return String.fromCharCode(Number.parseInt(escape.slice(1), 16));
+    return escape;
+  });
 }
 
 function skipWhitespace(value: string, start: number): number {
@@ -237,6 +253,17 @@ function boundTarget(value: string, escapeInlineMarkdown = true): string {
     .replace(/\s+/g, " ").trim();
   if (escapeInlineMarkdown) safe = safe.replaceAll("\\", "\\\\").replaceAll(String.fromCharCode(96), "\\" + String.fromCharCode(96));
   return safe.length <= TARGET_LIMIT ? safe : safe.slice(0, TARGET_LIMIT - 1).trimEnd() + "…";
+}
+
+function boundInputPreview(value: string): string {
+  const safe = redactToolActivitySecrets(value)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim();
+  const characters = [...safe];
+  if (characters.length <= INPUT_PREVIEW_LIMIT) return safe;
+  const suffix = "\n… 已截断，请在对应 Herdr Pane 查看完整输入。";
+  return characters.slice(0, Math.max(0, INPUT_PREVIEW_LIMIT - [...suffix].length)).join("").trimEnd() + suffix;
 }
 
 export function normalizeToolOutput(output: unknown): string {

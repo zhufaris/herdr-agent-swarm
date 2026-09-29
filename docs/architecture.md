@@ -38,7 +38,7 @@ projections. Feishu is the only production Gateway in this milestone.
                │ SDK / WebSocket      │ CLI / Socket / Agent Events│ lifecycle
                v                      v                           v
 ┌──────────────────────── Infrastructure adapters ────────────────────────┐
-│ Gateway plugin · Herdr adapter · PaneHost · TranscriptReader · health  │
+│ Gateway plugin · Herdr adapter · PaneHost · Core Event Reader · health │
 │ command runner · Agent drivers · worktree manager · SQLite bundle       │
 └─────────────────────────────┬────────────────────────────────────────────┘
                               │ concrete implementations
@@ -79,7 +79,7 @@ Gateway input
   -> routing and atomic prompt or command acceptance
   -> FIFO claim
   -> one fenced Herdr / TraeX effect
-  -> exact transcript observation
+  -> exact Core event turn observation
   -> durable view reduction and outbox intent
   -> frozen Gateway plan and Gateway-scoped lane claim
   -> ordered Gateway delivery
@@ -132,7 +132,7 @@ createBridgeRuntime
 │
 ├─ RuntimeEventIntegration
 ├─ createInfrastructureRuntime
-│    └─ built-in Gateway registry/session, Herdr, PaneHost, transcripts, drivers, worktrees
+│    └─ built-in Gateway registry/session, Herdr, PaneHost, Core events, drivers, worktrees
 ├─ createOutboundRuntime
 │    └─ projections, Answer/Main Card workflows, GatewayView, durable outbox drain
 ├─ createPrimaryRuntime
@@ -339,7 +339,7 @@ creator and generation checks remain additional fences for stateful operations.
 | Concern | Authority | Why |
 | --- | --- | --- |
 | Pane identity, terminal identity, native Agent session reference, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
-| Typed turn output, tool activity, lifecycle, and structured plan for a supported Agent turn | Exactly identified Herdr Core Agent Events source | Core decodes the native transcript once into a durable cursor stream. Swarm projects that stream into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
+| Typed turn output, tool activity, edited-file count, lifecycle, and structured plan for a supported Agent turn | Exactly identified Herdr Core Agent Events source | Core decodes the Agent-native source once into a durable cursor stream. Swarm projects that stream into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
 | Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
 | Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
 | Process lifecycle | user systemd service | The standalone `npm run swarm:*` commands control the service; the application does not manage PID files. |
@@ -356,7 +356,7 @@ pane state from a card. Reconcile against Herdr, then let the normal projection
 and durable Lark outbox converge the visible state.
 
 An operator can explicitly observe a binding blocked by an exact-owned detached
-prompt with `/swarm awake`. This path reopens the matching TraeX transcript
+prompt with `/swarm awake`. This path reopens the matching Core event turn
 immediately after the detached turn's exact completion boundary, or at the next
 distinct turn start when interruption left no completion record, adopts later
 turns in chronological order into separate Answer Cards, and then wakes the
@@ -373,13 +373,32 @@ input, interrupts TraeX, or replays the prompt.
 ### Herdr Core Agent Events boundary
 
 `HerdrEventsReader` is the sole structured reply facade used by coordinators.
-The bridge supplies the pane plus native Agent session identity and a descriptor
-that lets Core attach the source; only Core decodes TraeX or Pi records. Every
+The bridge supplies the pane, Agent kind, and expected native session ID; Core
+discovers exactly one source inside its allowlisted roots and alone decodes TraeX or Pi records. Every
 read is fenced by source ID, Agent kind, session ID, exact turn ID, and canonical
-start time. Cursor expiration after journal pruning restarts bounded recovery at
-Core's advertised retained floor. Unknown future payloads and unavailable or
-mismatched identities fail closed; neither legacy JSONL readers nor pane
-scrollback become a fallback reply authority.
+start time. Core advertises a retained cursor floor and first-boundary scans use
+it. When an already-open cursor expires after journal pruning, the reader accepts
+only Core's typed `cursor_expired` metadata and retries once from the advertised
+retained floor. Other errors and a repeated expiry fail closed. Unknown future
+payloads and unavailable or mismatched identities also fail closed; neither
+Agent-native JSONL nor pane scrollback becomes a fallback reply authority.
+
+The Agent-native JSONL files are still Core's source input and may also belong to
+the Agent's own recovery/history contract; Swarm does not delete or rewrite them.
+Core `attach` owns bounded source discovery and validates the pane, Agent kind,
+expected session ID, allowlisted root, session header, and foreground process.
+The Agent transcript roots must therefore be readable by the Herdr Core process.
+Core uses the owning user's default `~/.trae/cli/sessions` and
+`~/.pi/agent/sessions` roots; non-default deployments set
+`HERDR_TRAEX_TRANSCRIPT_ROOT` or `HERDR_PI_TRANSCRIPT_ROOT` in the Core process
+environment, not in the Swarm service environment. Missing, unreadable,
+ambiguous, or out-of-root sources fail closed.
+Core retains failed source metadata while any journal event remains addressable,
+then reclaims the terminal source row with the expired history so repeated Agent
+or Pane restarts cannot permanently exhaust the bounded source registry.
+Swarm contains no producer-specific JSONL decoder, cursor, projector, path
+locator, or session-root scan; headless smoke and coordinator tests use the Core
+Events reader or Core-shaped observations.
 
 ## Architecture and dependency direction
 
@@ -405,12 +424,12 @@ The production implementation uses the following modules and seams.
 | --- | --- | --- |
 | `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
 | `HealthSnapshotCollector` / `startHealthServer` | Coherent readiness/status observation and the loopback HTTP transport | The collector owns provider reads, bounded failure isolation, degradation policy, and caches; the server owns only routes, methods, status codes, and JSON |
-| `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
+| `DurableInboundPipeline` / `InboundMessageRoutingWorkflow` / `PromptAdmissionWorkflow` | Durable ingress FIFO, normalized routing, and atomic Prompt acceptance | Process-local hints carry only IDs; SQLite admission and claim state remain authoritative |
 | `SwarmCommandGateway` / `CommandIntentDispatcher` | Unified command ingress/admission and durable mutation execution, including CardKit and Primary-tool Worker creation | The facade owns resolution, queries, admission, and result adaptation; the dispatcher hides lane FIFO claims, frozen-context revalidation, external-effect uncertainty, accepted-only recovery, and shutdown |
-| `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted transcript turn |
+| `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted Core event turn |
 | `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
 | `InstanceMessagingWorkflow` / `WorkerTurnDispatcher` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Messaging persists through its focused store; dispatch uses `WorkerTurnDispatchStore`, Agent driver hooks, and exact observation watches |
-| `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
+| `WorkerTurnObserver` | Claims and follows the exact structured Core event turn owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
 | Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
 | `HerdrRuntimeReconciler` / `BindingReconciliationPass` / `BindingRuntimeConverger` | Reconciliation lifecycle, authoritative snapshot/pass traversal, and one generation-fenced Binding convergence | The facade owns cooldown, priority, diagnostics, and shutdown; the pass hides classification/discovery/pruning; the converger owns `RuntimeReconciliationStore` transitions and downstream effects |
 | `ModelSelectionWorkflow` / `PaneControlWorkflow` | Session-scoped model catalog/preferences plus Primary command adaptation and legacy control-row recovery | `TraexControlPort` plus shared exact-turn `TurnControlWorkflow`; no raw terminal-input seam |
@@ -440,7 +459,7 @@ responsibility is a business or application concern.
 | Current or broad term | Target term | Meaning |
 | --- | --- | --- |
 | `Binding` | `TopicPaneBinding` in explanatory and external-facing contexts | The controlled association between a Lark topic or root message and a Herdr pane. `Binding` remains an acceptable short internal domain term. |
-| `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
+| inbound coordination | `DurableInboundPipeline` plus `InboundMessageRoutingWorkflow` | Persists and claims inbound work before routing it to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
 | prompt execution | `PromptRunWorkflow` | Lifecycle facade for scheduling, safety, process-local ownership, recovery controls, and prompt-specific shutdown; dispatch and detached polling stay behind dedicated deep modules. |
 | `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
 | runtime event wiring | `RuntimeEventIntegration` | Composition owner for lifecycle fan-out, durable-work wake-ups, and the bounded Herdr hint connection; it exposes only reliability-specific interfaces. |
@@ -551,7 +570,7 @@ checkpoint, and startup convergence therefore share one pair of serialized
 workflow instances without exposing their storage capabilities to consumers.
 
 Instance orchestration follows the same consumer-first rule. Messaging, turn
-supervision, exact transcript observation, runtime reconciliation, and lifecycle
+supervision, exact Core event observation, runtime reconciliation, and lifecycle
 control each depend on a named store interface containing exactly their durable
 operations. The single SQLite instance capability structurally satisfies those
 interfaces, so narrowing the workflow seams adds no forwarding adapter and does
@@ -705,7 +724,7 @@ Every workflow-wake-up producer follows the durable-before-wake rule:
 For Herdr pane hints, `HerdrRuntimeReconciler` owns binding convergence and the
 corresponding external-turn observation as one ordered path. The event router
 must not invoke `ExternalTurnObserver` in parallel with binding reconciliation:
-that would duplicate transcript reads and race against binding lifecycle
+that would duplicate Core event reads and race against binding lifecycle
 changes. Instance-turn observation and retired-pane cleanup remain separate
 consumers because they own different durable aggregates.
 
@@ -781,7 +800,7 @@ context invalidation before waking the scheduler. A Worker claims at most one or
 a time. The Agent driver's dispatch receipt proves only that submission crossed
 the boundary; it is never interpreted as the task result. `WorkerTurnObserver`
 claims output ownership only when the instance generation, runtime turn ID, and
-canonical turn start time all match. Restart recovery reopens that transcript
+canonical turn start time all match. Restart recovery reopens that Core event turn
 boundary for observation and never calls the submission boundary again.
 The wake target is `WorkerTurnDispatcher`, a coordinator module rather than event
 infrastructure. Its process-local per-instance single flight only schedules work;
@@ -929,7 +948,7 @@ change during the target decomposition without changing these steps.
    priority turn when the Primary is idle. An active turn is rejected as
    unsupported without transport delivery or queue conversion. Both outcomes
    fence binding generation, pane, and native Agent session.
-   `/swarm awake` observes detached transcript state without terminalizing an
+   `/swarm awake` observes detached Core event state without terminalizing an
    unrecoverable prompt. `/swarm skip` is the separate creator-authorized,
    generation-fenced action that atomically fails one oldest detached ordinary
    prompt and wakes the existing FIFO dispatcher.
@@ -1004,22 +1023,22 @@ projected. A finished Answer page receives one final non-streaming green card
 update and is not subsequently patched.
 
 Interrupted running prompts are detached instead of replayed. On restart the
-bridge observes the surviving pane and canonical transcript. Answer and Main Card
+bridge observes the surviving pane and canonical Core event turn. Answer and Main Card
 projection resumes only for observations whose turn ID matches the prompt's exact
-persisted transcript identity. Completing the detached prompt and waking the next
+persisted Core event identity. Completing the detached prompt and waking the next
 FIFO item requires stronger evidence: the matching turn ID, the exact persisted
 canonical start time, a canonical `task_complete`, and a surviving TraeX process.
 Dispatch time admits only the first fresh `task_started` ownership claim. Herdr
 `idle` or composer readiness alone cannot settle a detached turn.
 Legacy detached prompts without an exact persisted turn identity remain uncertain,
-are not scheduled for automatic transcript observation, cannot consume later pane
+are not scheduled for automatic Core event observation, cannot consume later pane
 turns, and are never replayed. If completion cannot be proven, the prompt remains
 explicitly uncertain. If its binding later becomes archived, closed,
 failed, or orphaned, the durable work scan atomically fails both the detached
 prompt and its Run Card with an explicit no-replay notice; this retains audit
 history while preventing an unobservable turn from remaining operationally
 running forever. Detached turns on active, attached bindings remain automatically
-observable only when their exact transcript turn ID and canonical start time are
+observable only when their exact Core event turn ID and canonical start time are
 persisted.
 Jobs that never started remain queued.
 
@@ -1049,7 +1068,7 @@ surface and never substitutes the separate Codex executable. A live TraeX
 session must have the exact tuple `herdr:traex` / `traex` / `id` / non-empty
 thread ID. Legacy persisted `herdr:codex` and `herdr-traex-shim` tuples remain
 unaltered audit history, but are never treated as aliases and cannot pass
-reconciliation, recovery, transcript, model-control, or exact-turn fences.
+reconciliation, recovery, Core event, model-control, or exact-turn fences.
 Ordinary prompt submission uses the Agent CLI surface exclusively so its
 uncertain-dispatch/no-replay boundary is explicit.
 Active Herdr calls pass through a global transport circuit breaker inside the
@@ -1134,9 +1153,9 @@ Markdown element is updated through CardKit streaming rather than by repeatedly
 replacing the whole Lark message. The original Lark message remains the request
 record.
 
-For transcripts that expose structured history, `answer_timeline_items` is the
+For Core sources that expose structured history, `answer_timeline_items` is the
 canonical Primary and Worker Answer projection. Agent Markdown, Tool calls and
-results, lifecycle status, and the final answer retain transcript order and stable
+results, lifecycle status, and the final answer retain Core event order and stable
 item IDs. Primary and Worker cards use the same pure CardKit timeline renderer;
 Tool items are collapsed by default and their redacted command/result details are
 bounded before delivery. Historical rows without timeline items keep the legacy
@@ -1157,33 +1176,41 @@ process, terminal, and native Agent session identity; reconciliation persists
 that canonical tuple in SQLite. Before dispatch, Swarm attaches Core Agent
 Events at the current end. A fresh `turn_started` event establishes the durable
 turn fence. Messages, paired tool calls/results, plan updates, and terminal
-lifecycle events then retain Core order and stable IDs. Core redacts and bounds
-content before journaling; Swarm applies its presentation-specific bounds again
-before projection. `update_plan` updates the task list but is not rendered as a
+lifecycle events then retain Core order and stable IDs. Core bounds records, and
+Swarm applies secret redaction plus presentation-specific bounds before projection.
+Core's durable journal does not yet apply the same secret-shape redaction to tool
+arguments/results; closing that gap is a high-priority Core boundary hardening item.
+`update_plan` updates the task list but is not rendered as a
 normal tool row. Running tools may appear in Main Card **当前活动**; completed
-tools remain only in the Answer timeline.
+tools remain only in the Answer timeline. A completed TraeX `FileChange` item is
+projected by Core as a cumulative unique-file count for the active turn. Core
+keeps only hashed path identities in its decoder checkpoint and does not expose
+paths in the reply event; Swarm renders the count as one stable Edit item in the
+Answer timeline and updates that item as later edits arrive.
 
 If command settlement becomes uncertain, the binding worker hands its live
 cursor and accumulated Answer state to `DetachedPromptObserver`. After restart,
 the observer reopens the exact persisted `turnId + startedAt`, replays retained
 Agent messages, timeline items, plan state, and lifecycle, and publishes only a
 proven missing answer suffix or an explicit replace-all recovery. It never
-replays the prompt. Core journal pruning may remove older events; recovery starts
-at the advertised retained floor and fails closed when the exact boundary no
-longer exists.
+replays the prompt. Core journal pruning may remove older events. Fresh boundary
+lookup uses Core's retained source metadata. An already-open cursor that expires
+retries once from Core's advertised retained floor and never falls back to Agent
+JSONL or pane text; a repeated expiry or non-retention failure remains closed.
 
 Each turn selects one Answer source mode before dispatch. An exact, validated
 Core Agent Events source selects typed mode; otherwise structured output is unavailable and the
 turn logs one bounded reason: `missing_session_identity`,
 `unsupported_session_identity`, `transcript_not_found`,
-`ambiguous_transcript`, or `transcript_validation_failed`. These diagnostics do
-not include prompt text, transcript content, paths, or secrets. If a transcript
-read fails before any typed content is published, the turn changes to unavailable
+`ambiguous_transcript`, or `transcript_validation_failed`. These compatibility
+reason names remain in the domain contract, but the production reader is Core
+Agent Events. Diagnostics do not include prompt text, Agent event content, paths,
+or secrets. If a Core event read fails before any typed content is published, the turn changes to unavailable
 with `transcript_read_failed`. After any typed content has been published, the
 turn remains typed and finalizes from its accumulated typed chunks. When no typed
 content exists, completion uses the fixed safe notice
 `⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
-A transcript failure does not fail or replay the prompt.
+A Core event read failure does not fail or replay the prompt.
 
 For a bound pane, reconciliation also keeps an independent external-turn cursor
 with a lightweight two-second Agent Events poll between full Herdr reconciliations.
@@ -1192,18 +1219,21 @@ Pane establishes its cursor at Core's latest boundary and never scans retained
 history. Only a currently `working` or `blocked` Pane may recover Core's latest
 active turn. This prevents startup from importing completed history while still
 covering a direct Herdr request that was already in flight when the observer
-started. Core does not expose prompt text, so a directly initiated turn
-uses a fixed synthetic task description while its replies remain canonical.
+started. Core emits a bounded, redacted `human_message` event for a directly
+initiated turn. Swarm associates that message with the exact Core turn ID and
+renders it as separate Pane-request context; when recovery begins after that
+event is no longer available, Swarm uses a fixed synthetic description rather
+than reading terminal scrollback or guessing prompt text.
 Background polling pauses while the binding worker owns the turn
 boundary. Before that worker claims each queued Lark prompt, it performs one
-serialized handoff scan so external transcript work is adopted before the next
+serialized handoff scan so external Core event work is adopted before the next
 bridge dispatch; external completion wakes the binding worker to resume its FIFO.
 
 An Agent can return to `idle` without Core observing a matching `turn_completed`
 or `turn_aborted` event. That absence is not success evidence. For an exact external
 turn that remains `running` and `attached`, the observer requires two distinct
 durable Herdr observations later than the turn start, both `idle` or `done`, with
-no intervening transcript observation. Any transcript activity or non-idle state
+no intervening Core event observation. Any Core event activity or non-idle state
 resets the confirmation. It then attempts one transactional fail-closed transition
 fenced by Binding generation and attachment, Pane, Agent session, Prompt origin and
 state, exact turn ID/start time, Run Card generation, and durable runtime state.
@@ -1213,9 +1243,11 @@ request is never replayed and the bridge never fabricates a successful answer.
 The scan reads only durable active bindings and their Core Agent Events sources;
 it does not treat socket payloads as authoritative state. A new `turn_started`
 event may create one external durable prompt when binding generation, pane, and
-native session all match. Core intentionally does not expose prompt text, so the
-external prompt uses a fixed synthetic task description and never claims a queued
-Lark prompt by comparing request bodies.
+native session all match. When the exact turn exposes a bounded Core
+`human_message`, the external prompt retains it as Pane-request context. If that
+event is unavailable at the recovery boundary, the prompt uses a fixed synthetic
+description. Swarm never reads JSONL or terminal scrollback for prompt recovery
+and never claims a queued Lark prompt by comparing request bodies.
 The atomic SQLite transition records `execution_origin = 'herdr'`, claims the
 full Core turn ID, and reserves any initial card delivery before events enter the
 normal `BridgeEventBus` projection path; it never submits the request to the Agent
@@ -1260,22 +1292,22 @@ replaying a prompt. If the exact boundary is unavailable, observation falls back
 to the live EOF tail.
 
 Terminal content is not a control-plane source. Live pane/process/session
-identity uses Herdr; detached completion uses the canonical typed transcript;
+identity uses Herdr; detached completion uses the canonical Core event turn;
 ordinary prompts use `agent prompt --wait`, and
 interrupts use `agent send-keys`. Runtime text steering is unsupported and fails
 fast without invoking a transport or converting active work into another prompt. Terminal text
 never becomes Answer content, either live or during detached restart recovery.
 Typed detached recovery retains the persisted RunCard answer and may append only
 a bounded, redacted suffix whose replayed canonical text begins with that exact
-answer. Unprovable historical transcript text is ignored; a later canonical
+answer. Unprovable historical Agent output is ignored; a later canonical
 completion still supplies the final answer or the fixed safe notice when no
 typed answer exists.
 
-Typed output uses one shared 512 KiB per-turn aggregate bound in the transcript
+Typed output uses one shared 512 KiB per-turn aggregate bound in the Core event
 reader and observer accumulator. Crossing that hard limit records a stable
 truncation marker and suppresses later prose while lifecycle and progress
-observation continue. The larger aggregate feeds the existing 9,000-character
-Answer pagination protocol; it does not increase any single CardKit page. Worker
+observation continue. The larger aggregate feeds the 12,000-character final-Markdown
+Answer pagination budget; it does not increase any single CardKit page. Worker
 output retains its separate per-fragment sanitization before entering the shared
 bounded accumulator.
 
@@ -1283,7 +1315,7 @@ Rollout does not infer or migrate session identity. Existing panes without a
 native TraeX session identity complete with the fixed safe notice. A
 fresh bridge-created pane, or a pane explicitly reset through the bridge,
 becomes eligible for typed mode only after Herdr has published the native TraeX
-UUID and reconciliation has persisted it in SQLite. The bridge never matches a transcript
+UUID and reconciliation has persisted it in SQLite. The bridge never matches a Core source
 from cwd, timestamps, titles, or newest-file order, and it does not automatically
 restart or replace existing panes to enable typed output.
 
@@ -1390,7 +1422,7 @@ The live projector persists changed Agent-message observations into Topic View
 before it schedules Main Card convergence. Detached restart replay rebuilds the
 same projection from the exact retained Core event turn. Legacy Topic Views
 without the field hydrate with an empty list. Neither path reads terminal
-scrollback, native transcript files, or the visible Lark card as history.
+scrollback, Agent-native JSONL files, or the visible Lark card as history.
 
 SQLite saves the desired TopicView and reserves its `session_status` outbox row
 in one transaction. Initial creation uses `status-card:<bindingId>`; subsequent

@@ -143,9 +143,8 @@ export class SqliteStoreKernel implements TurnControlStore {
   reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerAnswerTimelineCard(input); }
   reserveWorkerRichTextUpdate(input: Parameters<SqliteWorkerTurnStore["reserveWorkerRichTextUpdate"]>[0]): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerRichTextUpdate(input); }
   reserveWorkerRichTextContinuation(input: Parameters<SqliteWorkerTurnStore["reserveWorkerRichTextContinuation"]>[0]): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerRichTextContinuation(input); }
-  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnContent(input); }
+  reserveWorkerTurnContent(input: Parameters<SqliteWorkerTurnStore["reserveWorkerTurnContent"]>[0]): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnContent(input); }
   listActionableWorkerTurnCardIds(): string[] { return this.workerTurns.listActionableWorkerTurnCardIds(); }
-  reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnProgress(input); }
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnFinish(input); }
   reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnCardHydration(input); }
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome { return this.workerTurns.reserveWorkerTurnContinuation(input); }
@@ -667,7 +666,7 @@ export class SqliteStoreKernel implements TurnControlStore {
   reserveRichTextAnswerUpdate(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished"; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome { return this.projections.reserveRichTextAnswerUpdate(input); }
   reserveRichTextAnswerContinuation(input: { promptId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome { return this.projections.reserveRichTextAnswerContinuation(input); }
 
-  reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
+  reserveAnswerContent(input: Parameters<SqliteProjectionStore["reserveAnswerContent"]>[0]): AnswerPageReservationOutcome {
     return this.projections.reserveAnswerContent(input);
   }
 

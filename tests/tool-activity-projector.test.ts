@@ -37,10 +37,11 @@ describe("tool activity projector", () => {
     expect(projected.descriptor).toEqual({ category: "Command", target: "", skillNames: [] });
   });
 
-  it("does not borrow fields from a later nested tool call", () => {
+  it("keeps fields scoped to the first nested tool call", () => {
     const projected = projectToolCall("exec", "tools.wait({cell_id: '123'}); tools.exec_command({cmd: 'npm test'});");
 
-    expect(projected.descriptor).toEqual({ category: "Wait", target: "wait", skillNames: [] });
+    expect(projected.descriptor).toEqual({ category: "Wait", target: "session 123", skillNames: [] });
+    expect(JSON.stringify(projected.descriptor)).not.toContain("npm test");
   });
 
   it("redacts secrets from command targets", () => {
@@ -106,6 +107,30 @@ describe("tool activity projector", () => {
 
     expect(projectToolResult(descriptor, JSON.stringify({ session_id: 263, output: "private partial output" }))).toBe(`… 等待命令完成 · ${target}`);
     expect(projectToolResult(descriptor, JSON.stringify({ exit_code: 0, output: "private final output" }))).toBe(`✓ 等待完成 · ${target}`);
+  });
+
+  it("keeps a bounded redacted write_stdin input preview without exposing control input", () => {
+    const code = "printf 'start'\nTOKEN=do-not-show\n" + "echo line\n".repeat(100);
+    const projected = projectToolCall("write_stdin", JSON.stringify({ session_id: 263, chars: code }));
+    const control = projectToolCall("write_stdin", JSON.stringify({ session_id: 263, chars: "\u0003\n" }));
+
+    expect(projected.descriptor).toMatchObject({ category: "Wait", target: "session 263" });
+    expect(projected.descriptor.inputPreview).toContain("printf 'start'");
+    expect(projected.descriptor.inputPreview).toContain("TOKEN=[REDACTED]");
+    expect(projected.descriptor.inputPreview).toContain("Herdr Pane");
+    expect(projected.descriptor.inputPreview!.length).toBeLessThanOrEqual(480);
+    expect(projected.descriptor.inputPreview).not.toContain("do-not-show");
+    expect(control.descriptor.inputPreview).toBeUndefined();
+  });
+
+  it("extracts write_stdin code from an exec wrapper", () => {
+    const projected = projectToolCall("exec", "const r = await tools.write_stdin({session_id: '263', chars: 'echo first\\necho second'}); text(r.output);");
+
+    expect(projected.descriptor).toMatchObject({
+      category: "Wait",
+      target: "session 263",
+      inputPreview: "echo first\necho second"
+    });
   });
 
   it("renders one semantic redacted fallback for a failed wait", () => {

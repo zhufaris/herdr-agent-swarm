@@ -24,7 +24,7 @@ import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessPromptWorkScheduler } from "../src/events/prompt-work-scheduler.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
-import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
+import { HerdrEventsReader } from "../src/runtime/herdr-events-reader.js";
 import { APPROVAL_POLICY_VERSION, classifyAction, fingerprintAction } from "../src/domain/approval-policy.js";
 
 const execute = process.argv.includes("--execute");
@@ -59,7 +59,7 @@ try {
   const herdr = new HerdrCliAdapter(runner, herdrBin, 180_000); const paneHost = new HerdrPaneHost(herdr);
   const drivers = new AgentDriverRegistry([new CodexDriver(herdr, codexBin, 180_000, true), new ClaudeCodeDriver(herdr, claudeBin, 180_000, true), new TraexDriver(herdr, traexBin, 180_000)]);
   store = new SqliteStoreKernel(databasePath);
-  const transcriptReader = new TraexTranscriptReader();
+  const transcriptReader = new HerdrEventsReader(runner, herdr, herdrBin);
   const workerObserver = new WorkerTurnObserver({ store, transcriptReader, wakeInstance: (instanceId) => scheduler?.wake(instanceId), wakeOutbound: () => undefined });
   scheduler = new InstanceWorkScheduler({ store, drivers, observer: workerObserver });
   const promptScheduler = new InProcessPromptWorkScheduler();

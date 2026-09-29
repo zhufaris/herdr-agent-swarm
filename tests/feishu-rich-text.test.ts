@@ -79,7 +79,7 @@ describe("Feishu rich-text materialization", () => {
     expect(materializeFeishuRichText(page.document)).toMatchObject({
       zh_cn: {
         content: expect.arrayContaining([
-          [{ tag: "md", text: "⚙️ Ran · ✓" }],
+          [{ tag: "md", text: "🖥️ Ran · npm test · ✅" }],
           [{ tag: "code_block", language: "BASH", text: "npm test" }]
         ])
       }

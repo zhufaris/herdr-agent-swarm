@@ -3,6 +3,7 @@ import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import type { RunProgressEvent } from "../domain/run-card-view.js";
 import type { RichTextDocument } from "../domain/rich-text.js";
 import { displayPaneIdentity } from "../domain/pane-display-identity.js";
+import { answerStatusPresentation, answerToolPresentation } from "./answer-presentation.js";
 import { renderLarkMarkdownPage } from "./lark-markdown.js";
 import { redactSecrets } from "./redact-secrets.js";
 
@@ -21,16 +22,6 @@ const TASK_LIST_VISIBLE_STEPS = 5;
 const ANSWER_TITLE_LIMIT = 200;
 const ANSI = /[\u001B\u009B][[\]\(\)#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 
-const TOOL_CATEGORY = {
-  read: { icon: "📖", label: "Read" },
-  search: { icon: "🔍", label: "Search" },
-  edit: { icon: "✏️", label: "Edit" },
-  command: { icon: "⚙️", label: "Ran" },
-  test: { icon: "🧪", label: "Test" },
-  step: { icon: "🛠️", label: "Step" }
-} as const;
-
-const TOOL_STATE = { running: "…", succeeded: "✓", failed: "✗" } as const;
 const TASK_STATE = { pending: "◻", active: "■", done: "✔", failed: "✕" } as const;
 
 export interface RichTextAnswerPage {
@@ -208,19 +199,18 @@ function markdownFromTimelineItems(items: readonly AnswerTimelineItem[]): string
 }
 
 function markdownFromTimelineItem(item: AnswerTimelineItem): string {
-  if (item.kind === "agent_message" || item.kind === "final_answer") return item.markdown.trim();
-  if (item.kind === "status") {
-    const status = item.state === "blocked"
-      ? "⚠️ 等待用户处理"
-      : item.state === "failed" ? "❌ 执行失败" : "⏳ 处理中";
-    return `${status} · ${safeInline(item.label, TOOL_LABEL_LIMIT)}`;
+  if (item.kind === "agent_message") return item.markdown.trim();
+  if (item.kind === "final_answer") {
+    const markdown = item.markdown.trim();
+    return markdown ? `✅ **最终回答**\n\n${markdown}` : "";
   }
-  const category = TOOL_CATEGORY[item.category] ?? TOOL_CATEGORY.step;
-  const command = (item.category === "command" || item.category === "test") && item.command ? bashCommandBlock(item.command) : "";
-  const source = safeInline(item.label, TOOL_LABEL_LIMIT);
-  const summary = command ? `${category.icon} ${category.label} · ${TOOL_STATE[item.state]}` : `${category.icon} ${category.label} · ${source} · ${TOOL_STATE[item.state]}`;
-  const preview = compactPreview(item.resultPreview, item.state);
-  return [summary, command, preview ? `> └ ${preview}` : ""].filter(Boolean).join(command ? "\n\n" : "\n");
+  if (item.kind === "status") {
+    return answerStatusPresentation(item).title;
+  }
+  const view = answerToolPresentation(item);
+  const command = view.command ? bashCommandBlock(view.command) : "";
+  const preview = compactPreview(view.result, item.state);
+  return [view.title, command, preview ? `> └ ${preview}` : ""].filter(Boolean).join(command ? "\n\n" : "\n");
 }
 
 function bashCommandBlock(value: string): string {

@@ -56,6 +56,7 @@ export class SqliteMigrations {
     this.cards.ensureRunCardQueueFeedbackColumn();
     this.cards.ensureRunCardRequestText();
     this.cards.ensureRunCardSpaceName();
+    this.cards.ensureRunCardRequestOrigin();
     this.cards.ensureRunCardSessionTitle();
     this.cards.ensureDualRequestCardColumns();
     this.cards.ensureRunCardAnswerState();
@@ -71,6 +72,7 @@ export class SqliteMigrations {
     this.binding.ensurePrimaryAgentKindColumns();
     this.binding.ensureBindingLifecycleColumns();
     this.binding.ensureBindingPaneTokenColumn();
+    this.cards.ensureRunCardPaneToken();
     this.binding.ensureBindingPrimaryToolCapabilities();
     this.binding.ensureBindingCreatorColumn();
     this.binding.ensureSessionOperations();

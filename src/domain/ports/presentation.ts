@@ -23,10 +23,10 @@ import type { AnswerTimelineItem } from "../answer-timeline.js";
 export interface PrimaryPresentation {
   mainCard(view: TopicViewState): object;
   paneEntryCard(view: TopicViewState): object;
-  answerCard(view: RunCardView, options?: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly AnswerTimelineItem[] }): object;
+  answerCard(view: RunCardView, options?: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly AnswerTimelineItem[]; showTaskList?: boolean }): object;
   disconnectedTopic(reason: "archived" | "unbound"): object;
   requestRejected(message: string): object;
-  finalAnswer(view: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly AnswerTimelineItem[] }): object | null;
+  finalAnswer(view: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly AnswerTimelineItem[]; showTaskList?: boolean }): object | null;
   answerStreamContent(view: RunCardView): string;
   answerStreamPage(content: string, pageStart: number, limit?: number): { page: string; nextPageStart: number | null };
   finalAnswerPage(content: string, pageStart: number, pageEnd?: number): { page: string; nextPageStart: number | null };
@@ -34,7 +34,7 @@ export interface PrimaryPresentation {
 }
 
 export interface WorkerPresentation {
-  workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options?: { initialContent?: string; timelineItems?: readonly AnswerTimelineItem[] }): object;
+  workerTurn(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options?: { initialContent?: string; timelineItems?: readonly AnswerTimelineItem[]; showTaskList?: boolean }): object;
   workerHumanReviewNotification(input: WorkerHumanReviewNotificationInput): object;
   workerTurnProgress(view: WorkerTurnCardView): string;
   turnControlResult(operation: TurnControlOperation): object;

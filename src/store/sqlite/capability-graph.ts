@@ -286,7 +286,7 @@ function publishCapabilities(graph: SqliteCapabilityGraph) {
     startupRecovery: new SqliteStartupRecoveryCapabilityStore(routing, graph.operations, (timestamp) => graph.migrations.canonicalizeLegacyAnswerTargets(timestamp)),
     startupViews: new SqliteStartupViewCapabilityStore(graph.prompts, graph.projections, graph.outbox),
     deliveryRecovery: new SqliteDeliveryRecoveryCapabilityStore(graph.outbox, graph.bindings, graph.projections, graph.operations, graph.workerThreads),
-    externalTurns: new SqliteExternalTurnCapabilityStore(graph.prompts, graph.promptDispatch, graph.externalTurnAdoption, graph.bindings),
+    externalTurns: new SqliteExternalTurnCapabilityStore(graph.prompts, graph.promptDispatch, graph.externalTurnAdoption, graph.bindings, graph.projections),
     instance: new SqliteInstanceCapabilityStore(graph.bindings, graph.instances, graph.workerTurns, graph.cardContexts, graph.projections, graph.promptDispatch, graph.instanceOperations),
     outbox: new SqliteOutboxCapabilityStore(graph.outbox, graph.bindings, graph.threadAliases, graph.projections, graph.promptDispatch, graph.inboundProjects, graph.workerTurns, graph.cardContexts),
     outboxAdmin: graph.outbox

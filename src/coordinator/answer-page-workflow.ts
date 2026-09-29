@@ -8,6 +8,7 @@ import type { AnswerPageConvergencePort } from "../domain/ports/card-convergence
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { continuationSummary } from "../domain/card-page-handoff.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
+import { isPureAgentMarkdownUpdate } from "../domain/answer-timeline-convergence.js";
 import { planRichTextAnswerPage, richTextAnswerTitle } from "../runtime/answer-rich-text.js";
 import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 
@@ -69,7 +70,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       if (!binding?.rootMessageId) return;
       outcome = this.store.reserveAnswerContinuation({
         promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId!, summary: plan.currentSummary,
-        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart, plan.nextPageStart).page })!,
+        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart, plan.nextPageStart).page, showTaskList: false })!,
         nextPageIndex: plan.nextPageIndex, nextPageStart: plan.nextPageStart, nextElementId: plan.nextElementId,
         rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion,
         card: this.presentation.answerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true }), workClass
@@ -126,8 +127,10 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
     const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenAnswerTimelineItems(view.promptId, page.pageIndex), page.pageIndex);
     const plan = this.presentation.answerTimelinePage(view.timelineItems, checkpoint.startCursor, this.planning.pageLimit, lateResults);
-    const card = this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, streaming: view.phase !== "completed", timelineItems: plan.items });
-    const outcome = this.store.reserveAnswerTimelineCard({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId!, card, cursor: plan.nextCursor, items: plan.items, ...(workClass ? { workClass } : {}) });
+    const tail = plan.items.at(-1);
+    const outcome = isPureAgentMarkdownUpdate(checkpoint, plan.items) && tail?.kind === "agent_message"
+      ? this.store.reserveAnswerContent({ promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId!, elementId: page.elementId, content: tail.markdown, timelineCursor: plan.nextCursor, timelineItems: plan.items, ...(workClass ? { workClass } : {}) })
+      : this.store.reserveAnswerTimelineCard({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId!, card: this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, streaming: view.phase !== "completed", timelineItems: plan.items }), cursor: plan.nextCursor, items: plan.items, ...(workClass ? { workClass } : {}) });
     if (outcome === "reserved") { this.wakeOutbound(); return; }
     const delivered = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
     if (delivered.pending || !sameCursor(delivered.deliveredCursor, plan.nextCursor)) return;
@@ -139,7 +142,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       const next = this.presentation.answerTimelinePage(view.timelineItems, plan.nextCursor, this.planning.pageLimit);
       const continuation = this.store.reserveAnswerContinuation({
         promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId!, messageId: page.messageId!, summary: continuationSummary(nextPageIndex),
-        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items })!,
+        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items, showTaskList: false })!,
         nextPageIndex, nextPageStart: nextPageIndex, nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, timelineStartCursor: plan.nextCursor, timelineEndCursor: next.nextCursor, timelineItems: next.items,
         card: this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, streaming: true, timelineItems: next.items }), workClass
       });

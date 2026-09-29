@@ -1,7 +1,4 @@
 import pino from "pino";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
 import { createTestRouter } from "./helpers/create-test-router.js";
@@ -12,9 +9,6 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { BridgeEvent } from "../src/domain/events.js";
-import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
-import { PiTranscriptReader } from "../src/runtime/pi-transcript.js";
-import { piTranscriptDescriptor } from "../src/runtime/agents/pi-transcript-identity.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -236,9 +230,9 @@ describe("coordinator concurrency controls", () => {
       await coordinator.handleMessage({ eventId: "alias-e1", messageId: "alias-m1", chatId: "chat", topicId: "alias-topic", rootMessageId: "alias-root", actorOpenId: "user", text: "continue here", mentionsBot: false, isRootMessage: false });
       const prompt = store.listRunCards("b1").find((view) => view.requestText === "continue here")!;
       expect(prompt).toBeDefined();
-      const answerCreate = store.database.prepare("SELECT prompt_id, kind, intent_kind, root_message_id, state FROM outbound_replies WHERE prompt_id = ? AND intent_kind = 'rich-text-reply'").get(prompt.promptId) as { prompt_id: string; kind: string; intent_kind: string; root_message_id: string; state: string };
-      expect(answerCreate).toMatchObject({ prompt_id: prompt.promptId, kind: "text", intent_kind: "rich-text-reply", root_message_id: "alias-root" });
-      expect(answerCreate.state).not.toBe("dead_letter");
+      const answerCreate = store.database.prepare("SELECT prompt_id, kind, intent_kind, root_message_id, state, error FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.promptId) as { prompt_id: string; kind: string; intent_kind: string; root_message_id: string; state: string; error: string | null };
+      expect(answerCreate).toMatchObject({ prompt_id: prompt.promptId, kind: "stream_card_create", intent_kind: "stream-card", root_message_id: "alias-root" });
+      expect(answerCreate.error).toBeNull();
       expect(store.getBinding("b1")).toMatchObject({ rootMessageId: "canonical-root", topicId: "canonical-topic" });
     } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
   });
@@ -340,9 +334,9 @@ describe("coordinator concurrency controls", () => {
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "legacy" }; },
       async updateCard() {},
-      async replyRichText() {
+      async replyStreamingCard() {
         if (failReply) { failReply = false; throw Object.assign(new Error("temporary"), { response: { status: 503 } }); }
-        return { messageId: "answer-1" };
+        return { messageId: "answer-1", cardId: "answer-card-1" };
       },
       async updateRichText() {}
     };
@@ -832,27 +826,23 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("boundedly drains a real transcript to claim a turn after inherited and unscoped batches", async () => {
+  it("boundedly drains Core-shaped observations to claim a turn after inherited and unscoped batches", async () => {
     const sessionId = "01a03eb1-c193-7531-83c0-e6c6f70143d4";
     const turnA = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     const turnB = "01a052d3-9c14-70e1-a375-397e2ecb55ea";
-    const root = await mkdtemp(join(tmpdir(), "attached-turn-drain-"));
-    const path = join(root, "2026", "08", "30", `rollout-${sessionId}.jsonl`);
-    await mkdir(dirname(path), { recursive: true });
-    const envelope = (type: string, payload: unknown) => `${JSON.stringify({ type, payload })}\n`;
-    const mutation = (items: unknown[]) => envelope("history_mutation", { operation: "append", items });
-    await writeFile(path, [envelope("session_meta", { id: sessionId }), envelope("event_msg", { type: "task_started", turn_id: turnA, started_at: Math.floor(Date.now() / 1_000) })].join(""));
-    const transcriptReader = new TraexTranscriptReader({ sessionsRoot: root });
+    const startedAt = new Date().toISOString();
+    let available = false;
+    const observations = [
+      { turnId: turnA, answerDelta: "", turnLifecycle: { turnId: turnA, startedAt, state: "completed" as const } },
+      { answerDelta: "Must not publish" },
+      { turnId: turnB, freshTurnStart: true, answerDelta: "Owned B answer", turnLifecycle: { turnId: turnB, startedAt, state: "completed" as const, finalAnswer: "Owned B answer" } }
+    ];
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() { return available ? observations.shift() ?? { answerDelta: "" } : { answerDelta: "" }; } } }; }
+    };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       await onDispatched?.();
-      const nowSeconds = Math.floor(Date.now() / 1_000);
-      await appendFile(path, [
-        envelope("event_msg", { type: "task_complete", turn_id: turnA, started_at: nowSeconds, completed_at: nowSeconds }),
-        mutation([{ type: "message", id: "unscoped", role: "assistant", content: [{ type: "output_text", text: "Must not publish" }] }]),
-        envelope("event_msg", { type: "task_started", turn_id: turnB, started_at: nowSeconds }),
-        mutation([{ type: "message", id: "answer-b", role: "assistant", content: [{ type: "output_text", text: "Owned B answer" }] }]),
-        envelope("event_msg", { type: "task_complete", turn_id: turnB, started_at: nowSeconds, completed_at: nowSeconds })
-      ].join(""));
+      available = true;
       return "done" as const;
     });
     const herdr: HerdrPort = { ...emptyHerdr(), async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; }, runPrompt };
@@ -869,42 +859,25 @@ describe("coordinator concurrency controls", () => {
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Owned B answer" }));
       expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)?.transcriptTurnId).toBe(turnB);
       expect(runPrompt).toHaveBeenCalledOnce();
-    } finally {
-      await coordinator.stop(); await publisher.stop(); store.close(); await rm(root, { recursive: true, force: true });
-    }
+    } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
   });
 
   it("projects a Pi Core Agent Events turn into the durable Answer Card without terminal fallback", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-answer-integration-"));
-    const descriptor = piTranscriptDescriptor(root, "b1", 1);
-    const path = join(descriptor.sessionDir, `2026-09-25T12-00-00_${descriptor.sessionId}.jsonl`);
     const turnId = "7f6eef5c-887d-4d40-81f9-0068ba979a45";
     const sources: Parameters<AgentTranscriptReaderPort["open"]>[0][] = [];
-    const reader = new PiTranscriptReader({ root });
+    let available = false;
+    let emitted = false;
     const transcriptReader: AgentTranscriptReaderPort = {
-      async open(source) { sources.push(source); return reader.open(source); },
-      async openActiveTurn(source) { return reader.openActiveTurn!(source); },
-      async openFirstTurn(source) { return reader.openFirstTurn!(source); },
-      async openAtTurn(source, id, startedAt) { return reader.openAtTurn!(source, id, startedAt); },
-      async openAfterTurn(source, id, startedAt) { return reader.openAfterTurn!(source, id, startedAt); }
+      async open(source) { sources.push(source); return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
+        if (!available || emitted) return { answerDelta: "" };
+        emitted = true;
+        const startedAt = new Date().toISOString();
+        return { turnId, freshTurnStart: true, answerDelta: "Pi durable answer", mainStatus: { tokenCount: 42 }, turnLifecycle: { turnId, startedAt, state: "completed" as const, finalAnswer: "Pi durable answer" } };
+      } } }; }
     };
-    const runPrompt = vi.fn(async (_paneId: string, text: string, _timeoutMs: number, onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       await onDispatched?.();
-      await mkdir(descriptor.sessionDir, { recursive: true });
-      const startedAt = new Date().toISOString();
-      const completedAt = new Date(Date.now() + 1).toISOString();
-      const lines = [
-        { type: "session", id: descriptor.sessionId, timestamp: startedAt, cwd: "/repo" },
-        { type: "message", id: turnId, parentId: null, timestamp: startedAt, message: { role: "user", content: text, timestamp: Date.now() } },
-        { type: "message", id: "56d49143-881a-4563-aa93-8bf6539ecfac", parentId: turnId, timestamp: completedAt, message: {
-          role: "assistant",
-          content: [{ type: "thinking", thinking: "private chain of thought" }, { type: "text", text: "Pi durable answer" }],
-          stopReason: "stop",
-          usage: { totalTokens: 42 },
-          timestamp: Date.now() + 1
-        } }
-      ];
-      await writeFile(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+      available = true;
       await onObservation?.({ state: "working", stateSource: "herdr", output: "SECRET_TERMINAL_SENTINEL" });
       return "done" as const;
     });
@@ -918,12 +891,12 @@ describe("coordinator concurrency controls", () => {
     const bus = new BridgeEventBus();
     const lark = quietLark();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader, false, undefined, root);
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader, false, undefined, "/tmp/pi-core-events-test");
     try {
       store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Pi task", agentKind: "pi" });
       store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
       await coordinator.start();
-      await coordinator.handleMessage({ eventId: "pi-jsonl-e1", messageId: "pi-jsonl-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "analyze CI", mentionsBot: false, isRootMessage: false });
+      await coordinator.handleMessage({ eventId: "pi-core-events-e1", messageId: "pi-core-events-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "analyze CI", mentionsBot: false, isRootMessage: false });
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Pi durable answer" }));
 
       const card = store.listRunCards("b1")[0]!;
@@ -931,9 +904,7 @@ describe("coordinator concurrency controls", () => {
       expect(store.getPrompt(card.promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: expect.any(String) });
       expect(card.answer).not.toMatch(/不支持结构化输出|private chain of thought|SECRET_TERMINAL_SENTINEL/);
       expect(runPrompt).toHaveBeenCalledOnce();
-    } finally {
-      await coordinator.stop(); await publisher.stop(); store.close(); await rm(root, { recursive: true, force: true });
-    }
+    } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
   });
 
   it("stops a bounded final drain before republishing an identical owned observation", async () => {
@@ -1013,7 +984,7 @@ describe("coordinator concurrency controls", () => {
         expect(session).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId });
         let read = false;
         return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
-          const freshTurnStart = !read; const answerDelta = read ? "" : "authoritative JSONL answer"; read = true;
+          const freshTurnStart = !read; const answerDelta = read ? "" : "authoritative Core event answer"; read = true;
           return { turnId, freshTurnStart, answerDelta, turnLifecycle: { turnId, state: "active", startedAt: new Date().toISOString() } };
         } } };
       }
@@ -1041,7 +1012,7 @@ describe("coordinator concurrency controls", () => {
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
 
     expect(opens).toEqual([null, sessionId]);
-    expect(store.listRunCards("b1")[0]!.answer).toBe("authoritative JSONL answer");
+    expect(store.listRunCards("b1")[0]!.answer).toBe("authoritative Core event answer");
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
@@ -1066,8 +1037,7 @@ describe("coordinator concurrency controls", () => {
           emitted = true;
           return { turnId, freshTurnStart: true, requestText: "first native turn", answerDelta: "authoritative first-turn answer", turnLifecycle: { turnId, state: "completed", startedAt, finalAnswer: "authoritative first-turn answer" } };
         } } };
-      },
-      async openFirstTurn(source) { return this.open(source); }
+      }
     };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       dispatched = true;
@@ -1117,7 +1087,7 @@ describe("coordinator concurrency controls", () => {
         if (opens === 1) return { mode: "unavailable", reason: "transcript_not_found" };
         let read = false;
         return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
-          const freshTurnStart = !read; const answerDelta = read ? "" : "JSONL created after session report"; read = true;
+          const freshTurnStart = !read; const answerDelta = read ? "" : "Core event source created after session report"; read = true;
           return { turnId, freshTurnStart, answerDelta, turnLifecycle: { turnId, state: "active", startedAt: new Date().toISOString() } };
         } } };
       }
@@ -1145,7 +1115,7 @@ describe("coordinator concurrency controls", () => {
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
 
     expect(opens).toBe(2);
-    expect(store.listRunCards("b1")[0]!.answer).toBe("JSONL created after session report");
+    expect(store.listRunCards("b1")[0]!.answer).toBe("Core event source created after session report");
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();

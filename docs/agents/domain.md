@@ -25,11 +25,12 @@ This repository uses a multi-context layout:
 │       ├── prompt-execution/CONTEXT.md
 │       ├── worker-runtime/CONTEXT.md
 │       ├── conversation-projection/CONTEXT.md
-│       └── delivery-operations/CONTEXT.md
+│       ├── delivery-operations/CONTEXT.md
+│       └── agent-observation/CONTEXT.md
 └── src/
 ```
 
-The current contexts are Primary Session, Prompt Execution, Worker Runtime, Conversation Projection, and Delivery and Operations. `CONTEXT-MAP.md` is the routing authority when contexts are added, renamed, or split.
+The current contexts are Primary Session, Prompt Execution, Worker Runtime, Conversation Projection, Delivery and Operations, and Agent Observation Boundary. `CONTEXT-MAP.md` is the routing authority when contexts are added, renamed, or split.
 
 ## Use the glossary's vocabulary
 

@@ -18,8 +18,9 @@ current supported behavior and its boundaries.
 | Inspect an earlier decision or completed implementation plan | [Historical documentation](archive/README.md) |
 
 The [interactive architecture diagram](herdr-agent-swarm-architecture.html) is a
-visual companion to the architecture guide. The static diagram appears in the
-repository README.
+visual companion to the architecture guide. Its validated, reviewable source is
+[`herdr-agent-swarm-architecture.json`](herdr-agent-swarm-architecture.json).
+Superseded static diagrams and visual-check evidence live in the archive.
 
 ## Current authority
 

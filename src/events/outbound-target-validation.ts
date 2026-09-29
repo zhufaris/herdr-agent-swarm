@@ -1,6 +1,6 @@
 import type { OutboxStore } from "../domain/ports/outbox.js";
 import { answerElementId } from "../domain/run-card-view.js";
-import { workerTurnElementId, workerTurnProgressElementId } from "../domain/worker-turn-card-view.js";
+import { workerTurnElementId } from "../domain/worker-turn-card-view.js";
 
 export class PermanentDeliveryError extends Error {}
 
@@ -25,6 +25,12 @@ export function assertAnswerCardCreateTarget(
   if (!view || view.bindingId !== bindingId || !validRoot) throw new PermanentDeliveryError(`Answer card create target mismatch for prompt ${promptId}`);
   if (!stream) {
     if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0) throw new PermanentDeliveryError(`Initial answer card create is stale for prompt ${promptId}`);
+    return;
+  }
+  if (stream.pageIndex === 0) {
+    const expectedElementId = answerElementId(promptId, 0);
+    const cardElementIds = collectElementIds(card);
+    if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0 || stream.pageStart !== 0 || stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== expectedElementId)) throw new PermanentDeliveryError(`Initial answer card create is stale for prompt ${promptId}`);
     return;
   }
   const expectedPageStart = stream.deliveryMode === "static" ? stream.pageStart === view.answerPageStart : stream.pageStart > view.answerPageStart;
@@ -94,21 +100,13 @@ export function assertWorkerCardCreateTarget(
   if (!page || page.pageStart !== stream.pageStart || page.elementId !== stream.elementId || page.messageId || page.cardId) throw new PermanentDeliveryError(`Worker card page target mismatch for turn ${turnId}`);
   const expectedElementId = workerTurnElementId(turnId, stream.pageIndex);
   const cardElementIds = collectElementIds(card);
-  const expectedProgressElementId = workerTurnProgressElementId(turnId, stream.pageIndex);
-  const allowedElementIds = new Set([expectedProgressElementId, expectedElementId]);
-  const outputElementIsValid = view.phase === "completed" ? cardElementIds.includes(expectedElementId) : !cardElementIds.includes(expectedElementId);
-  if (stream.elementId !== expectedElementId || !cardElementIds.includes(expectedProgressElementId) || !outputElementIsValid || cardElementIds.some((id) => !allowedElementIds.has(id))) throw new PermanentDeliveryError(`Worker card element mismatch for turn ${turnId}`);
+  if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== expectedElementId)) throw new PermanentDeliveryError(`Worker card element mismatch for turn ${turnId}`);
 }
 
 export function assertWorkerCardTarget(store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, cardId: string, elementId?: string): void {
   const view = store.loadWorkerTurnCard(turnId);
   const page = store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === view?.pageIndex);
   if (!view || !page || page.cardId !== cardId || (elementId !== undefined && page.elementId !== elementId)) throw new PermanentDeliveryError(`Worker card target mismatch for turn ${turnId}`);
-}
-
-export function assertWorkerProgressTarget(store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, cardId: string, elementId: string, pageIndex: number): void {
-  const page = store.listWorkerTurnCardPages(turnId).find((candidate) => candidate.pageIndex === pageIndex);
-  if (!page || page.cardId !== cardId || elementId !== workerTurnProgressElementId(turnId, pageIndex)) throw new PermanentDeliveryError(`Worker progress target mismatch for turn ${turnId}`);
 }
 
 export function assertWorkerMessageTarget(store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, messageId: string): void {

@@ -9,11 +9,12 @@ import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 import { callbackButton, formSubmitButton } from "./cardkit-button.js";
 import { actionRow, cardSection, lifecycleMarker, passiveCardElements, recentItems } from "./card-style.js";
-import { renderProgressTimeline } from "./progress-timeline.js";
-import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-content.js";
+import { renderProgressTimeline, renderTaskList } from "./progress-timeline.js";
+import { foldFinalAnswerContent } from "./final-answer-content.js";
 import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS } from "../domain/swarm-command.js";
 import { renderAnswerTimeline } from "./answer-timeline.js";
 import { currentMainCardActivity } from "../domain/main-card-activity.js";
+import { attachActiveAnswerSlot } from "./active-answer-slot.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -199,7 +200,7 @@ export function renderRequestRunCard(input: RunCardView): object {
   };
 }
 
-export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] } = {}): object {
+export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[]; showTaskList?: boolean } = {}): object {
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
   const streaming = options.streaming ?? input.phase !== "completed";
@@ -209,22 +210,24 @@ export function renderRequestAnswerCard(input: RunCardView, options: { pageNumbe
     ? options.initialContent
     : defaultAnswerContent(input, stepProgress);
   const firstPage = pageNumber === 1;
-  const showProgress = firstPage && (input.phase === "queued" || input.phase === "running" || input.phase === "blocked");
   const elements: object[] = [{ tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) }];
-  if (showProgress) elements.push(...renderProgressTimeline(input.progressEvents, input.phase, { summary }));
+  elements.push(...paneRequestElements(input, pageNumber));
   if (firstPage && input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
   if (firstPage && input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   if (firstPage) elements.push(...workerActivityElements(input));
   if (firstPage && isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
   const timelineItems = options.timelineItems ?? input.timelineItems;
-  const answerElements = timelineItems.length > 0 && (options.timelineItems !== undefined || (input.phase === "completed" && options.initialContent === undefined))
+  const usesTimeline = timelineItems.length > 0 && (options.timelineItems !== undefined || (input.phase === "completed" && options.initialContent === undefined));
+  const answerElements = usesTimeline
     ? renderAnswerTimeline(timelineItems)
     : [{ tag: "markdown", content }];
-  attachElementIdToFirstMarkdown(answerElements, input.answerElementId);
+  attachActiveAnswerSlot(answerElements, input.answerElementId, streaming, !usesTimeline || timelineItems.at(-1)?.kind === "agent_message");
   elements.push({ tag: "hr" }, ...answerElements);
+  if (options.showTaskList !== false) elements.push(...renderTaskList(input.progressEvents, input.phase));
   return {
     schema: "2.0", config: {
-      update_multi: true, streaming_mode: streaming,
+      update_multi: true, wide_screen_mode: true, streaming_mode: streaming,
+      ...(streaming ? { streaming_config: { print_frequency_ms: 70, print_step: 1, print_strategy: "fast" } } : {}),
       summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` }
     },
     header: {
@@ -260,17 +263,16 @@ function effectiveProgressSummary(summary: RunProgressSummary, events: readonly 
   return summary.total === 0 && events.length > 0 ? summarizeProgress(events) : summary;
 }
 
-export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] }, payloadLimit = 12_000): object | null {
+export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[]; showTaskList?: boolean }, payloadLimit = 12_000): object | null {
   const pageNumber = options.pageNumber ?? 1;
   const timelineItems = options.timelineItems ?? input.timelineItems;
   const elements = timelineItems.length > 0 && (options.timelineItems !== undefined || (pageNumber === 1 && input.answerPageIndex === 0))
     ? renderAnswerTimeline(timelineItems, payloadLimit)
     : foldFinalAnswerContent(options.initialContent, payloadLimit);
-  if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const workerElements = pageNumber === 1 ? workerActivityElements(input) : [];
   return {
     schema: "2.0",
-    config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
+    config: { update_multi: true, wide_screen_mode: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
       title: { tag: "plain_text", content: input.phase === "completed" ? (pageNumber > 1 ? `✅ ${agentLabel(input.agentKind)} 回复已完成 · 第 ${pageNumber} 页` : `✅ ${agentLabel(input.agentKind)} 回复已完成`) : (pageNumber > 1 ? `✨ ${agentLabel(input.agentKind)} 回复 · 第 ${pageNumber} 页` : `✨ ${agentLabel(input.agentKind)} 回复`) },
       subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
@@ -278,10 +280,17 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
     },
     body: { elements: [
       { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
+      ...paneRequestElements(input, pageNumber),
       ...workerElements,
-      ...elements
+      ...elements,
+      ...(options.showTaskList === false ? [] : renderTaskList(input.progressEvents, input.phase))
     ] }
   };
+}
+
+function paneRequestElements(input: RunCardView, pageNumber: number): object[] {
+  if (pageNumber !== 1 || input.requestOrigin !== "herdr-pane" || !input.requestText.trim()) return [];
+  return [{ tag: "markdown", content: `**💬 Pane 请求**\n\n${truncateLarkMarkdown(input.requestText, 2_000)}` }];
 }
 
 function workerActivityElements(input: RunCardView): object[] {
@@ -290,18 +299,6 @@ function workerActivityElements(input: RunCardView): object[] {
   const elements: object[] = [{ tag: "markdown", content: `${cardSection("🤖", "Worker 动态")}\n${workers.map((worker) => `- ${worker.name} · ${worker.latestPhase} · ${worker.latestTaskTitle}${worker.taskCount > 1 ? ` · ${worker.taskCount} 个任务` : ""}`).join("\n")}` }];
   for (const worker of workers) if (worker.latestTaskCard.messageId) elements.push(callbackButton(`打开 ${worker.name} Task`, { action: "card_target_open", ...worker.latestTaskCard }, "default"));
   return elements;
-}
-
-function attachElementIdToFirstMarkdown(elements: FinalAnswerElement[], elementId: string): boolean {
-  for (const element of elements) {
-    if (element.tag === "markdown") {
-      element.element_id = elementId;
-      return true;
-    }
-    const nested = element.elements;
-    if (Array.isArray(nested) && attachElementIdToFirstMarkdown(nested as FinalAnswerElement[], elementId)) return true;
-  }
-  return false;
 }
 
 function renderLiveStatus(status: NonNullable<TopicViewState["liveStatus"]>, phase: TopicViewPhase): object[] {
@@ -503,7 +500,8 @@ function agentPaneTitle(input: Pick<TopicViewState, "agentKind" | "spaceName" | 
 function agentLabel(kind: AgentKind | undefined): string { return AGENT_LABEL[kind ?? "traex"]; }
 function boundedTitle(title: string): string { return truncate(title.replace(/\s+/g, " " ).trim() || "未命名任务", 64); }
 function answerCardSubtitle(input: RunCardView): string {
-  const sessionTitle = input.sessionTitle?.trim() || [input.spaceName, displayPaneIdentity(input)].filter(Boolean).join(" / " ) || "unknown";
+  const paneIdentity = displayPaneIdentity(input, "");
+  const sessionTitle = paneIdentity ? [input.spaceName, paneIdentity].filter(Boolean).join(" / " ) : input.sessionTitle?.trim() || "unknown";
   return boundedTitle(`${sessionTitle} · ${input.title}`);
 }
 function requestSummaryLabel(phase: RunCardView["phase"]): string {

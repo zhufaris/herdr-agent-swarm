@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { HerdrPort, AgentTranscriptObservation, AgentTranscriptReaderPort } from "../domain/ports/external.js";
+import { sameCanonicalTurnStart } from "../domain/turn-identity.js";
 import type { PromptDispatchStore } from "../domain/ports/prompt-run.js";
 import type { Binding, PromptJob } from "../domain/types.js";
 import { ExactTurnObserver, type ExactTurnCursor } from "../runtime/exact-turn-observer.js";
@@ -238,7 +239,9 @@ export class TranscriptObserver {
       if (outcome.prompt) ownedPrompt = outcome.prompt;
       if (outcome.state === "claimed") this.options.logger.info({ event: "transcript-turn-owned", bindingId: binding.id, promptId: current.id, paneId: binding.paneId, turnId: observation.turnId, outcome: "claimed" }, "claimed exact TraeX transcript turn ownership");
     }
-    const detachedIdentityMatches = ownedPrompt.observationState !== "detached" || observation.turnLifecycle?.startedAt === ownedPrompt.transcriptTurnStartedAt;
+    const detachedIdentityMatches = ownedPrompt.observationState !== "detached"
+      || Boolean(observation.turnLifecycle && ownedPrompt.transcriptTurnStartedAt
+        && sameCanonicalTurnStart(observation.turnLifecycle.startedAt, ownedPrompt.transcriptTurnStartedAt));
     const owned = ownedPrompt.transcriptTurnId !== null && observation.turnId === ownedPrompt.transcriptTurnId && detachedIdentityMatches;
     if (!owned && ownedPrompt.transcriptTurnId) this.logConflict(binding, current.id, ownedPrompt.transcriptTurnId, observation.turnId);
     return { owned, prompt: ownedPrompt, observation };

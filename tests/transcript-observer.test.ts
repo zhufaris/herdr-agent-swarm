@@ -9,14 +9,31 @@ const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
 const startedAt = "2026-09-13T00:00:00.000Z";
 
 describe("TranscriptObserver detached output recovery", () => {
+  it("owns a detached Core event when only legacy subsecond precision differs", () => {
+    const legacy = { ...prompt(), transcriptTurnStartedAt: "2026-09-13T00:00:00.987Z" };
+    const observer = new TranscriptObserver({
+      store: { getBinding: () => binding(), getPrompt: () => legacy, claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => null },
+      reader: { open: vi.fn() }, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
+      isBindingActive: () => true, isStopping: () => false, publishObservation: vi.fn()
+    });
+
+    expect(observer.own(binding(), legacy, {
+      turnId, answerDelta: "trusted",
+      turnLifecycle: { turnId, state: "completed", startedAt, finalAnswer: "trusted" }
+    }).owned).toBe(true);
+    expect(observer.own(binding(), legacy, {
+      turnId, answerDelta: "foreign",
+      turnLifecycle: { turnId, state: "completed", startedAt: "2026-09-13T00:00:01Z", finalAnswer: "foreign" }
+    }).owned).toBe(false);
+  });
+
   it("replaces a legacy-truncated snapshot from the exact replayed turn", async () => {
     const prefix = "x".repeat(64 * 1024 - TURN_OUTPUT_TRUNCATION_MARKER.length);
     const persisted = `${prefix}${TURN_OUTPUT_TRUNCATION_MARKER}`;
     const replayed = `${prefix}\n\ncontinued after the old boundary`;
     let read = false;
     const reader: AgentTranscriptReaderPort = {
-      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
-      async openAtTurn() { return { mode: "typed", cursor: {
+      async open(_source, boundary) { return boundary.kind !== "at" ? { mode: "unavailable", reason: "transcript_not_found" } : { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
           if (read) return { answerDelta: "" };
@@ -47,8 +64,7 @@ describe("TranscriptObserver detached output recovery", () => {
     const persisted = `${"x".repeat(64 * 1024 - TURN_OUTPUT_TRUNCATION_MARKER.length)}${TURN_OUTPUT_TRUNCATION_MARKER}`;
     let read = false;
     const reader: AgentTranscriptReaderPort = {
-      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
-      async openAtTurn() { return { mode: "typed", cursor: {
+      async open(_source, boundary) { return boundary.kind !== "at" ? { mode: "unavailable", reason: "transcript_not_found" } : { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
           if (read) return { answerDelta: "" };
@@ -77,8 +93,7 @@ describe("TranscriptObserver detached output recovery", () => {
     let read = false;
     const timelineDeltas = [{ kind: "agent_message" as const, id: "message:1", sequence: 1, markdown: "Recovered" }];
     const reader: AgentTranscriptReaderPort = {
-      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
-      async openAtTurn() { return { mode: "typed", cursor: {
+      async open(_source, boundary) { return boundary.kind !== "at" ? { mode: "unavailable", reason: "transcript_not_found" } : { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
           if (read) return { answerDelta: "" };
@@ -103,8 +118,7 @@ describe("TranscriptObserver detached output recovery", () => {
     let read = false;
     const agentMessages = [{ messageId: "m1", turnId, channel: "commentary" as const, markdown: "Recovered message", occurredAt: "2026-09-13T00:00:01.000Z" }];
     const reader: AgentTranscriptReaderPort = {
-      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
-      async openAtTurn() { return { mode: "typed", cursor: {
+      async open(_source, boundary) { return boundary.kind !== "at" ? { mode: "unavailable", reason: "transcript_not_found" } : { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
           if (read) return { answerDelta: "" };

@@ -77,8 +77,7 @@ export interface InstanceStore {
   reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
   reserveWorkerRichTextUpdate(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; sourceEnd?: number; pageState: "active" | "finished" }): AnswerPageReservationOutcome;
   reserveWorkerRichTextContinuation(input: { turnId: string; pageIndex: number; messageId: string; document: RichTextDocument; cursor: AnswerTimelineCursor; items: readonly AnswerTimelineItem[]; sourceEnd?: number; nextPageIndex: number; nextPageStart: number; nextElementId: string; nextTitle?: string; rootMessageId: string; viewVersion: number }): AnswerPageReservationOutcome;
-  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
-  reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
+  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number; timelineCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome;
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
@@ -124,7 +123,7 @@ export type InstanceTurnStore = Pick<InstanceStore,
   "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "getInstanceTurn" |
   "claimInstanceTurnTranscript" | "loadWorkerTurnCard" | "findWorkerTurnByCardMessage" | "listActionableWorkerTurnCardIds" |
   "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "reserveWorkerTurnContent" |
-  "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" | "reserveWorkerTurnCardHydration" |
+  "reserveWorkerTurnFinish" | "reserveWorkerTurnCardHydration" |
   "reserveWorkerTurnContinuation" | "applyInstanceTurnProjection" |
   "transitionInstanceTurnWithProjection" | "listInstanceTurns" | "listRecentInstanceTurnSummaries" |
   "getActiveInstanceTurn" | "claimNextInstanceTurn" | "recoverInterruptedInstanceTurns" |
@@ -141,7 +140,7 @@ export type WorkerTurnDispatchStore = Pick<InstanceStore,
 
 export type WorkerTurnCardStore = Pick<InstanceStore,
   "getAgentInstance" | "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "reserveWorkerAnswerTimelineCard" |
-  "reserveWorkerTurnContent" | "reserveWorkerRichTextUpdate" | "reserveWorkerRichTextContinuation" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
+  "reserveWorkerTurnContent" | "reserveWorkerRichTextUpdate" | "reserveWorkerRichTextContinuation" | "reserveWorkerTurnFinish" |
   "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation"
 >;
 

@@ -16,15 +16,11 @@ import { HerdrCircuitBreaker } from "../runtime/herdr-circuit-breaker.js";
 import type { HerdrRuntimeHint } from "../runtime/herdr-event-hint.js";
 import { HerdrPaneHost } from "../runtime/herdr/pane-host.js";
 import { HerdrSocketSubscriber } from "../runtime/herdr-socket-subscriber.js";
-import { TraexTranscriptReader } from "../runtime/traex-transcript.js";
-import { PiTranscriptReader } from "../runtime/pi-transcript.js";
-import { AgentTranscriptReader, type DescriptorAwareTranscriptReader } from "../runtime/agent-transcript-reader.js";
 import { HerdrEventsReader } from "../runtime/herdr-events-reader.js";
 import { WorkspaceSnapshotCache } from "../runtime/workspace-snapshot-cache.js";
 import { WorktreeManager } from "../runtime/worktree-manager.js";
 import { WorktreeNameResolver } from "../runtime/worktree-name-resolver.js";
 import { RuntimeLink } from "./runtime-link.js";
-import type { AgentKind } from "../domain/agent-instance.js";
 
 export interface AgentRuntimeAvailability { codex: boolean; claude: boolean; pi: boolean; }
 
@@ -61,14 +57,7 @@ export function createInfrastructureRuntime(
     new ClaudeCodeDriver(herdr, config.agents.claudeCode, config.turnTimeoutMs, availability.claude),
     new PiDriver(herdr, config.agents.pi, config.turnTimeoutMs, availability.pi, piTranscriptRoot)
   ]);
-  const descriptorReaders = new AgentTranscriptReader(new Map<AgentKind, DescriptorAwareTranscriptReader>([
-    ["traex", new TraexTranscriptReader({ sessionsRoot: config.traex.sessionsRoot })],
-    ["pi", new PiTranscriptReader({ root: piTranscriptRoot })]
-  ]));
-  const transcriptReader = new HerdrEventsReader(
-    runner, herdr, config.herdr.executable,
-    (source) => descriptorReaders.resolveTranscriptDescriptor(source)
-  );
+  const transcriptReader = new HerdrEventsReader(runner, herdr, config.herdr.executable);
   return {
     runner, worktreeNameResolver, herdrSocketSubscriber, herdrCircuitBreaker, herdr, traexControl, paneHost, agentDrivers,
     worktrees: new WorktreeManager(runner, { timeoutMs: config.commandTimeoutMs }),

@@ -65,4 +65,16 @@ describe("command error redaction", () => {
     expect(error.message).not.toContain(capability);
     expect(JSON.stringify(error)).not.toContain(capability);
   });
+
+  it("preserves only bounded structured API failure metadata from stdout", async () => {
+    const command = new ExecFileCommandRunner(1_000).run(process.execPath, [
+      "-e",
+      'process.stdout.write(JSON.stringify({error:{code:"cursor_expired",message:"private",earliest_cursor:"c10",latest_cursor:"c20",secret:"must-not-leak"}})); process.exit(1);'
+    ]);
+
+    await expect(command).rejects.toMatchObject({
+      apiFailure: { code: "cursor_expired", earliestCursor: "c10", latestCursor: "c20" }
+    });
+    await expect(command).rejects.not.toHaveProperty("apiFailure.secret");
+  });
 });

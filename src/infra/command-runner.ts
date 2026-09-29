@@ -19,7 +19,7 @@ export class ExecFileCommandRunner implements CommandRunner {
           if (!cause) { resolve({ stdout, stderr }); return; }
           const error = cause as NodeJS.ErrnoException & { stdout?: string; stderr?: string; killed?: boolean };
           const detail = [error.message, error.stderr?.trim()].filter(Boolean).join(": " );
-          reject(new CommandError(executable, args, detail, error.killed === true, cause));
+          reject(new CommandError(executable, args, detail, error.killed === true, cause, parseApiFailure(stdout)));
         };
         if (startReceipt) void startReceipt.then(finish, () => undefined);
         else finish();
@@ -43,13 +43,35 @@ export class CommandError extends Error {
     readonly args: string[],
     message: string,
     readonly timedOut: boolean,
-    options?: unknown
+    options?: unknown,
+    readonly apiFailure?: CommandApiFailure
   ) {
     const safeArgs = redactCommandArgs(args);
     const safeMessage = redactKnownValues(message, sensitiveCommandArgValues(args));
     super(`Command failed: ${executable} ${safeArgs.join(" " )}: ${safeMessage}`, { cause: options });
     this.name = "CommandError";
     this.args = safeArgs;
+  }
+}
+
+export interface CommandApiFailure {
+  code: string;
+  earliestCursor?: string;
+  latestCursor?: string;
+}
+
+function parseApiFailure(stdout: string): CommandApiFailure | undefined {
+  if (!stdout || Buffer.byteLength(stdout) > 64 * 1024) return undefined;
+  try {
+    const parsed = JSON.parse(stdout) as { error?: Record<string, unknown> };
+    const error = parsed.error;
+    if (!error || typeof error.code !== "string" || error.code.length === 0 || error.code.length > 128) return undefined;
+    const failure: CommandApiFailure = { code: error.code };
+    if (typeof error.earliest_cursor === "string" && error.earliest_cursor.length <= 1024) failure.earliestCursor = error.earliest_cursor;
+    if (typeof error.latest_cursor === "string" && error.latest_cursor.length <= 1024) failure.latestCursor = error.latest_cursor;
+    return failure;
+  } catch {
+    return undefined;
   }
 }
 

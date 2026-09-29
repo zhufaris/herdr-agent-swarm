@@ -13,6 +13,7 @@ modules. For full lifecycle and dependency rules, see the
 | [Worker Runtime](worker-runtime/CONTEXT.md) | Worker ownership, generations, sessions, and delegated tasks | Primary conversation binding |
 | [Conversation Projection](conversation-projection/CONTEXT.md) | User-visible topic, run, Worker, answer-page, and card-context read models | Execution state |
 | [Delivery and Operations](delivery-operations/CONTEXT.md) | Delivery intents, lanes, outbox attempts, checkpoints, dead letters, and instance lease | Agent execution or card-derived workflow truth |
+| [Agent Observation Boundary](agent-observation/CONTEXT.md) | Core event source adaptation, exact-turn identity validation, and bounded observation conversion | Agent JSONL ownership, workflow transitions, projection policy, or delivery |
 
 When a feature crosses contexts, keep the transition in an application workflow
 and depend on consumer-shaped domain ports. Do not make a projection, adapter, or

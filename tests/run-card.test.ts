@@ -683,8 +683,8 @@ describe("run card", () => {
   });
 
   it("renders lifecycle only on the task card and gives the answer a stable stream element", () => {
-    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", sessionTitle: "datasage_semantic_knowledge / task-7kq2", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
-    const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerSnapshot: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", paneToken: "yx0c", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
+    const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerSnapshot: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "plan:implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "2026-08-22T10:00:02Z", answer: "Fixed." });
     const taskCard = renderRequestRunCard(completed);
     const answerCard = renderRequestAnswerCard(completed);
@@ -699,17 +699,15 @@ describe("run card", () => {
     expect(task).not.toContain("执行计划");
     expect(task).not.toContain("Fixed.");
     expect(answer).toContain("Fixed.");
-    expect(answer).not.toContain("实现双卡更新");
+    expect(answer).toContain("📋 Task List");
+    expect(answer).toContain("实现双卡更新");
     expect(answer).not.toContain("Fix **login**");
     const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
     expect(panels).toEqual([]);
-    expect(answerCard).toMatchObject({ header: { title: { content: "✅ TraeX 回复已完成" }, subtitle: { content: "datasage_semantic_knowledge / task-7kq2 · Fix login" }, template: "green" } });
-    expect(answerCard).toMatchObject({ config: { streaming_mode: false, summary: { content: "完成 · Fix login" } } });
+    expect(answerCard).toMatchObject({ header: { title: { content: "✅ TraeX 回复已完成" }, subtitle: { content: "datasage_semantic_knowledge / yx0c · Fix login" }, template: "green" } });
+    expect(answerCard).toMatchObject({ config: { wide_screen_mode: true, streaming_mode: false, summary: { content: "完成 · Fix login" } } });
     const answerElements = (answerCard as { body: { elements: Array<{ tag?: string; element_id?: string }> } }).body.elements;
-    expect(answerElements).toContainEqual(expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" }));
-    const elementId = answerElements.find((element) => element.element_id)?.element_id;
-    expect(elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
-    expect(elementId.length).toBeLessThanOrEqual(20);
+    expect(answerElements.some((element) => element.element_id !== undefined)).toBe(false);
     expect(createQueuedRunCard({ promptId: "3f0cea75-c8cd-41f0-8fca-87d402b2a2a1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" }).answerElementId).toBe("element_cbb6cb5f9c09");
   });
 
@@ -724,7 +722,7 @@ describe("run card", () => {
 
     expect(answer.map((element) => element.tag)).toEqual(["hr", "markdown", "collapsible_panel", "markdown"]);
     expect(JSON.stringify(answer)).toContain("Before tool");
-    expect(JSON.stringify(answer)).toContain("🔍 Search · timeline store · ✓ 完成");
+    expect(JSON.stringify(answer)).toContain("🔎 Search · timeline store · ✅");
     expect(JSON.stringify(answer)).toContain("After tool");
     expect(JSON.stringify(answer)).not.toContain("legacy duplicate");
   });
@@ -739,10 +737,10 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
 
     expect(serialized).toContain("Before command");
-    expect(serialized).toContain("⚙️ Command · npm test · ✓ 完成");
+    expect(serialized).toContain("🖥️ Ran · npm test · ✅");
     expect(serialized).toContain("After command");
     expect(serialized).not.toContain("legacy page");
-    expect(card.body.elements.some((element) => element.element_id === "answer_element")).toBe(true);
+    expect(card.body.elements.some((element) => element.element_id !== undefined)).toBe(false);
   });
 
   it("shows relative freshness and live or final output state on request cards", () => {
@@ -809,15 +807,16 @@ describe("run card", () => {
   });
 
   it("renders a conversational answer with compact metadata and arbitrary continuation pages", () => {
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", sessionTitle: "datasage / task-7kq2", workspaceId: "w1", paneId: "w1:p9", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", workspaceId: "w1", spaceName: "datasage", paneId: "w1:p9", paneToken: "yx0c", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
     const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
     const card = renderRequestAnswerCard(completed, { pageNumber: 7, initialContent: "Only page seven" }) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string; element_id?: string }> } };
 
-    expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "datasage / task-7kq2 · Explain rollout" } });
+    expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "datasage / yx0c · Explain rollout" } });
     expect(card).toMatchObject({ config: { streaming_mode: false }, header: { title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, template: "green" } });
-    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "最终结果  ·  ✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
+    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "最终结果  ·  ✅ 任务完成  ·  Pane `yx0c`  ·  用时 1m 5s  ·  第 7 页" });
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
-    expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });
+    expect(card.body.elements[2]).toMatchObject({ tag: "markdown", content: "Only page seven" });
+    expect(card.body.elements[2]!.element_id).toBeUndefined();
     expect(JSON.stringify(card)).not.toContain("older page");
   });
 
@@ -838,25 +837,25 @@ describe("run card", () => {
     expect(JSON.stringify(card).length).toBeLessThanOrEqual(2_400);
   });
 
-  it("keeps Answer continuation pages focused on metadata and page content", () => {
-    const view = { ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "start" }), phase: "running" as const, progressEvents: [{ key: "step", kind: "step" as const, label: "Do work", state: "active" as const, occurredAt: "now" }], workerActivity: [{ instanceId: "i1", name: "reviewer", latestTurnId: "turn", latestTaskTitle: "Review", latestPhase: "running" as const, taskCount: 1, latestTaskCard: { aggregateKind: "worker-turn" as const, aggregateId: "turn", generation: 1, messageId: "worker-message" } }] };
+  it("keeps Answer continuation pages focused while retaining the live Task List", () => {
+    const view = { ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "start" }), phase: "running" as const, progressEvents: [{ key: "plan:step", kind: "step" as const, label: "Do work", state: "active" as const, occurredAt: "now" }], workerActivity: [{ instanceId: "i1", name: "reviewer", latestTurnId: "turn", latestTaskTitle: "Review", latestPhase: "running" as const, taskCount: 1, latestTaskCard: { aggregateKind: "worker-turn" as const, aggregateId: "turn", generation: 1, messageId: "worker-message" } }] };
     const card = renderRequestAnswerCard(view, { pageNumber: 2, initialContent: "continued answer" });
     const serialized = JSON.stringify(card);
     expect(serialized).toContain("第 2 页");
     expect(serialized).toContain("continued answer");
-    expect(serialized).not.toContain("Do work");
+    expect(serialized).toContain("📋 Task List");
+    expect(serialized).toContain("Do work");
     expect(serialized).not.toContain("Worker 动态");
     expect(serialized).not.toContain("card_target_open");
   });
 
-  it("enables cumulative CardKit streaming without character-by-character playback", () => {
+  it("enables wide native CardKit typewriter streaming only while active", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stream", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "start" });
 
     expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
-      config: { streaming_mode: true }
+      config: { wide_screen_mode: true, streaming_mode: true, streaming_config: { print_frequency_ms: 70, print_step: 1, print_strategy: "fast" } }
     });
-    expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "running" }))).not.toContain("streaming_config");
-    expect(renderRequestAnswerCard({ ...view, phase: "completed" })).toMatchObject({ config: { streaming_mode: false } });
+    expect(renderRequestAnswerCard({ ...view, phase: "completed" })).toMatchObject({ config: { wide_screen_mode: true, streaming_mode: false } });
     expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed" }))).not.toContain("streaming_config");
   });
 
@@ -865,6 +864,14 @@ describe("run card", () => {
 
     expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
       header: { title: { content: "✨ TraeX 回复" }, subtitle: { content: "datasage / w5:p3G · Stream" } }
+    });
+  });
+
+  it("uses the native pane token in the Answer Card subtitle", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "jixu", workspaceId: "w1", spaceName: "herdr-agent-swarm", paneId: "wN:p4E", requestText: "go", queuePosition: 0, occurredAt: "start" });
+
+    expect(renderRequestAnswerCard({ ...view, paneToken: "yx0c", phase: "running" })).toMatchObject({
+      header: { subtitle: { content: "herdr-agent-swarm / yx0c · jixu" } }
     });
   });
 
@@ -959,7 +966,7 @@ describe("run card", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large JSON", workspaceId: "w1", paneId: "p1", requestText: "show", queuePosition: 0, occurredAt: "now" });
     const answer = ["{", "  \"head-field\": true,", ...Array.from({ length: 600 }, (_, index) => `  \"middle-${index}\": ${index},`), "  \"tail-field\": true", "}"].join("\n");
     const card = renderRequestAnswerCard({ ...view, phase: "completed", answer }) as { body: { elements: Array<{ content?: string; element_id?: string }> } };
-    const content = card.body.elements.find((element) => element.element_id)?.content ?? "";
+    const content = card.body.elements.find((element) => element.content?.includes("head-field"))?.content ?? "";
     expect(content).toContain("head-field");
     expect(content).toContain("tail-field");
     expect(content).toContain("已省略中间");

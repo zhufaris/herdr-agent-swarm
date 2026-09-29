@@ -104,11 +104,6 @@ export function workerTurnElementId(turnId: string, pageIndex: number): string {
   return stableElementId(`worker-turn-${turnId}-${pageIndex}`);
 }
 
-/** A distinct, stable CardKit element for the live Worker progress snapshot. */
-export function workerTurnProgressElementId(turnId: string, pageIndex: number): string {
-  return stableElementId(`worker-progress-${turnId}-${pageIndex}`);
-}
-
 export function workerTurnStreamContent(view: WorkerTurnCardView): string {
   return view.resultCapture === "unavailable"
     ? "⚠️ 任务已结束，但无法获取可信的结构化输出。请前往对应 Herdr Pane 查看本地会话。"

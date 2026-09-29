@@ -38,7 +38,7 @@ best-effort wake-up hint.
 | Feishu / Lark | ----------> | coordinator |----------------->| Herdr            |
 |                | <---------- | + projectors|<-----------------| + real Agent pane|
 | visible cards  |  CardKit    +------+------+  fresh snapshot  | + local approval |
-| and messages   |  delivery          |         and transcript +---------+--------+
+| and messages   |  delivery          |      and Core events +---------+--------+
 +----------------+                    |                                    |
                                       | durable transitions                |
                                       v                                    |
@@ -66,7 +66,7 @@ Lark                Service / SQLite                  Herdr / Agent
  |                          | claim FIFO or exact-turn work |
  |                          |------------------------------>| fenced effect
  |                          |<------------------------------| observe runtime
- |                          | project lifecycle, timeline,  | and transcript
+ |                          | project lifecycle, timeline,  | and Core events
  |                          | and card views durably         |
  |                          | enqueue and claim outbox       |
  |<-------------------------| ordered Gateway/CardKit send  |
@@ -81,7 +81,7 @@ card or an in-memory event:
 socket/EventBus hint or periodic scan
                  |
                  v
-SQLite durable state + fresh Herdr snapshot + exact transcript
+SQLite durable state + fresh Herdr snapshot + exact Core event turn
                  |
                  +--> work never started: remains eligible for FIFO dispatch
                  |
@@ -127,9 +127,10 @@ Answer Card.
 
 Blocked, degraded, orphaned, draining, archived, and error states replace the
 conversation preview with the recovery notice that needs attention. After a
-service restart, the Main Card rebuilds its preview from durable recent Run
-Cards before normal CardKit convergence resumes; it never reconstructs history
-from the visible Lark card or terminal scrollback.
+service restart, the Main Card rebuilds its preview from durable Topic View state
+and exact retained Core events before normal CardKit convergence resumes; it never
+reconstructs history from Run Card text, the visible Lark card, terminal scrollback,
+or a Swarm-side JSONL parser.
 
 Open the [interactive architecture diagram](docs/herdr-agent-swarm-architecture.html)
 for an explorable view. See [Architecture](docs/architecture.md) for lifecycle,
@@ -270,7 +271,9 @@ A forced restart detaches observers and recovers durable work without replay;
 it bypasses active-work checks. If the status endpoint is unreachable, force is
 accepted only when the configured listener is owned by the canonical user-systemd
 unit. It does not bypass a known foreign identity, failed SQLite quick check, or
-post-start build and listener ownership verification.
+post-start build and listener ownership verification. It also does not waive a
+degraded or incomplete startup-recovery fence; repair that state before treating
+the service as ready.
 
 ## Install from a GitHub Release
 
@@ -395,14 +398,14 @@ close` remains accepted as a compatibility alias.
 
 Omitting `--agent` selects TraeX. The selected kind is durable: reset and pane
 replacement preserve it, while attach discovers the actual supported kind from
-Herdr. The Main Card shows the selected Agent. TraeX and Pi structured replies,
-tool activity, plans, and turn lifecycle come only from Herdr Core Agent Events;
-the bridge does not parse a transcript or pane scrollback as a second reply
-authority. TraeX additionally supports model selection and the Primary Worker
-tools. Codex and Claude Code currently use fenced prompt delivery without
+Herdr. The Main Card shows the selected Agent. TraeX, and Pi when its managed
+session directory is configured, obtain structured replies, tool activity, plans,
+and turn lifecycle only from Herdr Core Agent Events; the bridge does not parse
+Agent JSONL or pane scrollback as a second reply authority. TraeX additionally
+supports model selection and the Primary Worker tools. Codex and Claude Code currently use fenced prompt delivery without
 structured Answer capture; their result card tells the operator to inspect the
 corresponding Herdr pane.
-Unsupported model, steering, stop, transcript-recovery, and Primary-tool
+Unsupported model, steering, stop, structured-output recovery, and Primary-tool
 operations fail closed instead of falling back to TraeX or terminal input.
 
 See [Lark group usage](docs/feishu-group-usage.md) for the complete command

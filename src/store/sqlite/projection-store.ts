@@ -171,8 +171,8 @@ export class SqliteProjectionStore {
 
   saveRunCard(view: RunCardView): RunCardView {
     return this.context.transaction(() => {
-      this.context.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, session_title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, progress_summary_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, worker_activity_json = ?, worker_dependency_revision = ?, worker_context_frozen_at = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
-        .run(view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
+      this.context.database.prepare(`UPDATE run_cards SET binding_generation = ?, conversion_parent_prompt_id = ?, queue_feedback_json = ?, lark_message_id = ?, answer_message_id = ?, answer_card_id = ?, answer_element_id = ?, answer_sequence = ?, answer_page_index = ?, answer_page_start = ?, phase = ?, title = ?, request_origin = ?, session_title = ?, request_text = ?, workspace_id = ?, space_name = ?, pane_id = ?, pane_token = ?, answer = ?, answer_segments_json = ?, answer_draft = ?, answer_draft_transient = ?, progress_events_json = ?, progress_summary_json = ?, queue_position = ?, started_at = ?, finished_at = ?, notice = ?, worker_activity_json = ?, worker_dependency_revision = ?, worker_context_frozen_at = ?, activity_at = ?, view_version = ?, delivered_version = ?, answer_delivered_version = ?, updated_at = ? WHERE prompt_id = ?`)
+        .run(view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestOrigin, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.paneToken ?? null, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.updatedAt, view.promptId);
       this.timelines.save("primary-run", view.promptId, view.timelineItems ?? []);
       return this.loadRunCard(view.promptId)!;
     });
@@ -296,21 +296,15 @@ export class SqliteProjectionStore {
   listFrozenAnswerTimelineItems(promptId: string, beforePageIndex: number) { return this.timelinePages.frozenItems("primary-run", promptId, beforePageIndex); }
 
   reserveAnswerTimelineCard(input: { promptId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass }): AnswerPageReservationOutcome {
-    return this.context.transaction(() => {
-      const page = this.context.database.prepare("SELECT state, message_id FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(input.promptId, input.pageIndex) as { state: string; message_id: string | null } | undefined;
-      const view = this.loadRunCard(input.promptId);
-      if (!page || !view || page.state !== "active" || page.message_id !== input.messageId) return "stale";
+    return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
+      if (page.deliveryMode !== "streaming" || page.messageId !== input.messageId) return "stale";
       this.timelinePages.ensure("primary-run", input.promptId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
       if (this.timelinePages.load("primary-run", input.promptId, input.pageIndex).pending || this.timelinePages.isDelivered("primary-run", input.promptId, input.pageIndex, input.cursor, input.items)) return "waiting";
-      const baseKey = `answer-timeline:${input.promptId}:${input.pageIndex}:${view.viewVersion}`;
-      const payload = JSON.stringify(input.card);
-      const existing = this.context.database.prepare(`SELECT payload, snapshot_revision FROM outbound_replies
-        WHERE idempotency_key = ? OR idempotency_key LIKE ?
-        ORDER BY snapshot_revision DESC, delivery_order DESC LIMIT 1`).get(baseKey, `${baseKey}:revision:%`) as { payload: string; snapshot_revision: number } | undefined;
-      if (existing?.payload === payload) return "waiting";
-      const revision = (existing?.snapshot_revision ?? 0) + 1;
+      const sequence = page.sequence + 1;
+      this.context.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.promptId, input.pageIndex, page.sequence);
+      this.context.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?").run(sequence, now(), input.promptId, input.pageIndex);
       const id = randomUUID();
-      const reply = this.dependencies.enqueueOutboundReply({ id, idempotencyKey: revision === 1 ? baseKey : `${baseKey}:revision:${revision}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.messageId, kind: "card_update", payload, projectionKey: `answer-timeline:${input.promptId}:${input.pageIndex}`, snapshotRevision: revision, laneKeyOverride: `answer:${input.promptId}` }) as OutboundReply;
+      const reply = this.dependencies.enqueueOutboundReply({ id, idempotencyKey: `answer-timeline:${input.promptId}:${input.pageIndex}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, bindingGeneration: view.bindingGeneration, viewVersion: view.viewVersion, cardSequence: sequence, cardRole: "answer", workClass: input.workClass ?? "live", rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `answer:${input.promptId}` }) as OutboundReply;
       this.timelinePages.reserve("primary-run", input.promptId, input.pageIndex, reply.id, input.cursor, input.items);
       return "reserved";
     });
@@ -350,17 +344,22 @@ export class SqliteProjectionStore {
     });
   }
 
-  reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome {
+  reserveAnswerContent(input: { promptId: string; pageIndex: number; cardId: string; elementId: string; content: string; source?: string; timelineCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[]; workClass?: OutboundWorkClass | undefined }): AnswerPageReservationOutcome {
     return this.reserveAnswerPageIntent(input.promptId, input.pageIndex, (page, view) => {
       if (page.deliveryMode !== "streaming" || page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
+      if (input.timelineItems !== undefined) {
+        this.timelinePages.ensure("primary-run", input.promptId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
+        if (this.timelinePages.load("primary-run", input.promptId, input.pageIndex).pending) return "waiting";
+      }
       const facts = this.getAnswerPageDeliveryFacts(input.promptId, input.pageIndex);
       if (facts.latestContent?.state === "pending" || facts.latestContent?.content === input.content) return "waiting";
       const sequence = page.sequence + 1;
       this.context.database.prepare("UPDATE answer_pages SET sequence = ?, updated_at = ? WHERE prompt_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.promptId, input.pageIndex, page.sequence);
       this.context.database.prepare("UPDATE run_cards SET answer_sequence = ?, updated_at = ? WHERE prompt_id = ? AND answer_page_index = ?").run(sequence, now(), input.promptId, input.pageIndex);
       const id = randomUUID();
-      this.dependencies.enqueueOutboundReply({ id, idempotencyKey: `stream:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", ...outboundWorkClass(input.workClass), rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sequence }) });
+      this.dependencies.enqueueOutboundReply({ id, idempotencyKey: `stream:${input.promptId}:${input.cardId}:${sequence}`, bindingId: view.bindingId, promptId: input.promptId, viewVersion: sequence, cardRole: "answer", ...outboundWorkClass(input.workClass), rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sequence }), laneKeyOverride: `answer:${input.promptId}` });
       if (input.source !== undefined) recordAnswerCoverage(this.context, { replyId: id, promptId: input.promptId, bindingGeneration: view.bindingGeneration, pageIndex: input.pageIndex, sourceStart: page.sourceStart, source: input.source });
+      if (input.timelineItems !== undefined) this.timelinePages.reserve("primary-run", input.promptId, input.pageIndex, id, input.timelineCursor ?? null, input.timelineItems);
       return "reserved";
     });
   }
@@ -497,8 +496,8 @@ export class SqliteProjectionStore {
 
   insertRunCard(view: RunCardView): void {
     this.context.transaction(() => {
-      this.context.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, session_title, request_text, workspace_id, space_name, pane_id, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, progress_summary_json, queue_position, started_at, finished_at, notice, worker_activity_json, worker_dependency_revision, worker_context_frozen_at, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
+      this.context.database.prepare(`INSERT INTO run_cards(prompt_id, binding_id, binding_generation, conversion_parent_prompt_id, queue_feedback_json, lark_message_id, answer_message_id, answer_card_id, answer_element_id, answer_sequence, answer_page_index, answer_page_start, phase, title, request_origin, session_title, request_text, workspace_id, space_name, pane_id, pane_token, answer, answer_segments_json, answer_draft, answer_draft_transient, progress_events_json, progress_summary_json, queue_position, started_at, finished_at, notice, worker_activity_json, worker_dependency_revision, worker_context_frozen_at, activity_at, view_version, delivered_version, answer_delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(view.promptId, view.bindingId, view.bindingGeneration, view.conversionParentPromptId, view.queueFeedback === null ? null : JSON.stringify(view.queueFeedback), view.larkMessageId, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerSequence, view.answerPageIndex, view.answerPageStart, view.phase, view.title, view.requestOrigin, view.sessionTitle ?? null, view.requestText, view.workspaceId, view.spaceName, view.paneId, view.paneToken ?? null, view.answer, JSON.stringify(view.answerSegments), view.answerDraft, view.answerDraftTransient ? 1 : 0, JSON.stringify(view.progressEvents), JSON.stringify(view.progressSummary), view.queuePosition, view.startedAt, view.finishedAt, view.notice, JSON.stringify(view.workerActivity), view.workerDependencyRevision, view.workerContextFrozenAt, view.activityAt, view.viewVersion, view.deliveredVersion, view.answerDeliveredVersion, view.createdAt, view.updatedAt);
       this.timelines.save("primary-run", view.promptId, view.timelineItems ?? []);
       this.context.database.prepare("INSERT OR IGNORE INTO answer_pages(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'streaming', ?, ?)")
         .run(view.promptId, view.answerPageIndex, view.answerMessageId, view.answerCardId, view.answerElementId, view.answerPageStart, view.answerSequence, view.answerCardId ? "active" : "creating", view.createdAt, view.updatedAt);

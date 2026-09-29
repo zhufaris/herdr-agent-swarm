@@ -23,3 +23,8 @@ _Avoid_: Card reply, child prompt
 **Worker Ownership**:
 The exact Primary binding generation and pane identity allowed to operate a Worker and its tasks.
 _Avoid_: Parent link
+
+**Worker Turn Observation**:
+The exact Herdr Core event turn selected by Worker generation, session generation,
+runtime turn ID, and canonical start time.
+_Avoid_: Latest Agent output, pane tail, Worker JSONL

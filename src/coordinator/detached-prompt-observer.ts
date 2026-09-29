@@ -48,6 +48,20 @@ export class DetachedPromptObserver implements DetachedPromptObserverPort {
     let source = initialSource;
     let superseding = false;
     try {
+      if (source.mode === "typed" && source.terminalLifecycle) {
+        const durable = this.options.store.getPrompt(prompt.id);
+        if (!durable || !this.options.isBindingActive(binding.id)) return;
+        const runtime = await this.options.herdr.observeRuntime(paneId);
+        if (!runtime.pane) throw new Error(`Herdr pane ${paneId} disappeared while observing an existing turn`);
+        const state = runtime.pane.agentState;
+        this.options.registry.updateTurnState(binding.id, prompt.id, state);
+        const shouldStop = await this.settleTerminal(prompt, binding, source, {
+          turnId: source.terminalLifecycle.turnId,
+          answerDelta: "",
+          turnLifecycle: source.terminalLifecycle
+        }, runtime.traexProcess, state, paneId);
+        if (shouldStop) return;
+      }
       while (!this.options.isStopping() && !controller.signal.aborted) {
         const durable = this.options.store.getPrompt(prompt.id);
         if (!durable || (!superseding && (durable.state !== "running" || durable.observationState !== "detached"))) return;
@@ -69,27 +83,37 @@ export class DetachedPromptObserver implements DetachedPromptObserverPort {
           this.options.transcript.retain(source, owned.observation);
           await this.options.transcript.publishOwned(binding.id, prompt.id, owned.observation, Date.parse(prompt.transcriptTurnStartedAt!));
         }
-        const terminal = owned.owned ? decideDetachedTurnTerminalOutcome(prompt, owned.observation, runtime.traexProcess) : { kind: "pending" as const };
-        if (terminal.kind === "completed") {
-          const sourceAnswer = terminal.finalAnswer ?? (source.mode === "typed" ? source.output.text : "");
-          const answer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
-          if (!this.options.store.settleDetachedPrompt({ promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(), terminal: { kind: "completed", answer, outputFingerprint: outputFingerprint(sourceAnswer) } })) return;
-          await this.options.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
-          this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
-          return;
-        }
-        if (terminal.kind === "aborted") {
-          const reason = abortedPromptNotice(terminal.reason);
-          if (!this.options.store.settleDetachedPrompt({ promptId: prompt.id, bindingId: binding.id, runtime: state, occurredAt: new Date().toISOString(), terminal: { kind: "failed", error: reason } })) return;
-          await this.options.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
-          this.options.logger.info({ event: "detached-turn-aborted", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "failed_without_replay" }, "observed explicit abort of an existing TraeX turn");
-          return;
-        }
+        if (owned.owned && await this.settleTerminal(prompt, binding, source, owned.observation, runtime.traexProcess, state, paneId)) return;
         await this.wait(paneId, controller.signal);
       }
     } catch (error) {
       this.recordUncertainFailure(prompt, binding, error, controller.signal);
     }
+  }
+  private async settleTerminal(
+    prompt: PromptJob,
+    binding: Binding,
+    source: TurnOutputSource,
+    observation: AgentTranscriptObservation,
+    traexProcessPresent: boolean,
+    runtime: Binding["lastAgentState"],
+    paneId: string
+  ): Promise<boolean> {
+    const terminal = decideDetachedTurnTerminalOutcome(prompt, observation, traexProcessPresent);
+    if (terminal.kind === "pending") return false;
+    if (terminal.kind === "completed") {
+      const sourceAnswer = terminal.finalAnswer ?? (source.mode === "typed" ? source.output.text : "");
+      const answer = sourceAnswer || STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE;
+      if (!this.options.store.settleDetachedPrompt({ promptId: prompt.id, bindingId: binding.id, runtime, occurredAt: new Date().toISOString(), terminal: { kind: "completed", answer, outputFingerprint: outputFingerprint(sourceAnswer) } })) return true;
+      await this.options.publish(binding.id, "TurnCompleted", "herdr", { promptId: prompt.id, answer, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+      this.options.logger.info({ event: "detached-turn-completed", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "observed_without_replay" }, "observed completion of an existing TraeX turn");
+      return true;
+    }
+    const reason = abortedPromptNotice(terminal.reason);
+    if (!this.options.store.settleDetachedPrompt({ promptId: prompt.id, bindingId: binding.id, runtime, occurredAt: new Date().toISOString(), terminal: { kind: "failed", error: reason } })) return true;
+    await this.options.publish(binding.id, "TurnFailed", "herdr", { promptId: prompt.id, error: reason, queueDepth: this.options.store.countPendingPrompts(binding.id) });
+    this.options.logger.info({ event: "detached-turn-aborted", bindingId: binding.id, promptId: prompt.id, paneId, outcome: "failed_without_replay" }, "observed explicit abort of an existing TraeX turn");
+    return true;
   }
   private recordUncertainFailure(prompt: PromptJob, binding: Binding, error: unknown, signal: AbortSignal): void {
     if (signal.aborted || this.options.isStopping()) return;

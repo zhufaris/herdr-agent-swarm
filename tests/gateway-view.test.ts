@@ -19,11 +19,16 @@ describe("GatewayView", () => {
     ["select", () => renderModelSelectionCard({ bindingId: "binding", spaceName: "space", paneId: "pane", models: [{ name: "model", displayName: "Model" }], preference: null })],
     ["main", () => renderProjectEntryCard({ ...initialTopicView("binding"), title: "Gateway main" })],
     ["stream", () => renderRequestAnswerCard(createQueuedRunCard({ promptId: "prompt", bindingId: "binding", title: "Answer", workspaceId: "workspace", paneId: "pane", requestText: "question", queuePosition: 1, occurredAt: "now" }))]
-  ])("round-trips the %s CardKit surface through the portable AST", (_name, render) => {
+  ])("round-trips the %s CardKit surface through the portable AST", (name, render) => {
     const card = render();
     const view = cardKitToGatewayView(card);
     expect(view).toMatchObject({ schemaVersion: 1, fallbackText: expect.any(String), nodes: expect.any(Array) });
-    expect(materializeFeishuView(view)).toEqual(card);
+    const materialized = materializeFeishuView(view);
+    if (name === "stream") {
+      expect(materialized).toMatchObject({
+        config: { streaming_config: { print_frequency_ms: { default: 70 }, print_step: { default: 1 }, print_strategy: "fast" } }
+      });
+    } else expect(materialized).toEqual(card);
   });
 
   it("preserves the CardKit v2 form submit action through the portable AST", () => {
@@ -32,6 +37,43 @@ describe("GatewayView", () => {
 
     expect(materialized).toContain('\"form_action_type\":\"submit\"');
     expect(materialized).not.toContain('\"action_type\":\"form_submit\"');
+  });
+
+  it("round-trips wide native streaming presentation without widening standard cards", () => {
+    const answer = renderRequestAnswerCard(createQueuedRunCard({ promptId: "prompt", bindingId: "binding", title: "Answer", workspaceId: "workspace", paneId: "pane", requestText: "question", queuePosition: 1, occurredAt: "now" })) as { config: Record<string, unknown> };
+    answer.config.wide_screen_mode = true;
+    answer.config.streaming_config = { print_frequency_ms: 70, print_step: 1, print_strategy: "fast" };
+    const view = cardKitToGatewayView(answer);
+
+    expect(view).toMatchObject({ width: "wide", streamPresentation: { printFrequencyMs: 70, printStep: 1, printStrategy: "fast" } });
+    expect(materializeFeishuView(view)).toEqual({
+      ...answer,
+      config: {
+        ...answer.config,
+        streaming_config: {
+          print_frequency_ms: { default: 70 },
+          print_step: { default: 1 },
+          print_strategy: "fast"
+        }
+      }
+    });
+
+    const main = materializeFeishuView(cardKitToGatewayView(renderProjectEntryCard({ ...initialTopicView("binding"), title: "Main" })));
+    expect(JSON.stringify(main)).not.toMatch(/wide_screen_mode|streaming_config/);
+  });
+
+  it("keeps a terminal Answer wide while omitting inactive streaming configuration", () => {
+    const view = cardKitToGatewayView({
+      schema: "2.0",
+      config: { update_multi: true, wide_screen_mode: true, streaming_mode: false, summary: { content: "Done" } },
+      body: { elements: [{ tag: "markdown", content: "Complete" }] }
+    });
+
+    expect(materializeFeishuView(view)).toEqual({
+      schema: "2.0",
+      config: { update_multi: true, wide_screen_mode: true, summary: { content: "Done" } },
+      body: { elements: [{ tag: "markdown", content: "Complete" }] }
+    });
   });
 
   it("materializes form select defaults as CardKit value strings", () => {

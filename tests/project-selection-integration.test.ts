@@ -132,6 +132,7 @@ describe("project selection flow", () => {
       async createTopic() { return { topicId: "task-topic", rootMessageId: "task-root" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card" }; },
+      async replyStreamingCard() { return { messageId: "answer-card", cardId: "answer-surface" }; },
       async updateCard() {}
     };
     const herdr: HerdrPort = {
@@ -167,6 +168,7 @@ describe("project selection flow", () => {
       async createTopic(card) { groupCards.push(card); return { topicId: "task-topic", rootMessageId: "task-root" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card" }; },
+      async replyStreamingCard() { return { messageId: "answer-card", cardId: "answer-surface" }; },
       async updateCard() {}
     };
     const herdr: HerdrPort = {

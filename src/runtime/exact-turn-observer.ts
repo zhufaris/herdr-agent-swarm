@@ -1,16 +1,10 @@
-import type { AgentTranscriptCursorPort, AgentTranscriptObservation, AgentTranscriptReaderPort, AgentTranscriptSource, AgentTranscriptUnavailableReason } from "../domain/ports/external.js";
-import type { HerdrAgentSession } from "../domain/types.js";
+import type { AgentTranscriptBoundary, AgentTranscriptCursorPort, AgentTranscriptObservation, AgentTranscriptReaderPort, AgentTranscriptSource, AgentTranscriptUnavailableReason } from "../domain/ports/external.js";
+import { sameCanonicalTurnStart } from "../domain/turn-identity.js";
 
 export interface ExactTurnIdentity {
   turnId: string;
   startedAt: string;
 }
-
-export type TranscriptBoundary =
-  | { kind: "latest" }
-  | { kind: "active" }
-  | { kind: "first" }
-  | ({ kind: "at" | "after" } & ExactTurnIdentity);
 
 export type ExactTurnReadResult =
   | { kind: "accepted"; observation: AgentTranscriptObservation }
@@ -24,42 +18,17 @@ export interface ExactTurnCursor {
 
 export type ExactTurnOpenResult =
   | { mode: "typed"; cursor: ExactTurnCursor }
-  | { mode: "unavailable"; reason: AgentTranscriptUnavailableReason | "recovery_cursor_unavailable" };
+  | { mode: "unavailable"; reason: AgentTranscriptUnavailableReason };
 
 export class ExactTurnObserver {
   constructor(private readonly reader: AgentTranscriptReaderPort) {}
 
-  async open(input: ({ source: AgentTranscriptSource } | { session: HerdrAgentSession | null }) & { boundary: TranscriptBoundary; expected?: ExactTurnIdentity }): Promise<ExactTurnOpenResult> {
-    const source = "source" in input ? input.source : input.session;
-    const opened = await this.openBoundary(source, input.boundary);
+  async open(input: { source: AgentTranscriptSource; boundary: AgentTranscriptBoundary; expected?: ExactTurnIdentity }): Promise<ExactTurnOpenResult> {
+    const opened = await this.reader.open(input.source, input.boundary);
     if (opened.mode === "unavailable") return opened;
     return { mode: "typed", cursor: new FilteringExactTurnCursor(opened.cursor, input.expected) };
   }
-
-  private openBoundary(source: AgentTranscriptSource | HerdrAgentSession | null, boundary: TranscriptBoundary) {
-    const reader = this.reader as LegacyCompatibleTranscriptReader;
-    if (boundary.kind === "latest") return reader.open(source);
-    if (boundary.kind === "active") return reader.openActiveTurn?.(source) ?? reader.open(source);
-    if (boundary.kind === "first") {
-      if (!reader.openFirstTurn) return Promise.resolve({ mode: "unavailable" as const, reason: "recovery_cursor_unavailable" as const });
-      return reader.openFirstTurn(source);
-    }
-    if (boundary.kind === "at") {
-      if (!reader.openAtTurn) return Promise.resolve({ mode: "unavailable" as const, reason: "recovery_cursor_unavailable" as const });
-      return reader.openAtTurn(source, boundary.turnId, boundary.startedAt);
-    }
-    if (!reader.openAfterTurn) return Promise.resolve({ mode: "unavailable" as const, reason: "recovery_cursor_unavailable" as const });
-    return reader.openAfterTurn(source, boundary.turnId, boundary.startedAt);
-  }
 }
-
-type LegacyCompatibleTranscriptReader = {
-  open(source: AgentTranscriptSource | HerdrAgentSession | null): Promise<import("../domain/ports/external.js").AgentTranscriptOpenResult>;
-  openActiveTurn?(source: AgentTranscriptSource | HerdrAgentSession | null): Promise<import("../domain/ports/external.js").AgentTranscriptOpenResult>;
-  openFirstTurn?(source: AgentTranscriptSource | HerdrAgentSession | null): Promise<import("../domain/ports/external.js").AgentTranscriptOpenResult>;
-  openAtTurn?(source: AgentTranscriptSource | HerdrAgentSession | null, turnId: string, startedAt: string): Promise<import("../domain/ports/external.js").AgentTranscriptOpenResult>;
-  openAfterTurn?(source: AgentTranscriptSource | HerdrAgentSession | null, turnId: string, startedAt: string): Promise<import("../domain/ports/external.js").AgentTranscriptOpenResult>;
-};
 
 class FilteringExactTurnCursor implements ExactTurnCursor {
   private lastAcceptedSignature = "";
@@ -100,7 +69,7 @@ class FilteringExactTurnCursor implements ExactTurnCursor {
 function matchesExactTurn(observation: AgentTranscriptObservation, expected: ExactTurnIdentity): boolean {
   const turnId = observation.turnId ?? observation.turnLifecycle?.turnId;
   if (turnId !== expected.turnId) return false;
-  return !observation.turnLifecycle || observation.turnLifecycle.startedAt === expected.startedAt;
+  return !observation.turnLifecycle || sameCanonicalTurnStart(observation.turnLifecycle.startedAt, expected.startedAt);
 }
 
 function hasObservation(observation: AgentTranscriptObservation): boolean {

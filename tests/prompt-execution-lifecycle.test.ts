@@ -27,6 +27,14 @@ describe("prompt execution lifecycle", () => {
     expect(decideDetachedTurnTerminalOutcome(prompt, { ...completed, turnLifecycle: { ...completed.turnLifecycle, state: "aborted", reason: "interrupted" } }, true)).toEqual({ kind: "aborted", reason: "interrupted" });
   });
 
+  it("accepts a Core terminal timestamp with different precision in the same UTC second", () => {
+    const legacyPrompt = { ...prompt, transcriptTurnStartedAt: "2026-09-03T00:00:01.987Z" };
+    const completed = { turnId: "turn-1", answerDelta: "", turnLifecycle: { turnId: "turn-1", state: "completed" as const, startedAt: "2026-09-03T00:00:01Z", finalAnswer: "done" } };
+
+    expect(decideDetachedTurnTerminalOutcome(legacyPrompt, completed, true)).toEqual({ kind: "completed", finalAnswer: "done" });
+    expect(decideDetachedTurnTerminalOutcome(legacyPrompt, { ...completed, turnLifecycle: { ...completed.turnLifecycle, startedAt: "2026-09-03T00:00:02Z" } }, true)).toEqual({ kind: "pending" });
+  });
+
   it("recognizes later conflicting turns without accepting their output", () => {
     expect(isLaterConflictingTranscriptTurn(prompt, { turnId: "turn-2", answerDelta: "", turnLifecycle: { turnId: "turn-2", state: "active", startedAt: "2026-09-03T00:00:02.000Z" } })).toBe(true);
     expect(isLaterConflictingTranscriptTurn(prompt, { turnId: "turn-2", answerDelta: "", turnLifecycle: { turnId: "turn-2", state: "active", startedAt: "2026-09-03T00:00:00.000Z" } })).toBe(false);

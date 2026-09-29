@@ -65,7 +65,7 @@ export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
           await watch?.flush();
           const observed = this.options.store.getInstanceTurn(turn.id);
           if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) { await watch?.stop(); continue; }
-          if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) { this.detachWatch(watch); return; }
+          if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) { this.detachWatch(watch, instanceId, turn.id); return; }
           await watch?.stop();
           const message = safeLogError(error).message;
           this.transition(turn.id, turn.instanceGeneration, "dispatch-uncertain", "turn.dispatch-uncertain", { type: "dispatch-uncertain", occurredAt: new Date().toISOString(), notice: message }, message);
@@ -76,7 +76,7 @@ export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
         await watch?.flush();
         const observed = this.options.store.getInstanceTurn(turn.id);
         if (!observed || ["completed", "failed", "cancelled"].includes(observed.state)) { await watch?.stop(); continue; }
-        if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) { this.detachWatch(watch); return; }
+        if (observed.runtimeTurnId && observed.runtimeTurnStartedAt) { this.detachWatch(watch, instanceId, turn.id); return; }
         await watch?.stop();
         if (receipt.status === "confirmed-delivered") {
           if (driver.describe().structuredEvents) return;
@@ -121,10 +121,14 @@ export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
     await this.stopDetachedWatches();
     await settled;
   }
-  private detachWatch(watch: WorkerTurnWatch | null): void {
+  private detachWatch(watch: WorkerTurnWatch | null, instanceId: string, turnId: string): void {
     if (!watch) return;
     this.detachedWatches.add(watch);
-    void watch.detach().finally(() => this.detachedWatches.delete(watch));
+    const finish = () => this.detachedWatches.delete(watch);
+    void watch.detach().then(finish, (error) => {
+      finish();
+      this.recordFailure(error, instanceId, turnId);
+    });
   }
   private async stopDetachedWatches(): Promise<void> {
     const watches = [...this.detachedWatches];
