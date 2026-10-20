@@ -19,7 +19,7 @@ export function renderTurnControlResultCard(operation: TurnControlOperation): ob
   const priorityAccepted = operation.kind === "steer" && operation.result?.status === "priority-accepted";
   const unsupportedSteer = operation.kind === "steer" && operation.result?.status === "unsupported";
   const presentation = priorityAccepted ? { title: "Priority Steering 已接收", template: "blue", summary: "目标 turn 已结束，指令已转为优先任务并等待安全调度。" }
-    : unsupportedSteer ? { title: "Steering 不受支持", template: "orange", summary: "当前运行时不支持 exact-turn steering，指令未注入且不会转为普通任务。可用 `/swarm awake` 观察恢复，或用 `/swarm skip` 显式释放 detached blocker。" }
+    : unsupportedSteer ? { title: "Steering 不受支持", template: "orange", summary: "当前运行时不支持 exact-turn steering，指令未注入且不会转为普通任务。可用 `/swarm awake` 执行 Core 投影追赶与卡片重投。" }
       : (operation.kind === "interrupt" ? interruptPresentation : steerPresentation)[operation.state];
   const target = operation.target.owner.kind === "binding" ? "Primary" : "Worker";
   return {

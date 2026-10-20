@@ -39,7 +39,7 @@ export class PaneRetentionWorkflow implements PaneRetentionWorkflowPort {
       const pane = panesById ? panesById.get(binding.paneId) ?? null : await this.options.herdr.getPane(binding.paneId);
       const decision = evaluatePaneRetention({ binding, now, enabled: true, pendingWork: this.options.store.countPendingPrompts(binding.id) > 0, unresolvedTurn: this.options.isBindingBusy(binding.id), runtimeState: pane?.agentState ?? null, ...(policy.idleAfterMs !== undefined ? { idleAfterMs: policy.idleAfterMs } : {}), ...(policy.graceMs !== undefined ? { graceMs: policy.graceMs } : {}) });
       if (decision.status === "warning" && binding.rootMessageId) {
-        await this.options.outbound.enqueueCard(binding.rootMessageId, `pane-retention-warning:${binding.id}:${decision.warningAt}`, this.options.presentation.paneRetentionWarning({ paneId: pane?.paneId ?? binding.paneId, warningAt: decision.warningAt, closeAt: decision.closeAt }), binding.id, "operation_result");
+        await this.options.outbound.enqueueCard(binding.rootMessageId, `pane-retention-warning:${binding.id}:${decision.warningAt}`, this.options.presentation.paneRetentionWarning({ paneId: pane?.paneId ?? binding.paneId, paneToken: pane?.paneToken ?? binding.paneToken, warningAt: decision.warningAt, closeAt: decision.closeAt }), binding.id, "operation_result");
         continue;
       }
       if (decision.status !== "eligible" || !pane) continue;

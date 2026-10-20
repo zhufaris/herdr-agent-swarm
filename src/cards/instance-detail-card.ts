@@ -5,13 +5,14 @@ import { normalizeLarkPreview, truncateLarkMarkdown } from "../runtime/lark-mark
 import { redactSecrets } from "../runtime/redact-secrets.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { callbackButton } from "./cardkit-button.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 export function renderInstanceDetailCard(input: { instance: AgentInstance; workspace: WorkspaceLease; capabilities: AgentCapabilities; turns: InstanceTurnSummary[]; activeTurnId?: string | null; queueDepth: number; conversationKey?: string; bindingId?: string; bindingGeneration?: number }): object {
   const runtime = input.instance.runtimeRef;
   const elements: object[] = [{ tag: "markdown", content: [
     `**ROLE**  ${input.instance.role}   **AGENT**  ${input.instance.agentKind}   **STATE**  ${input.instance.observedState}`,
     `**MODEL**  ${input.instance.model ?? "—"}   **GENERATION**  ${input.instance.generation}   **QUEUE**  ${input.queueDepth}`,
-    `**HERDR**  ${runtime ? `${runtime.herdrWorkspaceId} / ${runtime.paneId}` : "—"}`,
+    `**HERDR**  ${runtime ? `${runtime.herdrWorkspaceId} / ${displayPaneIdentity(runtime)}` : "—"}`,
     `**WORKTREE**  ${input.workspace.kind} · ${input.workspace.cwd}`,
     `**BRANCH**  ${input.workspace.branch ?? "—"}   **BASE**  ${input.workspace.baseCommit}   **GIT**  ${input.workspace.state}`,
     `**PROVISIONING**  ${input.instance.provisioningCheckpoint}`,

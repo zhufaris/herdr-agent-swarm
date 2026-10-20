@@ -23,7 +23,7 @@ export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
   private stopping = false;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
-  constructor(private readonly options: { store: WorkerTurnDispatchStore; drivers: AgentDriverCatalog; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error"> }) {}
+  constructor(private readonly options: { store: WorkerTurnDispatchStore; drivers: AgentDriverCatalog; observer?: Pick<WorkerTurnObservationPort, "watch">; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void; presentation: Pick<WorkerPresentation, "workerTurn" | "workerHumanReviewNotification">; logger?: Pick<Logger, "error" | "info" | "warn"> }) {}
 
   wake(instanceId: string): void {
     if (this.stopping) return;
@@ -54,6 +54,7 @@ export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
         try {
           if (driver.describe().structuredEvents) watch = await this.options.observer?.watch(turn.id) ?? null;
           receipt = await driver.submit(instance.runtimeRef, turn.text, {
+            submissionId: turn.id,
             onDispatched: () => {
               if (this.detachedTurns.has(turn.id)) return;
               this.transition(turn.id, turn.instanceGeneration, "running", "turn.running", { type: "running", occurredAt: new Date().toISOString() });
@@ -99,7 +100,9 @@ export class WorkerTurnDispatcher implements WorkerTurnDispatcherPort {
   private transition(turnId: string, generation: number, state: Parameters<WorkerTurnDispatchStore["updateInstanceTurn"]>[0]["state"], eventKind: Parameters<WorkerTurnDispatchStore["updateInstanceTurn"]>[0]["eventKind"], change: WorkerTurnCardChange, error: string | null = null, result: string | null = null): void {
     if (this.options.store.loadWorkerTurnCard(turnId)) {
       const projected = this.options.store.transitionInstanceTurnWithProjection({ turnId, expectedGeneration: generation, state, result, error, eventKind, change, render: this.options.presentation.workerTurn, renderHumanReviewNotification: this.options.presentation.workerHumanReviewNotification });
-      if (projected && (projected.projectionChanged || projected.notification.outcome === "reserved")) { this.options.wakeOutbound?.(); this.options.convergeWorkerTurn?.(turnId); }
+      if (projected) {
+        if (projected.projectionChanged || projected.notification.outcome === "reserved") { this.options.wakeOutbound?.(); this.options.convergeWorkerTurn?.(turnId); }
+      }
     } else this.options.store.updateInstanceTurn({ turnId, expectedGeneration: generation, state, result, error, eventKind });
   }
   snapshot(): { state: "idle" | "running" | "stopping"; activeDispatchWorkers: number; lastFailureAt: string | null; lastFailure: string | null } {

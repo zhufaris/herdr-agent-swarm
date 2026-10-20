@@ -104,6 +104,17 @@ describe("PriorityReconciliationRunner", () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it("does not reject shutdown when the active pass fails", async () => {
+    let rejectExecute!: (error: Error) => void;
+    const runner = new PriorityReconciliationRunner({ execute: async () => new Promise<void>((_resolve, reject) => { rejectExecute = reject; }) });
+    const active = runner.request({ kind: "all" });
+    const stopping = runner.stop();
+
+    rejectExecute(new Error("Herdr unavailable"));
+    await expect(active).rejects.toThrow("Herdr unavailable");
+    await expect(stopping).resolves.toBeUndefined();
+  });
+
   it("requests periodic full reconciliation and reports bounded queue delay diagnostics", async () => {
     vi.useFakeTimers();
     let now = 10;

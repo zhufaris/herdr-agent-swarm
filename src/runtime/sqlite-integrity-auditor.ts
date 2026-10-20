@@ -56,7 +56,7 @@ export class SqliteIntegrityAuditor {
       else this.logger.info(record, "SQLite integrity audit completed");
     }).catch((error) => {
       const completedAtMs = this.clock();
-      this.diagnostics = { state: "degraded", quickCheck: "failed", issues: [], truncated: false, startedAt: new Date(startedAtMs).toISOString(), completedAt: new Date(completedAtMs).toISOString(), durationMs: Math.max(0, completedAtMs - startedAtMs), error: safeLogError(error).message.slice(0, 240) };
+      this.diagnostics = { ...previous, state: "degraded", startedAt: new Date(startedAtMs).toISOString(), durationMs: Math.max(0, completedAtMs - startedAtMs), error: safeLogError(error).message.slice(0, 240) };
       this.logger.error({ event: "sqlite-integrity-audit-failed", error: this.diagnostics.error, durationMs: this.diagnostics.durationMs, outcome: "failed" }, "SQLite integrity audit failed");
     }).finally(() => {
       if (this.inspectionAbort === inspectionAbort) this.inspectionAbort = null;

@@ -36,7 +36,7 @@ describe("attach existing pane command", () => {
 
     await coordinator.handleMessage(command(1, "tidy"));
 
-    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active" });
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", paneId: "w5:p3G", state: "active", creatorOpenId: "user" });
     expect(store.loadTopicView(store.findBindingByPane("w5:p3G")!.id)).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) });
     expect(createTopic).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(replyCards.at(-1))).toContain("发送话题入口");
@@ -63,10 +63,37 @@ describe("attach existing pane command", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("attaches an eligible pane without mutating or starting it and is idempotent", async () => {
+  it("creates a new thread from a group-level Pane token and derives its project", async () => {
+    let exposePane = false;
+    const createTopic = vi.fn(async () => ({ topicId: "topic-token", rootMessageId: "root-token" }));
+    const createPane = vi.fn<HerdrPort["createPane"]>();
+    const startTraex = vi.fn<HerdrPort["startTraex"]>();
+    const runPrompt = vi.fn<HerdrPort["runPrompt"]>();
+    const pane = { paneId: "w6:p2", paneToken: "cum7", workspaceId: "w6", cwd: "/repo/beta", label: "Beta pane", agentState: "idle" as const, foregroundExecutables: ["traex"] };
+    const lark: LarkPort = { async start() {}, async stop() {}, isReady: () => true, createTopic, async replyText() { return { messageId: "text" }; }, async replyCard() { return { messageId: "card" }; }, async updateCard() {} };
+    const herdr: HerdrPort = {
+      async assertWorkspace() {}, async listPanes(workspaceId) { return exposePane && workspaceId === "w6" ? [pane] : []; }, async getPane() { return null; },
+      createPane, startTraex, runPrompt, async renamePane() { throw new Error("unexpected renamePane"); }
+    };
+    const testConfig = config();
+    testConfig.projects.push({ id: "beta", displayName: "Beta", spaceName: "beta", description: "Beta project", workspaceId: "w6", cwd: "/repo/beta" });
+    const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(testConfig, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start(); exposePane = true;
+
+    await coordinator.handleMessage({ ...command(90), text: "/swarm attach CUM7" });
+
+    expect(store.findBindingByPane("w6:p2")).toMatchObject({ projectId: "beta", topicId: "topic-token", rootMessageId: "root-token", paneToken: "cum7", state: "active" });
+    expect(createTopic).toHaveBeenCalledTimes(1);
+    expect(createPane).not.toHaveBeenCalled(); expect(startTraex).not.toHaveBeenCalled(); expect(runPrompt).not.toHaveBeenCalled();
+    await coordinator.stop(); await publisher.stop(); store.close();
+  });
+
+  it("creates a fresh thread for an attached task Pane and archives the previous thread", async () => {
     let exposePane = false;
     let onAction: Parameters<LarkPort["start"]>[1];
-    const createTopic = vi.fn(async () => ({ topicId: "topic-attached", rootMessageId: "root-attached" }));
+    let topicIndex = 0;
+    const createTopic = vi.fn(async () => { topicIndex += 1; return { topicId: `topic-attached-${topicIndex}`, rootMessageId: `root-attached-${topicIndex}` }; });
     const shareThread = vi.fn(async () => ({ messageId: "forwarded-topic" }));
     const replyCards: object[] = [];
     const lark: LarkPort = {
@@ -94,7 +121,8 @@ describe("attach existing pane command", () => {
     exposePane = true;
 
     await coordinator.handleMessage(command(1));
-    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ projectId: "analytics", topicId: "topic-attached", rootMessageId: "root-attached", state: "active" });
+    const first = store.findBindingByPane("w5:p3G")!;
+    expect(first).toMatchObject({ projectId: "analytics", topicId: "topic-attached-1", rootMessageId: "root-attached-1", state: "active" });
     expect(store.loadTopicView(store.findBindingByPane("w5:p3G")!.id)).toMatchObject({ primaryToolsAvailable: false, primaryToolsNotice: expect.stringMatching(/reset.*replace/i) });
     expect(createTopic).toHaveBeenCalledTimes(1);
     expect(createPane).not.toHaveBeenCalled();
@@ -102,11 +130,14 @@ describe("attach existing pane command", () => {
     expect(runPrompt).not.toHaveBeenCalled();
     expect(renamePane).not.toHaveBeenCalled();
 
-    await coordinator.handleMessage(command(2));
-    expect(createTopic).toHaveBeenCalledTimes(1);
-    expect(store.listBindings()).toHaveLength(1);
+    await coordinator.handleMessage(command(2, "w5:p3G", "user-1"));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT idempotency_key,state,outcome_json FROM swarm_command_intents ORDER BY created_at").all()).toContainEqual(expect.objectContaining({ idempotency_key: "lark-message:message-2:attach", state: "succeeded" })));
+    await vi.waitFor(() => expect(createTopic).toHaveBeenCalledTimes(2));
+    expect(store.listBindings()).toHaveLength(2);
+    expect(store.getBinding(first.id)).toMatchObject({ lifecycle: "archived", state: "archived", topicId: "topic-attached-1", rootMessageId: "root-attached-1" });
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ lifecycle: "active", state: "active", topicId: "topic-attached-2", rootMessageId: "root-attached-2" });
     await vi.waitFor(() => expect(replyCards.some((card) => JSON.stringify(card).includes('\"action\":\"open_project_thread\"'))).toBe(true));
-    const attachedCard = replyCards.find((card) => JSON.stringify(card).includes('\"action\":\"open_project_thread\"'))!;
+    const attachedCard = replyCards.findLast((card) => JSON.stringify(card).includes('\"action\":\"open_project_thread\"'))!;
     expect(JSON.stringify(attachedCard)).toContain("已连接");
     expect(JSON.stringify(attachedCard)).toContain("w5:p3G");
     expect(JSON.stringify(attachedCard)).toContain("发送话题入口");
@@ -114,17 +145,40 @@ describe("attach existing pane command", () => {
     expect(response).toContain('\"action\":\"open_project_thread\"');
     expect(response).not.toContain("openMessageId");
     expect(response).not.toContain("client/chat/open");
-    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ statusMessageId: "root-attached" });
+    expect(store.findBindingByPane("w5:p3G")).toMatchObject({ statusMessageId: "root-attached-2", creatorOpenId: "user-1" });
 
     const button = findActionButton(attachedCard, "open_project_thread");
     const attachedMessageId = `reply-${replyCards.indexOf(attachedCard) + 1}`;
     await onAction!({ messageId: attachedMessageId, chatId: "chat", operatorOpenId: "user-1", value: button.value });
-    expect(shareThread).toHaveBeenCalledWith("topic-attached", { messageId: attachedMessageId, chatId: "chat", sourceRootMessageId: "root-attached" });
+    expect(shareThread).toHaveBeenCalledWith("topic-attached-2", { messageId: attachedMessageId, chatId: "chat", sourceRootMessageId: "root-attached-2" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("preserves managed Primary tools when attaching the authoritative active pane again", async () => {
+  it("adopts an empty review owner only through the exact active attached Binding generation and Pane", () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "fenced", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Fenced" });
+    store.updateBinding("fenced", { paneId: "w5:p3G", state: "active", lifecycle: "active", attachment: "attached" });
+    const provisioning = store.capabilityModules().bindingProvisioning;
+
+    expect(provisioning.adoptBindingReviewOwnerIfEmpty({ bindingId: "fenced", expectedGeneration: 1, expectedPaneId: "w5:p3G", actorOpenId: "user-1" })).toMatchObject({ creatorOpenId: "user-1" });
+    expect(provisioning.adoptBindingReviewOwnerIfEmpty({ bindingId: "fenced", expectedGeneration: 1, expectedPaneId: "w5:p3G", actorOpenId: "user-2" })).toMatchObject({ creatorOpenId: "user-1" });
+
+    store.updateBinding("fenced", { generation: 2, creatorOpenId: null });
+    expect(provisioning.adoptBindingReviewOwnerIfEmpty({ bindingId: "fenced", expectedGeneration: 1, expectedPaneId: "w5:p3G", actorOpenId: "stale-user" })).toBeNull();
+    expect(store.getBinding("fenced")).toMatchObject({ creatorOpenId: null });
+
+    store.createPendingBinding({ id: "archived", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "archived-topic", rootMessageId: "archived-root", title: "Archived" });
+    store.updateBinding("archived", { paneId: "w5:p4G", state: "archived", lifecycle: "archived", attachment: "attached" });
+    expect(provisioning.adoptBindingReviewOwnerIfEmpty({ bindingId: "archived", expectedGeneration: 1, expectedPaneId: "w5:p4G", actorOpenId: "archived-user" })).toBeNull();
+
+    store.createPendingBinding({ id: "unattached", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "unattached-topic", rootMessageId: "unattached-root", title: "Unattached" });
+    store.updateBinding("unattached", { paneId: "w5:p5G", state: "active", lifecycle: "active", attachment: "unattached" });
+    expect(provisioning.adoptBindingReviewOwnerIfEmpty({ bindingId: "unattached", expectedGeneration: 1, expectedPaneId: "w5:p5G", actorOpenId: "unattached-user" })).toBeNull();
+    store.close();
+  });
+
+  it("preserves the fixed Orchestrator thread and managed tools when attaching its Pane again", async () => {
     const capability = "managed-capability";
     const createPane = vi.fn<HerdrPort["createPane"]>();
     const startTraex = vi.fn<HerdrPort["startTraex"]>();
@@ -142,7 +196,7 @@ describe("attach existing pane command", () => {
       async getPane() { return pane; }, createPane, startTraex, runPrompt, renamePane
     };
     const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "managed", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "topic-managed", rootMessageId: "root-managed", title: "managed" });
+    store.createPendingBinding({ id: "managed", kind: "orchestrator", projectId: "analytics", workspaceId: "w5", chatId: "chat", topicId: "topic-managed", rootMessageId: "root-managed", title: "managed" });
     store.updateBinding("managed", { paneId: pane.paneId, state: "active", lifecycle: "active", attachment: "attached" });
     expect(store.setBindingPrimaryToolCapability({ bindingId: "managed", expectedGeneration: 1, capabilityHash: createHash("sha256").update(capability).digest("hex") })).toBe(true);
     const bus = new BridgeEventBus();
@@ -196,7 +250,7 @@ describe("attach existing pane command", () => {
 
     await coordinator.handleMessage(command(1, "main"));
 
-    expect(store.getBinding("orphaned")).toMatchObject({ lifecycle: "archived", attachment: "attached", state: "archived", paneId: "w5:p20", traexSessionId: "term-main" });
+    expect(store.getBinding("orphaned")).toMatchObject({ lifecycle: "archived", attachment: "attached", state: "archived", paneId: "w5:p20", traexSessionId: "term-main", creatorOpenId: null });
     expect(store.listBindings()).toHaveLength(1);
     expect(createTopic).not.toHaveBeenCalled();
     expect(runPrompt).not.toHaveBeenCalled();
@@ -396,8 +450,8 @@ function config(): BridgeConfig {
   };
 }
 
-function command(index: number, pane = "w5:p3G") {
-  return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId: "user", text: `/swarm attach datasage_semantic_knowledge ${pane}`, mentionsBot: true, isRootMessage: true };
+function command(index: number, pane = "w5:p3G", actorOpenId = "user") {
+  return { eventId: `event-${index}`, messageId: `message-${index}`, chatId: "chat", topicId: null, rootMessageId: `message-${index}`, actorOpenId, text: `/swarm attach datasage_semantic_knowledge ${pane}`, mentionsBot: true, isRootMessage: true };
 }
 
 function findActionButton(card: object, action: string): { value: unknown } {

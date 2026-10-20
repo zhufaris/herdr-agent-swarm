@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { instanceCardActionNames, parseCardActionCommand, retiredCardActionNames, sessionCardActionNames } from "../src/coordinator/card-action-command.js";
+import { instanceCardActionNames, parseCardActionCommand, retiredCardActionNames, sessionCardActionNames, shortcutPanelActionNames } from "../src/coordinator/card-action-command.js";
 
 describe("card action command parsing", () => {
   it.each(instanceCardActionNames)("assigns %s only to instance interactions", (action) => {
@@ -14,6 +14,68 @@ describe("card action command parsing", () => {
     expect(parseCardActionCommand({ action })).toEqual({ kind: "retired", action });
   });
 
+  it.each(shortcutPanelActionNames)("accepts the fixed shortcut-panel action %s without client supplied authority", (action) => {
+    expect(parseCardActionCommand({ action })).toEqual({ kind: "shortcut-panel", action });
+  });
+
+  it.each(["default", "approve", "continue", "reject"] as const)("parses the closed Primary completion action %s", (selection) => {
+    expect(parseCardActionCommand({
+      action: "completion_action",
+      actionSetId: "action-set-1",
+      selection,
+      ownerKind: "primary-prompt",
+      ownerId: "prompt-1",
+      ownerGeneration: "3",
+      cardMessageId: "answer-1"
+    })).toEqual({
+      kind: "completion-action",
+      actionSetId: "action-set-1",
+      selection,
+      ownerKind: "primary-prompt",
+      ownerId: "prompt-1",
+      ownerGeneration: 3,
+      cardMessageId: "answer-1"
+    });
+  });
+
+  it.each(["yes", "", null])("rejects the open-ended completion selection %#", (selection) => {
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId: "action-set-1", selection, ownerKind: "primary-prompt", ownerId: "prompt-1", ownerGeneration: 3, cardMessageId: "answer-1" })).toEqual({ kind: "unknown" });
+  });
+
+  it("parses a dynamic option identity without trusting a callback message", () => {
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId: "action-set-1", optionId: "option-2", message: "tampered", ownerKind: "primary-prompt", ownerId: "prompt-1", ownerGeneration: 3, cardMessageId: "answer-1" })).toEqual({
+      kind: "completion-action", actionSetId: "action-set-1", optionId: "option-2", ownerKind: "primary-prompt", ownerId: "prompt-1", ownerGeneration: 3, cardMessageId: "answer-1"
+    });
+  });
+
+  it("parses a fresh-card completion choice without client-supplied authority", () => {
+    const actionSetId = `completion-review:v3:${"a".repeat(64)}`;
+    expect(parseCardActionCommand({
+      action: "completion_action",
+      actionSetId,
+      optionId: "approve"
+    })).toEqual({
+      kind: "completion-action",
+      actionSetId,
+      optionId: "approve"
+    });
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId: "completion-review:v3:abc123", optionId: "approve" })).toEqual({ kind: "unknown" });
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId, optionId: "approve", ownerKind: "primary-prompt", ownerId: "forged", ownerGeneration: 1, cardMessageId: "forged" })).toEqual({ kind: "unknown" });
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId, optionId: "approve", selection: "approve" })).toEqual({ kind: "unknown" });
+  });
+
+  it("parses a requester-owned Primary Segment choice", () => {
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId: "segment-actions-1", optionId: "revise", message: "tampered", ownerKind: "primary-segment", ownerId: "segment-1", ownerGeneration: "4", cardMessageId: "turn-card-1" })).toEqual({
+      kind: "completion-action", actionSetId: "segment-actions-1", optionId: "revise", ownerKind: "primary-segment", ownerId: "segment-1", ownerGeneration: 4, cardMessageId: "turn-card-1"
+    });
+  });
+
+  it("parses the system-owned Ignore identity separately from business choices", () => {
+    expect(parseCardActionCommand({ action: "completion_action", actionSetId: "action-set-1", optionId: "ignore", ownerKind: "worker-turn", ownerId: "turn-1", ownerGeneration: 3, cardMessageId: "task-1" })).toEqual({
+      kind: "completion-action", actionSetId: "action-set-1", ignore: true, ownerKind: "worker-turn", ownerId: "turn-1", ownerGeneration: 3, cardMessageId: "task-1"
+    });
+  });
+
   it.each([
     [{ action: "select_model", bindingId: "b1" }, "gpt-5.4", { kind: "model", bindingId: "b1", model: "gpt-5.4" }],
     [{ action: "select_model_mode", bindingId: "b1", operationId: "op1" }, "high", { kind: "model-mode", bindingId: "b1", operationId: "op1", mode: "high" }],
@@ -26,6 +88,8 @@ describe("card action command parsing", () => {
     [{ action: "pane_worker_thread_forward", instanceId: "i1", generation: "4", workerSessionGeneration: "3", bindingId: "b1", bindingGeneration: "2", parentPaneId: "pane-1", sourceMainMessageId: "om-main" }, null, { kind: "pane-directory", action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 2, parentPaneId: "pane-1", sourceMainMessageId: "om-main" }],
     [{ action: "natural_language_command_confirm", confirmationId: "confirmation_1" }, null, { kind: "natural-language-confirmation", decision: "confirm", confirmationId: "confirmation_1" }],
     [{ action: "natural_language_command_cancel", confirmationId: "confirmation_1" }, null, { kind: "natural-language-confirmation", decision: "cancel", confirmationId: "confirmation_1" }],
+    [{ action: "orchestrator_clear_confirm", confirmationId: "clear_1" }, null, { kind: "orchestrator-clear-confirmation", decision: "confirm", confirmationId: "clear_1" }],
+    [{ action: "orchestrator_clear_cancel", confirmationId: "clear_1" }, null, { kind: "orchestrator-clear-confirmation", decision: "cancel", confirmationId: "clear_1" }],
   ] as const)("normalizes an owned action %#", (value, option, expected) => {
     expect(parseCardActionCommand(value, option)).toEqual(expected);
   });
@@ -64,6 +128,7 @@ describe("card action command parsing", () => {
     { action: "card_target_open", aggregateKind: "unknown", aggregateId: "i1", generation: 1, messageId: "card" },
     { action: "instance_open", instanceId: "i1", generation: 1, conversationKey: "x".repeat(201) },
     { action: "natural_language_command_confirm" },
+    { action: "orchestrator_clear_confirm" },
   ])("maps malformed or unknown payload %# to the common fallback", (value) => {
     expect(parseCardActionCommand(value)).toEqual({ kind: "unknown" });
   });

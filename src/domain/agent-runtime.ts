@@ -34,6 +34,7 @@ export type InterruptReceipt =
   | { status: "delivery-uncertain"; operationId: string; reason: string }
   | { status: "failed"; reason: string };
 export interface AgentDispatchHooks {
+  submissionId?: string;
   onDispatched?(): void | Promise<void>;
   onObservation?(observation: RuntimeTurnObservation): void | Promise<void>;
 }
@@ -41,7 +42,7 @@ export interface AgentDispatchHooks {
 export interface AgentRuntimeDriver {
   readonly kind: AgentKind;
   describe(): AgentCapabilities;
-  start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void>;
+  start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; transcriptOwnerId?: string; primaryTools?: { command: string; args: string[]; agentArgs?: string[] }; rotatable?: boolean }): Promise<void>;
   submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt>;
   steer?(runtime: AgentRuntimeRef, text: string): Promise<SteerReceipt>;
   interrupt?(runtime: AgentRuntimeRef): Promise<InterruptReceipt>;

@@ -3,7 +3,8 @@ import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, Dispatc
 import type { HerdrPort } from "../../domain/ports/external.js";
 import { classifyPromptSubmissionFailure } from "../../domain/prompt-submission.js";
 import { safeLogError } from "../safe-error.js";
-import { managedAgentName, primaryToolMcpArguments } from "./agent-startup.js";
+import { managedAgentName, normalizeManagedAgentName } from "../../domain/managed-agent-name.js";
+import { primaryToolMcpArguments } from "./agent-startup.js";
 
 export class TraexDriver implements AgentRuntimeDriver {
   readonly kind = "traex" as const;
@@ -22,18 +23,29 @@ export class TraexDriver implements AgentRuntimeDriver {
     };
   }
 
-  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
+  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] }; rotatable?: boolean }): Promise<void> {
     const args = [
       ...(options?.model ? ["--model", options.model] : []),
       ...(options?.primaryTools ? [...(options.primaryTools.agentArgs ?? []), ...primaryToolMcpArguments(options.primaryTools)] : [])
     ];
-    if (this.herdr.startAgent) await this.herdr.startAgent(runtime.paneId, { name: managedAgentName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: "traex", executable: this.executable, args });
+    const name = options?.managedName ? normalizeManagedAgentName(options.managedName) : managedAgentName(options?.projectId, options?.name ?? this.kind);
+    if (this.herdr.startAgent) await this.herdr.startAgent(runtime.paneId, { name, kind: "traex", executable: this.executable, args, ...(options?.rotatable === undefined ? {} : { rotatable: options.rotatable }) });
     else await this.herdr.startTraex(runtime.paneId, this.executable, args);
   }
 
   async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt> {
     let dispatched = false;
     try {
+      if (hooks?.submissionId) {
+        if (!runtime.nativeSessionId || !this.herdr.queuePrompt) return { status: "not-delivered", reason: "Native Worker submission identity is unavailable" };
+        const result = await this.herdr.queuePrompt(runtime.paneId, text, { submissionId: hooks.submissionId, expectedSessionId: runtime.nativeSessionId }, signal);
+        if (result.submissionId !== hooks.submissionId) return { status: "delivery-uncertain", reason: "Native Worker submission receipt identity mismatch" };
+        if (result.receipt?.state === "rejected") return { status: "not-delivered", reason: "Native Worker submission was rejected" };
+        if (result.receipt?.state === "uncertain") return { status: "delivery-uncertain", reason: "Native Worker submission receipt is uncertain" };
+        dispatched = true;
+        await hooks.onDispatched?.();
+        return { status: "confirmed-delivered" };
+      }
       await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, hooks?.onObservation, signal, async () => { dispatched = true; await hooks?.onDispatched?.(); });
       return { status: "confirmed-delivered" };
     } catch (error) {

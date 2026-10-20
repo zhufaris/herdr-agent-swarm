@@ -28,4 +28,16 @@ describe("PeriodicWorkflowRunner", () => {
     await runner.stop();
     vi.useRealTimers();
   });
+
+  it("does not reject shutdown when an active pass fails", async () => {
+    let rejectRun!: (error: Error) => void;
+    const run = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectRun = reject; }));
+    const runner = new PeriodicWorkflowRunner({ run, onError: vi.fn() });
+    const active = runner.request();
+    const stopping = runner.stop();
+
+    rejectRun(new Error("database busy"));
+    await expect(active).rejects.toThrow("database busy");
+    await expect(stopping).resolves.toBeUndefined();
+  });
 });

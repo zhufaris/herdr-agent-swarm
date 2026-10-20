@@ -13,13 +13,13 @@ current supported behavior and its boundaries.
 | Track Clean Architecture completion across the major workflow seams | [Architecture boundary inventory](architecture-boundary-inventory.md) |
 | Learn the domain language and ownership boundaries | [Domain contexts](domain/README.md) |
 | Use the service from a configured Feishu group | [Feishu group usage](feishu-group-usage.md) |
+| Prepare the fixed group Orchestrator without crossing the live-change gate | [Group Orchestrator rollout](agents/group-orchestrator-rollout.md) |
 | Prepare or inspect a published release | [Releases](releases.md) |
 | Install, update, diagnose, or restart the standalone service | [README operations guide](../README.md#install-from-source) |
 | Inspect an earlier decision or completed implementation plan | [Historical documentation](archive/README.md) |
 
-The [interactive architecture diagram](herdr-agent-swarm-architecture.html) is a
-visual companion to the architecture guide. The static diagram appears in the
-repository README.
+The [architecture diagram](herdr-agent-swarm-architecture.svg) is a visual
+companion to the architecture guide.
 
 ## Current authority
 

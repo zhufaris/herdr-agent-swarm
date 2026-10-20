@@ -5,21 +5,98 @@ import { WorkerTurnDispatcher } from "../src/coordinator/worker-turn-dispatcher.
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import type { AgentRuntimeDriver } from "../src/domain/agent-runtime.js";
 import { WorkerTurnObserver } from "../src/coordinator/worker-turn-observer.js";
-import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptReaderPort } from "../src/domain/ports.js";
 import { workerPresentation } from "./helpers/presentation.js";
 import { TurnControlRequestError } from "../src/domain/ports/turn-control.js";
+import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { connectPreparedDeliveryProducers } from "../src/composition/create-outbound-runtime.js";
+import type { GatewayDeliveryIntent } from "../src/gateways/contract/plugin.js";
 
 let store: SqliteBindingStore | undefined;
-afterEach(() => { vi.useRealTimers(); store?.close(); store = undefined; });
+let schedulers: WorkerTurnDispatcher[] = [];
+afterEach(async () => {
+  await Promise.all(schedulers.splice(0).map((scheduler) => scheduler.stop()));
+  vi.useRealTimers();
+  store?.close();
+  store = undefined;
+});
 
-function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}, options: { nativeSessionId?: string | null; transcriptReader?: TraexTranscriptReaderPort } = {}) {
-  store = new SqliteBindingStore(":memory:");
+function createStore(): SqliteBindingStore {
+  const target = new SqliteBindingStore(":memory:");
+  const modules = target.capabilityModules();
+  connectPreparedDeliveryProducers(modules.outbox, modules.preparedDeliveryProducers, {
+    prepare: (intent: GatewayDeliveryIntent) => ({
+      protocolVersion: 1,
+      gatewayId: "feishu:primary",
+      profileId: "feishu-cardkit-v1",
+      rendererRevision: 1,
+      operation: intent.kind,
+      intent
+    })
+  }, { enqueuePreparedDelivery() {} });
+  return target;
+}
+
+function unifiedWorkerTurn(turnId: string): Record<string, unknown> | null {
+  if (!store) return null;
+  const id = `worker-turn:${turnId}`;
+  const segment = store.capabilityModules().conversationSegments.getConversationSegment(id);
+  if (!segment) return null;
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM worker_turn_cards WHERE turn_id=?").get(turnId)).toEqual({ count: 0 });
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM worker_turn_card_pages WHERE turn_id=?").get(turnId)).toEqual({ count: 0 });
+  const items = store.capabilityModules().conversationSegments.listConversationSegmentItems(id).map(({ item }) => item);
+  const turn = store.getInstanceTurn(turnId);
+  const answer = turn?.result ?? items.filter((item) => item.kind === "agent_message" || item.kind === "final_answer").map((item) => item.markdown).join("");
+  const phase = turn?.state === "dispatch-uncertain" ? "dispatch-uncertain" : turn?.state === "claimed" ? "preparing" : turn?.state === "running" ? "running" : turn?.state === "completed" ? "completed" : turn?.state === "failed" ? "failed" : segment.state;
+  const notice = turn?.error === "Command failed: herdr agent prompt w:p [REDACTED] --wait\n{\"error\":{\"code\":\"agent_prompt_stalled\"}}" ? "正在确认 Worker 是否已接收任务；系统不会自动重放。" : turn?.error ?? null;
+  return { phase, answer, notice, resultCapture: answer ? "captured" : "pending", segmentId: id, viewVersion: segment.viewVersion };
+}
+
+function projectCanonicalWorker(turnId: string): void {
+  if (!store) throw new Error("Worker test store is unavailable");
+  const intent = store.database.prepare(`SELECT text,canonical_expected_session_id FROM instance_turns WHERE id=?`).get(turnId) as {
+    text: string; canonical_expected_session_id: string | null;
+  } | undefined;
+  if (!intent) throw new Error(`Worker canonical intent is unavailable: ${turnId}`);
+  store.capabilityModules().conversationSegments.projectCanonicalEvent({
+    laneId: `worker-test:${turnId}`,
+    laneSequence: 1,
+    observedAt: "2026-10-04T12:00:01.000Z",
+    event: {
+      schemaVersion: 1,
+      eventId: `worker-test-human:${turnId}`,
+      cursor: "worker-test:1",
+      sourceId: "worker-test",
+      agentKind: "traex",
+      sessionId: intent.canonical_expected_session_id ?? `session:${turnId}`,
+      turnId: `runtime:${turnId}`,
+      occurredAt: "2026-10-04T12:00:01.000Z",
+      payload: { type: "human_message", message_id: `worker-test-message:${turnId}`, text: intent.text, truncated: false, submission_id: turnId }
+    }
+  });
+}
+
+function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>> = {}, options: { nativeSessionId?: string | null; transcriptReader?: AgentTranscriptReaderPort; projectCanonicalOnSubmit?: boolean } = {}) {
+  store = createStore();
+  store.createPendingBinding({ id: "instance-messaging-parent", projectId: "p1", workspaceId: "w", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+  store.updateBinding("instance-messaging-parent", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", statusMessageId: "primary-root" });
   const runtime = { herdrWorkspaceId: "w", paneId: "w:p1", nativeSessionId: null, generation: 2 };
   const create = (id: string, projectId = "p1", role: "primary" | "worker" = "worker") => {
-    store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null, desiredState: "running", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null,
+      ...(role === "worker" ? { parent: { bindingId: "instance-messaging-parent", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" } } : {}),
+      ...(role === "worker" ? { workerSessionLifecycle: "active" as const } : {}),
+      desiredState: "running", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, ...runtime, paneId: `${id}:pane`, nativeSessionId: options.nativeSessionId ?? null })!;
   };
-  const submit = vi.fn(async () => ({ status: "confirmed-delivered" as const }));
+  let canonicalSequence = 0;
+  const submit = vi.fn(async (submittedRuntime: typeof runtime, text: string, hooks?: { submissionId?: string }) => {
+    if (options.projectCanonicalOnSubmit !== false && hooks?.submissionId) {
+      const sequence = ++canonicalSequence;
+      void submittedRuntime; void text; void sequence;
+      projectCanonicalWorker(hooks.submissionId);
+    }
+    return { status: "confirmed-delivered" as const };
+  });
   const driver: AgentRuntimeDriver = {
     kind: "traex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "runtime", usageReporting: true, ...capabilities }),
     start: vi.fn(async () => undefined), submit, steer: vi.fn(async () => ({ status: "delivered" as const })), interrupt: vi.fn(async () => ({ status: "interrupted" as const }))
@@ -35,10 +112,129 @@ function setup(capabilities: Partial<ReturnType<AgentRuntimeDriver["describe"]>>
   let scheduler!: WorkerTurnDispatcher;
   const observer = options.transcriptReader ? new WorkerTurnObserver({ store, transcriptReader: options.transcriptReader, wakeInstance: (instanceId) => scheduler.wake(instanceId), wakeOutbound, presentation: workerPresentation }) : undefined;
   scheduler = new WorkerTurnDispatcher({ store, drivers, observer, wakeOutbound, presentation: workerPresentation });
+  schedulers.push(scheduler);
   return { create, workflow, scheduler, observer, wake, wakeOutbound, submit, driver, turnControl };
 }
 
 describe("instance messaging", () => {
+  it("creates the first Worker Turn Card only when the exact canonical Human Message arrives", async () => {
+    const sessionId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
+    const { create, workflow, scheduler, submit } = setup({}, { nativeSessionId: sessionId, projectCanonicalOnSubmit: false });
+    const worker = create("worker");
+
+    await workflow.submit({
+      idempotencyKey: "m1",
+      actor: { kind: "human", userId: "u1", channel: "feishu" },
+      projectId: "p1",
+      targetInstanceId: worker.id,
+      content: { kind: "turn", text: "review" },
+      source: { messageId: "m1", rootMessageId: "root-1" }
+    });
+
+    expect(store!.capabilityModules().conversationSegments.getConversationSegment("worker-turn:turn-1")).toBeNull();
+    expect(store!.database.prepare("SELECT COUNT(*) AS count FROM conversation_segment_pages").get()).toEqual({ count: 0 });
+    expect(store!.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE projection_key LIKE 'turn-card:%'").get()).toEqual({ count: 0 });
+
+    await scheduler.drain(worker.id);
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ nativeSessionId: sessionId }),
+      "review",
+      expect.objectContaining({ submissionId: "turn-1" }),
+      expect.any(AbortSignal)
+    );
+
+    const adopted = store!.capabilityModules().conversationSegments.projectCanonicalEvent({
+      laneId: "worker-lane",
+      laneSequence: 42,
+      observedAt: "2026-10-04T12:00:01.000Z",
+      event: {
+        schemaVersion: 1,
+        eventId: "worker-human-1",
+        cursor: "worker:42",
+        sourceId: "worker-source",
+        agentKind: "traex",
+        sessionId,
+        turnId: "runtime-turn-1",
+        occurredAt: "2026-10-04T12:00:01.000Z",
+        payload: { type: "human_message", message_id: "worker-message-1", text: "review", truncated: false, submission_id: "turn-1" }
+      }
+    });
+
+    expect(adopted).toEqual({ outcome: "created", segmentId: "worker-turn:turn-1" });
+    expect(store!.database.prepare("SELECT id FROM conversation_segments").all()).toEqual([{ id: "worker-turn:turn-1" }]);
+    expect(store!.capabilityModules().conversationSegments.getConversationSegment("worker-turn:turn-1")).toMatchObject({
+      humanEventId: "worker-human-1",
+      state: "working",
+      startAt: { laneSequence: 42, itemOrdinal: 0 }
+    });
+    expect(store!.capabilityModules().conversationSegments.listConversationSegmentItems("worker-turn:turn-1")).toHaveLength(1);
+    expect(store!.database.prepare(`SELECT scope_kind,scope_workspace_id,scope_pane_id,delivery_owner_kind,delivery_owner_id,
+      gateway_plan_hash IS NOT NULL AS prepared FROM outbound_replies WHERE projection_key LIKE 'turn-card:%'`).get()).toEqual({
+      scope_kind: "pane", scope_workspace_id: "w", scope_pane_id: "worker:pane",
+      delivery_owner_kind: "worker", delivery_owner_id: worker.id, prepared: 1
+    });
+  });
+
+  it.each([
+    ["default", "default"],
+    ["approve", "批准，按当前方案继续执行。"],
+    ["continue", "继续。"],
+    ["reject", "拒绝，请停止当前方案并等待进一步指示。"]
+  ] as const)("maps Worker completion action %s to one ordinary follow-up", async (selection, expectedText) => {
+    const owner = { id: "owner-turn", projectId: "p1", instanceId: "worker", instanceGeneration: 2, state: "completed", kind: "turn" };
+    const ownerView = createQueuedWorkerTurnCard({ turnId: owner.id, instanceId: "worker", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    const target = { id: "worker", projectId: "p1", name: "reviewer", generation: 2, workerSessionGeneration: 3, desiredState: "running", runtimeRef: { paneId: "worker-pane" } };
+    const acceptWorkerCompletionAction = vi.fn((input) => ({ turn: { ...owner, id: "followup-turn", text: input.accepted.text }, view: input.accepted.view, inserted: true, completionActionOwnerTurnIds: [owner.id] }));
+    const convergeWorkerTurn = vi.fn(async () => undefined);
+    const wake = vi.fn();
+    const workflow = new InstanceMessagingWorkflow({
+      store: { getInstanceTurn: vi.fn(() => owner), loadWorkerTurnCard: vi.fn(() => ownerView), getAgentInstance: vi.fn(() => target), acceptWorkerCompletionAction } as never,
+      turnControl: {} as never, wake, wakeOutbound: vi.fn(), convergeWorkerTurn, idFactory: () => "followup-turn", presentation: workerPresentation
+    });
+
+    const result = await workflow.acceptWorkerCompletionAction({ actionSetId: "actions-1", selection, ownerTurnId: owner.id, ownerGeneration: 3, cardMessageId: "worker-card", chatId: "chat", actor: { kind: "human", userId: "ou_actor", channel: "feishu" } });
+
+    expect(result).toMatchObject({ accepted: true, inserted: true, turn: { id: "followup-turn", text: expectedText }, card: { parentTurnId: owner.id, requestText: expectedText } });
+    expect(acceptWorkerCompletionAction).toHaveBeenCalledWith(expect.objectContaining({
+      selection, ownerTurnId: owner.id, ownerGeneration: 3, cardMessageId: "worker-card", actorOpenId: "ou_actor",
+      accepted: expect.objectContaining({ idempotencyKey: `completion-action:v1:actions-1:${selection}`, kind: "followup", text: expectedText, parentTurnId: owner.id, sourceMessageId: "worker-card" })
+    }));
+    expect(convergeWorkerTurn).toHaveBeenCalledWith(owner.id);
+    expect(wake).toHaveBeenCalledWith(target.id);
+  });
+
+  it("resolves a dynamic Worker choice before constructing its ordinary follow-up", async () => {
+    const owner = { id: "owner-turn", projectId: "p1", instanceId: "worker", instanceGeneration: 2, state: "completed", kind: "turn" };
+    const ownerView = createQueuedWorkerTurnCard({ turnId: owner.id, instanceId: "worker", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    const target = { id: "worker", projectId: "p1", name: "reviewer", generation: 2, workerSessionGeneration: 3, desiredState: "running", runtimeRef: { paneId: "worker-pane" } };
+    const acceptWorkerCompletionAction = vi.fn((input) => ({ turn: { ...owner, id: "followup-turn", text: input.accepted.text }, view: input.accepted.view, inserted: true, completionActionOwnerTurnIds: [owner.id] }));
+    const workflow = new InstanceMessagingWorkflow({
+      store: { getInstanceTurn: vi.fn(() => owner), loadWorkerTurnCard: vi.fn(() => ownerView), getAgentInstance: vi.fn(() => target), resolveWorkerCompletionChoice: vi.fn(() => ({ label: "Two", message: "server message" })), acceptWorkerCompletionAction } as never,
+      turnControl: {} as never, wake: vi.fn(), idFactory: () => "followup-turn", presentation: workerPresentation
+    });
+
+    await workflow.acceptWorkerCompletionAction({ actionSetId: "actions-1", optionId: "two", ownerTurnId: owner.id, ownerGeneration: 3, cardMessageId: "worker-card", chatId: "chat", actor: { kind: "human", userId: "ou_actor", channel: "feishu" } });
+
+    expect(acceptWorkerCompletionAction).toHaveBeenCalledWith(expect.objectContaining({ optionId: "two", accepted: expect.objectContaining({ idempotencyKey: "completion-choice:v1:actions-1:two", text: "server message" }) }));
+  });
+
+  it("consumes Worker Ignore locally without constructing or waking a follow-up", async () => {
+    const ignoreWorkerCompletionAction = vi.fn(() => ({ ownerId: "owner-turn", changed: true }));
+    const convergeWorkerTurn = vi.fn(async () => undefined);
+    const wake = vi.fn();
+    const idFactory = vi.fn(() => "must-not-be-created");
+    const workflow = new InstanceMessagingWorkflow({
+      store: { ignoreWorkerCompletionAction } as never,
+      turnControl: {} as never, wake, convergeWorkerTurn, idFactory, presentation: workerPresentation
+    });
+
+    await expect(workflow.ignoreWorkerCompletionAction({ actionSetId: "actions-1", ownerTurnId: "owner-turn", ownerGeneration: 3, cardMessageId: "worker-card", chatId: "chat", actor: { kind: "human", userId: "ou_actor", channel: "feishu" } })).resolves.toEqual({ ownerId: "owner-turn", changed: true });
+    expect(ignoreWorkerCompletionAction).toHaveBeenCalledWith({ actionSetId: "actions-1", ownerTurnId: "owner-turn", ownerGeneration: 3, cardMessageId: "worker-card", chatId: "chat", actorOpenId: "ou_actor" });
+    expect(convergeWorkerTurn).toHaveBeenCalledWith("owner-turn");
+    expect(idFactory).not.toHaveBeenCalled();
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("rejects oversized task and steering input at the messaging boundary", async () => {
     const { create, workflow, wake, turnControl } = setup();
     const worker = create("worker");
@@ -235,10 +431,8 @@ describe("instance messaging", () => {
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({
-      phase: "dispatch-uncertain",
-      notice: "正在确认 Worker 是否已接收任务；系统不会自动重放。"
-    });
+    expect(unifiedWorkerTurn("turn-1")).toBeNull();
+    expect(store!.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE projection_key LIKE 'turn-card:%'").get()).toEqual({ count: 0 });
   });
 
   it("completes unstructured dispatches without inventing output and drains FIFO", async () => {
@@ -258,6 +452,7 @@ describe("instance messaging", () => {
     const worker = create("worker");
     let release!: () => void;
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await new Promise<void>((resolve) => { release = resolve; });
       return { status: "confirmed-delivered", runtimeCursor: "not-an-answer" };
@@ -266,12 +461,12 @@ describe("instance messaging", () => {
     const draining = scheduler.drain(worker.id);
     await vi.waitFor(() => {
       expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "running", result: null });
-      expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "" });
+      expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "running", answer: "" });
     });
     release();
     await draining;
     expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "running", result: null });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "" });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "running", answer: "" });
     expect(JSON.stringify(store!.listPendingOutboundReplies())).not.toContain("not-an-answer");
     expect(wakeOutbound).toHaveBeenCalled();
   });
@@ -280,7 +475,7 @@ describe("instance messaging", () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
     let read = false;
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -292,18 +487,18 @@ describe("instance messaging", () => {
     };
     const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
-    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => { await hooks?.onDispatched?.(); return { status: "confirmed-delivered" }; });
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => { projectCanonicalWorker(hooks?.submissionId ?? "turn-1"); await hooks?.onDispatched?.(); return { status: "confirmed-delivered" }; });
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root-1" } });
 
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "review finding", runtimeTurnId });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "review finding", resultCapture: "captured" });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "completed", answer: "review finding", resultCapture: "captured" });
   });
 
   it("does not overwrite an exact transcript completion when the driver observer disconnects", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -315,18 +510,18 @@ describe("instance messaging", () => {
     };
     const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
-    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => { await hooks?.onDispatched?.(); throw new Error("observer disconnected"); });
+    vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => { projectCanonicalWorker(hooks?.submissionId ?? "turn-1"); await hooks?.onDispatched?.(); throw new Error("observer disconnected"); });
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "review" }, source: { messageId: "m1", rootMessageId: "root-1" } });
 
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted" });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "completed", answer: "trusted" });
   });
 
   it("does not overwrite an exact transcript completion with a late not-delivered receipt", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -339,6 +534,7 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       return { status: "not-delivered", reason: "late settlement missed the already completed turn" };
     });
@@ -347,13 +543,13 @@ describe("instance messaging", () => {
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted", error: null });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "completed", answer: "trusted" });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "completed", answer: "trusted" });
   });
 
   it("keeps observing an exact-owned running turn after a late not-delivered receipt", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -366,6 +562,7 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, observer, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", runtimeTurnId, runtimeTurnStartedAt: startedAt }));
       return { status: "not-delivered", reason: "late settlement missed the running turn" };
@@ -375,7 +572,7 @@ describe("instance messaging", () => {
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", error: null, runtimeTurnId, runtimeTurnStartedAt: startedAt });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", notice: null });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "running", notice: null });
     expect(store!.listInstanceEvents(worker.id).map(({ kind }) => kind)).not.toContain("turn.failed");
 
     await observer!.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "trusted completion", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "trusted completion" } });
@@ -385,7 +582,7 @@ describe("instance messaging", () => {
   it("keeps observing an exact-owned running turn after a late uncertain receipt", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -398,6 +595,7 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, observer, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", runtimeTurnId, runtimeTurnStartedAt: startedAt }));
       return { status: "delivery-uncertain", reason: "agent_prompt_stalled" };
@@ -407,7 +605,7 @@ describe("instance messaging", () => {
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", error: null, runtimeTurnId, runtimeTurnStartedAt: startedAt });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", notice: null });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "running", notice: null });
 
     await observer!.observe("turn-1", { turnId: runtimeTurnId, answerDelta: "trusted completion", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "trusted completion" } });
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "completed", result: "trusted completion", error: null });
@@ -421,7 +619,7 @@ describe("instance messaging", () => {
       turnId: runtimeTurnId, freshTurnStart: true, answerDelta: "",
       turnLifecycle: { turnId: runtimeTurnId, state: "active" as const, startedAt }
     }];
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() { return observations.shift() ?? { answerDelta: "" }; }
@@ -430,6 +628,7 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await vi.advanceTimersByTimeAsync(250);
       return { status: "delivery-uncertain", reason: "agent_prompt_stalled" };
@@ -441,7 +640,7 @@ describe("instance messaging", () => {
 
     observations.push({ turnId: runtimeTurnId, answerDelta: "late progress", turnLifecycle: { turnId: runtimeTurnId, state: "active", startedAt } });
     await vi.advanceTimersByTimeAsync(250);
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", answer: "late progress" });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "running", segmentId: "worker-turn:turn-1" });
 
     observations.push({ turnId: runtimeTurnId, answerDelta: "", turnLifecycle: { turnId: runtimeTurnId, state: "completed", startedAt, finalAnswer: "final answer" } });
     await vi.advanceTimersByTimeAsync(250);
@@ -454,7 +653,7 @@ describe("instance messaging", () => {
   it("keeps observing an exact-owned running turn when the driver throws late", async () => {
     const runtimeTurnId = "01a052d3-9c14-70e1-a375-397e2ecb5501";
     const startedAt = "2026-09-01T00:00:01.000Z";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { let read = false; return { mode: "typed" as const, cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -467,6 +666,7 @@ describe("instance messaging", () => {
     const { create, workflow, scheduler, driver } = setup({}, { nativeSessionId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", transcriptReader });
     const worker = create("worker");
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks) => {
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await vi.waitFor(() => expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", runtimeTurnId, runtimeTurnStartedAt: startedAt }));
       throw new Error("agent_prompt_stalled");
@@ -476,7 +676,7 @@ describe("instance messaging", () => {
     await scheduler.drain(worker.id);
 
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "running", error: null, runtimeTurnId, runtimeTurnStartedAt: startedAt });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "running", notice: null });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "running", notice: null });
   });
 
   it("fences a thrown driver call as uncertain without rejecting the drain", async () => {
@@ -486,7 +686,7 @@ describe("instance messaging", () => {
     await workflow.submit({ idempotencyKey: "m1", actor: { kind: "human", userId: "u1", channel: "feishu" }, projectId: "p1", targetInstanceId: worker.id, content: { kind: "turn", text: "work" }, source: { messageId: "m1", rootMessageId: "root-1" } });
     await expect(scheduler.drain(worker.id)).resolves.toBeUndefined();
     expect(store!.listInstanceTurns(worker.id).items[0]).toMatchObject({ state: "dispatch-uncertain", error: "driver crashed" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "dispatch-uncertain", notice: "driver crashed", answer: "" });
+    expect(unifiedWorkerTurn("turn-1")).toBeNull();
     expect(scheduler.snapshot()).toMatchObject({ activeDispatchWorkers: 0, lastFailure: "driver crashed" });
   });
 
@@ -496,6 +696,7 @@ describe("instance messaging", () => {
     let release!: () => void; let receivedSignal: AbortSignal | undefined;
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks, signal) => {
       receivedSignal = signal;
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await new Promise<void>((resolve) => { release = resolve; signal?.addEventListener("abort", () => resolve(), { once: true }); });
       return { status: "confirmed-delivered" };
@@ -509,7 +710,7 @@ describe("instance messaging", () => {
     await expect(stopped).resolves.toBeUndefined();
     expect(receivedSignal?.aborted).toBe(true);
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
-    expect(store!.loadWorkerTurnCard("turn-1")).toMatchObject({ phase: "dispatch-uncertain" });
+    expect(unifiedWorkerTurn("turn-1")).toMatchObject({ phase: "dispatch-uncertain" });
     release();
     await new Promise((resolve) => setImmediate(resolve));
     expect(store!.getInstanceTurn("turn-1")).toMatchObject({ state: "dispatch-uncertain" });
@@ -521,6 +722,7 @@ describe("instance messaging", () => {
     let release!: () => void; let receivedSignal: AbortSignal | undefined;
     vi.mocked(driver.submit).mockImplementationOnce(async (_runtime, _text, hooks, signal) => {
       receivedSignal = signal;
+      projectCanonicalWorker(hooks?.submissionId ?? "turn-1");
       await hooks?.onDispatched?.();
       await new Promise<void>((resolve) => { release = resolve; });
       return { status: "confirmed-delivered" };

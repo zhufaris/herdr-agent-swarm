@@ -15,7 +15,7 @@ export type NaturalLanguageCommandResult =
 export interface NaturalLanguageCommandInterpreter { interpret(text: string, message?: IncomingLarkMessage): NaturalLanguageCommandResult | Promise<NaturalLanguageCommandResult> }
 
 const AGENT_KINDS = new Set<AgentKind>(["traex", "pi", "codex", "claude-code"]);
-const COMMAND_LEADS = /^(?:请|帮我|麻烦)?(?:查看|显示|列出|打开|切换|选择|创建|新建|重置|重新连接|连接|替换|恢复|唤醒|跳过|停止|终止|中断|修改|重命名|关闭|发送|告诉|追加|补充|转向|steer(?:\s|$)|show(?:\s|$)|list(?:\s|$)|open(?:\s|$)|switch(?:\s|$)|select(?:\s|$)|create(?:\s|$)|new(?:\s|$)|reset(?:\s|$)|reattach(?:\s|$)|attach(?:\s|$)|replace(?:\s|$)|resume(?:\s|$)|awake(?:\s|$)|skip(?:\s|$)|stop(?:\s|$)|interrupt(?:\s|$)|rename(?:\s|$)|close(?:\s|$)|send(?:\s|$))/i;
+const COMMAND_LEADS = /^(?:请|帮我|麻烦)?(?:查看|显示|列出|打开|切换|选择|创建|新建|重置|重新连接|连接|替换|恢复|唤醒|停止|终止|中断|修改|重命名|关闭|发送|告诉|追加|补充|转向|steer(?:\s|$)|show(?:\s|$)|list(?:\s|$)|open(?:\s|$)|switch(?:\s|$)|select(?:\s|$)|create(?:\s|$)|new(?:\s|$)|reset(?:\s|$)|reattach(?:\s|$)|attach(?:\s|$)|replace(?:\s|$)|resume(?:\s|$)|awake(?:\s|$)|stop(?:\s|$)|interrupt(?:\s|$)|rename(?:\s|$)|close(?:\s|$)|send(?:\s|$))/i;
 const TASK_LEADS = /^(?:请|帮我|麻烦)?(?:实现|修复|排查|分析|优化|编写|更新|重构|测试|review(?:\s|$)|implement(?:\s|$)|fix(?:\s|$)|debug(?:\s|$)|investigate(?:\s|$)|analy[sz]e(?:\s|$)|optimi[sz]e(?:\s|$)|write(?:\s|$)|update(?:\s|$)|refactor(?:\s|$)|test(?:\s|$))/i;
 
 export class DeterministicNaturalLanguageCommandInterpreter implements NaturalLanguageCommandInterpreter {
@@ -71,10 +71,18 @@ function projectAndPrimaryRule({ text, projects }: InterpretationContext): Natur
     const resolved = projectId(project[1]!, projects);
     return resolved ? instance({ kind: "project", projectId: resolved }) : clarify("没有找到这个已配置项目。", ["查看项目", "选择项目 <project-id>"]);
   }
-  const primary = /^(?:在\s+(.+?)\s+)?(?:(?:创建|新建)(?:一个)?(?:新)?(?:primary)?(?:任务|会话)|(?:create|start)\s+(?:(?:a|one)\s+)?(?:new\s+)?(?:primary\s+)?(?:task|session))(?:\s*[:：-]\s*|\s+)?(.*)$/i.exec(text);
+  const primary = /^(?:在\s+(.+?)\s+)?(?:(?:创建|新建)\s*(?:一个)?\s*(?:新)?\s*(?:primary\s*)?(?:任务|会话)|(?:create|start)\s+(?:(?:a|one)\s+)?(?:new\s+)?(?:primary\s+)?(?:task|session))(?:\s*[:：-]\s*|\s+)?(.*)$/i.exec(text);
   if (!primary) return null;
   if (primary[1] && !projectId(primary[1], projects)) return clarify("没有找到目标项目。", ["查看项目", "在 <project-id> 创建新任务：<标题>"]);
-  return swarm({ kind: "new", title: primary[2]?.trim() || null, agentKind: "traex" });
+  const options = extractAgentOption(primary[2] ?? "");
+  return swarm({ kind: "new", title: options.text || null, agentKind: options.agentKind });
+}
+
+function extractAgentOption(value: string): { text: string; agentKind: AgentKind } {
+  const option = /(?:^|\s)--agent\s+(traex|pi|codex|claude-code)(?=\s|$)/i.exec(value);
+  if (!option) return { text: value.trim(), agentKind: "traex" };
+  const agentKind = option[1]!.toLowerCase() as AgentKind;
+  return { text: `${value.slice(0, option.index)} ${value.slice(option.index + option[0].length)}`.replace(/\s+/g, " ").trim(), agentKind };
 }
 
 function workerRule({ text }: InterpretationContext): NaturalLanguageCommandResult | null {
@@ -118,7 +126,6 @@ function currentSessionMutationRule({ text }: InterpretationContext): NaturalLan
   if (/^(?:替换|replace)(?:\s*(?:pane|会话|session))?$/i.test(text)) return swarm({ kind: "replace" });
   if (/^(?:恢复|resume)(?:\s*(?:会话|session))?$/i.test(text)) return swarm({ kind: "resume" });
   if (/^(?:唤醒|awake)(?:\s*(?:会话|session))?$/i.test(text)) return swarm({ kind: "awake" });
-  if (/^(?:跳过|skip)(?:\s*(?:detached\s*)?(?:任务|prompt))?$/i.test(text)) return swarm({ kind: "skip" });
   return null;
 }
 

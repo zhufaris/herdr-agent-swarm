@@ -1,4 +1,5 @@
-export type PromptState = "queued" | "running" | "delivered" | "failed" | "cancelled";
+export type PromptState = "queued" | "submitted" | "running" | "recovering" | "uncertain" | "delivered" | "failed" | "cancelled";
+export type PromptIngressSource = "feishu" | "herdr" | "internal";
 export type TurnPriority = "normal" | "priority";
 export type PromptObservationState = "not_started" | "attached" | "detached" | "completed";
 export type PromptWorkHint =
@@ -10,9 +11,9 @@ export interface DurablePromptWorkScan { cancelled: number; failedDetached: numb
 export interface StalePromptClaim { promptId: string; bindingId: string; updatedAt: string }
 export interface UndispatchedPromptClaimFence extends StalePromptClaim { bindingGeneration: number; paneId: string }
 export interface PromptJob {
-  id: string; bindingId: string; larkMessageId: string; actorOpenId: string; body: string; executionOrigin: "bridge" | "herdr";
+  id: string; bindingId: string; sessionEpoch: number; larkMessageId: string | null; ingressSource: PromptIngressSource; sourceMessageKey: string; actorOpenId: string; body: string; executionOrigin: "bridge" | "herdr";
   parentPromptId: string | null;
-  priority: TurnPriority; wasDetached: boolean; dispatchedAt: string | null; transcriptTurnId: string | null; transcriptTurnStartedAt: string | null;
+  priority: TurnPriority; wasDetached: boolean; dispatchedAt: string | null; nativeSubmissionId?: string | null; transcriptTurnId: string | null; transcriptTurnStartedAt: string | null;
   modelName?: string | null; modelRevision?: number | null; observationState: PromptObservationState; state: PromptState; attemptCount: number;
   error: string | null; createdAt: string; updatedAt: string;
 }
@@ -23,3 +24,11 @@ export type TranscriptTurnClaimOutcome =
   | { state: "matched"; prompt: PromptJob }
   | { state: "conflict"; prompt: PromptJob }
   | { state: "ineligible"; prompt: PromptJob | null };
+export interface PromptTranscriptTurn {
+  promptId: string; bindingId: string; bindingGeneration: number; paneId: string | null; nativeSessionId: string | null;
+  turnId: string; startedAt: string; chainId: string;
+  parentTurnId: string | null; origin: "prompt" | "runtime_continuation"; ordinal: number; createdAt: string;
+}
+export type TranscriptTurnAdoptionOutcome =
+  | { state: "adopted" | "matched"; turn: PromptTranscriptTurn }
+  | { state: "conflict" | "ineligible"; turn: PromptTranscriptTurn | null };

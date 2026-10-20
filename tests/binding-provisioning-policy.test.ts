@@ -12,6 +12,7 @@ describe("binding provisioning policy", () => {
     expect(decidePaneCreatedCheckpoint({ checkpoint: "pane_created", hasPrimaryToolCapability: false, traexProcess: false, composerReady: false })).toBe("reject_missing_capability");
     expect(decidePaneCreatedCheckpoint({ checkpoint: "pane_created", hasPrimaryToolCapability: true, traexProcess: true, composerReady: false })).toBe("replace_pane");
     expect(decidePaneCreatedCheckpoint({ checkpoint: "pane_created", hasPrimaryToolCapability: true, traexProcess: true, composerReady: true })).toBe("start_runtime");
+    expect(decidePaneCreatedCheckpoint({ checkpoint: "pane_created", hasPrimaryToolCapability: true, processProbe: "unavailable", traexProcess: false, composerReady: false })).toBe("pause_process_probe_unavailable");
     expect(decidePaneCreatedCheckpoint({ checkpoint: "activated", hasPrimaryToolCapability: false, traexProcess: true, composerReady: false })).toBe("continue");
   });
 

@@ -22,6 +22,9 @@ import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.j
 import type { CardInteractionStore, InboundRoutingStore, ModelSelectionStore, SessionOperationStore } from "../domain/ports/workflow.js";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { WorkerSessionThreadApplicationStore } from "../domain/ports/worker-session-thread.js";
+import type { BindingPromptWorkflowPort } from "../domain/ports/prompt-acceptance.js";
+import type { RecoverySupervisorPort } from "../coordinator/recovery-supervisor.js";
+import type { AgentInputWorkflowPort } from "../domain/ports/agent-input.js";
 
 export interface CommandControlStores {
   modelSelection: ModelSelectionStore; paneControl: PaneControlStore; sessionOperations: SessionOperationStore; cardInteraction: CardInteractionStore;
@@ -33,22 +36,24 @@ export function createCommandControlRuntime(options: {
   infrastructure: ReturnType<typeof createInfrastructureRuntime>; delivery: ReturnType<typeof createOutboundRuntime>;
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   bindingSession: ReturnType<typeof createBindingSessionRuntime>; presentation: { application: ApplicationPresentation; pane: PanePresentation };
+  recoverySupervisor: Pick<RecoverySupervisorPort, "recoverBinding">;
+  agentInput: AgentInputWorkflowPort;
   onWork?(name: string, listener: (hint: import("../events/runtime-event-bus.js").RuntimeWorkHint) => void | Promise<void>): () => void;
   wakeSwarmCommand?(intentId: string): void;
 }) {
   const { config, stores, logger, turnControl, scheduler, infrastructure, delivery, primary, worker, bindingSession, presentation } = options;
-  const { traexControl, agentDrivers } = infrastructure; const { outbound, outboundWork, mainCards } = delivery; const { promptRun, primaryState } = primary;
-  const { provisioning, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure } = bindingSession;
-  const modelSelection = new ModelSelectionWorkflow({ config, store: stores.modelSelection, traexControl, outbound, outboundWork, scheduler, mainCards, activeTurn: (bindingId) => primaryState.activeTurn(bindingId), presentation: presentation.application, logger });
-  const paneControl = new PaneControlWorkflow({ store: stores.paneControl, outbound, presentation: presentation.pane, scheduler, model: modelSelection, turnControl, activeTurn: (bindingId) => primaryState.activeTurn(bindingId) });
+  const { traexControl, agentDrivers } = infrastructure; const { outbound, outboundWork, mainCards } = delivery; const { bindingPrompts } = primary;
+  const { provisioning, orchestratorClear, operationsQuery, sessionAdministration, deliveryRecovery, paneClosure } = bindingSession;
+  const modelSelection = new ModelSelectionWorkflow({ config, store: stores.modelSelection, traexControl, outbound, outboundWork, scheduler, mainCards, presentation: presentation.application, logger });
+  const paneControl = new PaneControlWorkflow({ store: stores.paneControl, outbound, presentation: presentation.pane, scheduler, model: modelSelection, turnControl });
   const sessionOperations = new SessionOperationWorkflow({ store: stores.sessionOperations, sessionAdministration, provisioning, paneControl, paneClosure, logger });
-  const cardInteractions = new CardInteractionWorkflow({ store: stores.cardInteraction, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, sessionOperations, wakePrompt: (bindingId) => scheduler.wake({ kind: "prompt-ready", bindingId }), presentation: presentation.application, logger });
-  const commandResolver = new SwarmCommandContextResolver({ config, store: stores.inboundRouting, activeTurn: (bindingId) => primaryState.activeTurn(bindingId) });
+  const commandResolver = new SwarmCommandContextResolver({ config, store: stores.inboundRouting });
   const commandWake = options.wakeSwarmCommand ? { wakeCommand: options.wakeSwarmCommand } : {};
-  const swarmCommands = new SwarmCommandGateway({ store: stores.commandIntents, primaryPrompts: stores.instance, resolver: commandResolver, outbound, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, promptRun, instanceControl: worker.instanceControl, wakeCardContext: () => outboundWork.wake(), wakeOutbound: () => outboundWork.wake(), ...commandWake, presentation: presentation.application });
+  const swarmCommands = new SwarmCommandGateway({ store: stores.commandIntents, primaryPrompts: stores.instance, resolver: commandResolver, outbound, logger, provisioning, modelSelection, paneControl, operationsQuery, sessionAdministration, paneClosure, orchestratorClear, recoverySupervisor: options.recoverySupervisor, primaryCardRedelivery: delivery.primaryCardRedelivery, instanceControl: worker.instanceControl, wakeCardContext: () => outboundWork.wake(), wakeOutbound: () => outboundWork.wake(), deferDispatchUntilRecovery: true, ...commandWake, presentation: presentation.application });
+  const cardInteractions = new CardInteractionWorkflow({ store: stores.cardInteraction, projects: config.projects, adminOpenIds: config.lark.adminOpenIds, sessionAdministration, commands: swarmCommands, bindingPrompts: bindingPrompts as Pick<BindingPromptWorkflowPort, "ignorePrimaryCompletionAction">, agentInput: options.agentInput, workerMessaging: worker.instanceMessaging, convergeTurnCard: (segmentId) => delivery.turnCards.converge(segmentId), presentation: presentation.application, logger });
   options.onWork?.("swarm-command-dispatcher", (hint) => { if (hint.kind === "swarm-command-ready") swarmCommands.wakeAcceptedIntent({ id: hint.intentId }); });
   const programmaticWorkerCreation = new ProgrammaticWorkerCreation(swarmCommands, config.commandTimeoutMs);
-  const workerSessionThreads = new WorkerSessionThreadWorkflow({ adminOpenIds: config.lark.adminOpenIds, store: stores.workerSessionThreads, messaging: worker.instanceMessaging, outbound, wakeOutbound: () => outboundWork.wake(), gatewayEffects: infrastructure.gatewayEffects, presentation: presentation.application });
+  const workerSessionThreads = new WorkerSessionThreadWorkflow({ gatewayId: config.gateway.id, adminOpenIds: config.lark.adminOpenIds, store: stores.workerSessionThreads, messaging: worker.instanceMessaging, agentInput: options.agentInput, herdr: infrastructure.herdr, outbound, wakeOutbound: () => outboundWork.wake(), gatewayEffects: infrastructure.gatewayEffects, presentation: presentation.application });
   const instanceInteractions = new InstanceInteractionWorkflow({ projects: config.projects, adminOpenIds: config.lark.adminOpenIds, store: stores.instance, control: worker.instanceControl, messaging: worker.instanceMessaging, drivers: agentDrivers, outbound, wakeOutbound: () => outboundWork.wake(), workerCreation: programmaticWorkerCreation, presentation: presentation.application, workerSessionThreads });
   return { modelSelection, paneControl, sessionOperations, cardInteractions, swarmCommands, programmaticWorkerCreation, instanceInteractions, workerSessionThreads, deliveryRecovery };
 }

@@ -50,12 +50,13 @@ describe("space directory command", () => {
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
     await coordinator.start();
     listPanes.mockClear();
 
     await coordinator.handleMessage({ eventId: "spaces-1", messageId: "message-1", chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
+    await publisher.drain();
 
     const rendered = JSON.stringify(cards);
     expect(store.listBindings()).toEqual([]);
@@ -63,9 +64,9 @@ describe("space directory command", () => {
     expect(rendered).toContain("space\\\\-empty");
     expect(rendered).toContain("space\\\\-failed");
     expect(rendered).toContain("未注册");
-    expect(rendered).toContain("`p1`");
-    expect(rendered).toContain("`p2`");
-    expect(rendered).toContain("`p3`");
+    expect(rendered).toContain("`w1:p1`");
+    expect(rendered).toContain("`w1:p2`");
+    expect(rendered).toContain("`w1:p3`");
     expect(rendered).toContain("workspace unavailable");
     expect(listPanes.mock.calls.map(([workspaceId]) => workspaceId)).toEqual(["w1", "w2"]);
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "space-directory-workspace-failed", workspaceId: "w2" }), expect.any(String));
@@ -102,6 +103,7 @@ describe("space directory command", () => {
     release.get("w1")!();
     release.get("w2")!();
     await listing;
+    await publisher.drain();
     expect(cards).not.toHaveLength(0);
 
     await coordinator.stop(); await publisher.stop(); store.close();
@@ -166,12 +168,14 @@ describe("space directory command", () => {
     await coordinator.start();
     expose = true;
     await coordinator.handleMessage({ eventId: "spaces-action", messageId: "spaces-message", chatId: "chat", topicId: null, rootMessageId: "spaces-message", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
+    await publisher.drain();
     const claim = findAction(cards.at(-1)!, "claim_pane");
     await onAction!({ messageId: "spaces-card", chatId: "chat", operatorOpenId: "user", value: claim });
     expect(listPanes.mock.calls.some(([, options]) => options?.forceRefresh === true)).toBe(true);
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ projectId: "alpha", chatId: "chat" });
 
     await coordinator.handleMessage({ eventId: "spaces-bound", messageId: "spaces-bound-message", chatId: "chat", topicId: null, rootMessageId: "spaces-bound-message", actorOpenId: "user", text: "/swarm spaces", mentionsBot: true, isRootMessage: true });
+    await publisher.drain();
     const open = findAction(cards.at(-1)!, "open_project_thread");
     await onAction!({ messageId: "spaces-bound-card", chatId: "chat", operatorOpenId: "user", value: open });
     expect(shareThread).toHaveBeenCalledWith("omt-new", { messageId: "spaces-bound-card", chatId: "chat", sourceRootMessageId: "root-new" });
@@ -201,6 +205,7 @@ describe("space directory command", () => {
     await coordinator.start();
 
     await onAction!({ messageId: "spaces-card", chatId: "chat", operatorOpenId: "user", value: { action: "open_project_thread", bindingId: "b1" } });
+    await publisher.drain();
 
     expect(notices).toEqual([{ root: "spaces-card", text: "话题入口发送失败，请重新执行 `/swarm spaces` 后重试。" }]);
     await coordinator.stop(); await publisher.stop(); store.close();

@@ -12,14 +12,12 @@ import type { SqlitePromptDispatchStore } from "./prompt-dispatch-store.js";
 import type { SqliteSessionOperationStore } from "./session-operation-store.js";
 import type { SqliteTurnControlStore } from "./turn-control-store.js";
 import type { SqliteWorkerTurnStore } from "./worker-turn-store.js";
+import type { SqliteConversationSegmentStore } from "./conversation-segment-store.js";
 
 export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStore {
   constructor(
     private readonly controls: SqliteTurnControlStore,
     private readonly bindings: SqliteBindingLifecycleStore,
-    private readonly prompts: SqlitePromptStore,
-    private readonly promptAcceptance: SqlitePromptAcceptanceStore,
-    private readonly promptDispatch: SqlitePromptDispatchStore,
     private readonly instances: SqliteInstanceStore,
     private readonly workerTurns: SqliteWorkerTurnStore
   ) {}
@@ -31,19 +29,15 @@ export class SqliteTurnControlCapabilityStore implements TurnControlWorkflowStor
   claimTurnControlOperation: TurnControlStore["claimTurnControlOperation"] = (id) => this.controls.claim(id);
   rejectAcceptedTurnControlOperation: TurnControlStore["rejectAcceptedTurnControlOperation"] = (input) => this.controls.rejectAccepted(input);
   finishTurnControlOperation: TurnControlStore["finishTurnControlOperation"] = (input) => this.controls.finish(input);
-  convertTurnControlToPrimaryPriority: TurnControlStore["convertTurnControlToPrimaryPriority"] = (input) => this.controls.convertToPrimaryPriority(input);
   convertTurnControlToWorkerPriority: TurnControlStore["convertTurnControlToWorkerPriority"] = (input) => this.controls.convertToWorkerPriority(input);
   recoverTurnControlOperations: TurnControlStore["recoverTurnControlOperations"] = (render) => this.controls.recover(render);
   listAcceptedTurnControlOperations: TurnControlStore["listAcceptedTurnControlOperations"] = (owner) => this.controls.listAccepted(owner);
   getBinding: TurnControlWorkflowStore["getBinding"] = (id) => this.bindings.getBinding(id);
-  getActiveOrdinaryPrompt: TurnControlWorkflowStore["getActiveOrdinaryPrompt"] = (id, generation) => this.promptDispatch.getActiveOrdinaryPrompt(id, generation);
   getAgentInstance: TurnControlWorkflowStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);
   getActiveInstanceTurn: TurnControlWorkflowStore["getActiveInstanceTurn"] = (id, generation) => this.workerTurns.getActiveInstanceTurn(id, generation);
   acceptInstanceTurn: TurnControlWorkflowStore["acceptInstanceTurn"] = (input) => this.workerTurns.acceptInstanceTurn(input);
   acceptInstanceTurnWithCard: TurnControlWorkflowStore["acceptInstanceTurnWithCard"] = (input) => this.workerTurns.acceptInstanceTurnWithCard(input);
   countPendingInstanceTurns: TurnControlWorkflowStore["countPendingInstanceTurns"] = (id, generation) => this.workerTurns.countPendingInstanceTurns(id, generation);
-  acceptPrompt: TurnControlWorkflowStore["acceptPrompt"] = (input) => this.promptAcceptance.acceptPrompt(input);
-  countPendingPrompts: TurnControlWorkflowStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
 }
 
 export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneCloseStore, ModelSelectionStore, CardInteractionStore {
@@ -57,7 +51,8 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
     private readonly sessionOperations: SqliteSessionOperationStore,
     private readonly operations: SqliteOperationsStore,
     private readonly instances: SqliteInstanceStore,
-    private readonly workerTurns: SqliteWorkerTurnStore
+    private readonly workerTurns: SqliteWorkerTurnStore,
+    private readonly conversationSegments: SqliteConversationSegmentStore
   ) {}
 
   audit: PaneControlStore["audit"] = (input) => this.operations.audit(input);
@@ -89,8 +84,11 @@ export class SqlitePaneControlCapabilityStore implements PaneControlStore, PaneC
   rejectAppliedPaneControlOperation: ModelSelectionStore["rejectAppliedPaneControlOperation"] = (id, detail) => this.paneOperations.rejectAppliedPaneControlOperation(id, detail);
   createCardInteraction: CardInteractionStore["createCardInteraction"] = (input) => this.sessionOperations.createInteraction(input);
   getCardInteraction: CardInteractionStore["getCardInteraction"] = (id) => this.sessionOperations.getInteraction(id);
-  acceptInterruptedContinuation: CardInteractionStore["acceptInterruptedContinuation"] = (input) => this.promptAcceptance.acceptInterruptedContinuation(input);
   getPrompt: CardInteractionStore["getPrompt"] = (id) => this.promptDispatch.getPrompt(id);
   loadRunCard: CardInteractionStore["loadRunCard"] = (id) => this.projections.loadRunCard(id);
   loadTopicView: CardInteractionStore["loadTopicView"] = (id) => this.projections.loadTopicView(id);
+  getCompletionReviewOwnerKind: CardInteractionStore["getCompletionReviewOwnerKind"] = (id) => this.projections.getCompletionReviewOwnerKind(id);
+  decidePrimaryCompletionReview: CardInteractionStore["decidePrimaryCompletionReview"] = (input) => this.projections.decidePrimaryCompletionReview(input);
+  acceptPrimarySegmentCompletionChoice: CardInteractionStore["acceptPrimarySegmentCompletionChoice"] = (input) => this.conversationSegments.acceptPrimarySegmentCompletionChoice(input);
+  ignorePrimarySegmentCompletionChoice: CardInteractionStore["ignorePrimarySegmentCompletionChoice"] = (input) => this.conversationSegments.ignorePrimarySegmentCompletionChoice(input);
 }

@@ -107,10 +107,12 @@ describe("local setup checks", () => {
     localDraft.environment = { ...localDraft.environment, HERDR_BIN: executable, TRAEX_BIN: executable };
     try {
       const checks = await runLocalSetupChecks(localDraft, { ...context, configDirectory: directory }, {
-        runner: { async run() { return { stdout: "", stderr: "" }; } }, nodeVersion: "22.12.0", pathValue: "", inspectPort: async () => "free"
+        runner: { async run() { return { stdout: "", stderr: "" }; } }, nodeVersion: "22.12.0", pathValue: "", inspectPort: async () => "free",
+        inspectStorage: async () => ({ availableBytes: 20n * 1024n ** 3n, totalBytes: 100n * 1024n ** 3n, writable: true })
       });
       expect(checks.map(({ id, status }) => [id, status])).toEqual([
         ["local.node", "pass"], ["local.systemd", "pass"], ["local.config-directory", "pass"],
+        ["local.database-storage", "pass"],
         ["local.http-host", "pass"], ["local.http-port", "pass"], ["local.executable.herdr", "pass"], ["local.executable.traex", "pass"]
       ]);
     } finally {
@@ -122,7 +124,8 @@ describe("local setup checks", () => {
     const changed = structuredClone(draft);
     changed.environment = { ...changed.environment, HERDR_BIN: "missing-herdr", TRAEX_BIN: "missing-traex", BRIDGE_HTTP_HOST: "0.0.0.0" };
     const checks = await runLocalSetupChecks(changed, context, {
-      runner: { async run() { throw new Error("no user bus"); } }, nodeVersion: "22.11.9", pathValue: "", inspectPort: async () => "occupied-other", inspectDirectoryMode: async () => 0o755
+      runner: { async run() { throw new Error("no user bus"); } }, nodeVersion: "22.11.9", pathValue: "", inspectPort: async () => "occupied-other", inspectDirectoryMode: async () => 0o755,
+      inspectStorage: async () => ({ availableBytes: 20n * 1024n ** 3n, totalBytes: 100n * 1024n ** 3n, writable: true })
     });
     for (const id of ["local.node", "local.systemd", "local.config-directory", "local.http-host", "local.http-port", "local.executable.herdr", "local.executable.traex"]) {
       expect(checks).toContainEqual(expect.objectContaining({ id, status: "fail", remediation: expect.any(String) }));
@@ -131,7 +134,8 @@ describe("local setup checks", () => {
 
   it("accepts a port owned by the matching managed service", async () => {
     const checks = await runLocalSetupChecks(draft, context, {
-      runner: { async run() { return { stdout: "", stderr: "" }; } }, inspectPort: async () => "occupied-managed", inspectDirectoryMode: async () => 0o700, resolveExecutable: () => "/bin/tool"
+      runner: { async run() { return { stdout: "", stderr: "" }; } }, inspectPort: async () => "occupied-managed", inspectDirectoryMode: async () => 0o700, resolveExecutable: () => "/bin/tool",
+      inspectStorage: async () => ({ availableBytes: 20n * 1024n ** 3n, totalBytes: 100n * 1024n ** 3n, writable: true })
     });
     expect(checks).toContainEqual(expect.objectContaining({ id: "local.http-port", status: "pass" }));
   });

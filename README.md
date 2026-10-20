@@ -5,7 +5,7 @@ Herdr Agent Swarm is a durable, human-controlled multi-agent coordinator for
 to real Agent processes in Herdr panes, keeps workflow state in SQLite, and
 publishes progress and answers as Lark CardKit cards.
 
-Version 0.4.0 supports one standalone service, managed by user systemd. The
+Version 0.5.0 supports one standalone service, managed by user systemd. The
 former compatibility plugin is not an installation or operation surface.
 
 ## What it provides
@@ -13,11 +13,15 @@ former compatibility plugin is not an installation or operation surface.
 - Project-scoped Primary sessions and explicitly created Worker sessions.
 - Selectable TraeX, Pi, Codex, or Claude Code Primary sessions, with TraeX as
   the default, plus the same four Agent kinds for Workers.
-- One durable FIFO per binding or Worker, with exact-turn steering and stopping.
-- Restart recovery that observes uncertain work without automatically replaying
-  prompts that may already have reached an Agent.
+- Independent Primary and Worker Agent Input submission through Herdr Core;
+  canonical Core JSONL is the sole conversation-order authority.
+- Restart recovery that queries uncertain receipts and repairs projections
+  without automatically resubmitting input that may already have reached an Agent.
 - Durable CardKit projections and an idempotent SQLite outbox for Lark delivery.
 - Multiple configured projects with strict workspace and working-directory routes.
+- An optional fixed group Orchestrator that resolves the unique Space labeled
+  exactly `herdr`, owns native Pane token `orch`, and keeps one managed TraeX
+  pane plus one reusable Lark Thread for the default project.
 - Loopback health, readiness, and safe operational status endpoints.
 
 ## System architecture
@@ -42,7 +46,7 @@ best-effort wake-up hint.
                                       v                                    |
                              +------------------+                          |
                              | SQLite           |                          |
-                             | workflow, FIFO,  |                          |
+                             | intents, views,  |                          |
                              | views, outbox,   |                          |
                              | audit, lease     |                          |
                              +--------+---------+                          |
@@ -61,12 +65,14 @@ Lark                Service / SQLite                  Herdr / Agent
  | message or card action   |                               |
  |------------------------->| validate and authorize        |
  |                          | persist inbound intent        |
- |                          | claim FIFO or exact-turn work |
+ |                          | submit input or exact control |
  |                          |------------------------------>| fenced effect
  |                          |<------------------------------| observe runtime
  |                          | project lifecycle, timeline,  | and transcript
  |                          | and card views durably         |
- |                          | enqueue and claim outbox       |
+ |                          | reserve scoped prepared work  |
+ |                          | enqueue Primary Pane/Global   |
+ |                          | Ring and claim durably         |
  |<-------------------------| ordered Gateway/CardKit send  |
  | delivery result          |                               |
  |------------------------->| checkpoint success or retry   |
@@ -81,19 +87,27 @@ socket/EventBus hint or periodic scan
                  v
 SQLite durable state + fresh Herdr snapshot + exact transcript
                  |
-                 +--> work never started: remains eligible for FIFO dispatch
+                 +--> recorded input: independently eligible for Core submission
                  |
-                 +--> Agent effect uncertain: detach and observe; never replay
+                 +--> Agent effect uncertain: query receipt; never resubmit
+                 |
+                 +--> Lark delivery missing: refill its scoped Ring from outbox
                  |
                  +--> Lark delivery failed: retry only the durable outbox effect
 ~~~
+
+Delivery uses one bounded full-data Ring per Primary Pane and one Global Ring
+for effects that are genuinely not Pane-owned. Worker effects use their parent
+Primary Pane Ring; Workers do not own separate Rings, and missing ownership does
+not fall back to Global. SQLite remains the restart authority for every Ring.
 
 The system deliberately splits authority:
 
 | Authority | Owns |
 | --- | --- |
 | Herdr | Live pane identity, terminal identity, foreground process, and Agent state |
-| SQLite | Bindings, prompt FIFO, Worker turns, Answer timelines and checkpoints, projections, delivery intent and outbox, audit data, and the fenced instance lease |
+| Core JSONL | Final event order for each exact Agent session |
+| SQLite | Bindings, Submission Intents, Worker state, projection checkpoints/gaps, Answer timelines, delivery intent and outbox, audit data, and the fenced instance lease |
 | Lark | Visible cards and messages only |
 | user systemd | The standalone service process |
 
@@ -101,8 +115,8 @@ High-risk Agent approval remains local to the Herdr pane. The bridge can stop an
 identity-fenced exact turn, but it cannot remotely approve or deny a request,
 send arbitrary terminal input, or kill a process or pane.
 
-Open the [interactive architecture diagram](docs/herdr-agent-swarm-architecture.html)
-for an explorable view. See [Architecture](docs/architecture.md) for lifecycle,
+Open the [architecture diagram](docs/herdr-agent-swarm-architecture.svg)
+for a compact visual view. See [Architecture](docs/architecture.md) for lifecycle,
 durability, and recovery semantics, or the
 [architecture reference](docs/architecture-reference.md) for a maintainer-focused
 module map.
@@ -113,6 +127,8 @@ Start with the [maintainer documentation map](docs/README.md) to choose the
 current guide for architecture, module ownership, domain language, Feishu usage,
 releases, or historical decisions. Current guides are kept separate from
 completed specifications, plans, audits, and generated validation artifacts.
+Operators preparing the fixed group Orchestrator should use the gated
+[Group Orchestrator rollout](docs/agents/group-orchestrator-rollout.md).
 
 ## Security model
 
@@ -139,7 +155,13 @@ tracked configuration.
 
 - Linux with Node.js 22.12 or newer; Node.js 24 LTS is recommended.
 - npm and user systemd.
-- Herdr 0.7.5 or newer, with a running workspace.
+- Herdr 0.9.0 or newer, with a running workspace. The fixed Orchestrator
+  requires a compatible Core build whose `herdr tab create --help` exposes
+  `--expected-workspace-label` and `--token`, whose
+  `herdr pane identity-reconcile --help` exposes the exact source and target
+  identity fences, and whose `herdr agent session-rotate --help` exposes
+  `--operation-id` and `--expected-state-change-seq`. Version text alone does
+  not prove these capabilities.
 - `herdr`, `traex`, and any optional Primary or Worker CLIs you intend to use
   (`codex`, `claude`, or `pi`) available to the service account.
 - A published Lark custom app with bot capability and long-connection event delivery.
@@ -250,15 +272,15 @@ Download both files from the GitHub Release, then verify and extract them:
 
 ~~~bash
 sha256sum --check SHA256SUMS
-tar -xzf herdr-agent-swarm-0.4.0-linux-x64.tar.gz
-cd herdr-agent-swarm-0.4.0-linux-x64
+tar -xzf herdr-agent-swarm-0.5.0-linux-x64.tar.gz
+cd herdr-agent-swarm-0.5.0-linux-x64
 npm run swarm:setup
 ./install.sh
 npm run swarm:start
 npm run swarm:status
 ~~~
 
-Replace `0.4.0` with the downloaded version. The packaged installer stages
+Replace `0.5.0` with the downloaded version. The packaged installer stages
 the prebuilt release and retains existing configuration and state.
 
 ## Install as a standalone service
@@ -268,13 +290,21 @@ The setup wizard writes private files only after validation and confirmation:
 
 - `.env` contains credentials and process settings.
 - `projects.json` maps public project IDs to exact Herdr workspaces and
-  absolute working directories.
+  absolute working directories. Its optional strict `orchestrator` block has
+  `enabled` and an absolute `cwd`; only the default project's enabled block
+  changes unbound group-root mentions into the fixed Orchestrator flow.
 - `runtime.yaml` contains polling, caching, CardKit, and pane-retention tuning.
 
 Templates are available in [`.env.example`](.env.example),
 [`projects.example.json`](config/projects.example.json), and
 [`runtime.example.yaml`](config/runtime.example.yaml). Validate manually
 edited files before installing:
+
+Core Inbox payload retention defaults to `CORE_EVENT_RETENTION_MODE=off` and
+uses an independent 24-hour window. Operators should use `audit` first and
+inspect `/status` plus aggregate maintenance logs before separately authorizing
+`compact`. JSON-null logical compaction reuses SQLite pages; physical database
+shrinkage still requires the maintenance command below.
 
 ~~~bash
 npm run config:validate -- ~/.config/herdr-agent-swarm/.env \
@@ -295,7 +325,13 @@ The unit stops retrying after five starts within 60 seconds. After correcting a
 permanent startup error, use `swarm:start` or the safety-gated `swarm:restart`;
 these commands clear the failed start counter before starting the service.
 
-Run `npm run swarm:doctor` for read-only environment diagnosis. The service
+Run `npm run swarm:doctor` for read-only environment diagnosis. The doctor checks
+the filesystem containing the effective `BRIDGE_DATABASE_PATH`: an unavailable,
+unwritable, or sub-1 GiB filesystem blocks startup validation, while less than
+10% available space produces a warning. Place `SWARM_STATE_DIR` or
+`BRIDGE_DATABASE_PATH` on a durable filesystem with enough headroom; moving a
+live database requires the database, WAL, and SHM to remain a consistent set.
+The service
 log is private, bounded, and available through `swarm:logs`; host journal
 access is not required. In installed mode, one application-owned Pino
 destination writes the private file. A user-systemd timer rotates at 16 MiB and
@@ -347,14 +383,15 @@ Within a Primary topic, the `/swarm` commands manage the current session:
 /swarm replace
 /swarm resume
 /swarm awake
-/swarm skip
 /swarm help
 ~~~
 
-Ordinary messages remain FIFO. Eligible requests during an active turn can be
-delivered as exact-turn steering; an identity mismatch fails closed. `/swarm
+Ordinary messages are independent Agent Inputs; their final order comes only
+from canonical Core JSONL. Eligible requests during an active turn can be
+delivered as exact-turn steering; otherwise steer submits an independent Agent
+Input. An identity mismatch fails closed. `/swarm
 close` issues a short-lived confirmation code and rechecks the Primary runtime
-identity, queue, and idle/done state before closing anything. Confirmation
+identity and idle/done state before closing anything. Confirmation
 best-effort closes safe Worker panes owned by that exact Primary generation,
 retains working, busy, missing, or identity-uncertain Workers, and then closes
 the Primary pane. Lark history and Worker worktrees are preserved. `/swarm pane
@@ -438,7 +475,17 @@ release tag.
   service account.
 - If an Agent CLI is missing under systemd, set its absolute executable path in
   the private environment file and rerun `npm run swarm:doctor`.
-- If SQLite cannot be opened, verify ownership and permissions of the configured
+- If SQLite reports `database or disk is full`, run `npm run swarm:doctor`, then
+  free space or move `SWARM_STATE_DIR` / `BRIDGE_DATABASE_PATH` to durable
+  storage before retrying. Retention deletes reusable rows but does not promise
+  to shrink the database file; do not run `VACUUM` against the live service.
+  Use `npm run swarm:maintenance` for an explicitly scheduled, maximum
+  15-minute, validated and reversible physical compaction. If interrupted,
+  resume only the reported cycle with
+  `npm run swarm:maintenance -- --resume <cycle-id>`; retained `.backup`,
+  `.original`, `.failed`, WAL/SHM, and journal files are not automatically
+  deleted.
+  If SQLite cannot be opened, verify ownership and permissions of the configured
   state directory. Never copy a live database without its WAL and SHM files.
 - If a running card becomes detached after restart, inspect the original Herdr
   pane. The coordinator observes uncertain work and will not replay it

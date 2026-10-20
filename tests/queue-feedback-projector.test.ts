@@ -16,6 +16,26 @@ function event(type: "PromptQueued" | "TurnStarted" | "TurnCompleted" | "TurnFai
 }
 
 describe("QueueFeedbackProjector", () => {
+  it("does not replace the active lifecycle subscription when started twice", async () => {
+    const store = {
+      listBindings: () => [],
+      loadQueueFeedbackInputs: vi.fn(() => ({ activeStartedAt: null, queued: [], durationsMs: [] })),
+      projectQueuedRunCards: vi.fn()
+    };
+    const bus = new BridgeEventBus();
+    const projector = new QueueFeedbackProjector({ store: store as never, outboundWork: { wake: vi.fn() }, logger: pino({ enabled: false }), presentation: primaryPresentation });
+    const firstStop = projector.start(bus);
+    const secondStop = projector.start(bus);
+
+    expect(secondStop).toBe(firstStop);
+    await bus.publish(event("PromptQueued"));
+    expect(store.loadQueueFeedbackInputs).toHaveBeenCalledOnce();
+    firstStop();
+    await bus.publish(event("PromptQueued"));
+    expect(store.loadQueueFeedbackInputs).toHaveBeenCalledOnce();
+    await projector.stop();
+  });
+
   it.each(["RunQueuePositionChanged", "PromptCancelled"] as const)("does not rescan the binding for %s", async (type) => {
     const store = {
       listBindings: () => [],

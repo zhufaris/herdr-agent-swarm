@@ -10,6 +10,14 @@ function view() {
 }
 
 describe("Worker Main card", () => {
+  it("renders legacy views without model usage telemetry", () => {
+    const legacy = { ...view(), modelUsage: undefined } as unknown as ReturnType<typeof view>;
+    expect(() => renderWorkerMainCard(legacy)).not.toThrow();
+    expect(JSON.stringify(renderWorkerMainCard(legacy))).toContain("Model usage");
+  });
+  it("retains the known runtime model in model usage diagnostics", () => {
+    expect(JSON.stringify(renderWorkerMainCard(view()))).toContain("Model usage  GPT-5");
+  });
   it("renders a compact Primary entry that only opens the canonical Worker Thread", () => {
     const card = renderWorkerThreadEntryReadyCard({ workerName: "reviewer", workerId: "worker-1", workerSessionGeneration: 3, messageId: "om_worker_main" }) as { config: { update_multi?: boolean } };
     const rendered = JSON.stringify(card);
@@ -186,16 +194,24 @@ describe("Worker Main card", () => {
 
     expect(card.header).toEqual({
       title: { tag: "plain_text", content: "🧭 Worker · reviewer" },
-      subtitle: { tag: "plain_text", content: "HERDR WORKER · PRIMARY Primary Review · 🧠 工作中" },
+      subtitle: { tag: "plain_text", content: "HERDR WORKER · PRIMARY pane-primary · 🧠 工作中" },
       template: "blue"
     });
     expect(card.body.elements[0]?.content).toBe("🧠 工作中  ·  Worker `pane-worker`  ·  队列 `0`  ·  模型 `GPT-5`");
     expect(rendered).toContain("Project Herdr Agent Swarm (`swarm`)");
-    expect(rendered).toContain("Primary Primary Review (`pane-primary`)");
+    expect(rendered).toContain("Primary `pane-primary`");
     expect(rendered).toContain("Worker `pane-worker`");
     expect(rendered).toContain("Session `3`");
     expect(rendered).toContain("Runtime `4`");
     expect(rendered).toContain("Workspace  /repo/.worktree/reviewer");
+    expect(rendered).toContain("Branch  `swarm/reviewer`");
+  });
+
+  it("renders the shared worktree identity when the lease provides one", () => {
+    const rendered = JSON.stringify(renderWorkerMainCard({ ...view(), worktreeName: "reviewer", paneIdentity: {
+      workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer", paneId: "pane-worker", paneToken: null
+    } }));
+    expect(rendered).toContain("Worktree  `reviewer`");
     expect(rendered).toContain("Branch  `swarm/reviewer`");
   });
 
@@ -205,7 +221,7 @@ describe("Worker Main card", () => {
 
     expect(card.header.subtitle.content).toBe("HERDR WORKER · PRIMARY pane-primary · 🧠 工作中");
     expect(rendered).toContain("Project binding-1");
-    expect(rendered).toContain("Primary pane-primary (`pane-primary`)");
+    expect(rendered).toContain("Primary `pane-primary`");
     expect(rendered).toContain("Worker `未绑定`");
     expect(rendered).not.toContain("Unknown project");
   });

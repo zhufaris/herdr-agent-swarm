@@ -9,19 +9,35 @@ const message: IncomingLarkMessage = { eventId: "event-1", messageId: "message-1
 const action: IncomingLarkCardAction = { messageId: "directory-card", chatId: "chat", operatorOpenId: "user", value: {} };
 
 describe("topic pane directory workflow", () => {
+  it("deletes a dismissed dead-letter source card without enqueueing a replacement failure card", async () => {
+    const dismissDeadLetter = vi.fn(() => "dismissed" as const);
+    const enqueueCardUpdate = vi.fn(async () => {});
+    const workflow = new DeliveryRecoveryWorkflow({
+      store: { getBinding: vi.fn(), resolveCanonicalWorkerThread: vi.fn(), loadTopicView: vi.fn(), reservePaneThreadAlias: vi.fn(), audit: vi.fn(), dismissDeadLetter, listFailures: vi.fn(() => []), retryDeadLetter: vi.fn() },
+      gatewayEffects: { createConversation: vi.fn(), replyText: vi.fn(), shareConversation: vi.fn() }, outbound: { enqueueCardUpdate }, outboundWork: { wake: vi.fn(), subscribe: vi.fn(() => () => {}) },
+      presentation: { paneEntryCard: vi.fn(), failures: vi.fn(() => []) }, logger: pino({ enabled: false })
+    });
+
+    await workflow.decideDeadLetter(action, "failed-reply", "dismiss_dead_letter");
+
+    expect(dismissDeadLetter).toHaveBeenCalledWith("failed-reply", "chat", "user", "directory-card");
+    expect(enqueueCardUpdate).not.toHaveBeenCalled();
+  });
+
   it("lists only current-chat attached active panes carrying a main-card identity", async () => {
     const selected = activeBinding("selected");
     const presentation = { topicPanes: vi.fn(() => ({ card: "directory" })), spaces: vi.fn(), sessions: vi.fn(), failures: vi.fn() };
     const outbound = { enqueueCard: vi.fn(async () => {}) };
     const workflow = new OperationsQueryWorkflow({
       config: { projects: [] }, herdr: { listPanes: vi.fn() }, outbound, presentation, logger: pino({ enabled: false }),
-      store: { listBindings: () => [selected, { ...activeBinding("other-chat"), chatId: "other" }, { ...activeBinding("detached"), attachment: "orphaned" }, { ...activeBinding("missing-card"), statusMessageId: null }], listWorkerInstancesByParent: () => [{ id: "worker-1", name: "reviewer", generation: 4, workerSessionGeneration: 2, observedState: "working", runtimeRef: { paneId: "work:p2" } }], loadTopicView: (id) => id === "selected" ? topic("selected") : null, listFailures: () => [], listSessions: () => [] }
+      store: { listBindings: () => [selected, { ...activeBinding("other-chat"), chatId: "other" }, { ...activeBinding("detached"), attachment: "orphaned" }, { ...activeBinding("missing-card"), statusMessageId: null }], listWorkerInstancesByParent: () => [{ id: "worker-1", name: "reviewer", generation: 4, workerSessionGeneration: 2, workspaceLeaseId: "lease-1", observedState: "working", runtimeRef: { paneId: "work:p2" } }], getWorkspaceLease: () => ({ kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer" }), resolveCanonicalWorkerThreadId: () => "omt_worker", loadTopicView: (id) => id === "selected" ? topic("selected") : null, listFailures: () => [], listSessions: () => [] }
     });
 
     await workflow.listTopicPanes(message);
 
-    expect(presentation.topicPanes).toHaveBeenCalledWith([expect.objectContaining({ bindingId: "selected", bindingGeneration: 3, paneId: "work:p1", sourceMainMessageId: "om-main" })]);
-    expect(presentation.topicPanes).toHaveBeenCalledWith([expect.objectContaining({ workers: [expect.objectContaining({ workerName: "reviewer", paneId: "work:p2", runtimeGeneration: 4 })] })]);
+    expect(presentation.topicPanes).toHaveBeenCalledWith([expect.objectContaining({ bindingId: "selected", bindingGeneration: 3, paneId: "work:p1", sourceMainMessageId: "om-main", chatId: "chat", threadId: "topic" })]);
+    expect(presentation.topicPanes).toHaveBeenCalledWith([expect.objectContaining({ workers: [expect.objectContaining({ workerName: "reviewer", paneId: "work:p2", runtimeGeneration: 4, threadId: "omt_worker" })] })]);
+    expect(presentation.topicPanes).toHaveBeenCalledWith([expect.objectContaining({ workers: [expect.objectContaining({ paneIdentity: expect.objectContaining({ workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer", paneId: "work:p2" }) })] })]);
     expect(outbound.enqueueCard).toHaveBeenCalledWith("root", "panes:message-1:0", { card: "directory" });
   });
 
@@ -33,7 +49,7 @@ describe("topic pane directory workflow", () => {
     const outbound = { enqueueCard: vi.fn(async () => {}) };
     const workflow = new OperationsQueryWorkflow({
       config: { projects: [{ id: "project", displayName: "Project", spaceName: "core", description: "", workspaceId: "workspace", cwd: "/project" }, { id: "same-space-project", displayName: "Same Space", spaceName: "core", description: "", workspaceId: "workspace", cwd: "/same" }, { id: "other-project", displayName: "Other", spaceName: "other", description: "", workspaceId: "workspace", cwd: "/other" }] }, herdr: { listPanes: vi.fn() }, outbound, presentation, logger: pino({ enabled: false }),
-      store: { listBindings: () => [scoped, sameSpace, otherProject], listWorkerInstancesByParent: () => [], loadTopicView: (id) => topic(id), listFailures: () => [], listSessions: () => [] }
+      store: { listBindings: () => [scoped, sameSpace, otherProject], listWorkerInstancesByParent: () => [], getWorkspaceLease: () => null, resolveCanonicalWorkerThreadId: () => null, loadTopicView: (id) => topic(id), listFailures: () => [], listSessions: () => [] }
     });
 
     await workflow.listTopicPanes(message, scoped);

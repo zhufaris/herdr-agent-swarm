@@ -9,8 +9,9 @@ import type { WorkerPresentation } from "../domain/ports/presentation.js";
 import { TurnControlRequestError, type TurnControlPort } from "../domain/ports/turn-control.js";
 import { assertPromptInputSize } from "../domain/prompt-input-policy.js";
 import type { InstanceConversationView, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
+import { COMPLETION_ACTION_MESSAGES, type CompletionActionSelection } from "../domain/completion-action-set.js";
 
-interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlPort, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
+interface Options { store: InstanceMessagingStore; turnControl: Pick<TurnControlPort, "steer" | "interrupt">; wake: (instanceId: string) => void; wakeOutbound?: () => void; convergeWorkerTurn?: (turnId: string) => void | Promise<void>; idFactory: () => string; presentation: Pick<WorkerPresentation, "workerTurn">; maxQueueDepth?: number }
 const INSTANCE_EVENT_POLL_INTERVAL_MS = 250;
 
 export class InstanceMessagingWorkflow implements InstanceMessagingPort {
@@ -24,13 +25,72 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
     if (input.source) {
       const primaryAnswer = input.actor.kind === "thread-primary" ? { aggregateKind: "primary-turn" as const, aggregateId: input.actor.parentPromptId, generation: input.actor.bindingGeneration, messageId: null } : null;
       const view = createQueuedWorkerTurnCard({ turnId: id, instanceId: target.id, instanceGeneration: target.generation, workerSessionGeneration: target.workerSessionGeneration, workerName: target.name, parentTurnId: input.source.parentTurnId ?? null, rootMessageId: input.source.rootMessageId, requestText: input.content.text, queuePosition: 0, primaryAnswer, occurredAt: new Date().toISOString() });
-      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, render: this.options.presentation.workerTurn, maxQueueDepth: this.options.maxQueueDepth ?? 20 });
+      const result = this.options.store.acceptInstanceTurnWithCard({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, parentTurnId: input.source.parentTurnId ?? null, sourceMessageId: input.source.messageId, view, render: this.options.presentation.workerTurn, maxQueueDepth: this.options.maxQueueDepth ?? 20, unifiedSegment: { segmentId: `worker-turn:${id}`, submissionId: id, producerKey: `worker:${target.id}`, owner: { kind: "worker", id: target.id, generation: target.generation }, agentKind: target.agentKind === "pi" ? "pi" : "traex", expectedSessionId: target.runtimeRef?.nativeSessionId ?? null, rootMessageId: input.source.rootMessageId, occurredAt: new Date().toISOString() } });
+      await this.convergeCompletionOwners(result.completionActionOwnerTurnIds);
       if (result.inserted) { this.options.wakeOutbound?.(); this.options.wake(target.id); }
       return { accepted: true, ...result, card: result.view };
     }
     const result = this.options.store.acceptInstanceTurn({ id, idempotencyKey: input.idempotencyKey, actor: input.actor, projectId: input.projectId, instanceId: target.id, instanceGeneration: target.generation, kind: input.content.kind, text: input.content.text, maxQueueDepth: this.options.maxQueueDepth ?? 20 });
     if (result.inserted) this.options.wake(target.id);
     return { accepted: true, ...result, card: null };
+  }
+
+  async acceptWorkerCompletionAction(input: { actionSetId: string; selection?: CompletionActionSelection; optionId?: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; chatId: string; actor: Extract<ControlActor, { kind: "human" }> }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView; inserted: boolean }> {
+    if ((input.selection === undefined) === (input.optionId === undefined)) throw new Error("Exactly one Worker completion action identity is required");
+    const owner = this.options.store.getInstanceTurn(input.ownerTurnId);
+    const ownerView = owner ? this.options.store.loadWorkerTurnCard(owner.id) : null;
+    const target = owner ? this.options.store.getAgentInstance(owner.instanceId) : null;
+    if (!owner || !ownerView || !target || !target.runtimeRef || target.desiredState !== "running") throw new Error("Worker completion action is no longer available");
+    const choice = input.optionId === undefined ? null : this.options.store.resolveWorkerCompletionChoice({ actionSetId: input.actionSetId, optionId: input.optionId, ownerTurnId: input.ownerTurnId, ownerGeneration: input.ownerGeneration, cardMessageId: input.cardMessageId, actorOpenId: input.actor.userId });
+    const text = choice?.message ?? COMPLETION_ACTION_MESSAGES[input.selection!];
+    const id = this.options.idFactory();
+    const sourceKey = input.optionId ? `completion-choice:v1:${input.actionSetId}:${input.optionId}` : `completion-action:v1:${input.actionSetId}:${input.selection}`;
+    const view = createQueuedWorkerTurnCard({
+      turnId: id, instanceId: target.id, instanceGeneration: target.generation, workerSessionGeneration: target.workerSessionGeneration,
+      workerName: target.name, parentTurnId: owner.id, rootMessageId: ownerView.rootMessageId, requestText: text, queuePosition: 0,
+      primaryAnswer: ownerView.primaryAnswer, occurredAt: new Date().toISOString()
+    });
+    const result = this.options.store.acceptWorkerCompletionAction({
+      actionSetId: input.actionSetId, ...(input.optionId ? { optionId: input.optionId } : { selection: input.selection! }), ownerTurnId: input.ownerTurnId, ownerGeneration: input.ownerGeneration,
+      cardMessageId: input.cardMessageId, chatId: input.chatId, actorOpenId: input.actor.userId,
+      accepted: { id, idempotencyKey: sourceKey, actor: input.actor, projectId: owner.projectId, instanceId: target.id, instanceGeneration: target.generation,
+        kind: "followup", text, parentTurnId: owner.id, sourceMessageId: input.cardMessageId, view, render: this.options.presentation.workerTurn, maxQueueDepth: this.options.maxQueueDepth ?? 20,
+        unifiedSegment: { segmentId: `worker-turn:${id}`, submissionId: id, producerKey: `worker:${target.id}`, owner: { kind: "worker", id: target.id, generation: target.generation },
+          agentKind: target.agentKind === "pi" ? "pi" : "traex", expectedSessionId: target.runtimeRef.nativeSessionId, rootMessageId: ownerView.rootMessageId, occurredAt: new Date().toISOString() } }
+    });
+    await this.convergeCompletionOwners(result.completionActionOwnerTurnIds);
+    if (result.inserted) { this.options.wakeOutbound?.(); this.options.wake(target.id); }
+    return { accepted: true, ...result, card: result.view };
+  }
+
+  async ignoreWorkerCompletionAction(input: { actionSetId: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; chatId: string; actor: Extract<ControlActor, { kind: "human" }> }) {
+    const result = this.options.store.ignoreWorkerCompletionAction({
+      actionSetId: input.actionSetId, ownerTurnId: input.ownerTurnId, ownerGeneration: input.ownerGeneration,
+      cardMessageId: input.cardMessageId, chatId: input.chatId, actorOpenId: input.actor.userId
+    });
+    await this.convergeCompletionOwners([result.ownerId]);
+    return result;
+  }
+
+  async decideFreshWorkerCompletionReview(input: { actionSetId: string; optionId: string; messageId: string; chatId: string; actor: Extract<ControlActor, { kind: "human" }> }): Promise<{ kind: "ignored"; changed: boolean } | { kind: "followup"; turn: InstanceTurn; card: WorkerTurnCardView; inserted: boolean }> {
+    const review = this.options.store.resolveFreshWorkerCompletionReview({
+      actionSetId: input.actionSetId, optionId: input.optionId, messageId: input.messageId,
+      actorOpenId: input.actor.userId, chatId: input.chatId
+    });
+    if (!review) throw new Error("Worker completion action is no longer available");
+    if (input.optionId === "ignore") {
+      const ignored = await this.ignoreWorkerCompletionAction({
+        actionSetId: input.actionSetId, ownerTurnId: review.ownerTurnId, ownerGeneration: review.ownerGeneration,
+        cardMessageId: review.cardMessageId, chatId: input.chatId, actor: input.actor
+      });
+      return { kind: "ignored", changed: ignored.changed };
+    }
+    const accepted = await this.acceptWorkerCompletionAction({
+      actionSetId: input.actionSetId, optionId: input.optionId, ownerTurnId: review.ownerTurnId,
+      ownerGeneration: review.ownerGeneration, cardMessageId: review.cardMessageId,
+      chatId: input.chatId, actor: input.actor
+    });
+    return { kind: "followup", turn: accepted.turn, card: accepted.card, inserted: accepted.inserted };
   }
 
   async steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; text: string; resultTargetMessageId?: string }): Promise<SteerReceipt & { durableResult?: boolean }> {
@@ -44,6 +104,7 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
     }
     try {
       const outcome = await this.options.turnControl.steer({ owner: { kind: "instance", id: target.id }, actor: input.actor, text: input.text, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
+      if (outcome.mode === "input") return { status: "delivered", operationId: outcome.submissionId, ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
       if (outcome.mode === "priority") return { status: "delivered", operationId: outcome.logicalTurnId, ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
       const { operation } = outcome;
       return { ...turnControlSteerReceipt(operation.id, operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
@@ -64,6 +125,7 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
     }
     try {
       const outcome = await this.options.turnControl.interrupt({ owner: { kind: "instance", id: target.id }, actor: input.actor, idempotencyKey: input.idempotencyKey, ...(input.resultTargetMessageId ? { resultTargetMessageId: input.resultTargetMessageId } : {}) });
+      if (outcome.mode === "input") return { status: "failed", reason: "Interrupt unexpectedly resolved to Agent Input", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
       if (outcome.mode === "priority") return { status: "failed", reason: "Interrupt unexpectedly resolved to a priority turn", ...(input.resultTargetMessageId ? { durableResult: false } : {}) };
       const { operation } = outcome;
       return { ...turnControlInterruptReceipt(operation.id, operation.state, operation.result), ...(input.resultTargetMessageId ? { durableResult: true } : {}) };
@@ -117,6 +179,11 @@ export class InstanceMessagingWorkflow implements InstanceMessagingPort {
     const prompt = this.options.store.getActiveOrdinaryPrompt(actor.bindingId, actor.bindingGeneration);
     if (!binding || binding.projectId !== actor.projectId || binding.projectId !== projectId || binding.generation !== actor.bindingGeneration || prompt?.id !== actor.parentPromptId) throw new Error("Caller is not the authorized current thread Primary");
     return binding;
+  }
+
+  private async convergeCompletionOwners(turnIds: readonly string[] | undefined): Promise<void> {
+    if (!this.options.convergeWorkerTurn) return;
+    for (const turnId of turnIds ?? []) await this.options.convergeWorkerTurn(turnId);
   }
 }
 

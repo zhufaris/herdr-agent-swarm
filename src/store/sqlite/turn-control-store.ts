@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { InstanceTurnCapacityExceeded } from "../../domain/instance-turn-capacity-error.js";
+import { primaryAnswerCreateIdempotencyKey } from "../../domain/delivery-intent.js";
 import type { AcceptInstanceTurnWithCardInput } from "../../domain/ports.js";
 import type { AcceptPromptInput } from "../../domain/ports/prompt.js";
-import type { OutboxStore } from "../../domain/ports/outbox.js";
+import type { OutboxStore, PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
 import type { AcceptTurnControlOperationInput, TurnControlOperation, TurnControlState, TurnTarget } from "../../domain/turn-control.js";
 import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { Binding, OutboundReply, PromptJob } from "../../domain/types.js";
@@ -11,6 +12,7 @@ import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import { mapTurnControlOperation, type OutboundReplyRow, type TurnControlOperationRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import { turnActorProvenance } from "./turn-actor-provenance.js";
+import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
 
 export interface TurnControlDependencies {
   getBinding(id: string): Binding | null;
@@ -25,13 +27,16 @@ export interface TurnControlDependencies {
 }
 
 export class SqliteTurnControlStore {
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext, private readonly dependencies: TurnControlDependencies) {}
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void { this.preparedDeliveryReservation = reservation; this.preparedDeliveryConsumer = consumer; }
   private get database() { return this.context.database; }
 
   accept(input: AcceptTurnControlOperationInput): { operation: TurnControlOperation; inserted: boolean } {
     if ((input.kind === "steer") !== (input.payload !== null)) throw new Error("Steer requires a payload and interrupt forbids one");
     const timestamp = now();
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.turn-control-store.write", () => {
       if (!this.turnTargetExists(input.target)) throw new Error("Turn control target changed before acceptance");
       const inserted = this.database.prepare(`INSERT INTO turn_control_operations(id, idempotency_key, kind, owner_kind, owner_id, project_id, pane_id, generation, agent_session_source, agent_session_agent, agent_session_kind, agent_session_value, logical_turn_id, runtime_turn_id, actor_json, payload, source_message_id, source_card_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`).run(input.id, input.idempotencyKey, input.kind, input.target.owner.kind, input.target.owner.id, input.target.projectId, input.target.paneId, input.target.generation, input.target.agentSession.source, input.target.agentSession.agent, input.target.agentSession.kind, input.target.agentSession.value, input.target.logicalTurnId, input.target.runtimeTurnId, JSON.stringify(input.actor), input.payload, input.sourceMessageId ?? null, input.sourceCardId ?? null, timestamp, timestamp).changes === 1;
       const operation = this.getByIdempotencyKey(input.idempotencyKey);
@@ -48,27 +53,38 @@ export class SqliteTurnControlStore {
     return (this.database.prepare("SELECT * FROM turn_control_operations WHERE owner_kind = ? AND owner_id = ? AND state = 'accepted' ORDER BY created_at, rowid").all(owner.kind, owner.id) as TurnControlOperationRow[]).map(mapTurnControlOperation);
   }
   getPrioritySteer(owner: import("../../domain/turn-control.js").TurnControlOwner, key: string): { logicalTurnId: string; text: string } | null {
-    if (owner.kind === "binding") { const row = this.database.prepare("SELECT id, body FROM prompt_jobs WHERE binding_id = ? AND lark_message_id = ? AND priority = 'priority'").get(owner.id, `priority-steer:${key}`) as { id: string; body: string } | undefined; return row ? { logicalTurnId: row.id, text: row.body } : null; }
+    if (owner.kind === "binding") {
+      const row = this.database.prepare(`
+        SELECT id, body FROM prompt_jobs
+        WHERE binding_id = ? AND priority = 'priority'
+          AND (
+            (ingress_source = 'internal' AND source_message_key = ?)
+            OR lark_message_id = ?
+          )
+      `).get(owner.id, `idle-steer:v1:${key}`, `priority-steer:${key}`) as { id: string; body: string } | undefined;
+      return row ? { logicalTurnId: row.id, text: row.body } : null;
+    }
     const row = this.database.prepare("SELECT id, text FROM instance_turns WHERE instance_id = ? AND idempotency_key = ? AND priority = 'priority'").get(owner.id, key) as { id: string; text: string } | undefined;
     return row ? { logicalTurnId: row.id, text: row.text } : null;
   }
 
-  claim(id: string): TurnControlOperation | null { return this.context.transaction(() => { const operation = this.get(id); if (!operation || operation.state !== "accepted" || !this.turnTargetExists(operation.target)) return null; const changed = this.database.prepare("UPDATE turn_control_operations SET state = 'dispatching', updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), id); return changed.changes === 1 ? this.get(id) : null; }); }
+  claim(id: string): TurnControlOperation | null { return this.context.transaction("sqlite.turn-control-store.write", () => { const operation = this.get(id); if (!operation || operation.state !== "accepted" || !this.turnTargetExists(operation.target)) return null; const changed = this.database.prepare("UPDATE turn_control_operations SET state = 'dispatching', updated_at = ? WHERE id = ? AND state = 'accepted'").run(now(), id); return changed.changes === 1 ? this.get(id) : null; }); }
   rejectAccepted(input: { id: string; result: Record<string, unknown>; card?: object }): TurnControlOperation | null { return this.finishTransition(input.id, "accepted", "rejected", input.result, input.card); }
   finish(input: { id: string; state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">; result: Record<string, unknown>; card?: object }): TurnControlOperation | null { return this.finishTransition(input.id, "dispatching", input.state, input.result, input.card); }
 
   convertToPrimaryPriority(input: { operationId: string; prompt: AcceptPromptInput["prompt"]; view: RunCardView; rootMessageId: string; answerCard: object; maxQueueDepth: number; expectedBindingGeneration: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; prompt: PromptJob } | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.turn-control-store.write", () => {
       const operation = this.get(input.operationId);
       if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "binding" || operation.target.owner.id !== input.prompt.bindingId) return null;
       const binding = this.dependencies.getBinding(input.prompt.bindingId);
       if (!binding || binding.generation !== input.expectedBindingGeneration || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached" || binding.paneId !== operation.target.paneId || !bindingSessionMatches(binding, operation.target.agentSession)) return null;
+      if (this.database.prepare(`SELECT 1 FROM orchestrator_clear_operations WHERE binding_id = ? AND state IN ('accepted','rotating','rotation-uncertain') LIMIT 1`).get(binding.id)) return null;
       if (this.dependencies.countPendingPrompts(input.prompt.bindingId) >= input.maxQueueDepth) throw new Error("This topic's prompt queue is full");
-      if (this.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND priority = 'priority' AND state IN ('queued','running') LIMIT 1").get(input.prompt.bindingId)) throw new Error("Primary binding already has a live priority turn");
+      if (this.database.prepare("SELECT 1 FROM prompt_jobs WHERE binding_id = ? AND priority = 'priority' AND state IN ('queued','submitted','running') LIMIT 1").get(input.prompt.bindingId)) throw new Error("Primary binding already has a live priority turn");
       const timestamp = now();
-      this.database.prepare("INSERT INTO prompt_jobs(id, binding_id, lark_message_id, actor_open_id, body, priority, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'priority', 0, 'queued', 'not_started', 0, NULL, ?, ?)").run(input.prompt.id, input.prompt.bindingId, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, timestamp, timestamp);
+      this.database.prepare("INSERT INTO prompt_jobs(id, binding_id, session_epoch, lark_message_id, actor_open_id, body, priority, was_detached, state, observation_state, attempt_count, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'priority', 0, 'queued', 'not_started', 0, NULL, ?, ?)").run(input.prompt.id, input.prompt.bindingId, binding.sessionEpoch, input.prompt.larkMessageId, input.prompt.actorOpenId, input.prompt.body, timestamp, timestamp);
       this.dependencies.insertRunCard(input.view);
-      this.database.prepare("INSERT INTO outbound_replies(id, gateway_id, idempotency_key, binding_id, prompt_id, view_version, card_role, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'answer', ?, 'stream_card_create', ?, ?, 'pending', 0, ?, ?, ?)").run(randomUUID(), binding.gatewayId, `run-card:create:${input.prompt.id}:answer`, input.prompt.bindingId, input.prompt.id, input.view.viewVersion, input.rootMessageId, JSON.stringify(input.answerCard), `gateway:${binding.gatewayId}:answer:${input.prompt.id}`, timestamp, timestamp, timestamp);
+      this.enqueuePrimaryEffect({ id: randomUUID(), idempotencyKey: primaryAnswerCreateIdempotencyKey(input.prompt.id), gatewayId: binding.gatewayId, bindingId: input.prompt.bindingId, bindingGeneration: input.expectedBindingGeneration, promptId: input.prompt.id, viewVersion: input.view.viewVersion, cardRole: "answer", rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify(input.answerCard) });
       this.database.prepare("UPDATE turn_control_operations SET state = 'delivered', result_json = ?, updated_at = ? WHERE id = ? AND state = 'dispatching'").run(JSON.stringify(input.result), timestamp, input.operationId);
       const converted = this.get(input.operationId)!; if (input.card) this.updateResult(converted, input.card);
       const prompt = this.dependencies.getPrompt(input.prompt.id); if (!prompt) throw new Error(`Prompt not found: ${input.prompt.id}`);
@@ -77,7 +93,7 @@ export class SqliteTurnControlStore {
   }
 
   convertToWorkerPriority(input: { operationId: string; turn: Omit<AcceptInstanceTurnWithCardInput, "view" | "render"> & { view?: AcceptInstanceTurnWithCardInput["view"]; render?: AcceptInstanceTurnWithCardInput["render"] }; maxQueueDepth: number; result: Record<string, unknown>; card?: object }): { operation: TurnControlOperation; logicalTurnId: string } | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.turn-control-store.write", () => {
       const operation = this.get(input.operationId);
       if (!operation || operation.state !== "dispatching" || operation.kind !== "steer" || operation.target.owner.kind !== "instance" || operation.target.owner.id !== input.turn.instanceId) return null;
       const instance = this.dependencies.getAgentInstance(input.turn.instanceId);
@@ -96,12 +112,31 @@ export class SqliteTurnControlStore {
     });
   }
 
-  recover(renderResult?: (operation: TurnControlOperation) => object): { accepted: TurnControlOperation[]; uncertain: TurnControlOperation[] } { return this.context.transaction(() => { this.database.prepare("UPDATE turn_control_operations SET state = 'uncertain', result_json = ?, updated_at = ? WHERE state = 'dispatching'").run(JSON.stringify({ status: "delivery-uncertain", reason: "Bridge restarted after native control dispatch began" }), now()); const accepted = (this.database.prepare("SELECT * FROM turn_control_operations WHERE state = 'accepted' ORDER BY created_at, rowid").all() as TurnControlOperationRow[]).map(mapTurnControlOperation); const uncertain = (this.database.prepare("SELECT * FROM turn_control_operations WHERE state = 'uncertain' ORDER BY created_at, rowid").all() as TurnControlOperationRow[]).map(mapTurnControlOperation); if (renderResult) for (const operation of uncertain) this.updateResult(operation, renderResult(operation)); return { accepted, uncertain }; }); }
+  recover(renderResult?: (operation: TurnControlOperation) => object): { accepted: TurnControlOperation[]; uncertain: TurnControlOperation[] } { return this.context.transaction("sqlite.turn-control-store.write", () => { this.database.prepare("UPDATE turn_control_operations SET state = 'uncertain', result_json = ?, updated_at = ? WHERE state = 'dispatching'").run(JSON.stringify({ status: "delivery-uncertain", reason: "Bridge restarted after native control dispatch began" }), now()); const accepted = (this.database.prepare("SELECT * FROM turn_control_operations WHERE state = 'accepted' ORDER BY created_at, rowid").all() as TurnControlOperationRow[]).map(mapTurnControlOperation); const uncertain = (this.database.prepare("SELECT * FROM turn_control_operations WHERE state = 'uncertain' ORDER BY created_at, rowid").all() as TurnControlOperationRow[]).map(mapTurnControlOperation); if (renderResult) for (const operation of uncertain) this.updateResult(operation, renderResult(operation)); return { accepted, uncertain }; }); }
 
-  private finishTransition(id: string, source: TurnControlState, state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">, result: Record<string, unknown>, card?: object): TurnControlOperation | null { return this.context.transaction(() => { const changed = this.database.prepare("UPDATE turn_control_operations SET state = ?, result_json = ?, updated_at = ? WHERE id = ? AND state = ?").run(state, JSON.stringify(result), now(), id, source); if (changed.changes !== 1) return null; const operation = this.get(id)!; if (card) this.updateResult(operation, card); return operation; }); }
-  private enqueueResult(operation: TurnControlOperation, card: object, targetMessageId: string, bindingId: string | null): void { this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `turn-control:${operation.id}:result`, bindingId, targetRole: "operation_result", rootMessageId: targetMessageId, kind: "card_reply", payload: JSON.stringify(card) }); }
-  private updateResult(operation: TurnControlOperation, card: object): void { const initial = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(`turn-control:${operation.id}:result`) as OutboundReplyRow | undefined; if (!initial) return; if (initial.state === "pending" && initial.root_message_id) { this.enqueueResult(operation, card, initial.root_message_id, initial.binding_id); return; } if (initial.state === "delivered" && initial.delivered_message_id) this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `turn-control:${operation.id}:result:${operation.state}`, bindingId: initial.binding_id, targetRole: "operation_result", rootMessageId: initial.delivered_message_id, kind: "card_update", payload: JSON.stringify(card) }); }
-  private turnTargetExists(target: TurnTarget): boolean { if (target.owner.kind === "binding") return Boolean(this.database.prepare(`SELECT 1 FROM bindings b JOIN prompt_jobs p ON p.id = ? AND p.binding_id = b.id WHERE b.id = ? AND b.project_id = ? AND b.pane_id = ? AND b.generation = ? AND b.agent_session_source = ? AND b.agent_session_agent = ? AND b.agent_session_kind = ? AND b.agent_session_value = ? AND p.transcript_turn_id = ? AND p.state = 'running'`).get(target.logicalTurnId, target.owner.id, target.projectId, target.paneId, target.generation, target.agentSession.source, target.agentSession.agent, target.agentSession.kind, target.agentSession.value, target.runtimeTurnId)); return Boolean(this.database.prepare(`SELECT 1 FROM agent_instances i JOIN instance_turns t ON t.id = ? AND t.instance_id = i.id AND t.instance_generation = i.generation WHERE i.id = ? AND i.project_id = ? AND i.pane_id = ? AND i.generation = ? AND i.native_session_id = ? AND t.runtime_turn_id = ? AND t.state IN ('dispatching','running','blocked','dispatch-uncertain')`).get(target.logicalTurnId, target.owner.id, target.projectId, target.paneId, target.generation, target.agentSession.value, target.runtimeTurnId)); }
+  private finishTransition(id: string, source: TurnControlState, state: Extract<TurnControlState, "delivered" | "rejected" | "uncertain">, result: Record<string, unknown>, card?: object): TurnControlOperation | null { return this.context.transaction("sqlite.turn-control-store.write", () => { const changed = this.database.prepare("UPDATE turn_control_operations SET state = ?, result_json = ?, updated_at = ? WHERE id = ? AND state = ?").run(state, JSON.stringify(result), now(), id, source); if (changed.changes !== 1) return null; const operation = this.get(id)!; if (card) this.updateResult(operation, card); return operation; }); }
+  private enqueueResult(operation: TurnControlOperation, card: object, targetMessageId: string, bindingId: string | null): void { this.enqueueOperationResult(operation, { id: randomUUID(), idempotencyKey: `turn-control:${operation.id}:result`, bindingId, bindingGeneration: operation.target.owner.kind === "binding" ? operation.target.generation : null, targetRole: "operation_result", rootMessageId: targetMessageId, kind: "card_reply", payload: JSON.stringify(card) }); }
+  private updateResult(operation: TurnControlOperation, card: object): void { const initial = this.database.prepare("SELECT * FROM outbound_replies WHERE idempotency_key = ?").get(`turn-control:${operation.id}:result`) as OutboundReplyRow | undefined; if (!initial) return; if (initial.state === "pending" && initial.root_message_id) { this.enqueueResult(operation, card, initial.root_message_id, initial.binding_id); return; } if (initial.state === "delivered" && initial.delivered_message_id) this.enqueueOperationResult(operation, { id: randomUUID(), idempotencyKey: `turn-control:${operation.id}:result:${operation.state}`, bindingId: initial.binding_id, bindingGeneration: operation.target.owner.kind === "binding" ? operation.target.generation : null, targetRole: "operation_result", rootMessageId: initial.delivered_message_id, kind: "card_update", payload: JSON.stringify(card) }); }
+  private enqueueOperationResult(operation: TurnControlOperation, input: EnqueueOutboundReplyInput): void {
+    if (operation.target.owner.kind === "binding") { this.enqueuePrimaryEffect(input); return; }
+    if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Turn Control prepared delivery is not connected");
+    const worker = this.database.prepare("SELECT worker_session_generation FROM agent_instances WHERE id=? AND generation=?").get(
+      operation.target.owner.id, operation.target.generation
+    ) as { worker_session_generation: number } | undefined;
+    if (!worker) throw new Error("Turn Control worker delivery owner is not available");
+    this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply({
+      ...input, workerId: operation.target.owner.id, workerSessionGeneration: worker.worker_session_generation
+    }));
+  }
+  private enqueuePrimaryEffect(input: EnqueueOutboundReplyInput): void {
+    if (!input.bindingId || input.bindingGeneration === null || input.bindingGeneration === undefined
+      || !this.hasExactActiveBinding(input.bindingId, input.bindingGeneration)) return;
+    if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Turn Control prepared delivery is not connected");
+    this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(input));
+  }
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void { queueMicrotask(() => { for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery); }); }
+  private hasExactActiveBinding(id: string, generation: number): boolean { return this.database.prepare("SELECT 1 FROM bindings WHERE id=? AND generation=? AND state='active' AND lifecycle='active' AND attachment='attached'").get(id, generation) !== undefined; }
+  private turnTargetExists(target: TurnTarget): boolean { if (target.owner.kind === "binding") return Boolean(this.database.prepare(`SELECT 1 FROM bindings b WHERE b.id = ? AND b.project_id = ? AND b.pane_id = ? AND b.generation = ? AND b.agent_session_source = ? AND b.agent_session_agent = ? AND b.agent_session_kind = ? AND b.agent_session_value = ?`).get(target.owner.id, target.projectId, target.paneId, target.generation, target.agentSession.source, target.agentSession.agent, target.agentSession.kind, target.agentSession.value)); return Boolean(this.database.prepare(`SELECT 1 FROM agent_instances i JOIN instance_turns t ON t.id = ? AND t.instance_id = i.id AND t.instance_generation = i.generation WHERE i.id = ? AND i.project_id = ? AND i.pane_id = ? AND i.generation = ? AND i.native_session_id = ? AND t.runtime_turn_id = ? AND t.state IN ('dispatching','running','blocked','dispatch-uncertain')`).get(target.logicalTurnId, target.owner.id, target.projectId, target.paneId, target.generation, target.agentSession.value, target.runtimeTurnId)); }
 }
 
 function sameRequest(operation: TurnControlOperation, input: AcceptTurnControlOperationInput): boolean { const left = operation.target; const right = input.target; return operation.kind === input.kind && operation.payload === input.payload && operation.sourceMessageId === (input.sourceMessageId ?? null) && operation.sourceCardId === (input.sourceCardId ?? null) && left.owner.kind === right.owner.kind && left.owner.id === right.owner.id && left.projectId === right.projectId && left.paneId === right.paneId && left.generation === right.generation && left.logicalTurnId === right.logicalTurnId && left.runtimeTurnId === right.runtimeTurnId && left.agentSession.source === right.agentSession.source && left.agentSession.agent === right.agentSession.agent && left.agentSession.kind === right.agentSession.kind && left.agentSession.value === right.agentSession.value; }

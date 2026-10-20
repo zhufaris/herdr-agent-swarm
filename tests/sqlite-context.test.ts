@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteContext } from "../src/store/sqlite/context.js";
+import { classifySqliteFailure, SqliteContext } from "../src/store/sqlite/context.js";
 
 let context: SqliteContext | undefined;
 
@@ -9,6 +12,12 @@ afterEach(() => {
 });
 
 describe("SqliteContext", () => {
+  it("classifies SQLite contention by numeric primary error code only", () => {
+    expect(classifySqliteFailure({ code: "ERR_SQLITE_ERROR", errcode: 5 })).toBe("busy");
+    expect(classifySqliteFailure({ code: "ERR_SQLITE_ERROR", errcode: 6 })).toBe("locked");
+    expect(classifySqliteFailure({ code: "ERR_SQLITE_ERROR", message: "database is locked" })).toBe("other");
+  });
+
   it("uses one configured connection", () => {
     context = new SqliteContext(":memory:");
 
@@ -48,6 +57,26 @@ describe("SqliteContext", () => {
     })).toThrow("fail outer transaction");
 
     expect(context.database.prepare("SELECT value FROM values_table").all()).toEqual([]);
+  });
+
+  it("rolls back a nested migration savepoint without aborting its outer transaction", () => {
+    context = new SqliteContext(":memory:");
+    context.database.exec("CREATE TABLE values_table(value TEXT NOT NULL)");
+
+    context.transaction("test.outer", () => {
+      context!.database.prepare("INSERT INTO values_table(value) VALUES (?)").run("outer-before");
+      expect(() => context!.migrationTransaction("sqlite.migrations.test-savepoint", () => {
+        context!.database.prepare("INSERT INTO values_table(value) VALUES (?)").run("discarded");
+        throw new Error("injected savepoint failure");
+      })).toThrow("injected savepoint failure");
+      context!.database.prepare("INSERT INTO values_table(value) VALUES (?)").run("outer-after");
+      expect(context!.database.isTransaction).toBe(true);
+    });
+
+    expect(context.database.prepare("SELECT value FROM values_table ORDER BY rowid").all()).toEqual([
+      { value: "outer-before" },
+      { value: "outer-after" }
+    ]);
   });
 
   it("can start a new transaction after rollback", () => {
@@ -90,5 +119,65 @@ describe("SqliteContext", () => {
 
     expect(receipt.commitState).toBe("rolled_back");
     expect(receipt.consumeEffects()).toEqual([]);
+  });
+
+  it("bounds a contended write and records payload-free busy diagnostics", () => {
+    const directory = mkdtempSync(join(tmpdir(), "sqlite-context-busy-"));
+    const databasePath = join(directory, "bridge.db");
+    const holder = new SqliteContext(databasePath, { busyTimeoutMs: 10, slowTransactionThresholdMs: 0 });
+    context = new SqliteContext(databasePath, { busyTimeoutMs: 10, slowTransactionThresholdMs: 0 });
+    try {
+      holder.database.exec("CREATE TABLE values_table(value TEXT NOT NULL); BEGIN IMMEDIATE");
+
+      expect(() => context!.transaction("test.busy-write", () => {
+        context!.database.prepare("INSERT INTO values_table(value) VALUES (?)").run("must-not-leak");
+      })).toThrow();
+
+      expect(context.database.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 10 });
+      expect(context.runtimeDiagnostics()).toMatchObject({
+        transactionCount: 1,
+        committedCount: 0,
+        failedTransactionCount: 1,
+        rolledBackCount: 0,
+        rollbackExecutionCount: 0,
+        failedBeginCount: 1,
+        busyCount: 1,
+        lockedCount: 0,
+        lastFailure: {
+          operation: "test.busy-write",
+          outcome: "begin_failed",
+          failureClass: "busy",
+          failurePhase: "begin",
+          rollbackExecuted: false
+        }
+      });
+      expect(JSON.stringify(context.runtimeDiagnostics())).not.toContain("must-not-leak");
+    } finally {
+      if (holder.database.isTransaction) holder.database.exec("ROLLBACK");
+      holder.close();
+      context?.close();
+      context = undefined;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("observes explicit manual migration transaction groups without claiming rollback evidence", () => {
+    context = new SqliteContext(":memory:", { slowTransactionThresholdMs: 0 });
+
+    context.observeManualTransactions("test.manual-migration", () => {
+      context!.database.exec("BEGIN IMMEDIATE; COMMIT");
+    });
+
+    expect(context.runtimeDiagnostics()).toMatchObject({
+      transactionCount: 0,
+      rolledBackCount: 0,
+      manualTransactionGroupCount: 1,
+      manualTransactionGroupFailureCount: 0,
+      lastManualTransactionGroup: {
+        operation: "test.manual-migration",
+        outcome: "manual_completed",
+        rollbackExecuted: false
+      }
+    });
   });
 });

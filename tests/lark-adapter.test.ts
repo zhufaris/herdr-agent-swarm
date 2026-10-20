@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const createMessage = vi.fn();
 const replyMessage = vi.fn();
 const patchMessage = vi.fn();
+const updateMessage = vi.fn();
+const deleteMessage = vi.fn();
 const getMessage = vi.fn();
 const forwardThread = vi.fn();
 const forwardMessage = vi.fn();
@@ -11,29 +13,64 @@ const streamContent = vi.fn();
 const updateSettings = vi.fn();
 const updateCardEntity = vi.fn();
 const convertCardId = vi.fn();
+const closeWebSocket = vi.fn();
 let clientOptions: Record<string, unknown> | undefined;
 let registeredHandlers: Record<string, (data: unknown) => Promise<unknown>> = {};
+let wsConnectionState = "connected";
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Client: class {
     constructor(options: Record<string, unknown>) { clientOptions = options; }
-    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, get: getMessage, forward: forwardMessage }, thread: { forward: forwardThread } } };
+    im = { v1: { message: { create: createMessage, reply: replyMessage, patch: patchMessage, update: updateMessage, delete: deleteMessage, get: getMessage, forward: forwardMessage }, thread: { forward: forwardThread } } };
     cardkit = { v1: { card: { create: createCard, settings: updateSettings, update: updateCardEntity, idConvert: convertCardId }, cardElement: { content: streamContent } } };
   },
   defaultHttpInstance: { request: vi.fn(), get: vi.fn(), delete: vi.fn(), head: vi.fn(), options: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn() },
-  WSClient: class { async start() {} close() {} },
+  WSClient: class { async start() {} close() { closeWebSocket(); } getConnectionStatus() { return { state: wsConnectionState }; } },
   EventDispatcher: class { register(handlers: Record<string, (data: unknown) => Promise<unknown>>) { registeredHandlers = handlers; return this; } }
 }));
 
 import { LarkSdkAdapter, normalizeCardActionEvent, normalizeMessage } from "../src/adapters/lark-adapter.js";
 
 beforeEach(() => {
-  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); forwardMessage.mockReset();
+  createMessage.mockReset(); replyMessage.mockReset(); patchMessage.mockReset(); updateMessage.mockReset(); deleteMessage.mockReset(); getMessage.mockReset(); forwardThread.mockReset(); forwardMessage.mockReset();
   createCard.mockReset(); streamContent.mockReset(); updateSettings.mockReset(); updateCardEntity.mockReset(); convertCardId.mockReset();
+  closeWebSocket.mockReset();
   clientOptions = undefined;
   registeredHandlers = {};
+  wsConnectionState = "connected";
 });
 
 describe("Lark streaming Answer cards", () => {
+  it("deletes the exact message and normalizes already-absent provider outcomes", async () => {
+    deleteMessage
+      .mockResolvedValueOnce({ code: 0 })
+      .mockResolvedValueOnce({ code: 230011 })
+      .mockRejectedValueOnce(Object.assign(new Error("gone"), { response: { status: 404, data: { code: 230019 } } }))
+      .mockRejectedValueOnce(Object.assign(new Error("expired"), { response: { status: 400, data: { code: 230009 } } }));
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.deleteMessage("message-1")).resolves.toBe("deleted");
+    await expect(adapter.deleteMessage("message-2")).resolves.toBe("already_absent");
+    await expect(adapter.deleteMessage("message-3")).resolves.toBe("already_absent");
+    await expect(adapter.deleteMessage("message-4")).resolves.toBe("already_absent");
+
+    expect(deleteMessage.mock.calls.map(([request]) => request)).toEqual([
+      { path: { message_id: "message-1" } },
+      { path: { message_id: "message-2" } },
+      { path: { message_id: "message-3" } },
+      { path: { message_id: "message-4" } }
+    ]);
+  });
+
+  it("preserves non-absence deletion failures for delivery classification", async () => {
+    deleteMessage.mockResolvedValue({ code: 230099 });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.deleteMessage("message-1")).rejects.toMatchObject({
+      message: "Lark message delete failed (code=230099)",
+      larkCode: 230099
+    });
+  });
+
   it("creates a CardKit entity and replies with a card reference", async () => {
     createCard.mockResolvedValue({ data: { card_id: "card-1" } });
     replyMessage.mockResolvedValue({ data: { message_id: "answer-1" } });
@@ -134,6 +171,16 @@ describe("Lark streaming Answer cards", () => {
     const normalized = { schema: "2.0", body: { elements: [{ element_id: "element_e8aa1ef57445" }] } };
     expect(replyMessage).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ content: JSON.stringify(normalized) }) }));
     expect(patchMessage).toHaveBeenCalledWith({ path: { message_id: "answer-1" }, data: { content: JSON.stringify(normalized) } });
+  });
+
+  it("rejects a message-card update business failure returned with HTTP success", async () => {
+    patchMessage.mockResolvedValue({ code: 230099, msg: "Message is locked", data: { request_id: "req-1" }, raw_token: "must-not-leak" });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.updateCard("answer-1", { schema: "2.0" })).rejects.toMatchObject({
+      message: 'Lark message update failed (code=230099, msg="Message is locked", dataKeys=[request_id], responseKeys=[code,data,msg,raw_token])',
+      larkCode: 230099
+    });
   });
 
   it("updates a Main Card through its CardKit entity with a monotonic view sequence", async () => {
@@ -290,15 +337,24 @@ describe("Lark topic sharing", () => {
     });
   });
 
-  it("falls back to forwarding the canonical root message when thread forwarding returns no message id", async () => {
-    forwardThread.mockResolvedValue({ data: {} });
-    forwardMessage.mockResolvedValue({ data: { message_id: "om_forwarded_root" } });
+  it("does not fallback when thread forwarding has an ambiguous server outcome", async () => {
+    forwardThread.mockRejectedValue({ response: { status: 500, data: { code: 99991663 } } });
+    forwardMessage.mockResolvedValue({ data: { message_id: "om_duplicate_root" } });
     const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
 
-    await expect(adapter.shareThread("omt_reply_thread", { messageId: "om_directory", chatId: "oc_target", sourceRootMessageId: "om_canonical_root" })).resolves.toEqual({ messageId: "om_forwarded_root" });
-    expect(forwardMessage).toHaveBeenCalledWith({
-      path: { message_id: "om_canonical_root" }, params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_target" }
-    });
+    await expect(adapter.shareThread("omt_primary_thread", { messageId: "om_directory", chatId: "oc_target", sourceRootMessageId: "om_canonical_root" }))
+      .rejects.toMatchObject({ response: { status: 500 } });
+    expect(forwardThread).toHaveBeenCalledTimes(1);
+    expect(forwardMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not fallback when thread forwarding returns no acknowledgement identity", async () => {
+    forwardThread.mockResolvedValue({ data: {} });
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+
+    await expect(adapter.shareThread("omt_reply_thread", { messageId: "om_directory", chatId: "oc_target", sourceRootMessageId: "om_canonical_root" }))
+      .rejects.toThrow();
+    expect(forwardMessage).not.toHaveBeenCalled();
   });
 
 });
@@ -428,6 +484,73 @@ describe("Lark message normalization", () => {
       message: { ...post.message, content: JSON.stringify({ content: [[{ tag: "img", image_key: "img-1" }]] }) }
     }, "bot")).toBeNull();
   });
+
+  it("fails closed on malformed message envelopes instead of throwing", () => {
+    expect(() => normalizeMessage({} as never, "bot")).not.toThrow();
+    expect(normalizeMessage({} as never, "bot")).toBeNull();
+    expect(normalizeMessage({ sender: { sender_type: "user" }, message: { content: "{}", message_type: "text" } } as never, "bot")).toBeNull();
+  });
+});
+
+describe("Lark ingress connection diagnostics", () => {
+  const event = {
+    event_id: "event-1", sender: { sender_type: "user", sender_id: { open_id: "user" } },
+    message: { message_id: "message-1", chat_id: "chat", message_type: "text", content: JSON.stringify({ text: "continue" }), mentions: [] }
+  };
+
+  it("reports only the SDK connected state as ready", () => {
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    wsConnectionState = "reconnecting";
+
+    expect(adapter.isReady()).toBe(false);
+    expect(adapter.ingressStatus()).toMatchObject({ state: "reconnecting", receivedEvents: 0, lastReceivedAt: null, lastAcceptedAt: null });
+  });
+
+  it("records a received message event before handing it to durable ingress", async () => {
+    const info = vi.fn();
+    const onMessage = vi.fn(async () => undefined);
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" }, { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never);
+    await adapter.start(onMessage);
+
+    await registeredHandlers["im.message.receive_v1"]!(event);
+
+    expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ eventId: "event-1", messageId: "message-1", text: "continue" }));
+    expect(adapter.ingressStatus()).toMatchObject({ state: "connected", receivedEvents: 1, lastReceivedAt: expect.any(String), lastAcceptedAt: expect.any(String) });
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ event: "lark-message-event-received", eventId: "event-1", messageId: "message-1", messageType: "text", outcome: "accepted" }), "received Lark message event");
+  });
+
+  it("closes SDK ingress before draining callbacks admitted before stop", async () => {
+    let release!: () => void;
+    const admittedWork = new Promise<void>((resolve) => { release = resolve; });
+    const onMessage = vi.fn(() => admittedWork);
+    const onCardAction = vi.fn(async () => ({ toast: { type: "success" as const, content: "late" } }));
+    const adapter = new LarkSdkAdapter({ appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot" });
+    await adapter.start(onMessage, onCardAction);
+
+    const admitted = registeredHandlers["im.message.receive_v1"]!(event);
+    await vi.waitFor(() => expect(onMessage).toHaveBeenCalledOnce());
+    let stopSettled = false;
+    const stopping = adapter.stop().then(() => { stopSettled = true; });
+    await vi.waitFor(() => expect(closeWebSocket).toHaveBeenCalledOnce());
+
+    const lateMessage = registeredHandlers["im.message.receive_v1"]!({
+      ...event, event_id: "event-late", message: { ...event.message, message_id: "message-late" }
+    });
+    const lateCard = registeredHandlers["card.action.trigger"]!({
+      context: { open_message_id: "card-late", open_chat_id: "chat" }, operator: { open_id: "user" },
+      action: { value: { action: "noop" } }
+    });
+
+    try {
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(onMessage).toHaveBeenCalledOnce();
+      expect(onCardAction).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await Promise.allSettled([admitted, lateMessage, lateCard, stopping]);
+    }
+  });
 });
 
 describe("Lark card action normalization", () => {
@@ -447,6 +570,8 @@ describe("Lark card action normalization", () => {
       open_message_id: "om_2", open_chat_id: "oc_2", operator: { open_id: "ou_2" }, action: { value: { action: "noop" } }
     })).toMatchObject({ messageId: "om_2", chatId: "oc_2", operatorOpenId: "ou_2" });
     expect(normalizeCardActionEvent({ context: {}, operator: {}, action: {} })).toBeNull();
+    expect(() => normalizeCardActionEvent({ context: {}, operator: {} } as never)).not.toThrow();
+    expect(normalizeCardActionEvent({ context: {}, operator: {} } as never)).toBeNull();
   });
 
   it("preserves the selected static option", () => {

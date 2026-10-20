@@ -5,7 +5,7 @@ import { join } from "node:path";
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mergeHerdrRuntimeHints, normalizeHerdrEvent } from "../src/runtime/herdr-event-hint.js";
-import { HerdrSocketSubscriber } from "../src/runtime/herdr-socket-subscriber.js";
+import { HerdrSocketSubscriber, type HerdrNativeEventHint } from "../src/runtime/herdr-socket-subscriber.js";
 import { createShutdownContext } from "../src/runtime/shutdown-context.js";
 
 describe("Herdr event hints", () => {
@@ -15,6 +15,9 @@ describe("Herdr event hints", () => {
 
     expect(dotted).toEqual({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
     expect(underscored).toEqual(dotted);
+    expect(normalizeHerdrEvent("pane.updated", { workspaceIds: ["w1"], paneIds: ["w1:p1"] })).toEqual({
+      kind: "pane-updated", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"]
+    });
     expect(mergeHerdrRuntimeHints(dotted, normalizeHerdrEvent("pane.updated", { workspaceIds: ["w1"], paneIds: [] }))).toEqual({
       kind: "unknown", scope: "workspaces", workspaceIds: ["w1"], paneIds: ["w1:p1"]
     });
@@ -194,6 +197,40 @@ describe("Herdr socket subscriber", () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
+  it("accepts valid Core RPC frames larger than the former 256 KiB ceiling", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-rpc-core-frame-")), "herdr.sock");
+    const payload = "x".repeat(300 * 1024);
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string };
+        socket.write(`${JSON.stringify({ id: request.id, result: { payload } })}\n`);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], () => {}, pino({ enabled: false }), 5, 20);
+
+    await expect(subscriber.request("session.events.read", {}, 1_000)).resolves.toEqual({ payload });
+
+    await subscriber.stop();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it("keeps the default Core RPC frame budget bounded", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-rpc-core-oversize-")), "herdr.sock");
+    const server = createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("data", () => socket.write("x".repeat(2 * 1024 * 1024 + 1)));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => [], () => {}, pino({ enabled: false }), 5, 20);
+
+    await expect(subscriber.request("session.events.read", {}, 1_000)).rejects.toMatchObject({ code: "socket_response_too_large", written: true });
+
+    await subscriber.stop();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
   it("wakes targeted Pane waiters from native events", async () => {
     const subscriber = new HerdrSocketSubscriber("unused", async () => [], () => {}, pino({ enabled: false }));
     const first = subscriber.waitForPaneEvent("w1:p1", 1_000);
@@ -228,8 +265,11 @@ describe("Herdr socket subscriber", () => {
     const request = subscriber.request("agent.get", { target: "missing" }, 1_000);
     const waiter = subscriber.waitForPaneEvent("w1:p1", 1_000);
     await vi.waitFor(() => expect(requestId).not.toBe(""));
-    client.write(`${JSON.stringify({ id: requestId, error: { code: "agent_not_found", message: "missing" } })}\n`);
-    await expect(request).rejects.toMatchObject({ code: "agent_not_found", written: true });
+    client.write(`${JSON.stringify({ id: requestId, error: { code: "agent_not_found", message: "missing", earliest_cursor: "cursor-1" } })}\n`);
+    await expect(request).rejects.toMatchObject({
+      code: "agent_not_found", written: true,
+      details: { code: "agent_not_found", message: "missing", earliest_cursor: "cursor-1" }
+    });
     expect(subscriber.status()).toMatchObject({ connected: true, requestFailures: 1, transportFailures: 0 });
     client.destroy();
     await expect(waiter).resolves.toBe(false);
@@ -260,6 +300,197 @@ describe("Herdr socket subscriber", () => {
     client.write('{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed",');
     client.write('"pane_id":"w1:p1","workspace_id":"w1","agent_status":"working"}}\n');
     await vi.waitFor(() => expect(received).toHaveBeenCalledWith({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] }, expect.any(AbortSignal)));
+
+    await subscriber.stop();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it("uses one global status subscription and releases buffered hints only after acknowledgement", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-global-status-")), "herdr.sock");
+    const requests: Array<{ id: string; params: { subscriptions: Array<Record<string, string>> } }> = [];
+    let client!: Socket;
+    const server = createServer((socket) => {
+      client = socket;
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        requests.push(JSON.parse(chunk.trim()) as { id: string; params: { subscriptions: Array<Record<string, string>> } });
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const paneIds = vi.fn(async () => ["w1:p1"]);
+    let releaseRecovery!: () => void;
+    const recovery = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const received = vi.fn(async (hint: HerdrNativeEventHint) => {
+      if (hint.kind === "socket-recovered") await recovery;
+    });
+    const subscriber = new HerdrSocketSubscriber(
+      socketPath,
+      paneIds,
+      received,
+      pino({ enabled: false }),
+      5,
+      20,
+      2 * 1024 * 1024,
+      1_000,
+      async () => true
+    );
+
+    subscriber.start();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(paneIds).not.toHaveBeenCalled();
+    expect(requests[0]!.params.subscriptions).toContainEqual({ type: "pane.agent_status_all" });
+    expect(requests[0]!.params.subscriptions.some(({ type }) => type === "pane.agent_status_changed")).toBe(false);
+
+    client.write('{"event":"pane_agent_status_changed","data":{"workspace_id":"w1","pane_id":"w1:p1","agent_status":"working"}}\n');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(received).not.toHaveBeenCalled();
+
+    client.write(`${JSON.stringify({ id: requests[0]!.id, result: { subscribed: true } })}\n`);
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith(
+      { kind: "socket-recovered", scope: "all", workspaceIds: [], paneIds: [] },
+      expect.any(AbortSignal)
+    ));
+    expect(received).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent-status" }),
+      expect.any(AbortSignal)
+    );
+    releaseRecovery();
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith(
+      { kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] },
+      expect.any(AbortSignal)
+    ));
+
+    client.write(
+      '{"event":"pane.created","data":{"workspace_id":"w1","pane_id":"w1:p2"}}\n' +
+      '{"event":"pane.closed","data":{"workspace_id":"w1","pane_id":"w1:p1"}}\n'
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(requests).toHaveLength(1);
+
+    await subscriber.stop();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it.each([
+    { outcome: "false", supports: async () => false },
+    { outcome: "error", supports: async () => { throw new Error("capability unavailable"); } }
+  ])("preserves legacy per-Pane subscriptions when the global capability returns $outcome", async ({ outcome, supports }) => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), `herdr-global-fallback-${outcome}-`)), "herdr.sock");
+    const requests: Array<{ id: string; params: { subscriptions: Array<Record<string, string>> } }> = [];
+    const clients = new Set<Socket>();
+    let eventClient!: Socket;
+    const server = createServer((socket) => {
+      clients.add(socket);
+      eventClient = socket;
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string; params: { subscriptions: Array<Record<string, string>> } };
+        requests.push(request);
+        socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
+      });
+      socket.once("close", () => clients.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    let currentPaneIds = ["w1:p1"];
+    const paneIds = vi.fn(async () => currentPaneIds);
+    const capability = vi.fn(supports);
+    const subscriber = new HerdrSocketSubscriber(
+      socketPath, paneIds, () => {}, pino({ enabled: false }), 5, 20, 2 * 1024 * 1024, 1_000, capability
+    );
+
+    subscriber.start();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]!.params.subscriptions).toContainEqual({ type: "pane.agent_status_changed", pane_id: "w1:p1" });
+    expect(requests[0]!.params.subscriptions).not.toContainEqual({ type: "pane.agent_status_all" });
+
+    currentPaneIds = ["w1:p1", "w1:p2"];
+    eventClient.write('{"event":"pane.created","data":{"workspace_id":"w1","pane_id":"w1:p2"}}\n');
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThanOrEqual(2));
+    expect(requests.at(-1)!.params.subscriptions).toContainEqual({ type: "pane.agent_status_changed", pane_id: "w1:p2" });
+
+    currentPaneIds = ["w1:p2"];
+    eventClient.write('{"event":"pane.closed","data":{"workspace_id":"w1","pane_id":"w1:p1"}}\n');
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThanOrEqual(3));
+    const latestStatusSubscriptions = requests.at(-1)!.params.subscriptions.filter(({ type }) => type === "pane.agent_status_changed");
+    expect(latestStatusSubscriptions).toEqual([{ type: "pane.agent_status_changed", pane_id: "w1:p2" }]);
+    expect(capability.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(paneIds.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    await subscriber.stop();
+    for (const client of clients) client.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it("reprobes and reconciles a retained global subscription after events_lost", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-global-events-lost-")), "herdr.sock");
+    const requests: Array<{ id: string; params: { subscriptions: Array<Record<string, string>> }; socket: Socket }> = [];
+    const clients = new Set<Socket>();
+    const server = createServer((socket) => {
+      clients.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const request = JSON.parse(chunk.trim()) as { id: string; params: { subscriptions: Array<Record<string, string>> } };
+        requests.push({ ...request, socket });
+        socket.write(`${JSON.stringify({ id: request.id, result: { subscribed: true } })}\n`);
+      });
+      socket.once("close", () => clients.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const paneIds = vi.fn(async () => ["w1:p1"]);
+    const capability = vi.fn(async () => capability.mock.calls.length === 1);
+    const received = vi.fn();
+    const subscriber = new HerdrSocketSubscriber(
+      socketPath, paneIds, received, pino({ enabled: false }), 5, 20, 2 * 1024 * 1024, 1_000, capability
+    );
+
+    subscriber.start();
+    await vi.waitFor(() => expect(subscriber.status().eventsConnected).toBe(true));
+    requests[0]!.socket.write(`${JSON.stringify({
+      id: requests[0]!.id,
+      error: { code: "events_lost", message: "retained history was overwritten" }
+    })}\n`);
+
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(subscriber.status().eventsConnected).toBe(true));
+    expect(capability.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(paneIds).toHaveBeenCalledOnce();
+    expect(requests[0]!.params.subscriptions.filter(({ type }) => type === "pane.agent_status_all")).toHaveLength(1);
+    expect(requests[0]!.params.subscriptions.every(({ type }) => type !== "pane.agent_status_changed")).toBe(true);
+    expect(requests[1]!.params.subscriptions).not.toContainEqual({ type: "pane.agent_status_all" });
+    expect(requests[1]!.params.subscriptions).toContainEqual({ type: "pane.agent_status_changed", pane_id: "w1:p1" });
+    expect(received.mock.calls.filter(([hint]) => hint.kind === "socket-recovered")).toHaveLength(2);
+
+    await subscriber.stop();
+    for (const client of clients) client.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it("subscribes to Core availability and emits a dedicated bounded source hint", async () => {
+    const socketPath = join(mkdtempSync(join(tmpdir(), "herdr-core-events-")), "herdr.sock");
+    let client!: Socket;
+    let request = "";
+    const server = createServer((socket) => {
+      client = socket;
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => { request += chunk; });
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const received = vi.fn();
+    const subscriber = new HerdrSocketSubscriber(socketPath, async () => ["w1:p1"], received, pino({ enabled: false }), 5, 20);
+    subscriber.start();
+    await vi.waitFor(() => expect(request).toContain("events.subscribe"));
+    const subscription = JSON.parse(request.trim()) as { id: string; params: { subscriptions: Array<Record<string, string>> } };
+    expect(subscription.params.subscriptions).toContainEqual({ type: "session.events.available" });
+    client.write(`${JSON.stringify({ id: subscription.id, result: { subscribed: true } })}\n`);
+    await vi.waitFor(() => expect(subscriber.status().eventsConnected).toBe(true));
+    received.mockClear();
+
+    client.write(`${JSON.stringify({ event: "session.events.available", data: { stream_id: "stream-1", latest_cursor: "cursor-9", pane_id: "must-not-route" } })}\n`);
+
+    await vi.waitFor(() => expect(received).toHaveBeenCalledWith({
+      kind: "session-events-available",
+      sources: [{ sourceId: "stream-1", latestCursor: "cursor-9" }]
+    }, expect.any(AbortSignal)));
 
     await subscriber.stop();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -313,7 +544,7 @@ describe("Herdr socket subscriber", () => {
     expect(received.mock.calls[1]?.[0]).toEqual({ kind: "unknown", scope: "workspaces", workspaceIds: ["w2", "w3"], paneIds: ["w2:p2", "w3:p3"] });
   });
 
-  it("waits for admitted hint handlers during stop and ignores post-gate hints", async () => {
+  it("cancels admitted hint handlers during stop and ignores post-gate hints", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const received = vi.fn(async () => { if (received.mock.calls.length === 1) await blocked; });
@@ -331,8 +562,25 @@ describe("Herdr socket subscriber", () => {
     release();
     await stopping;
 
-    expect(received).toHaveBeenCalledTimes(2);
-    expect(received.mock.calls[1]?.[0]).toMatchObject({ workspaceIds: ["w2"] });
+    expect(received).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels an in-flight handler when stop is called", async () => {
+    let aborted = false;
+    const received = vi.fn(async (_hint, signal: AbortSignal) => {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) { aborted = true; resolve(); return; }
+        signal.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true });
+      });
+    });
+    const subscriber = new HerdrSocketSubscriber("unused", async () => [], received, pino({ enabled: false }));
+    (subscriber as unknown as { receive(value: string): void }).receive(
+      '{"event":"pane_updated","data":{"workspace_id":"w1","pane_id":"w1:p1"}}\n'
+    );
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+
+    await subscriber.stop();
+    expect(aborted).toBe(true);
   });
 
   it("closes ingress separately from draining admitted hint handlers", async () => {

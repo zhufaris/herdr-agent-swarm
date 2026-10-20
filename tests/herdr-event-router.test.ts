@@ -11,12 +11,48 @@ function setup() {
     reconcileInstances: vi.fn(async () => undefined),
     observePrimaryTurns: vi.fn(async () => undefined),
     observeInstanceTurns: vi.fn(async () => undefined),
-    retryRetiredPanes: vi.fn(async () => undefined)
+    retryRetiredPanes: vi.fn(async () => undefined),
+    notifyCoreSources: vi.fn(async () => undefined)
   };
   return { calls, router: new HerdrEventRouter({ ...calls, logger: pino({ enabled: false }) }) };
 }
 
 describe("HerdrEventRouter", () => {
+  it("routes Core availability directly to source-owned ingestion", async () => {
+    const { calls, router } = setup();
+    await router.handle({ kind: "session-events-available", sources: [{ sourceId: "stream-1", latestCursor: "cursor-9" }] });
+
+    expect(calls.notifyCoreSources).toHaveBeenCalledWith([{ sourceId: "stream-1", latestCursor: "cursor-9" }]);
+    expect(calls.invalidateAll).not.toHaveBeenCalled();
+    expect(calls.reconcileBindings).not.toHaveBeenCalled();
+    expect(calls.reconcileInstances).not.toHaveBeenCalled();
+  });
+
+  it("does not hold runtime hints behind source-owned Core ingestion", async () => {
+    const { calls, router } = setup();
+    let releaseCore!: () => void;
+    calls.notifyCoreSources.mockImplementation(() => new Promise<void>((resolve) => { releaseCore = resolve; }));
+
+    let coreHintReturned = false;
+    const coreHint = router.handle({ kind: "session-events-available", sources: [{ sourceId: "stream-1", latestCursor: "cursor-9" }] })
+      .then(() => { coreHintReturned = true; });
+    await vi.waitFor(() => expect(calls.notifyCoreSources).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(coreHintReturned).toBe(true));
+
+    await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: [], paneIds: ["w1:p1"] });
+    expect(calls.reconcileBindings).toHaveBeenCalledWith({ paneIds: ["w1:p1"] });
+    releaseCore();
+    await coreHint;
+  });
+
+  it("contains asynchronous Core source failures for periodic recovery", async () => {
+    const { calls, router } = setup();
+    calls.notifyCoreSources.mockRejectedValueOnce(new Error("Core ingestion unavailable"));
+
+    await router.handle({ kind: "session-events-available", sources: [{ sourceId: "stream-1", latestCursor: "cursor-9" }] });
+    await vi.waitFor(() => expect(router.snapshot()).toMatchObject({ handlerFailures: 1 }));
+  });
+
   it("routes Agent status hints only to Pane-targeted consumers", async () => {
     const { calls, router } = setup();
     await router.handle({ kind: "agent-status", scope: "panes", workspaceIds: ["w1"], paneIds: ["w1:p1"] });

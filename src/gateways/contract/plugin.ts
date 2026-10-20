@@ -1,4 +1,6 @@
 import type { Logger } from "pino";
+import type { HumanInputMessageV2 } from "../../domain/inbound.js";
+import type { PreparedDeliveryPlan, SemanticDeliveryWork } from "../../domain/delivery.js";
 import type { GatewayRenderableView } from "./view.js";
 export type { GatewayRenderableView, GatewayView, GatewayViewNode, LegacyGatewayView } from "./view.js";
 
@@ -61,16 +63,18 @@ export interface GatewayConversationAddress {
   rootMessage: GatewayExternalRef<"message"> | null;
 }
 
+export type GatewayCommandValue = null | boolean | number | string | readonly GatewayCommandValue[] | { readonly [key: string]: GatewayCommandValue };
+
 export type GatewayInboundEvent =
   | {
-      schemaVersion: 1; kind: "message.received"; eventKey: string; occurredAt: string; address: GatewayConversationAddress;
+      schemaVersion: 2; kind: "message.received"; eventKey: string; occurredAt: string; address: GatewayConversationAddress;
       message: GatewayExternalRef<"message">; parentMessage: GatewayExternalRef<"message"> | null; actor: GatewayExternalRef<"actor">;
-      text: string; mentionsAgent: boolean; isRoot: boolean; hasUnsupportedContent: boolean; inputTooLarge?: boolean;
+      input: HumanInputMessageV2; mentionsAgent: boolean; isRoot: boolean; hasUnsupportedContent: boolean; inputTooLarge?: boolean;
     }
   | {
       schemaVersion: 1; kind: "interaction.invoked"; eventKey: string; occurredAt: string; address: GatewayConversationAddress;
       sourceMessage: GatewayExternalRef<"message">; actor: GatewayExternalRef<"actor">; interactionRef: string;
-      commandPayload: unknown; option: string | null; values: Readonly<Record<string, string>>;
+      commandPayload: GatewayCommandValue; option: string | null; values: Readonly<Record<string, string>>;
     };
 
 export type GatewayIngressResponse = void | { toast?: { level: "success" | "warning" | "error"; text: string }; replaceView?: unknown };
@@ -82,6 +86,7 @@ export type GatewayDeliveryIntent =
   | { kind: "message.reply.text"; purpose: GatewayDeliveryPurpose; rootMessageId: string; text: string; idempotencyKey: string }
   | { kind: "message.reply.view"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "surface.replace"; purpose: GatewayDeliveryPurpose; messageId: string; view: GatewayRenderableView; sequence?: number }
+  | { kind: "message.delete"; purpose: GatewayDeliveryPurpose; messageId: string; idempotencyKey: string }
   | { kind: "stream.create"; purpose: GatewayDeliveryPurpose; rootMessageId: string; view: GatewayRenderableView; idempotencyKey: string }
   | { kind: "stream.append"; purpose: GatewayDeliveryPurpose; surfaceId: string; slot: string; content: string; sequence: number }
   | { kind: "stream.finish"; purpose: GatewayDeliveryPurpose; surfaceId: string; sequence: number; summary: string }
@@ -96,15 +101,19 @@ export interface GatewayDeliveryContext {
   attemptId: string; leaseFencingToken: number | null; idempotencyKey: string; priorCheckpoints: readonly GatewayDeliveryCheckpoint[];
   checkpoint(value: GatewayDeliveryCheckpoint): Promise<void>; signal?: AbortSignal;
 }
-export interface GatewayDeliveryReceipt { refs: readonly GatewayExternalRef[]; }
+export interface GatewayDeliveryReceipt { refs: readonly GatewayExternalRef[]; messageDeleteOutcome?: "deleted" | "already_absent"; }
 export interface GatewayFailure {
   failureClass: "transient" | "permanent" | "unknown"; effectCertainty: "not-started" | "rejected" | "uncertain";
-  providerCode: string | null; providerOperation?: string; httpStatus: number | null; retryAfterMs?: number; recoveryKind?: "closed_answer_stream" | "stale_main_card" | "expired_view_target"; safeMessage: string;
+  providerCode: string | null; providerOperation?: string; httpStatus: number | null; retryAfterMs?: number; recoveryKind?: "closed_answer_stream" | "stale_main_card" | "expired_view_target" | "expired_worker_view_target" | "message_edit_limit" | "defunct_target"; safeMessage: string;
 }
 export class GatewayDeliveryError extends Error {
   readonly name = "GatewayDeliveryError";
   constructor(readonly failure: GatewayFailure, readonly cause?: unknown) { super(failure.safeMessage, { cause }); }
 }
+export class GatewayPreparationError extends Error {
+  readonly name = "GatewayPreparationError";
+}
+export type SemanticGatewayDeliveryPreparer = (work: SemanticDeliveryWork, gateway: GatewayDeliveryPort) => PreparedDeliveryPlan;
 export interface GatewayDeliveryPort {
   prepare(intent: GatewayDeliveryIntent): PreparedGatewayDelivery;
   execute(plan: PreparedGatewayDelivery, context: GatewayDeliveryContext): Promise<GatewayDeliveryReceipt>;

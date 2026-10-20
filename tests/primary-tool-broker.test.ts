@@ -12,7 +12,7 @@ afterEach(() => { store?.close(); store = undefined; });
 
 function setup() {
   store = new SqliteBindingStore(":memory:");
-  const create = (id: string, projectId: string) => { store!.createAgentInstance({ id, projectId, name: id, role: "worker", agentKind: "traex", model: null, parent: projectId === "p1" ? { bindingId: "binding", paneId: "primary:pane", nativeSessionId: null } : { bindingId: "other-binding", paneId: "other-primary:pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }); return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w", paneId: `${id}:pane`, nativeSessionId: null })!; };
+  const create = (id: string, projectId: string) => { store!.createAgentInstance({ id, projectId, name: id, role: "worker", agentKind: "traex", model: null, parent: projectId === "p1" ? { bindingId: "binding", bindingGeneration: 1, paneId: "primary:pane", nativeSessionId: null } : { bindingId: "other-binding", bindingGeneration: 1, paneId: "other-primary:pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }); return store!.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "w", paneId: `${id}:pane`, nativeSessionId: null })!; };
   const primary = (projectId = "p1") => {
     store!.createPendingBinding({ id: "binding", projectId, workspaceId: "w", chatId: "c", topicId: "t", rootMessageId: "root", title: "Primary" });
     store!.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane" });
@@ -50,7 +50,26 @@ describe("PrimaryToolBroker", () => {
 
   it("exposes a narrowly scoped Worker creation tool", () => {
     const { primary, broker } = setup();
-    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(broker(primary()))).filter((name) => name !== "constructor").sort()).toEqual(["createWorker", "followUpInstance", "inspectInstance", "interruptInstance", "listInstances", "promptInstance", "showWorkerCards", "steerInstance", "waitInstance"].sort());
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(broker(primary()))).filter((name) => name !== "constructor").sort()).toEqual(["createWorker", "followUpInstance", "inspectInstance", "interruptInstance", "listInstances", "listPanes", "listSpaces", "promptInstance", "showWorkerCards", "steerInstance", "waitInstance"].sort());
+  });
+
+  it("uses only the server-owned project for Orchestrator topology queries", async () => {
+    const { primary } = setup(); const identity = primary();
+    const topology = { listSpaces: vi.fn(() => [{ projectId: "p1" }]), listPanes: vi.fn(async () => [{ paneId: "pane" }]) };
+    const broker = new PrimaryToolBroker(identity, {} as never, undefined, undefined, topology as never, "orchestrator");
+    expect(broker.listSpaces()).toEqual([{ projectId: "p1" }]);
+    await expect(broker.listPanes()).resolves.toEqual([{ paneId: "pane" }]);
+    expect(topology.listSpaces).toHaveBeenCalledWith("p1");
+    expect(topology.listPanes).toHaveBeenCalledWith("p1");
+  });
+
+  it("denies topology queries to an ordinary task Primary", () => {
+    const { primary } = setup();
+    const topology = { listSpaces: vi.fn(), listPanes: vi.fn() };
+    const broker = new PrimaryToolBroker(primary(), {} as never, undefined, undefined, topology as never, "task");
+    expect(() => broker.listSpaces()).toThrow(/Orchestrator binding/);
+    expect(() => broker.listPanes()).toThrow(/Orchestrator binding/);
+    expect(topology.listSpaces).not.toHaveBeenCalled();
   });
 
   it("passes only server-owned Primary identity to durable Worker creation", async () => {

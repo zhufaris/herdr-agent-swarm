@@ -3,9 +3,10 @@ import { actionRow } from "./card-style.js";
 import { callbackButton } from "./cardkit-button.js";
 
 export function renderNaturalLanguageCommandConfirmationCard(input: NaturalLanguageCommandConfirmation): object {
+  const clear = input.envelope.family === "swarm" && input.envelope.command.kind === "clear";
   const actions = actionRow([
-    callbackButton("确认执行", { action: "natural_language_command_confirm", confirmationId: input.id }, "primary"),
-    callbackButton("取消", { action: "natural_language_command_cancel", confirmationId: input.id }, "default")
+    callbackButton("确认执行", { action: clear ? "orchestrator_clear_confirm" : "natural_language_command_confirm", confirmationId: input.id }, "primary"),
+    callbackButton("取消", { action: clear ? "orchestrator_clear_cancel" : "natural_language_command_cancel", confirmationId: input.id }, "default")
   ]);
   return {
     schema: "2.0", config: { update_multi: true, summary: { content: "Swarm 命令待确认" } },
@@ -43,6 +44,7 @@ function describeEnvelope(value: NaturalLanguageCommandEnvelope): string {
   if (command.kind === "model") return `将当前会话模型切换为 **${command.name ?? "默认模型"}**`;
   if (command.kind === "attach") return `连接 Pane **${command.paneId}** 到 Space **${command.spaceName}**`;
   if (command.kind === "reattach") return `重新连接 Pane **${command.paneId}**`;
+  if (command.kind === "clear") return "清空当前 Orchestrator 的 TraeX 上下文并撤回此前 Answer Cards；Pane ID、token、名称、位置、Thread 和 Workers 均会保留";
   if (command.kind === "pane_close_confirm") return `提交 Pane 关闭确认码 **${command.code}**`;
   return `Swarm 操作：${command.kind}`;
 }

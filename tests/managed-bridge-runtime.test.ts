@@ -10,6 +10,7 @@ import { createManagedBridgeRuntime, ManagedBridgeRuntime, type ManagedBridgeRun
 import type { HerdrPort } from "../src/domain/ports.js";
 import { WorkspaceSnapshotCache } from "../src/runtime/workspace-snapshot-cache.js";
 import { openSqliteLeaseBootstrap } from "../src/store/sqlite-lease-bootstrap.js";
+import type { ShutdownContext } from "../src/runtime/shutdown-context.js";
 
 function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
   const calls: string[] = [];
@@ -20,6 +21,7 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     store: { activateWriteFence() { mark("fence:start"); }, deactivateWriteFence() { mark("fence:stop"); }, close() { mark("store:close"); } },
     lease: { acquire() { mark("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; }, start(callback) { mark("lease:start"); onLeaseLost = callback; }, release() { mark("lease:release"); } },
     primaryToolGateway: { async start() { mark("primary-tools:start"); }, async stop() { mark("primary-tools:stop"); } },
+    completionChoiceEligibilityGateway: { async start() { mark("choice-eligibility:start"); }, async stop() { mark("choice-eligibility:stop"); } },
     naturalLanguageCommands: { async start() { mark("natural-language:start"); }, async stop() { mark("natural-language:stop"); }, async interpret() { return { outcome: "unresolved" as const }; } },
     sqliteIntegrity: { start() { mark("integrity:start"); }, async run() { mark("integrity:run"); }, async stop() { mark("integrity:stop"); } },
     instanceRuntime: { async reconcile() { mark("instance-runtime:reconcile"); }, start() { mark("instance-runtime:start"); }, async stop() { mark("instance-runtime:stop"); } },
@@ -28,8 +30,8 @@ function fixture(overrides: Partial<ManagedBridgeRuntimeDependencies> = {}) {
     instanceWork: { async stop() { mark("instance-work:stop"); } },
     turnControlDispatcher: { async recover() { mark("turn-control:recover"); }, async stop() { mark("turn-control:stop"); } },
     runtimeEvents: { async stop() { mark("runtime-events:stop"); } },
-    createHealthServer: async () => { mark("health:start"); return { close(callback) { mark("health:stop"); callback(); } }; },
-    channelPublisher: { start() { mark("publisher:start"); }, async stop() { mark("publisher:stop"); } },
+    createHealthServer: async () => { mark("health:start"); return { async stop() { mark("health:stop"); } } as never; },
+    ringDeliveryEngine: { start() { mark("ring:start"); }, async whenRecoveryReady() { mark("ring:ready"); }, async stop() { mark("ring:stop"); } },
     outboxRetention: { start() { mark("outbox-retention:start"); }, async stop() { mark("outbox-retention:stop"); } },
     projector: { start() { mark("projector:start"); }, async stop() { mark("projector:stop"); } },
     cardContextRebuilder: { start() { mark("card-context:start"); }, async stop() { mark("card-context:stop"); } },
@@ -84,6 +86,74 @@ function gatedFactoryFixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("ManagedBridgeRuntime", () => {
+  it("starts heartbeat and renews between bounded stale-claim pages before later startup phases", async () => {
+    const base = fixture();
+    let page = 0;
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      store: {
+        activateWriteFence() { base.calls.push("fence:start"); },
+        recoverPriorOwnerClaimsBatch() {
+          page += 1;
+          base.calls.push(`stale-page:${page}`);
+          return { recoveredCount: 1, next: { afterId: String(page), highWaterId: "2" }, hasMore: page < 2 };
+        },
+        deactivateWriteFence() { base.calls.push("fence:stop"); }, close() { base.calls.push("store:close"); }
+      },
+      lease: {
+        acquire() { base.calls.push("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; },
+        start() { base.calls.push("lease:start"); }, async renewNow() { base.calls.push("lease:renew"); return true; },
+        release() { base.calls.push("lease:release"); }
+      }
+    });
+    await runtime.start();
+    expect(base.calls.slice(0, 8)).toEqual([
+      "lease:acquire", "fence:start", "lease:start", "lease:renew", "stale-page:1", "lease:renew", "stale-page:2", "instance-turns:prepare"
+    ]);
+    await runtime.stop("SIGTERM");
+  });
+
+  it("does not enter stale-claim or later startup work when pre-page renewal loses the lease", async () => {
+    const base = fixture();
+    const recover = vi.fn();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      store: {
+        activateWriteFence() { base.calls.push("fence:start"); }, recoverPriorOwnerClaimsBatch: recover,
+        deactivateWriteFence() { base.calls.push("fence:stop"); }, close() { base.calls.push("store:close"); }
+      },
+      lease: {
+        acquire() { base.calls.push("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; },
+        start() { base.calls.push("lease:start"); }, async renewNow() { base.calls.push("lease:renew"); return false; },
+        release() { base.calls.push("lease:release"); }
+      }
+    });
+    await expect(runtime.start()).rejects.toThrow(/lease expired/);
+    expect(recover).not.toHaveBeenCalled();
+    expect(base.calls).not.toContain("instance-turns:prepare");
+  });
+
+  it("preserves a committed stale-claim prefix when renewal fails before page two", async () => {
+    const base = fixture();
+    let renewals = 0;
+    const recover = vi.fn(() => ({ recoveredCount: 1, next: { afterId: "a", highWaterId: "b" }, hasMore: true }));
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      store: {
+        activateWriteFence() { base.calls.push("fence:start"); }, recoverPriorOwnerClaimsBatch: recover,
+        deactivateWriteFence() { base.calls.push("fence:stop"); }, close() { base.calls.push("store:close"); }
+      },
+      lease: {
+        acquire() { base.calls.push("lease:acquire"); }, writeFence() { return { ownerId: "owner", fencingToken: 1 }; },
+        start() { base.calls.push("lease:start"); }, async renewNow() { renewals += 1; return renewals === 1; },
+        release() { base.calls.push("lease:release"); }
+      }
+    });
+    await expect(runtime.start()).rejects.toThrow(/lease expired/);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(base.calls).not.toContain("instance-turns:prepare");
+  });
+
   it("acquires the SQLite lease while Agent capability detection is still running", async () => {
     const test = gatedFactoryFixture();
 
@@ -107,7 +177,9 @@ describe("ManagedBridgeRuntime", () => {
     try {
       await vi.waitFor(() => expect(existsSync(test.probeStartedPath)).toBe(true));
       const inspector = new DatabaseSync(test.databasePath);
-      inspector.prepare("UPDATE instance_lease SET expires_at = ? WHERE singleton_id = 1").run(new Date(Date.now() - 1_000).toISOString());
+      const expiredAt = Date.now() - 1_000;
+      inspector.prepare("UPDATE instance_lease SET expires_at=?,expires_at_ms=? WHERE singleton_id=1")
+        .run(new Date(expiredAt).toISOString(), expiredAt);
       inspector.close();
       const contender = openSqliteLeaseBootstrap(test.databasePath);
       const now = Date.now();
@@ -133,13 +205,115 @@ describe("ManagedBridgeRuntime", () => {
 
     expect(calls).toEqual([
       "lease:acquire", "fence:start", "lease:start",
-      "instance-turns:prepare", "primary-tools:start", "natural-language:start", "integrity:start", "integrity:run",
-      "coordinator:prepare-delivery", "snapshot-reuse:start", "instance-runtime:reconcile", "instance-turns:reconcile", "turn-control:recover", "coordinator:recover-runtime", "snapshot-reuse:stop", "health:start",
-      "publisher:start", "outbox-retention:start", "projector:start", "card-context:start",
-      "queue-feedback:start", "queue-feedback:converge", "coordinator:start",
+      "instance-turns:prepare", "integrity:start", "integrity:run",
+      "coordinator:prepare-delivery", "snapshot-reuse:start", "instance-runtime:reconcile", "instance-turns:reconcile", "turn-control:recover", "coordinator:recover-runtime", "snapshot-reuse:stop",
+      "primary-tools:start", "choice-eligibility:start", "natural-language:start", "health:start",
+      "ring:start", "ring:ready", "outbox-retention:start", "projector:start", "card-context:start",
+      "coordinator:start",
       "pane-retention:scan", "pane-retention:start", "external-turns:start",
       "instance-runtime:start", "instance-turns:start", "socket:start"
     ]);
+  });
+
+  it("activates multiplex transport before target reconciliation and closes it before ingestion drain", async () => {
+    const base = fixture({
+      coreSessionIngestion: {
+        async reconcile() { base.calls.push("core-ingestion:reconcile"); },
+        start() { base.calls.push("core-ingestion:start"); },
+        async stop() { base.calls.push("core-ingestion:stop"); }
+      },
+      herdrSessionEventSubscriber: {
+        start() { base.calls.push("session-events:start"); },
+        async stop() { base.calls.push("session-events:stop"); }
+      }
+    });
+
+    await base.runtime.start();
+
+    expect(base.calls).toContain("session-events:start");
+    expect(base.calls.indexOf("session-events:start")).toBeLessThan(base.calls.indexOf("core-ingestion:reconcile"));
+    expect(base.calls.indexOf("core-ingestion:reconcile")).toBeLessThan(base.calls.indexOf("core-ingestion:start"));
+    expect(base.calls.indexOf("core-ingestion:start")).toBeLessThan(base.calls.indexOf("socket:start"));
+
+    await base.runtime.stop("SIGTERM");
+    expect(base.calls).toContain("session-events:stop");
+    expect(base.calls.indexOf("session-events:stop")).toBeLessThan(base.calls.indexOf("core-ingestion:stop"));
+  });
+
+  it("completes Ring cold recovery before starting delivery projections", async () => {
+    const { runtime, calls } = fixture({
+      ringDeliveryEngine: {
+        start() { calls.push("ring:start"); },
+        async whenRecoveryReady() { calls.push("ring:ready"); },
+        async stop() { calls.push("ring:stop"); }
+      }
+    });
+
+    await runtime.start();
+
+    expect(calls.indexOf("ring:start")).toBeLessThan(calls.indexOf("ring:ready"));
+    expect(calls.indexOf("ring:ready")).toBeLessThan(calls.indexOf("outbox-retention:start"));
+    await runtime.stop("SIGTERM");
+    expect(calls.indexOf("ring:stop")).toBeLessThan(calls.indexOf("fence:stop"));
+  });
+
+  it("keeps delivery closed when Ring cold recovery is not ready", async () => {
+    const { runtime, calls } = fixture({
+      ringDeliveryEngine: {
+        start() { calls.push("ring:start"); },
+        async whenRecoveryReady() { throw new Error("ring recovery failed"); },
+        async stop() { calls.push("ring:stop"); }
+      }
+    });
+
+    await expect(runtime.start()).rejects.toThrow("ring recovery failed");
+
+    expect(calls).not.toContain("outbox-retention:start");
+    expect(calls).toContain("ring:stop");
+  });
+
+  it("detects Core Agent Input capability, migrates safe legacy work, and recovers durable intents before opening ingress", async () => {
+    const calls: string[] = [];
+    const { runtime } = fixture({
+      agentInput: {
+        async detect() {
+          calls.push("agent-input:detect");
+          return { required: false, detected: true, supported: true, ready: true, error: null };
+        },
+        async migrate() { calls.push("agent-input:migrate"); },
+        async recover() { calls.push("agent-input:recover"); }
+      },
+      primaryToolGateway: {
+        async start() { calls.push("primary-tools:start"); },
+        async stop() {}
+      }
+    });
+
+    await runtime.start();
+
+    expect(calls).toEqual(["agent-input:detect", "agent-input:migrate", "agent-input:recover", "primary-tools:start"]);
+  });
+
+  it("does not migrate or recover Agent Input when Core capability is unsupported", async () => {
+    const calls: string[] = [];
+    const { runtime } = fixture({
+      agentInput: {
+        async detect() {
+          calls.push("agent-input:detect");
+          return { required: false, detected: true, supported: false, ready: false, error: "unsupported" };
+        },
+        async migrate() { calls.push("agent-input:migrate"); },
+        async recover() { calls.push("agent-input:recover"); }
+      },
+      primaryToolGateway: {
+        async start() { calls.push("primary-tools:start"); },
+        async stop() {}
+      }
+    });
+
+    await runtime.start();
+
+    expect(calls).toEqual(["agent-input:detect", "primary-tools:start"]);
   });
 
   it("shares one fresh Herdr snapshot across slow startup recovery and refreshes retention", async () => {
@@ -174,12 +348,31 @@ describe("ManagedBridgeRuntime", () => {
 
     try {
       await vi.waitFor(() => expect(calls).toContain("natural-language:start"));
-      expect(calls).not.toContain("integrity:start");
+      expect(calls.indexOf("coordinator:recover-runtime")).toBeLessThan(calls.indexOf("primary-tools:start"));
+      expect(calls.indexOf("coordinator:recover-runtime")).toBeLessThan(calls.indexOf("natural-language:start"));
+      expect(calls).not.toContain("coordinator:start");
     } finally {
       releasePrimaryTools();
       await starting;
       await runtime.stop("SIGTERM");
     }
+  });
+
+  it("keeps effect-capable local ingress closed when runtime recovery fails", async () => {
+    const { runtime, calls } = fixture({
+      coordinator: {
+        async prepareDelivery() { calls.push("coordinator:prepare-delivery"); },
+        async recoverRuntime() { calls.push("coordinator:recover-runtime"); throw new Error("legacy recovery failed"); },
+        async start() { calls.push("coordinator:start"); },
+        async stop() { calls.push("coordinator:stop"); }
+      }
+    });
+
+    await expect(runtime.start()).rejects.toThrow("legacy recovery failed");
+
+    expect(calls).not.toContain("primary-tools:start");
+    expect(calls).not.toContain("natural-language:start");
+    expect(calls).not.toContain("coordinator:start");
   });
 
   it("settles concurrent ingress starts before cleaning up a startup failure", async () => {
@@ -230,7 +423,7 @@ describe("ManagedBridgeRuntime", () => {
     expect(calls.indexOf("natural-language:start")).toBeLessThan(calls.indexOf("natural-language:stop"));
   });
 
-  it("completes durable startup repair before the publisher can claim work", async () => {
+  it("completes durable startup repair before the Ring can claim work", async () => {
     let releaseRepair!: () => void;
     const repair = new Promise<void>((resolve) => { releaseRepair = resolve; });
     const { runtime, calls } = fixture({
@@ -244,10 +437,30 @@ describe("ManagedBridgeRuntime", () => {
 
     const starting = runtime.start();
     await vi.waitFor(() => expect(calls).toContain("coordinator:prepare-delivery"));
-    expect(calls).not.toContain("publisher:start");
+    expect(calls).not.toContain("ring:start");
     releaseRepair();
     await starting;
-    expect(calls.indexOf("coordinator:prepare-delivery")).toBeLessThan(calls.indexOf("publisher:start"));
+    expect(calls.indexOf("coordinator:prepare-delivery")).toBeLessThan(calls.indexOf("ring:start"));
+  });
+
+  it("repairs historical delivery before Ring startup and starts supervised scans after the coordinator", async () => {
+    const { runtime, calls } = fixture({
+      recoverySupervisor: {
+        start() { calls.push("recovery-supervisor:start"); },
+        async repairDeliveryBeforePublisher() { calls.push("recovery-supervisor:repair-delivery"); },
+        async scan() { calls.push("recovery-supervisor:scan"); },
+        async stop() { calls.push("recovery-supervisor:stop"); }
+      }
+    });
+
+    await runtime.start();
+
+    expect(calls.indexOf("recovery-supervisor:repair-delivery")).toBeLessThan(calls.indexOf("ring:start"));
+    expect(calls.indexOf("coordinator:start")).toBeLessThan(calls.indexOf("recovery-supervisor:start"));
+    expect(calls.indexOf("recovery-supervisor:start")).toBeLessThan(calls.indexOf("recovery-supervisor:scan"));
+    await runtime.stop("SIGTERM");
+    expect(calls.filter((call) => call === "recovery-supervisor:scan")).toHaveLength(1);
+    expect(calls.filter((call) => call === "recovery-supervisor:stop")).toHaveLength(1);
   });
 
   it("does not reacquire a lease handed off by production bootstrap", async () => {
@@ -286,12 +499,35 @@ describe("ManagedBridgeRuntime", () => {
     expect(duplicate).toBe(signalStop);
     await expect(signalStop).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
     expect(calls).toEqual([
-      "socket-ingress:stop", "socket-drain:stop", "natural-language:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
+      "socket-ingress:stop", "socket-drain:stop", "natural-language:stop", "choice-eligibility:stop", "primary-tools:stop", "external-turns:stop", "pane-retention:stop",
       "instance-turns:stop", "instance-runtime:stop", "turn-control:stop", "runtime-events:stop", "instance-work:stop", "coordinator:stop",
-      "integrity:stop", "queue-feedback:stop", "card-context:stop", "projector:stop",
-      "outbox-retention:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"
+      "integrity:stop", "card-context:stop", "projector:stop",
+      "outbox-retention:stop", "ring:stop", "health:stop", "fence:stop", "lease:release", "store:close"
     ]);
     expect(onFatalStop).toHaveBeenCalledWith("lease-lost", { outcome: "completed", unsettledWriters: [] });
+  });
+
+  it("passes the shared shutdown context to health and settles it before closing SQLite", async () => {
+    let healthSignal: AbortSignal | undefined;
+    const base = fixture();
+    const runtime = new ManagedBridgeRuntime({
+      ...base.runtimeDependencies,
+      createHealthServer: async () => ({
+        async stop(context: ShutdownContext) {
+          healthSignal = context.signal;
+          base.calls.push("health:stop");
+          await Promise.resolve();
+          base.calls.push("health:settled");
+        }
+      } as never)
+    });
+    await runtime.start();
+    base.calls.length = 0;
+
+    await expect(runtime.stop("SIGTERM")).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+
+    expect(healthSignal).toBeInstanceOf(AbortSignal);
+    expect(base.calls.indexOf("health:settled")).toBeLessThan(base.calls.indexOf("store:close"));
   });
 
   it("cleans up only possibly started components when health creation fails", async () => {
@@ -301,6 +537,7 @@ describe("ManagedBridgeRuntime", () => {
       ...base.runtimeDependencies,
       createHealthServer: async () => { calls.push("health:start"); throw new Error("bind failed"); },
       primaryToolGateway: { async start() { calls.push("primary-tools:start"); }, async stop() { calls.push("primary-tools:stop"); } },
+      completionChoiceEligibilityGateway: { async start() { calls.push("choice-eligibility:start"); }, async stop() { calls.push("choice-eligibility:stop"); } },
       naturalLanguageCommands: { async start() { calls.push("natural-language:start"); }, async stop() { calls.push("natural-language:stop"); }, async interpret() { return { outcome: "unresolved" as const }; } },
       sqliteIntegrity: { start() { calls.push("integrity:start"); }, async run() { calls.push("integrity:run"); }, async stop() { calls.push("integrity:stop"); } },
       instanceRuntime: { async reconcile() { calls.push("instance-runtime:reconcile"); }, start() { calls.push("instance-runtime:start"); }, async stop() { calls.push("instance-runtime:stop"); } },
@@ -313,9 +550,9 @@ describe("ManagedBridgeRuntime", () => {
 
     expect(calls).toEqual([
       "lease:acquire", "fence:start", "lease:start", "instance-turns:prepare",
-      "primary-tools:start", "natural-language:start", "integrity:start", "integrity:run",
-      "instance-runtime:reconcile", "instance-turns:reconcile", "health:start",
-      "natural-language:stop", "primary-tools:stop", "integrity:stop", "fence:stop", "lease:release", "store:close"
+      "integrity:start", "integrity:run", "instance-runtime:reconcile", "instance-turns:reconcile",
+      "primary-tools:start", "choice-eligibility:start", "natural-language:start", "health:start",
+      "natural-language:stop", "choice-eligibility:stop", "primary-tools:stop", "integrity:stop", "fence:stop", "lease:release", "store:close"
     ]);
   });
 
@@ -333,7 +570,7 @@ describe("ManagedBridgeRuntime", () => {
     expect(calls).toEqual(["lease:acquire", "store:close"]);
   });
 
-  it("does not start later phases when shutdown begins during startup", async () => {
+  it("does not block runtime startup on the deep integrity audit", async () => {
     let releaseIntegrity!: () => void;
     const integrityRun = new Promise<void>((resolve) => { releaseIntegrity = resolve; });
     const { runtime, calls } = fixture({
@@ -341,13 +578,15 @@ describe("ManagedBridgeRuntime", () => {
     });
 
     const starting = runtime.start();
-    await vi.waitFor(() => expect(calls).toContain("integrity:run"));
-    const stopping = runtime.stop("SIGTERM");
-
-    await expect(stopping).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
-    await expect(starting).rejects.toThrow("startup interrupted");
-    expect(calls).not.toContain("instance-runtime:reconcile");
-    expect(calls).not.toContain("health:start");
+    try {
+      await vi.waitFor(() => expect(calls).toContain("health:start"), { timeout: 250 });
+    } finally {
+      releaseIntegrity();
+    }
+    await expect(starting).resolves.toBeUndefined();
+    await expect(runtime.stop("SIGTERM")).resolves.toEqual({ outcome: "completed", unsettledWriters: [] });
+    expect(calls).toContain("instance-runtime:reconcile");
+    expect(calls).toContain("integrity:stop");
   });
 
   it("does not start recovery when lease loss is reported synchronously", async () => {
@@ -368,8 +607,6 @@ describe("ManagedBridgeRuntime", () => {
 
   it.each([
     ["primary tools", { primaryToolGateway: { async start() { throw new Error("primary failed"); }, async stop() {} } }, ["fence:stop", "lease:release", "store:close"]],
-    ["integrity audit", { sqliteIntegrity: { start() {}, async run() { throw new Error("integrity failed"); }, async stop() {} } }, ["primary-tools:stop", "fence:stop", "lease:release", "store:close"]],
-    ["queue convergence", { queueFeedbackProjector: { start() {}, async converge() { throw new Error("queue failed"); }, async stop() {} } }, ["outbox-retention:stop", "card-context:stop", "projector:stop", "publisher:stop", "health:stop", "fence:stop", "lease:release", "store:close"]],
     ["pane scan", { paneRetention: { async scan() { throw new Error("scan failed"); }, start() {}, async stop() {} } }, ["coordinator:stop", "outbox-retention:stop", "health:stop", "fence:stop", "lease:release", "store:close"]]
   ])("cleans up the started prefix when %s startup fails", async (_phase, overrides, expectedCalls) => {
     const { runtime, calls } = fixture(overrides as Partial<ManagedBridgeRuntimeDependencies>);
@@ -459,7 +696,7 @@ describe("ManagedBridgeRuntime", () => {
     const base = fixture();
     const runtime = new ManagedBridgeRuntime({
       ...base.runtimeDependencies,
-      createHealthServer: async () => ({ close(callback) { callback(new Error("close failed")); } }),
+      createHealthServer: async () => ({ async stop() { throw new Error("close failed"); } } as never),
       logger: { info() {}, error(value) { errors.push(String(value.component)); } }
     });
 

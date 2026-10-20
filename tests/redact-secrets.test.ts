@@ -18,4 +18,10 @@ describe("redactSecrets", () => {
     const source = '{"client_secret":"json-value"}\nX-API-Key: header-value\n/path?token=query-value&next=1';
     expect(redactSecrets(source)).toBe('{"client_secret":"[REDACTED]"}\nX-API-Key: [REDACTED]\n/path?token=[REDACTED]&next=1');
   });
+
+  it("redacts plaintext email addresses that Feishu DLP rejects", () => {
+    expect(redactSecrets("Author: Example User <user@example.com>")).toBe(
+      "Author: Example User <[REDACTED EMAIL]>"
+    );
+  });
 });

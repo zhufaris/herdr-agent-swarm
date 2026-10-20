@@ -4,10 +4,10 @@ import type { InboundWorkNotifier } from "../events/inbound-work-notifier.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { RuntimeEventBus, type RuntimeEventBusSnapshot, type RuntimeWorkHint } from "../events/runtime-event-bus.js";
-import type { HerdrRuntimeHint } from "../runtime/herdr-event-hint.js";
+import type { HerdrNativeEventHint } from "../runtime/herdr-event-hint.js";
 
 type InstanceWakeup = (instanceId: string) => void;
-export type HerdrHintConsumer = (hint: HerdrRuntimeHint, signal: AbortSignal) => Promise<void>;
+export type HerdrHintConsumer = (hint: HerdrNativeEventHint, signal: AbortSignal) => Promise<void>;
 
 export interface RuntimeEventIntegrationSnapshot {
   reliability: { inbound: "durable-record-plus-hint"; lifecycle: "transactional-state-plus-fanout"; work: "best-effort-wakeup"; herdr: "bounded-reconciliation-hint"; };
@@ -31,7 +31,10 @@ export class RuntimeEventIntegration {
   constructor(logger: Logger) {
     this.bus = new RuntimeEventBus(logger);
     this.lifecycle = {
-      publish: (event) => this.bus.publishLifecycle(event),
+      // Core output is acknowledged only after every synchronous projection has
+      // committed. Other lifecycle notifications retain failure isolation
+      // because their authoritative workflow transition is already durable.
+      publish: (event) => this.bus.publishLifecycle(event, event.type !== "TurnOutputObserved"),
       onBridgeEvent: (name, listener) => this.bus.subscribe("lifecycle", name, ({ payload }) => listener(payload)),
       snapshot: () => lifecycleSnapshot(this.bus.snapshot())
     };

@@ -6,8 +6,9 @@ import type { PanePresentation } from "../domain/ports/presentation.js";
 import type { TurnControlPort } from "../domain/ports/turn-control.js";
 import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 
-interface Options { store: PaneControlStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "requestRejected">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: TurnControlPort; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; }
-export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean>; }
+interface Options { store: PaneControlStore; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<PanePresentation, "requestRejected">; scheduler: PromptWorkScheduler; model: Pick<ModelSelectionWorkflowPort, "execute" | "recover">; turnControl: TurnControlPort; }
+export interface PaneControlSteerResult { accepted: boolean; code: string; detail: string | null; operationKind: "turn-control" | "prompt" | null; operationId: string | null }
+export interface PaneControlWorkflowPort { recover(): Promise<void>; drainPaneControls(bindingId: string): Promise<void>; stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean>; steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<PaneControlSteerResult>; }
 
 export class PaneControlWorkflow implements PaneControlWorkflowPort {
   private readonly workers = new Map<string, Promise<void>>();
@@ -31,24 +32,23 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
 
   async stop(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可停止的活动任务。`/swarm stop` 未进入任务队列。"); return false; }
-    const active = this.options.activeTurn(binding.id);
-    if (!active || active.paneId !== binding.paneId) { await this.reject(message, "当前没有可停止的活动 TraeX 任务。`/swarm stop` 未进入任务队列。"); return false; }
     try {
       const result = await this.options.turnControl.interrupt({ owner: { kind: "binding", id: binding.id }, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, idempotencyKey: `message:${message.messageId}:stop`, sourceMessageId: message.messageId, resultTargetMessageId: message.rootMessageId ?? message.messageId });
-      return result.mode !== "priority" && ["accepted", "dispatching", "delivered"].includes(result.operation.state);
+      return result.mode === "native" && ["accepted", "dispatching", "delivered"].includes(result.operation.state);
     } catch (error) { await this.reject(message, `Stop 未发送：${errorMessage(error)}`); return false; }
   }
 
-  async steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<boolean> {
-    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "当前话题没有可 steering 的活动任务。`/swarm steer` 未进入任务队列。"); return false; }
+  async steer(message: IncomingLarkMessage, binding: Binding | null, text: string, expectedParentPromptId?: string): Promise<PaneControlSteerResult> {
+    if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") return rejectedSteer("当前话题没有可 steering 的活动会话。`/swarm steer` 未进入任务队列。", "binding_not_active");
     try {
-      if (expectedParentPromptId) {
-        const active = this.options.activeTurn(binding.id);
-        if (active && active.promptId !== expectedParentPromptId) { await this.reject(message, "目标 turn 已变化。`/swarm steer` 未进入任务队列。"); return false; }
-      }
+      void expectedParentPromptId;
       const result = await this.options.turnControl.steer({ owner: { kind: "binding", id: binding.id }, actor: { kind: "human", userId: message.actorOpenId, channel: "feishu" }, text, idempotencyKey: `message:${message.messageId}:steer`, sourceMessageId: message.messageId, resultTargetMessageId: message.rootMessageId ?? message.messageId });
-      return result.mode === "priority" || ["accepted", "dispatching", "delivered"].includes(result.operation.state);
-    } catch (error) { await this.reject(message, `Steer 未发送：${errorMessage(error)}`); return false; }
+      if (result.mode === "input") return { accepted: true, code: "agent_input_accepted", detail: `输入已提交到 Core（${result.submissionId.slice(0, 12)}）。`, operationKind: null, operationId: result.submissionId };
+      if (result.mode === "priority") return { accepted: true, code: "priority_accepted", detail: `已创建优先任务 \`${result.logicalTurnId.slice(0, 12)}\`，将在普通队列之前执行。`, operationKind: "prompt", operationId: result.logicalTurnId };
+      const accepted = ["accepted", "dispatching", "delivered"].includes(result.operation.state);
+      const reason = typeof result.operation.result?.reason === "string" ? result.operation.result.reason : null;
+      return { accepted, code: accepted ? "exact_turn_accepted" : steerResultCode(result.operation.result?.status), detail: reason, operationKind: "turn-control", operationId: result.operation.id };
+    } catch (error) { return rejectedSteer(`Steer 未发送：${errorMessage(error)}`, "steer_rejected"); }
   }
 
   private async drainOnce(bindingId: string): Promise<void> {
@@ -64,3 +64,5 @@ export class PaneControlWorkflow implements PaneControlWorkflowPort {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function rejectedSteer(detail: string, code: string): PaneControlSteerResult { return { accepted: false, code, detail, operationKind: null, operationId: null }; }
+function steerResultCode(status: unknown): string { return typeof status === "string" && status ? status.replace(/-/g, "_") : "steer_rejected"; }

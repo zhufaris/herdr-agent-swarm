@@ -12,18 +12,22 @@ const cacheSchema = z.object({
   herdrSnapshotTtlMs: z.number().int().min(0).max(60_000).default(2_000)
 }).strict().default({});
 const cardsSchema = z.object({
-  updateDebounceMs: z.number().int().min(0).max(10_000).default(500),
+  updateDebounceMs: z.number().int().min(0).max(10_000).default(250),
   payloadLimitChars: z.number().int().min(1_000).max(50_000).default(12_000),
   answerStreamLimitChars: z.number().int().min(4_000).max(50_000).default(28_000),
-  answerPageLimitChars: z.number().int().min(1_000).max(28_000).default(9_000)
+  answerPageLimitChars: z.number().int().min(1_000).max(28_000).default(21_000),
+  reasoningDisplay: z.enum(["hidden", "summary", "visible"]).default("visible")
 }).strict().default({}).superRefine((cards, context) => {
   if (cards.answerPageLimitChars > cards.answerStreamLimitChars) context.addIssue({ code: z.ZodIssueCode.custom, path: ["answerPageLimitChars"], message: "must not exceed answerStreamLimitChars" });
 });
 const paneClosureSchema = z.object({
   confirmationTtlMs: z.number().int().min(5_000).max(600_000).default(60_000)
 }).strict().default({});
+const recoverySchema = z.object({
+  externalTurnNotFoundMaxAttempts: z.number().int().min(2).max(100).default(3)
+}).strict().default({});
 const runtimeConfigSchema = z.object({
-  runtime: z.object({ polling: pollingSchema, cache: cacheSchema, cards: cardsSchema, paneClosure: paneClosureSchema }).strict().default({})
+  runtime: z.object({ polling: pollingSchema, cache: cacheSchema, cards: cardsSchema, paneClosure: paneClosureSchema, recovery: recoverySchema }).strict().default({})
 }).strict().default({});
 
 export type RuntimeTuningConfig = z.infer<typeof runtimeConfigSchema>["runtime"] & { outboxSafetyScanIntervalMs: number };
@@ -61,7 +65,9 @@ export function serializeRuntimeTuning(config: RuntimeYamlConfig): string {
     `    herdrSnapshotTtlMs: ${q(config.cache.herdrSnapshotTtlMs)}`, "", "  cards:",
     `    updateDebounceMs: ${q(config.cards.updateDebounceMs)}`, `    payloadLimitChars: ${q(config.cards.payloadLimitChars)}`,
     `    answerStreamLimitChars: ${q(config.cards.answerStreamLimitChars)}`, `    answerPageLimitChars: ${q(config.cards.answerPageLimitChars)}`,
-    "", "  paneClosure:", `    confirmationTtlMs: ${q(config.paneClosure.confirmationTtlMs)}`, ""
+    `    reasoningDisplay: ${config.cards.reasoningDisplay}`,
+    "", "  paneClosure:", `    confirmationTtlMs: ${q(config.paneClosure.confirmationTtlMs)}`,
+    "", "  recovery:", `    externalTurnNotFoundMaxAttempts: ${q(config.recovery.externalTurnNotFoundMaxAttempts)}`, ""
   ].join("\n");
 }
 

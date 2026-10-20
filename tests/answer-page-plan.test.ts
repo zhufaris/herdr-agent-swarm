@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { planAnswerPage as planAnswerPageWithPlanning } from "../src/domain/answer-page-plan.js";
 import { answerElementId, createQueuedRunCard } from "../src/domain/run-card-view.js";
 import type { AnswerPage } from "../src/domain/types.js";
@@ -59,6 +59,24 @@ describe("answer page planner", () => {
 
     expect(planAnswerPage(view, continuation, { latestContent: { content: "previous visible content", sequence: 9, state: "delivered" }, finishPending: false, continuationPending: false }))
       .toEqual({ type: "wait" });
+  });
+
+  it.each([
+    { name: "a pending continuation", facts: { latestContent: null, finishPending: false, continuationPending: true } },
+    { name: "pending content", facts: { latestContent: { content: "old", sequence: 1, state: "pending" as const }, finishPending: false, continuationPending: false } },
+    { name: "dead-lettered content", facts: { latestContent: { content: "old", sequence: 1, state: "dead_letter" as const }, finishPending: false, continuationPending: false } }
+  ])("does not render while waiting for $name", ({ facts }) => {
+    const { view, page } = fixture("canonical answer");
+    const answerStreamContentSpy = vi.fn(answerStreamContent);
+    const renderAnswerStreamPageSpy = vi.fn(renderAnswerStreamPage);
+
+    expect(planAnswerPageWithPlanning(view, page, facts, {
+      pageLimit: ANSWER_STREAM_PAGE_LIMIT,
+      answerStreamContent: answerStreamContentSpy,
+      renderAnswerStreamPage: renderAnswerStreamPageSpy
+    })).toEqual({ type: "wait" });
+    expect(answerStreamContentSpy).not.toHaveBeenCalled();
+    expect(renderAnswerStreamPageSpy).not.toHaveBeenCalled();
   });
 
   it("finishes a terminal continuation without sending empty content", () => {

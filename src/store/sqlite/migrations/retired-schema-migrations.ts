@@ -3,15 +3,17 @@ import type { SqliteContext } from "../context.js";
 export class RetiredSchemaMigrations {
   constructor(private readonly context: SqliteContext) {}
 
+  private migrationTransaction<T>(operation: () => T): T {
+    return this.context.migrationTransaction("sqlite.migrations.retired-schema", operation);
+  }
+
   removeReportedTraexSessionColumns(): void {
     const names = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map((column) => column.name));
     const obsolete = ["reported_traex_session_id", "reported_traex_session_at"].filter((name) => names.has(name));
     if (!obsolete.length) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       for (const name of obsolete) this.context.database.exec(`ALTER TABLE bindings DROP COLUMN ${name}`);
-      this.context.database.exec("COMMIT");
-    } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   convergeRetiredPromptSteering(): void {
@@ -26,8 +28,7 @@ export class RetiredSchemaMigrations {
     if (!runCardColumns.has("steering_failure_kind")) this.context.database.exec("ALTER TABLE run_cards ADD COLUMN steering_failure_kind TEXT CHECK(steering_failure_kind IN ('rejected','uncertain'))");
     const retiredPromptColumns = ["source_prompt_id", "steering_origin", "dispatch_kind"].filter((column) => promptColumns.has(column));
     const timestamp = now();
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       this.context.database.prepare(`
         UPDATE prompt_jobs
         SET state = 'failed', observation_state = 'completed', was_detached = CASE state WHEN 'running' THEN 1 ELSE was_detached END,
@@ -62,8 +63,7 @@ export class RetiredSchemaMigrations {
         CREATE INDEX prompt_jobs_priority_queue ON prompt_jobs(binding_id, state, priority, created_at);
       `);
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (30)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 }
 

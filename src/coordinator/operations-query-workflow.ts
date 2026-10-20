@@ -6,6 +6,7 @@ import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { OperationsQueryStore } from "../domain/ports/workflow.js";
 import type { Binding, HerdrPane, IncomingLarkMessage, ProjectConfig } from "../domain/types.js";
 import { safeLogError } from "../runtime/safe-error.js";
+import { createPaneIdentitySnapshot } from "../domain/worker-main-view.js";
 
 interface Options { config: Pick<BridgeConfig, "projects">; store: OperationsQueryStore; herdr: Pick<HerdrPort, "listPanes">; outbound: Pick<OutboundIntentPort, "enqueueCard">; presentation: Pick<ApplicationPresentation, "spaces" | "topicPanes" | "sessions" | "failures">; logger: Logger; }
 
@@ -48,11 +49,20 @@ export class OperationsQueryWorkflow implements OperationsQueryWorkflowPort {
         const view = this.options.store.loadTopicView(binding.id);
         if (!view || !binding.statusMessageId) return [];
         const workers = this.options.store.listWorkerInstancesByParent({ bindingId: binding.id, paneId: binding.paneId! }).map((worker) => {
-          return { workerId: worker.id, runtimeGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, paneId: worker.runtimeRef?.paneId ?? worker.pendingRuntimeRef?.paneId ?? null, state: worker.observedState };
+          const threadId = this.options.store.resolveCanonicalWorkerThreadId({
+            chatId: message.chatId, workerId: worker.id, runtimeGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration,
+            parentBindingId: binding.id, parentBindingGeneration: binding.generation, parentPaneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId!
+          });
+          const paneId = worker.runtimeRef?.paneId ?? worker.pendingRuntimeRef?.paneId ?? null;
+          const paneToken = worker.runtimeRef?.paneToken ?? worker.pendingRuntimeRef?.paneToken ?? null;
+          const lease = this.options.store.getWorkspaceLease(worker.workspaceLeaseId);
+          const worktreeName = lease?.kind === "git-worktree" ? lease.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) ?? null : null;
+          return { workerId: worker.id, runtimeGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, paneId, paneToken, paneIdentity: createPaneIdentitySnapshot({ workspace: lease?.cwd, worktreeName, branch: lease?.branch, paneId, paneToken }), threadId, state: worker.observedState };
         });
-        return [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, sourceMainMessageId: binding.statusMessageId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState, workers }];
+        const paneIdentity = view.paneIdentity ?? createPaneIdentitySnapshot({ workspace: view.workspace, worktreeName: view.worktreeName, branch: view.branch, paneId: binding.paneId, paneToken: binding.paneToken });
+        return [{ bindingId: binding.id, bindingGeneration: binding.generation, paneId: binding.paneId!, paneToken: binding.paneToken, paneIdentity, sourceMainMessageId: binding.statusMessageId, chatId: message.chatId, threadId: binding.topicId, title: binding.title, spaceName: view.spaceName, agentState: binding.lastAgentState, activityAt: view.activityAt, taskSummary: view.liveStatus?.statusTitle ?? view.notice ?? null, workers }];
       })
-      .sort((left, right) => left.spaceName.localeCompare(right.spaceName) || left.title.localeCompare(right.title) || left.paneId.localeCompare(right.paneId));
+      .sort((left, right) => (right.activityAt ?? "").localeCompare(left.activityAt ?? "") || left.title.localeCompare(right.title) || left.paneId.localeCompare(right.paneId));
     await this.publishCards(message, "panes", [this.options.presentation.topicPanes(entries)]);
   }
 
@@ -96,7 +106,7 @@ export function buildSpaceDirectoryGroups(projects: readonly ProjectConfig[], pa
     const unmatched = [];
     for (const pane of panes) {
       const group = pane.cwd === null ? undefined : groupsByRoute.get(`${workspaceId}\0${pane.cwd}`);
-      const view = { paneId: pane.paneId, name: pane.label ?? pane.paneId, agentState: pane.agentState, foregroundExecutables: pane.foregroundExecutables };
+      const view = { paneId: pane.paneId, paneToken: pane.paneToken ?? null, name: pane.label ?? "", agentState: pane.agentState, foregroundExecutables: pane.foregroundExecutables };
       if (group) group.panes.push(view);
       else unmatched.push(view);
     }

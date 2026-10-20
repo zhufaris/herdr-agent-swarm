@@ -59,6 +59,7 @@ export interface WorkerTurnCardPage {
   elementId: string;
   messageId: string | null;
   cardId: string | null;
+  deliveryMode?: "streaming";
   state: "creating" | "active" | "frozen" | "finished";
   sequence: number;
   createdAt: string;

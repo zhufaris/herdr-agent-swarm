@@ -1,9 +1,11 @@
 import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../inbound.js";
+import type { AgentKind } from "../agent-instance.js";
 import type { WorkerMainView } from "../worker-main-view.js";
 
 export interface WorkerThreadScope { chatId: string; topicId: string | null; rootMessageId: string | null }
 export interface ValidatedWorkerThreadTarget {
   threadId: string; workerId: string; workerName: string; workerSessionGeneration: number; projectId: string; runtimeGeneration: number;
+  paneId: string | null; agentKind: AgentKind; nativeSessionId: string | null;
   parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; rootMessageId: string; mode: "canonical-main" | "legacy-entry";
   view: WorkerMainView; activeTurn: { id: string; state: string } | null;
 }
@@ -32,6 +34,6 @@ export interface WorkerSessionThreadDeliveryStore {
 
 export interface WorkerSessionThreadLifecycleStore { retireSession(workerId: string, workerSessionGeneration: number, occurredAt: string): void }
 export interface WorkerSessionThreadWorkflowPort {
-  handleMessage(message: IncomingLarkMessage): Promise<{ handled: false } | { handled: true; disposition: "prompt_queued" | "command_completed" | "rejected" }>;
+  handleMessage(message: IncomingLarkMessage): Promise<{ handled: false } | { handled: true; disposition: "agent_input_accepted" | "command_completed" | "rejected" }>;
   publishFromCard(action: IncomingLarkCardAction, target: WorkerThreadPublicationTarget): Promise<LarkCardActionResult>;
 }

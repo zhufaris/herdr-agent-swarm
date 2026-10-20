@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BridgeEvent, InboundMessageReceivedEvent } from "../domain/events.js";
 import type { PromptWorkHint } from "../domain/types.js";
-import type { HerdrRuntimeHint } from "../runtime/herdr-event-hint.js";
+import type { HerdrNativeEventHint } from "../runtime/herdr-event-hint.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
 export type RuntimeWorkHint =
@@ -16,7 +16,7 @@ interface RuntimeEventPayloads {
   lifecycle: BridgeEvent;
   inbound: InboundMessageReceivedEvent;
   work: RuntimeWorkHint;
-  herdr: { hint: HerdrRuntimeHint; signal: AbortSignal };
+  herdr: { hint: HerdrNativeEventHint; signal: AbortSignal };
 }
 
 export type RuntimeEventChannel = keyof RuntimeEventPayloads;
@@ -55,8 +55,8 @@ export class RuntimeEventBus {
     return () => { if (listeners.get(name) === listener) listeners.delete(name); };
   }
 
-  publishLifecycle(event: BridgeEvent): Promise<void> {
-    return this.trackAwaited(this.fanOut(this.envelope("lifecycle", event.eventId, `${event.bindingId}:${event.type}`, event.occurredAt, event), true));
+  publishLifecycle(event: BridgeEvent, isolateFailures = true): Promise<void> {
+    return this.trackAwaited(this.fanOut(this.envelope("lifecycle", event.eventId, `${event.bindingId}:${event.type}`, event.occurredAt, event), isolateFailures));
   }
 
   publishInbound(event: InboundMessageReceivedEvent): Promise<void> {
@@ -74,7 +74,7 @@ export class RuntimeEventBus {
     if (this.sealed) this.scheduleWorkFlush();
   }
 
-  publishHerdr(hint: HerdrRuntimeHint, signal: AbortSignal): Promise<void> {
+  publishHerdr(hint: HerdrNativeEventHint, signal: AbortSignal): Promise<void> {
     return this.trackAwaited(this.fanOut(this.envelope("herdr", randomUUID(), herdrKey(hint), new Date().toISOString(), { hint, signal }), false));
   }
 
@@ -143,19 +143,21 @@ export class RuntimeEventBus {
     const events = [...this.pendingWork.values()];
     this.pendingWork.clear();
     this.diagnostics.get("work")!.pending = 0;
-    for (const event of events) this.fanOutBestEffort(event);
+    await Promise.all(events.map((event) => this.fanOutBestEffort(event)));
     if (this.pendingWork.size > 0) this.scheduleWorkFlush();
   }
 
-  private fanOutBestEffort(event: RuntimeEventEnvelope<"work">): void {
+  private fanOutBestEffort(event: RuntimeEventEnvelope<"work">): Promise<void> {
     const listeners = [...this.listeners.get("work")!.entries()] as Array<[string, RuntimeEventListener<"work">]>;
+    const pending: Promise<void>[] = [];
     for (const [subscriber, listener] of listeners) {
       try {
         const result = listener(event);
         this.diagnostics.get("work")!.delivered += 1;
-        void Promise.resolve(result).catch((error) => this.recordFailure(event, subscriber, error, "isolated"));
+        pending.push(Promise.resolve(result).then(() => undefined, (error) => this.recordFailure(event, subscriber, error, "isolated")));
       } catch (error) { this.recordFailure(event, subscriber, error, "isolated"); }
     }
+    return pending.length > 0 ? this.trackAwaited(Promise.all(pending).then(() => undefined)) : Promise.resolve();
   }
 
   private recordFailure(event: RuntimeEventEnvelope, subscriber: string, error: unknown, outcome: "isolated" | "failed"): void {
@@ -177,4 +179,8 @@ function workKey(hint: RuntimeWorkHint): string {
   if (hint.kind === "swarm-command-ready") return `${hint.kind}:${hint.intentId}`;
   return hint.kind;
 }
-function herdrKey(hint: HerdrRuntimeHint): string { return `${hint.kind}:${hint.scope}:${hint.workspaceIds.join(",")}:${hint.paneIds.join(",")}`; }
+function herdrKey(hint: HerdrNativeEventHint): string {
+  return hint.kind === "session-events-available"
+    ? `${hint.kind}:${hint.sources.map(({ sourceId, latestCursor }) => `${sourceId}:${latestCursor}`).join(",")}`
+    : `${hint.kind}:${hint.scope}:${hint.workspaceIds.join(",")}:${hint.paneIds.join(",")}`;
+}

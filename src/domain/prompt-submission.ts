@@ -10,7 +10,17 @@ export function classifyPromptSubmissionFailure(error: unknown): PromptSubmissio
   const message = error instanceof Error ? error.message : String(error);
   const code = structuredErrorCode(message);
   if (code === "agent_prompt_not_started") return { kind: "not_started", composerCleared: true, reason: message };
-  if (["agent_not_found", "agent_not_ready", "agent_blocked", "agent_prompt_rejected"].includes(code ?? "")) return { kind: "rejected", reason: message };
+  if ([
+    "agent_not_found",
+    "agent_not_ready",
+    "agent_blocked",
+    "agent_prompt_rejected",
+    "agent_session_changed",
+    "session_identity_missing",
+    "session_identity_mismatch",
+    "terminal_identity_missing",
+    "pane_not_found"
+  ].includes(code ?? "")) return { kind: "rejected", reason: message };
   if (code === "agent_prompt_stalled" || code === "agent_prompt_uncertain") return { kind: "uncertain", reason: message };
   return null;
 }

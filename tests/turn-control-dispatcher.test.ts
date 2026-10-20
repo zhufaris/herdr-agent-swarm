@@ -79,4 +79,29 @@ describe("TurnControlDispatcher", () => {
     expect(interruptAgent).toHaveBeenCalledOnce();
     await dispatcher.stop();
   });
+
+  it("leaves accepted work recoverable when stop wins during revalidation", async () => {
+    const { panes, accept } = fixture();
+    const owner = { kind: "instance" as const, id: "i1" };
+    accept("control-stop-race", owner);
+    let releaseRevalidation!: () => void;
+    const revalidation = new Promise<void>((resolve) => { releaseRevalidation = resolve; });
+    const getPane = vi.fn(async (paneId: string) => {
+      await revalidation;
+      return panes.get(paneId) ?? null;
+    });
+    const interruptAgent = vi.fn(async () => ({ status: "interrupted" as const }));
+    const dispatcher = new TurnControlDispatcher({
+      store: store!, herdr: { getPane, interruptAgent }, presentation: applicationPresentation, wakeOutbound: () => undefined
+    });
+
+    dispatcher.wake(owner);
+    await vi.waitFor(() => expect(getPane).toHaveBeenCalledOnce());
+    const stopping = dispatcher.stop();
+    releaseRevalidation();
+    await stopping;
+
+    expect(store!.getTurnControlOperation("control-stop-race")?.state).toBe("accepted");
+    expect(interruptAgent).not.toHaveBeenCalled();
+  });
 });

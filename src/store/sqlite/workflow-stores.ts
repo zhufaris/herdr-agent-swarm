@@ -3,11 +3,13 @@ import type { SessionOperationStore } from "../../domain/ports/workflow.js";
 import type { Binding } from "../../domain/types.js";
 import type { SessionOperation } from "../../domain/types.js";
 import type { SqliteCommandIntentStore } from "./command-intent-store.js";
+import type { SqliteCardCommandAdmissionStore } from "./card-command-admission-store.js";
 import type { SqliteSessionOperationStore } from "./session-operation-store.js";
 
 export class SqliteCommandIntentStoreAdapter implements CommandIntentWorkflowStore {
   constructor(
     private readonly store: SqliteCommandIntentStore,
+    private readonly cardAdmissions: SqliteCardCommandAdmissionStore,
     private readonly dependencies: {
       audit: CommandIntentWorkflowStore["audit"];
       getBinding: CommandIntentWorkflowStore["getBinding"];
@@ -15,6 +17,7 @@ export class SqliteCommandIntentStoreAdapter implements CommandIntentWorkflowSto
   ) {}
 
   acceptCommandIntent: CommandIntentStore["acceptCommandIntent"] = (input, source, renderStatus) => this.store.accept(input, source, renderStatus);
+  acceptCardCommandIntent: CommandIntentWorkflowStore["acceptCardCommandIntent"] = (input, renderStatus) => this.cardAdmissions.accept(input, renderStatus);
   getCommandIntent: CommandIntentStore["getCommandIntent"] = (id) => this.store.get(id);
   getCommandStatusView: CommandIntentStore["getCommandStatusView"] = (id) => this.store.getStatus(id);
   claimNextCommandIntent: CommandIntentStore["claimNextCommandIntent"] = (laneKey, renderStatus) => this.store.claimNext(laneKey, renderStatus);
@@ -32,7 +35,6 @@ export class SqliteSessionOperationStoreAdapter implements SessionOperationStore
     private readonly getBindingById: (id: string) => Binding | null
   ) {}
 
-  acceptSessionOperation: SessionOperationStore["acceptSessionOperation"] = (input) => this.store.accept(input);
   claimNextSessionOperation: SessionOperationStore["claimNextSessionOperation"] = (bindingId) => this.store.claimNext(bindingId);
   finishSessionOperation: SessionOperationStore["finishSessionOperation"] = (id, state, detail) => this.store.finish(id, state, detail);
   getSessionOperation(id: string): SessionOperation | null { return this.store.get(id); }

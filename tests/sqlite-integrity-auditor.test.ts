@@ -68,8 +68,32 @@ describe("SQLite integrity auditor", () => {
     );
 
     await expect(auditor.run()).resolves.toBeUndefined();
-    expect(auditor.snapshot()).toMatchObject({ state: "degraded", quickCheck: "failed", issues: [], truncated: false });
+    expect(auditor.snapshot()).toMatchObject({ state: "degraded", quickCheck: "ok", issues: [], truncated: false, completedAt: null });
     expect(auditor.snapshot().error?.length).toBeLessThanOrEqual(240);
+  });
+
+  it("keeps the last confirmed physical result when a later audit fails transiently", async () => {
+    let fail = false;
+    let now = 1_000;
+    const auditor = new SqliteIntegrityAuditor(
+      { inspectIntegrity() {
+        if (fail) throw Object.assign(new Error("database busy"), { errcode: 5 });
+        return { quickCheck: "ok", issues: [], truncated: false };
+      } },
+      { intervalMs: 900_000, issueLimit: 20 },
+      { info() {}, error() {} },
+      () => now
+    );
+
+    await auditor.run();
+    const confirmedAt = auditor.snapshot().completedAt;
+    fail = true; now += 1_000;
+    await auditor.run();
+
+    expect(auditor.snapshot()).toMatchObject({
+      state: "degraded", quickCheck: "ok", issues: [], completedAt: confirmedAt,
+      error: "database busy"
+    });
   });
 
   it("starts immediately and stops future interval runs", async () => {

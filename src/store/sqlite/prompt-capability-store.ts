@@ -18,7 +18,16 @@ export class SqlitePromptAcceptanceCapabilityStore implements PromptAcceptanceSt
 
   acceptPrompt: PromptAcceptanceStore["acceptPrompt"] = (input) => this.acceptance.acceptPrompt(input);
   acceptPromptWithEffects: PromptAcceptanceStore["acceptPromptWithEffects"] = (input) => this.acceptance.acceptPromptWithEffects(input);
+  acceptImmediateNativeInputBatch: PromptAcceptanceStore["acceptImmediateNativeInputBatch"] = (input) => this.acceptance.acceptImmediateNativeInputBatch(input);
+  acceptCollectingNativeInput: PromptAcceptanceStore["acceptCollectingNativeInput"] = (input) => this.acceptance.acceptCollectingNativeInput(input);
+  formDueNativeInputBatch: PromptAcceptanceStore["formDueNativeInputBatch"] = (input) => this.acceptance.formDueNativeInputBatch(input);
+  hasAcceptedPromptSource: PromptAcceptanceStore["hasAcceptedPromptSource"] = (identity) => this.acceptance.getPromptInputBySource(identity.ingressSource, identity.sourceMessageKey) !== null;
+  getNativeInputBacklog: PromptAcceptanceStore["getNativeInputBacklog"] = (id, generation) => this.acceptance.getNativeInputBacklog(id, generation);
   acceptInterruptedContinuation: PromptAcceptanceStore["acceptInterruptedContinuation"] = (input) => this.acceptance.acceptInterruptedContinuation(input);
+  acceptPrimaryCompletionAction: PromptAcceptanceStore["acceptPrimaryCompletionAction"] = (input) => this.acceptance.acceptPrimaryCompletionAction(input);
+  ignorePrimaryCompletionAction: PromptAcceptanceStore["ignorePrimaryCompletionAction"] = (input) => this.acceptance.ignorePrimaryCompletionAction(input);
+  resolvePrimaryCompletionChoice: PromptAcceptanceStore["resolvePrimaryCompletionChoice"] = (input) => this.acceptance.resolvePrimaryCompletionChoice(input);
+  getCurrentGoal: PromptAcceptanceStore["getCurrentGoal"] = (id) => this.acceptance.getCurrentGoal(id);
   audit: PromptAcceptanceStore["audit"] = (input) => this.operations.audit(input);
   countPendingPrompts: PromptAcceptanceStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
 }
@@ -29,22 +38,28 @@ export class SqlitePromptDispatchCapabilityStore implements PromptDispatchStore 
     private readonly recovery: SqlitePromptRecoveryStore,
     private readonly prompts: SqlitePromptStore,
     private readonly bindings: SqliteBindingLifecycleStore,
-    private readonly projections: SqliteProjectionStore
+    private readonly projections: SqliteProjectionStore,
+    private readonly bindingProjections: SqliteBindingProjectionStore
   ) {}
 
   getBinding: PromptDispatchStore["getBinding"] = (id) => this.bindings.getBinding(id);
   getPrompt: PromptDispatchStore["getPrompt"] = (id) => this.dispatch.getPrompt(id);
   getActiveOrdinaryPrompt: PromptDispatchStore["getActiveOrdinaryPrompt"] = (id, generation) => this.dispatch.getActiveOrdinaryPrompt(id, generation);
-  claimNextDispatchablePrompt: PromptDispatchStore["claimNextDispatchablePrompt"] = (id) => this.dispatch.claimNextDispatchablePrompt(id);
+  claimNextDispatchablePrompt: PromptDispatchStore["claimNextDispatchablePrompt"] = (id, options) => this.dispatch.claimNextDispatchablePrompt(id, options);
   markPromptDispatched: PromptDispatchStore["markPromptDispatched"] = (id, at) => this.dispatch.markPromptDispatched(id, at);
-  markModelPromptPrepared: PromptDispatchStore["markModelPromptPrepared"] = (input) => this.dispatch.markModelPromptPrepared(input);
-  markModelPromptAccepted: PromptDispatchStore["markModelPromptAccepted"] = (input) => this.dispatch.markModelPromptAccepted(input);
-  rollbackPreparedModelPrompt: PromptDispatchStore["rollbackPreparedModelPrompt"] = (input) => this.dispatch.rollbackPreparedModelPrompt(input);
+  fencePromptNativeSubmission: PromptDispatchStore["fencePromptNativeSubmission"] = (input) => this.dispatch.fencePromptNativeSubmission(input);
+  markPromptNativeQueued: PromptDispatchStore["markPromptNativeQueued"] = (input) => this.dispatch.markPromptNativeQueued(input);
+  applyPromptNativeSubmissionReceipt: PromptDispatchStore["applyPromptNativeSubmissionReceipt"] = (input) => this.dispatch.applyPromptNativeSubmissionReceipt(input);
+  releaseRejectedNativeSubmission: PromptDispatchStore["releaseRejectedNativeSubmission"] = (input) => this.dispatch.releaseRejectedNativeSubmission(input);
+  recordModelDispatchEvidence: PromptDispatchStore["recordModelDispatchEvidence"] = (input) => this.dispatch.recordModelDispatchEvidence(input);
   claimPromptTranscriptTurn: PromptDispatchStore["claimPromptTranscriptTurn"] = (input) => this.dispatch.claimPromptTranscriptTurn(input);
+  listPromptTranscriptTurns: PromptDispatchStore["listPromptTranscriptTurns"] = (input) => this.dispatch.listPromptTranscriptTurns(input);
+  adoptPromptTranscriptContinuation: PromptDispatchStore["adoptPromptTranscriptContinuation"] = (input) => this.dispatch.adoptPromptTranscriptContinuation(input);
   markPromptObservationDetached: PromptDispatchStore["markPromptObservationDetached"] = (id, notice) => this.recovery.markPromptObservationDetached(id, notice);
   completeTurn: PromptDispatchStore["completeTurn"] = (input) => this.dispatch.completeTurn(input);
   failPrompt: PromptDispatchStore["failPrompt"] = (input) => this.dispatch.failPrompt(input);
   transitionBinding: PromptDispatchStore["transitionBinding"] = (id, transition) => this.bindings.transitionBinding(id, transition);
+  observePrimaryPromptState: PromptDispatchStore["observePrimaryPromptState"] = (input) => this.bindingProjections.observePrimaryPromptState(input);
   countPendingPrompts: PromptDispatchStore["countPendingPrompts"] = (id) => this.prompts.countPendingPrompts(id);
   loadRunCard: PromptDispatchStore["loadRunCard"] = (id) => this.projections.loadRunCard(id);
 }
@@ -60,6 +75,9 @@ export class SqlitePromptRecoveryCapabilityStore implements PromptRecoveryStore 
   recoverRunningPrompts: PromptRecoveryStore["recoverRunningPrompts"] = () => this.recovery.recoverRunningPrompts();
   listDetachedPrompts: PromptRecoveryStore["listDetachedPrompts"] = () => this.recovery.listDetachedPrompts();
   skipOldestDetachedPrompt: PromptRecoveryStore["skipOldestDetachedPrompt"] = (input) => this.recovery.skipOldestDetachedPrompt(input);
+  advanceDetachedPromptRecovery: PromptRecoveryStore["advanceDetachedPromptRecovery"] = (input) => this.recovery.advanceDetachedPromptRecovery(input);
+  markDetachedPromptRecoveryNeedsHuman: PromptRecoveryStore["markDetachedPromptRecoveryNeedsHuman"] = (input) => this.recovery.markDetachedPromptRecoveryNeedsHuman(input);
+  recoverProjectedBridgeTurn: PromptRecoveryStore["recoverProjectedBridgeTurn"] = (input) => this.recovery.recoverProjectedBridgeTurn(input);
   settleDetachedPrompt: PromptRecoveryStore["settleDetachedPrompt"] = (input) => this.recovery.settleDetachedPrompt(input);
   scanDurablePromptWork: PromptRecoveryStore["scanDurablePromptWork"] = () => this.recovery.scanDurablePromptWork();
   listStaleUndispatchedPromptClaims: PromptRecoveryStore["listStaleUndispatchedPromptClaims"] = (before, limit) => this.recovery.listStaleUndispatchedPromptClaims(before, limit);

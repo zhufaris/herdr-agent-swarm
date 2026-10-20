@@ -7,14 +7,15 @@ import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, PaneControlOperation } from "../domain/types.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
-import { resolveCatalogModel } from "../domain/model-selection.js";
+import { resolveCatalogModel, runtimeModelPreference } from "../domain/model-selection.js";
 import { isNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { MainCardConvergencePort } from "../domain/ports/card-convergence.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
-interface Options { config: BridgeConfig; store: ModelSelectionStore; traexControl: TraexControlPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardConvergencePort, "converge">; activeTurn(bindingId: string): { promptId: string; paneId: string } | null; logger: Logger; }
+interface Options { config: BridgeConfig; store: ModelSelectionStore; traexControl: TraexControlPort; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; scheduler: PromptWorkScheduler; presentation: Pick<ApplicationPresentation, "modelResult" | "modelSelection" | "requestRejected">; mainCards?: Pick<MainCardConvergencePort, "converge">; logger: Logger; }
 
 const UNSUPPORTED_MODEL_MESSAGE = "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。";
+const SESSION_NOT_READY_MODEL_MESSAGE = "当前 Pane 尚未建立 TraeX Session。请先发送一条普通任务，待 Session 建立后再使用 /swarm model。";
 
 type ModelReplyTarget =
   | { kind: "text"; rootMessageId: string; sourceMessageId: string }
@@ -81,22 +82,31 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
   private async publishUnsupported(binding: Binding, messageId: string, operationId: string): Promise<void> {
     if (!binding.paneId) return;
     await this.publish(binding, { kind: "card", messageId }, `model:${operationId}:unsupported`, this.options.presentation.modelResult({
-      bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
+      bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId, paneToken: binding.paneToken, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
     }));
   }
 
   private async queryOrSelect(binding: Binding, requested: string | null, actorOpenId: string, replyTarget: ModelReplyTarget): Promise<boolean> {
     if (binding.agentKind !== "traex") {
       await this.publish(binding, replyTarget, "unsupported-agent", this.options.presentation.modelResult({
-        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
+        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, output: UNSUPPORTED_MODEL_MESSAGE, switched: false
       }));
       this.options.store.audit({ actorOpenId, action: "model.run", target: requested ?? "list", outcome: "unsupported_agent_kind" });
       return false;
     }
     const session = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
       ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
+    if (!session && !binding.hasCompletedTurn) {
+      await this.publish(binding, replyTarget, "session-not-ready", this.options.presentation.modelResult({
+        bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken,
+        output: SESSION_NOT_READY_MODEL_MESSAGE, switched: false
+      }));
+      this.options.store.audit({ actorOpenId, action: "model.run", target: requested ?? "list", outcome: "session_not_ready" });
+      return false;
+    }
     if (!isNativeTraexSession(session)) {
-      await this.publish(binding, replyTarget, "unavailable", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: "当前 Session 不支持结构化模型切换。", switched: false }));
+      await this.publish(binding, replyTarget, "unavailable", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, output: "当前 Session 不支持结构化模型切换。", switched: false }));
+      this.options.store.audit({ actorOpenId, action: "model.run", target: requested ?? "list", outcome: "unsupported_session" });
       return false;
     }
     try {
@@ -118,10 +128,10 @@ export class ModelSelectionWorkflow implements ModelSelectionWorkflowPort {
         }
       }
       const preference = this.options.store.getModelPreference(binding.id);
-      await this.publish(binding, replyTarget, `${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, models, preference, ...(notice ? { notice } : {}) }));
+      await this.publish(binding, replyTarget, `${preference?.desiredRevision ?? "list"}`, this.options.presentation.modelSelection({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, models, snapshot: runtimeModelPreference.snapshot(preference), ...(notice ? { notice } : {}) }));
       return selected;
     } catch (error) {
-      await this.publish(binding, replyTarget, "failed", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
+      await this.publish(binding, replyTarget, "failed", this.options.presentation.modelResult({ bindingId: binding.id, spaceName: this.spaceNameFor(binding), paneId: binding.paneId!, paneToken: binding.paneToken, output: `模型目录读取失败：${errorMessage(error)}`, switched: false }));
       return false;
     }
   }

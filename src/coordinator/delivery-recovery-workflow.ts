@@ -44,10 +44,15 @@ export class DeliveryRecoveryWorkflow implements DeliveryRecoveryWorkflowPort {
 
   async decideDeadLetter(action: IncomingLarkCardAction, replyId: string, decision: "retry_dead_letter" | "dismiss_dead_letter"): Promise<void> {
     const { store, outbound, logger } = this.options;
-    const outcome = decision === "retry_dead_letter" ? store.retryDeadLetter(replyId, action.chatId, action.operatorOpenId) : store.dismissDeadLetter(replyId, action.chatId, action.operatorOpenId);
+    const outcome = decision === "retry_dead_letter" ? store.retryDeadLetter(replyId, action.chatId, action.operatorOpenId) : store.dismissDeadLetter(replyId, action.chatId, action.operatorOpenId, action.messageId);
     logger.info({ event: "dead-letter-action-decided", replyId, action: decision, outcome }, "processed dead-letter action");
     if (outcome === "retried") this.options.outboundWork.wake();
-    const notice = outcome === "retried" ? "已重新提交该消息发送；不会重放 TraeX 任务。" : outcome === "dismissed" ? "已忽略该发送失败并保留历史记录。" : "该操作已失效或无权执行。";
+    if (outcome === "dismissed") return;
+    const notice = outcome === "retried"
+      ? "已重新提交该消息发送；不会重放 TraeX 任务。"
+      : outcome === "unsafe"
+        ? "该 Delivery 的远端效果仍不确定或不可安全重放，已保留原记录且未执行重试。"
+        : "该操作已失效或无权执行。";
     await outbound.enqueueCardUpdate(null, action.messageId, `failures:${action.messageId}:${replyId}:${outcome}`, this.options.presentation.failures(store.listFailures(action.chatId), notice)[0]!);
   }
 

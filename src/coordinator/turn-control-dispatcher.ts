@@ -6,7 +6,7 @@ import { sameNativeTraexSession } from "../domain/traex-session-identity.js";
 import type { TurnControlOperation, TurnControlOwner, TurnTarget } from "../domain/turn-control.js";
 import { safeLogError } from "../runtime/safe-error.js";
 
-interface Options { store: TurnControlStore; herdr: Pick<HerdrPort, "getPane" | "interruptAgent">; presentation: Pick<ApplicationPresentation, "turnControlResult">; wakeOutbound(): void; logger?: { error(value: object, message: string): void } }
+interface Options { store: TurnControlStore; herdr: Pick<HerdrPort, "getPane" | "interruptAgent"> & Partial<Pick<HerdrPort, "getActiveTurn">>; presentation: Pick<ApplicationPresentation, "turnControlResult">; wakeOutbound(): void; logger?: { error(value: object, message: string): void } }
 
 /** Drains durable exact-turn control intents outside inbound request handlers. */
 export class TurnControlDispatcher {
@@ -48,6 +48,7 @@ export class TurnControlDispatcher {
 
   private async dispatch(operation: TurnControlOperation): Promise<void> {
     const rejection = await this.revalidate(operation.target);
+    if (this.stopping) return;
     if (rejection) { this.reject(operation, rejection); return; }
     const claimed = this.options.store.claimTurnControlOperation(operation.id);
     if (!claimed) { this.reject(operation, "Exact turn target changed before dispatch"); return; }
@@ -79,7 +80,8 @@ export class TurnControlDispatcher {
       if (!pane?.agentSession) return "Herdr pane has no native Agent session";
       if (!sameNativeTraexSession(target.agentSession, pane.agentSession)) return "Agent session identity changed";
       if (pane.agentState === "blocked") return "Agent is blocked on a local approval or question";
-      if (pane.activeTurnId !== target.runtimeTurnId) return "Runtime turn identity changed";
+      const activeTurnId = pane.activeTurnId ?? (await this.options.herdr.getActiveTurn?.(target.paneId))?.turnId ?? null;
+      if (activeTurnId !== target.runtimeTurnId) return "Runtime turn identity changed";
       return null;
     } catch (error) { return safeLogError(error).message; }
   }

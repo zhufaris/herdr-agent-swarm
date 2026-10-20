@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { InstanceStore } from "../domain/ports/instance.js";
 import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
 import type { WorkerCardDisplayPort } from "../domain/ports/worker-card-display.js";
+import type { PrimaryTopologyQueryPort } from "../domain/primary-topology.js";
 import { PrimaryToolBroker, type PrimaryWorkerCreationPort } from "./primary-tool-broker.js";
 import { safeLogError } from "./safe-error.js";
 import { ActiveWorkTracker } from "./active-work-tracker.js";
@@ -15,7 +16,7 @@ const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CONNECTIONS = 64;
 const requestSchema = z.object({
   bindingId: z.string().min(1).max(128), generation: z.number().int().positive(), capability: z.string().regex(/^[a-f0-9]{64}$/),
-  tool: z.enum(["listInstances", "promptInstance", "followUpInstance", "steerInstance", "inspectInstance", "waitInstance", "interruptInstance", "showWorkerCards", "createWorker"]),
+  tool: z.enum(["listInstances", "promptInstance", "followUpInstance", "steerInstance", "inspectInstance", "waitInstance", "interruptInstance", "showWorkerCards", "createWorker", "listSpaces", "listPanes"]),
   arguments: z.record(z.unknown()).default({})
 }).strict();
 
@@ -26,10 +27,11 @@ export class PrimaryToolGateway {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
   private readonly handlers = new ActiveWorkTracker();
+  private startPromise: Promise<void> | null = null;
   private accepting = false;
   private workerCreation: PrimaryWorkerCreationPort | undefined;
 
-  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}, private readonly workerCards?: WorkerCardDisplayPort) {}
+  constructor(private readonly socketPath: string, private readonly mcpCommand: string, private readonly mcpArgsPrefix: string[], private readonly store: InstanceStore, private readonly messaging: PrimaryToolMessagingPort, private readonly logger: Logger, private readonly agentArgs: string[] = [], private readonly options: PrimaryToolGatewayOptions = {}, private readonly workerCards?: WorkerCardDisplayPort, private readonly topology?: PrimaryTopologyQueryPort) {}
 
   issueBinding(bindingId: string, expectedGeneration: number): PrimaryToolLaunch {
     const capability = randomBytes(32).toString("hex");
@@ -40,20 +42,37 @@ export class PrimaryToolGateway {
   setWorkerCreation(workerCreation: PrimaryWorkerCreationPort): void { this.workerCreation = workerCreation; }
 
   configurationForBinding(bindingId: string, generation: number): PrimaryToolLaunch {
-    return { environment: {}, command: this.mcpCommand, args: [...this.mcpArgsPrefix, "--socket", this.socketPath, "--binding", bindingId, "--generation", String(generation)], ...(this.agentArgs.length ? { agentArgs: this.agentArgs } : {}) };
+    const binding = this.store.getBinding(bindingId);
+    const profile = binding?.kind === "orchestrator" ? "orchestrator" : "task";
+    return { environment: {}, command: this.mcpCommand, args: [...this.mcpArgsPrefix, "--socket", this.socketPath, "--binding", bindingId, "--generation", String(generation), ...(profile === "orchestrator" ? ["--profile", profile] : [])], ...(this.agentArgs.length ? { agentArgs: this.agentArgs } : {}) };
   }
 
   async start(): Promise<void> {
-    if (this.server) return;
+    if (this.server && this.accepting) return;
+    if (this.startPromise) return this.startPromise;
+    const starting = this.startInternal();
+    this.startPromise = starting;
+    try { await starting; } finally { if (this.startPromise === starting) this.startPromise = null; }
+  }
+
+  private async startInternal(): Promise<void> {
     await rm(this.socketPath, { force: true });
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.off("error", reject); resolve(); }); });
-    await chmod(this.socketPath, 0o600);
-    this.accepting = true;
+    try {
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.off("error", reject); resolve(); }); });
+      await chmod(this.socketPath, 0o600);
+      this.accepting = true;
+    } catch (error) {
+      this.accepting = false;
+      if (this.server === server) this.server = null;
+      if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
+    await this.startPromise?.catch(() => undefined);
     this.accepting = false;
     const server = this.server; this.server = null;
     if (server) {
@@ -105,7 +124,8 @@ export class PrimaryToolGateway {
     const prompt = this.store.getActiveOrdinaryPrompt(request.bindingId, request.generation);
     if (!binding?.projectId || !prompt) throw new Error("Primary tool calls require a current active ordinary binding prompt");
     if (!binding.rootMessageId) throw new Error("Primary tool calls require a Lark topic root message");
-    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id, sourceMessageId: prompt.larkMessageId, rootMessageId: binding.rootMessageId }, this.messaging, this.workerCards, this.workerCreation);
+    if (!prompt.larkMessageId) throw new Error("Primary tool calls require a Lark source message");
+    const broker = new PrimaryToolBroker({ projectId: binding.projectId, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: prompt.id, sourceMessageId: prompt.larkMessageId, rootMessageId: binding.rootMessageId }, this.messaging, this.workerCards, this.workerCreation, this.topology, binding.kind);
     return await (broker[request.tool] as (input: Record<string, unknown>) => unknown)(request.arguments);
   }
 }

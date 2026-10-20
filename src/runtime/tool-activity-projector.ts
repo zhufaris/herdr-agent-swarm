@@ -1,4 +1,5 @@
 import { redactSecrets } from "./redact-secrets.js";
+import { createBoundedTurnOutput } from "./bounded-turn-output.js";
 
 export type ToolActivityCategory = "Skill" | "Read" | "Search" | "Edit" | "Command" | "Wait" | "Agent" | "Tool";
 
@@ -6,47 +7,77 @@ export interface ToolActivityDescriptor {
   category: ToolActivityCategory;
   target: string;
   skillNames: string[];
+  diff?: string;
 }
 
 export interface ProjectedToolCall {
   descriptor: ToolActivityDescriptor;
-  entry: string;
+  nestedIndex?: number;
+}
+
+/** Safely extracts static terminal commands nested in a Code Mode functions.exec input. */
+export function nestedExecCommands(input: string): string[] {
+  const commands: string[] = [];
+  const pattern = /tools\.exec_command\s*\(\s*\{[\s\S]{0,8192}?\bcmd\s*:\s*(["\'])((?:\\.|(?!\1)[\s\S])*)\1/g;
+  for (const match of input.matchAll(pattern)) {
+    const value = match[2]?.replace(/\\([\\\'"nrt])/g, (_full, escaped: string) => escaped === "n" ? "\n" : escaped === "r" ? "\r" : escaped === "t" ? "\t" : escaped);
+    if (value?.trim()) commands.push(value);
+  }
+  return [...new Set(commands)];
+}
+
+/** Extracts only file identities from a static apply_patch payload. */
+export function nestedPatchFiles(input: string): string[] {
+  return [...new Set(nestedPatchChanges(input).map(({ file }) => file))];
+}
+
+export function isStatusVisibleToolActivity(_descriptor: ToolActivityDescriptor): boolean { return true; }
+
+export function isAnswerVisibleToolActivity(_descriptor: ToolActivityDescriptor): boolean { return true; }
+
+export function toolActivityKey(callId: string, descriptor: ToolActivityDescriptor): string {
+  if (descriptor.category === "Wait") return `wait:${descriptor.target || callId}`;
+  if (descriptor.category === "Agent") return `agent:${descriptor.target || callId}`;
+  return `tool:${callId}`;
 }
 
 const TARGET_LIMIT = 160;
-const FAILURE_DETAIL_LIMIT = 4_000;
-const COMMAND_OUTPUT_LIMIT = 4_000;
-const FAILURE_LINE_LIMIT = 20;
 const TRUSTED_SKILL_PATH = /\/data00\/home\/[^/\s"']+\/(?:\.trae\/skills|\.agents\/skills|\.trae\/plugins)\/[A-Za-z0-9._+@=\/-]+\/SKILL\.md/g;
 
 export function projectToolCall(name: string, argumentsJson: string): ProjectedToolCall {
   const parsed = parseArguments(argumentsJson);
-  const skillNames = skillNamesFromArguments(parsed);
+  const skillNames = skillNamesFromArguments(parsed === null ? argumentsJson : parsed);
   if (skillNames.length > 0) {
-    return { descriptor: { category: "Skill", target: skillNames.join(", "), skillNames }, entry: "" };
+    return { descriptor: { category: "Skill", target: skillNames.join(", "), skillNames } };
   }
-  const descriptor = describeCall(name, parsed);
-  return { descriptor, entry: "" };
+  const descriptor = describeCall(name, parsed, parsed === null ? argumentsJson : undefined);
+  return { descriptor };
 }
 
-export function projectToolResult(descriptor: ToolActivityDescriptor, output: unknown): string {
-  const normalized = normalizeToolOutput(output);
-  const status = explicitStatus(output, normalized);
-  if (descriptor.category === "Command" && !descriptor.target) return "";
-  if (descriptor.category === "Command") return renderCommandResult(descriptor, output, normalized, status);
-  if (descriptor.category === "Wait") {
-    if (status.kind === "running") return "… 等待命令完成 · " + descriptor.target;
-    if (status.kind === "success") return "✓ 等待完成 · " + descriptor.target;
-    return renderFailure("✗ 等待后台任务完成 · " + status.summary, normalized);
-  }
-  const target = renderTarget(descriptor);
-  if (status.kind === "running") return "… " + descriptor.category + " · " + target + " · 运行中";
-  if (status.kind === "failed") {
-    const heading = "✗ " + descriptor.category + " · " + target + " · " + status.summary;
-    return renderFailure(heading, normalized);
-  }
-  const summary = successSummary(descriptor, normalized);
-  return "✓ " + descriptor.category + " · " + target + (summary ? " · " + summary : "");
+/** Projects every statically visible Tool nested in one Core Code Mode exec. */
+export function projectToolCalls(name: string, argumentsJson: string): ProjectedToolCall[] {
+  const normalized = name.toLowerCase();
+  if (normalized === "update_plan") return [];
+  const parsed = parseArguments(argumentsJson);
+  const record = asRecord(parsed);
+  const input = (normalized === "exec" || normalized === "functions.exec")
+    ? typeof record?.input === "string" ? record.input : parsed === null ? argumentsJson : null
+    : null;
+  if (!input) return [projectToolCall(name, argumentsJson)];
+  const nested = nestedToolCalls(input)
+    .filter((call) => call.name.toLowerCase() !== "update_plan")
+    .map((call, nestedIndex) => {
+      const skillNames = skillNamesFromArguments(call.source);
+      const projectedDescriptor = skillNames.length > 0
+        ? { category: "Skill" as const, target: skillNames.join(", "), skillNames }
+        : call.name.toLowerCase().includes("apply_patch")
+          ? descriptor("Edit", nestedPatchTarget(input) || call.name, nestedPatchDiff(input) ?? undefined)
+          : describeCall(call.name, call.arguments);
+      return { descriptor: projectedDescriptor, nestedIndex };
+    });
+  if (nested.length === 0) return [];
+  if (nested.length === 1) return [{ descriptor: nested[0]!.descriptor }];
+  return [{ descriptor: descriptor("Tool", name) }, ...nested];
 }
 
 export function projectToolResultState(output: unknown): "active" | "done" | "failed" {
@@ -55,24 +86,31 @@ export function projectToolResultState(output: unknown): "active" | "done" | "fa
   return status.kind === "success" ? "done" : status.kind === "running" ? "active" : "failed";
 }
 
-function renderFailure(heading: string, output: string): string {
-  const detail = failureTail(output);
-  if (!detail) return heading;
-  const prefix = heading + "\n\n```text\n";
-  const suffix = "\n```";
-  const room = Math.max(0, FAILURE_DETAIL_LIMIT - prefix.length - suffix.length);
-  return prefix + detail.slice(-room) + suffix;
+export function summarizeToolActivity(descriptor: ToolActivityDescriptor): string {
+  if (descriptor.category === "Wait") return `Wait · ${descriptor.target || "command"}`;
+  if (descriptor.category !== "Command") return descriptor.target || descriptor.category;
+  const target = descriptor.target;
+  const command = target.replace(/^(?:(?:env\s+)?[A-Za-z_][A-Za-z0-9_]*=(?:\[[^\]]*\]|[^\s]+)\s+)+/, "");
+  const sqlite = /(?:^|\s)sqlite3(?:\s+[^\s]+)*\s+([^\s]+\.(?:db|sqlite|sqlite3))(?:\s|$)/i.exec(target);
+  if (sqlite?.[1]) return `Query · ${basename(sqlite[1])}`;
+  if (/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|compile)(?:\s|$)/i.test(command)) return "Build · project";
+  const test = /(?:^|\s)([^\s/]+\.(?:test|spec)\.[cm]?[jt]sx?)(?:\s|$)/i.exec(command);
+  if (test?.[1]) return `Test · ${basename(test[1])}`;
+  if (/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?:\s|$)|(?:^|\s)(?:vitest|jest|pytest)(?:\s|$)/i.test(command)) return "Test · project";
+  const executable = /^(?:[^\s/]+\/)*([^\s/]+)/.exec(command)?.[1];
+  return executable ? `Run · ${executable}` : "Command";
 }
 
-function renderTarget(descriptor: ToolActivityDescriptor): string {
-  return descriptor.category === "Command" ? "`" + descriptor.target + "`" : descriptor.target;
-}
-
-function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
+function describeCall(name: string, parsed: unknown, rawArguments?: string): ToolActivityDescriptor {
   const record = asRecord(parsed);
   const normalized = name.toLowerCase();
-  if (normalized === "exec" && typeof record?.input === "string") {
-    const inner = nestedToolCall(record.input);
+  const codeModeInput = typeof record?.input === "string" ? record.input : rawArguments;
+  if ((normalized === "exec" || normalized === "functions.exec") && codeModeInput) {
+    const patchTarget = nestedPatchTarget(codeModeInput);
+    if (patchTarget) return descriptor("Edit", patchTarget, nestedPatchDiff(codeModeInput) ?? undefined);
+    const commands = nestedExecCommands(codeModeInput);
+    if (commands.length) return descriptor("Command", commands[0]!);
+    const inner = nestedToolCall(codeModeInput);
     if (inner) return describeCall(inner.name, inner.arguments);
   }
   if (normalized.includes("read") || normalized === "view_image") {
@@ -84,9 +122,11 @@ function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
     return descriptor("Search", [query, scope].filter(Boolean).join(" · ") || name);
   }
   if (normalized.includes("patch") || normalized.includes("edit") || normalized.includes("write_file")) {
-    return descriptor("Edit", firstValue(record, ["path", "file", "filename"]) ?? name);
+    const patchSource = typeof parsed === "string" ? parsed : rawArguments;
+    const diff = normalized.includes("apply_patch") && patchSource ? nestedPatchDiff(patchSource) : null;
+    return descriptor("Edit", firstValue(record, ["path", "file", "filename"]) ?? name, diff ?? undefined);
   }
-  if (normalized === "exec_command" || normalized === "shell" || normalized === "bash" || normalized === "exec") {
+  if (normalized === "exec_command" || normalized === "shell" || normalized === "bash" || normalized === "exec" || normalized === "functions.exec") {
     return descriptor("Command", firstValue(record, ["cmd", "command"]) ?? "");
   }
   if (normalized === "wait" || normalized === "write_stdin" || normalized.includes("wait_agent")) {
@@ -99,8 +139,36 @@ function describeCall(name: string, parsed: unknown): ToolActivityDescriptor {
   return descriptor("Tool", name);
 }
 
-function descriptor(category: ToolActivityCategory, target: string): ToolActivityDescriptor {
-  return { category, target: boundTarget(target, category !== "Command"), skillNames: [] };
+function descriptor(category: ToolActivityCategory, target: string, diff?: string): ToolActivityDescriptor {
+  return { category, target: boundTarget(target, category !== "Command"), skillNames: [], ...(diff ? { diff } : {}) };
+}
+
+function nestedPatchTarget(input: string): string {
+  return nestedPatchChanges(input).map(({ file, added, removed }) => `${file} (+${added} -${removed})`).join(", ");
+}
+
+function nestedPatchDiff(input: string): string | null {
+  const normalized = input.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
+  const matches = [...normalized.matchAll(/\*\*\* Begin Patch\r?\n([\s\S]*?)\r?\n\*\*\* End Patch/g)];
+  if (matches.length !== 1 || !matches[0]?.[1]?.trim()) return null;
+  return redactToolActivitySecrets(matches[0][1].trim());
+}
+
+function nestedPatchChanges(input: string): Array<{ file: string; added: number; removed: number }> {
+  if (!/tools\.apply_patch\s*\(/.test(input)) return [];
+  const normalized = input.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
+  const pattern = /^\*\*\* (?:Add|Update|Delete) File:\s*([^\r\n"]+)/gm;
+  const matches = [...normalized.matchAll(pattern)];
+  return matches.map((match, index) => {
+    const file = basename(match[1]!.trim());
+    const start = (match.index ?? 0) + match[0].length;
+    const end = matches[index + 1]?.index ?? normalized.indexOf("*** End Patch", start);
+    const body = normalized.slice(start, end < 0 ? normalized.length : end);
+    const lines = body.split("\n");
+    const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
+    const removed = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
+    return { file, added, removed };
+  });
 }
 
 function nestedToolCall(value: string): { name: string; arguments: unknown } | null {
@@ -113,6 +181,71 @@ function nestedToolCall(value: string): { name: string; arguments: unknown } | n
     if (field?.[2]) fields[key] = field[2].replace(/\\([\\"'])/g, "$1");
   }
   return { name: match[1]!, arguments: fields };
+}
+
+function nestedToolCalls(value: string): Array<{ name: string; arguments: unknown; source: string }> {
+  const calls: Array<{ name: string; arguments: unknown; source: string }> = [];
+  for (const start of toolCallStarts(value)) {
+    const { name, open } = start;
+    const close = matchingParen(value, open);
+    if (!name || close < 0) continue;
+    const source = value.slice(start.index, close + 1);
+    calls.push({ name, arguments: staticCallArguments(value.slice(open + 1, close)), source });
+  }
+  return calls;
+}
+
+function toolCallStarts(value: string): Array<{ index: number; name: string; open: number }> {
+  const starts: Array<{ index: number; name: string; open: number }> = [];
+  let quote = ""; let escaped = false; let lineComment = false; let blockComment = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!; const next = value[index + 1] ?? "";
+    if (lineComment) { if (char === "\n") lineComment = false; continue; }
+    if (blockComment) { if (char === "*" && next === "/") { blockComment = false; index += 1; } continue; }
+    if (quote) {
+      if (escaped) { escaped = false; continue; }
+      if (char === "\\") { escaped = true; continue; }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "/" && next === "/") { lineComment = true; index += 1; continue; }
+    if (char === "/" && next === "*") { blockComment = true; index += 1; continue; }
+    if (char === "\"" || char === "'" || char === "`") { quote = char; continue; }
+    if (!value.startsWith("tools.", index) || /[A-Za-z0-9_$]/.test(value[index - 1] ?? "")) continue;
+    const match = /^tools\.([A-Za-z0-9_]+)\s*\(/.exec(value.slice(index));
+    if (match?.[1]) starts.push({ index, name: match[1], open: index + match[0].length - 1 });
+  }
+  return starts;
+}
+
+function matchingParen(value: string, open: number): number {
+  let depth = 0; let quote = ""; let escaped = false; let lineComment = false; let blockComment = false;
+  for (let index = open; index < value.length; index += 1) {
+    const char = value[index]!; const next = value[index + 1] ?? "";
+    if (lineComment) { if (char === "\n") lineComment = false; continue; }
+    if (blockComment) { if (char === "*" && next === "/") { blockComment = false; index += 1; } continue; }
+    if (quote) {
+      if (escaped) { escaped = false; continue; }
+      if (char === "\\") { escaped = true; continue; }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "/" && next === "/") { lineComment = true; index += 1; continue; }
+    if (char === "/" && next === "*") { blockComment = true; index += 1; continue; }
+    if (char === "\"" || char === "'" || char === "`") { quote = char; continue; }
+    if (char === "(") depth += 1;
+    if (char === ")" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function staticCallArguments(body: string): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const key of ["cmd", "command", "path", "file", "filename", "query", "pattern", "regex", "workdir", "directory", "task_name", "target", "session_id", "cell_id"]) {
+    const field = new RegExp("(?:[\\\"']?" + key + "[\\\"']?)\\s*:\\s*([\\\"'])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1").exec(body);
+    if (field?.[2]) fields[key] = field[2].replace(/\\([\\\"'nrt])/g, (_full, escaped: string) => escaped === "n" ? "\n" : escaped === "r" ? "\r" : escaped === "t" ? "\t" : escaped);
+  }
+  return fields;
 }
 
 function skillNamesFromArguments(value: unknown): string[] {
@@ -160,14 +293,45 @@ function boundTarget(value: string, escapeInlineMarkdown = true): string {
   return safe.length <= TARGET_LIMIT ? safe : safe.slice(0, TARGET_LIMIT - 1).trimEnd() + "…";
 }
 
+function basename(value: string): string { return value.replace(/["']/g, "").split("/").at(-1) ?? value; }
+
 export function normalizeToolOutput(output: unknown): string {
-  if (typeof output === "string") return output.trim();
-  if (!Array.isArray(output)) return "";
-  return output.flatMap((part) => {
+  const text = typeof output === "string" ? output.trim() : Array.isArray(output) ? output.flatMap((part) => {
     if (!part || typeof part !== "object") return [];
     const record = part as Record<string, unknown>;
     return (record.type === "input_text" || record.type === "output_text") && typeof record.text === "string" ? [record.text.trim()] : [];
-  }).filter(Boolean).join("\n");
+  }).filter(Boolean).join("\n") : "";
+  return unwrapToolOutput(text);
+}
+
+export function normalizeToolResultForDisplay(output: unknown, sourceTruncated = false): string {
+  const normalized = normalizeToolOutput(output);
+  const marked = `${normalized}${sourceTruncated ? "\n\n… source event truncated" : ""}`;
+  return createBoundedTurnOutput(redactSecrets(marked)).text;
+}
+
+function unwrapToolOutput(value: string): string {
+  const withoutHeader = stripExecutionHeader(value);
+  const parsed = parseArguments(withoutHeader);
+  if (!parsed || typeof parsed !== "object") return withoutHeader;
+  if (Array.isArray(parsed) ? parsed.length === 0 : Object.keys(parsed).length === 0) return "";
+  const outputs = collectStructuredOutputs(parsed);
+  return outputs.length > 0 ? outputs.join("\n") : withoutHeader;
+}
+
+function stripExecutionHeader(value: string): string {
+  const lines = value.split("\n");
+  if (lines[0] !== "Script completed" || !lines[1]?.startsWith("Wall time " ) || lines[2] !== "Output:") return value;
+  return lines.slice(3).join("\n").trim();
+}
+
+function collectStructuredOutputs(value: unknown, depth = 0): string[] {
+  if (depth > 8 || !value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectStructuredOutputs(item, depth + 1));
+  const record = value as Record<string, unknown>;
+  const isResultEnvelope = ["exit_code", "chunk_id", "session_id", "cell_id", "wall_time_seconds", "original_token_count"].some((key) => key in record);
+  if (isResultEnvelope && typeof record.output === "string") return record.output.trim() ? [record.output.trim()] : [];
+  return Object.values(record).flatMap((item) => collectStructuredOutputs(item, depth + 1));
 }
 
 function explicitStatus(output: unknown, normalized: string): { kind: "success" | "running" | "failed"; summary: string } {
@@ -184,69 +348,6 @@ function explicitStatus(output: unknown, normalized: string): { kind: "success" 
   return { kind: "success", summary: "成功" };
 }
 
-function renderCommandResult(descriptor: ToolActivityDescriptor, output: unknown, normalized: string, status: ReturnType<typeof explicitStatus>): string {
-  const command = fence("bash", descriptor.target);
-  if (status.kind === "running") return `◆ **Ran** · 运行中\n\n${command}`;
-  if (status.kind === "failed") {
-    const heading = `◆ **Ran** · ✗ ${status.summary}`;
-    return renderBoundedCommandBlocks([heading, command], failureTail(normalized));
-  }
-  return renderBoundedCommandBlocks(["◆ **Ran**", command], commandOutput(output, normalized));
-}
-
-function commandOutput(output: unknown, normalized: string): string {
-  const parsed = typeof output === "string" ? parseArguments(output) : output;
-  const record = asRecord(parsed);
-  const source = typeof record?.output === "string" ? record.output.trim() : normalized;
-  const cleaned = redactToolActivitySecrets(source).split("\n").map((line) => line.trimEnd())
-    .filter((line) => !/^(?:Script completed|Wall time\b.*|Output:)$/i.test(line.trim()))
-    .join("\n").trim();
-  return cleaned;
-}
-
-function renderBoundedCommandBlocks(parts: string[], detail: string): string {
-  const prefix = parts.join("\n\n");
-  if (!detail) return prefix;
-  const opening = "\n\n```text\n";
-  const closing = "\n```";
-  const room = Math.max(0, COMMAND_OUTPUT_LIMIT - prefix.length - opening.length - closing.length);
-  return prefix + opening + detail.slice(-room) + closing;
-}
-
-function successSummary(descriptor: ToolActivityDescriptor, output: string): string {
-  if (descriptor.category === "Command") {
-    const files = /Test Files\s+(\d+) passed/i.exec(output)?.[1];
-    const tests = /Tests\s+(\d+) passed/i.exec(output)?.[1];
-    if (files && tests) return files + " files / " + tests + " tests passed";
-    const generic = /(\d+) passed(?:,\s*(\d+) failed)?(?:,\s*(\d+) skipped)?/i.exec(output);
-    if (generic) return [generic[1] + " passed", generic[2] ? generic[2] + " failed" : "", generic[3] ? generic[3] + " skipped" : ""].filter(Boolean).join(" / ");
-    const build = /generated\s+dist\/build-info\.json\s+\((sha256:[a-f0-9]+)\)/i.exec(output)?.[1];
-    if (build) return "build " + build.slice(0, 15) + "…";
-    return "";
-  }
-  if (descriptor.category === "Read") {
-    const lines = /(?:^|\n)(\d+)\s+lines?\b/i.exec(output)?.[1];
-    return lines ? lines + " 行" : "";
-  }
-  if (descriptor.category === "Search") {
-    const matches = /(?:found|matches?)\D{0,8}(\d+)/i.exec(output)?.[1];
-    return matches ? matches + " 条" : "";
-  }
-  return "";
-}
-
-function failureTail(output: string): string {
-  const lines = redactToolActivitySecrets(output).split("\n").map((line) => line.trimEnd())
-    .filter((line) => line.trim() && !/^(?:Script failed|Process exited with code\s+-?\d+|Wall time\b|Output:)$/i.test(line.trim()));
-  return lines.slice(-FAILURE_LINE_LIMIT).join("\n");
-}
-
 export function redactToolActivitySecrets(value: string): string {
   return redactSecrets(value);
-}
-
-function fence(language: string, value: string): string {
-  const ticks = String.fromCharCode(96).repeat(3);
-  const spacedTicks = String.fromCharCode(96) + " " + String.fromCharCode(96) + " " + String.fromCharCode(96);
-  return ticks + language + "\n" + value.replaceAll(ticks, spacedTicks) + "\n" + ticks;
 }

@@ -1,10 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage, renderFinalAnswerPage, splitAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { ANSWER_STREAM_PAGE_LIMIT, answerStreamContent, renderAnswerStreamPage, renderFinalAnswerPage, splitAnswerStreamPage } from "../src/runtime/answer-stream.js";
 import { renderLarkMarkdownPage } from "../src/runtime/lark-markdown.js";
 
 describe("Answer stream pagination", () => {
-  it("uses a 9,000-character default page limit", () => {
-    expect(ANSWER_STREAM_PAGE_LIMIT).toBe(9_000);
+  it("withholds a trailing reserved choice candidate from live Feishu content", () => {
+    const answer = "Visible answer\n\n```herdr-choice-list\n{\"version\":1";
+    expect(answerStreamContent({ phase: "running", answer, notice: null } as never)).toBe("⏳ 已接收请求\n\nVisible answer");
+  });
+
+  it("keeps an unterminated reserved protocol candidate visible at terminal settlement", () => {
+    const answer = "Visible answer\n\n```herdr-choice-list\n{bad";
+    expect(answerStreamContent({ phase: "completed", answer, notice: null } as never)).toBe(`⏳ 已接收请求\n\n${answer}`);
+  });
+
+  it("keeps ineligible reserved regions visible at terminal settlement", () => {
+    const answer = [
+      "Before",
+      "```herdr-choice-list\n{bad}\n```",
+      "Between",
+      "```herdr-choice-list\n{\"version\":2,\"intent\":\"none\"}\n```",
+      "After"
+    ].join("\n\n");
+
+    const visible = answerStreamContent({ phase: "completed", answer, notice: null } as never);
+    expect(visible).toBe(`⏳ 已接收请求\n\n${answer}`);
+    expect(visible).toContain("herdr-choice-list");
+  });
+
+  it("uses presentation Markdown for completed envelopes while leaving canonical citation evidence untouched", () => {
+    const choice = { version: 3, choice: { question: "Approve?", defaultOption: { id: "approve", label: "Approve", submitText: "Approve" }, alternatives: [] } };
+    const citation = "<oai-mem-citation>\n<citation_entries>MEMORY.md:1-1|note=[evidence]</citation_entries>\n<rollout_ids>019dbb13-b7a0-7000-8000-000000000001</rollout_ids>\n</oai-mem-citation>";
+    const answer = `Visible answer.\n\n<at id=ou_1234567890abcdef></at>\n\n$herdr-choice-list:herdr-choice-list\n\`\`\`herdr-choice-list\n${JSON.stringify(choice)}\n\`\`\`\n\n${citation}`;
+
+    expect(answerStreamContent({ phase: "completed", answer, notice: null } as never)).toBe("⏳ 已接收请求\n\nVisible answer.");
+    expect(answer).toContain(citation);
+  });
+
+  it("keeps a malformed terminal choice visible while still hiding requester syntax, invocation, and citation", () => {
+    const malformed = "```herdr-choice-list\n{not-json}\n```";
+    const citation = "<oai-mem-citation>\n<citation_entries>MEMORY.md:2-2|note=[evidence]</citation_entries>\n<rollout_ids>019dbb13-b7a0-7000-8000-000000000002</rollout_ids>\n</oai-mem-citation>";
+    const answer = `Visible answer.\n\n<at id=ou_1234567890abcdef></at>\n\n$herdr-choice-list:herdr-choice-list\n${malformed}\n\n${citation}`;
+
+    const rendered = answerStreamContent({ phase: "completed", answer, notice: null } as never);
+
+    expect(rendered).toBe(`⏳ 已接收请求\n\nVisible answer.\n\n${malformed}`);
+    expect(rendered).not.toContain("<at id=");
+    expect(rendered).not.toContain("$herdr-choice-list:herdr-choice-list");
+    expect(rendered).not.toContain("oai-mem-citation");
+  });
+  it("uses a 21,000-character default page limit", () => {
+    expect(ANSWER_STREAM_PAGE_LIMIT).toBe(21_000);
   });
 
   it("keeps short content on one card", () => {
@@ -35,18 +80,6 @@ describe("Answer stream pagination", () => {
 
   it("does not add a continuation warning to a complete page", () => {
     expect(renderAnswerStreamPage("Working\nDone", 0, 80).page).not.toContain("本页接近显示上限");
-  });
-
-  it("keeps command activities as Markdown during streaming with canonical continuation offsets", () => {
-    const command = ["◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text", "passed", "```"].join("\n");
-    const content = `${"before\n".repeat(20)}${command}\nafter`;
-    const first = renderAnswerStreamPage(content, 0, 180);
-    const rendered = renderAnswerStreamPage(content, first.nextPageStart!, 180);
-
-    expect(rendered.page).toContain("⚙️ **Ran** · `npm test` · ✓ command 7");
-    expect(rendered.page).not.toContain("collapsible_panel");
-    expect(first.nextPageStart).not.toBeNull();
-    expect(content.slice(first.nextPageStart!)).toContain("◆ **Ran**");
   });
 
   it("splits at the latest newline before the CardKit limit without losing text", () => {
@@ -131,15 +164,6 @@ describe("Answer stream pagination", () => {
     ].join("\n"));
   });
 
-  it("renders command activity as one compact Herdr-like row while streaming", () => {
-    const content = ["before", "", "◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "12 tests passed", "```", "", "after"].join("\n");
-    const rendered = renderAnswerStreamPage(content, 0).page;
-
-    expect(rendered).toContain("⚙️ **Ran** · `npm test` · ✓ 完成");
-    expect(rendered).not.toContain("```bash");
-    expect(rendered).not.toContain("12 tests passed");
-  });
-
   it("renders final command detail only within the proven canonical page boundary", () => {
     const first = ["◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "12 tests passed", "```"].join("\n");
     const content = `${first}\nNEXT PAGE`;
@@ -149,36 +173,6 @@ describe("Answer stream pagination", () => {
     expect(rendered.page).toContain("12 tests passed");
     expect(rendered.page).not.toContain("NEXT PAGE");
     expect(rendered.nextPageStart).toBe(first.length);
-  });
-
-  it.each([
-    ["JSON", "jq . result.json", (index: number) => `\"key-${index}\": ${index}`],
-    ["Git diff", "git diff", (index: number) => `+changed line ${index}`],
-    ["Git status", "git status --short", (index: number) => `M  src/file-${index}.ts`],
-    ["Git log", "git log --oneline", (index: number) => `abc${index} commit ${index}`],
-    ["test output", "npm test", (index: number) => `test ${index} passed`],
-    ["plain text", "printf output", (index: number) => `plain line ${index}`]
-  ])("compacts %s tool results only in the rendered page", (_kind, command, line) => {
-    const canonicalLines = Array.from({ length: 35 }, (_, index) => line(index + 1));
-    const canonical = ["◆ **Ran**", "", "```bash", command, "```", "", "```text", ...canonicalLines, "```"].join("\n");
-    const rendered = renderAnswerStreamPage(canonical, 0).page;
-    expect(rendered).toBe(`⚙️ **Ran** · \`${command}\` · ✓ 完成`);
-    expect(rendered).not.toContain(canonicalLines[0]!);
-    expect(canonical.split("\n")).toContain(canonicalLines[20]);
-  });
-
-  it("keeps one bounded tool result together when prose nearly fills a page", () => {
-    const resultLines = Array.from({ length: 35 }, (_, index) => "result-" + (index + 1));
-    const ticks = String.fromCharCode(96).repeat(3);
-    const activity = ["◆ **Ran**", "", ticks + "bash", "git log --oneline", ticks, "", ticks + "text", ...resultLines, ticks].join("\n");
-    const content = "intro ".repeat(70) + "\n\n" + activity;
-    const first = renderAnswerStreamPage(content, 0, 600);
-    const second = renderAnswerStreamPage(content, first.nextPageStart!, 600);
-
-    expect(first.page).not.toContain("⚙️ **Ran**");
-    expect(second.page).toContain("⚙️ **Ran**");
-    expect(second.page).toContain("⚙️ **Ran** · `git log --oneline` · ✓ 完成");
-    expect(second.page).not.toContain("result-1");
   });
 
   it("sanitizes prose but leaves fenced code literals unchanged", () => {

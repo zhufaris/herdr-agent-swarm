@@ -13,24 +13,23 @@ const message = { eventId: "event", messageId: "message", parentMessageId: null,
 
 function setup(activeTurn: () => { promptId: string; paneId: string } | null = () => ({ promptId: "prompt", paneId: "w1:p1" }), logger = pino({ enabled: false })) {
   const store = new SqliteBindingStore(":memory:");
-  store.createPendingBinding({ id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+  store.createPendingBinding({ id: "binding", kind: "orchestrator", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
   store.updateBinding("binding", { paneId: "w1:p1", traexSessionId: "terminal", state: "active", lifecycle: "active", attachment: "attached" });
   const provisioning = { selectProject: vi.fn(async () => undefined), reset: vi.fn(async () => true), attach: vi.fn(async () => true), reattach: vi.fn(async () => undefined), replace: vi.fn(async () => undefined) };
   const operationsQuery = { listSpaces: vi.fn(async () => undefined), listTopicPanes: vi.fn(async () => undefined), listSessions: vi.fn(async () => undefined), listFailures: vi.fn(async () => undefined) };
   const sessionAdministration = { emitStatus: vi.fn(async () => undefined), rename: vi.fn(async () => true), archive: vi.fn(async () => true), resume: vi.fn(async () => true) };
-  const modelSelection = { runModel: vi.fn(async () => true) }; const paneControl = { stop: vi.fn(async () => true), steer: vi.fn(async () => true) };
-  const paneClosure = { requestPaneClose: vi.fn(async () => true), confirmPaneClose: vi.fn(async () => true) }; const promptRun = {
-    awake: vi.fn(async () => ({ outcome: "none", reason: "no_detached_prompt" })),
-    skipDetached: vi.fn(() => ({ outcome: "skipped" as const, promptId: "detached-prompt", outboxReserved: true }))
-  };
+  const modelSelection = { runModel: vi.fn(async () => true) }; const paneControl = { stop: vi.fn(async () => true), steer: vi.fn(async () => ({ accepted: true, code: "exact_turn_accepted", detail: null, operationKind: "turn-control" as const, operationId: "control-1" })) };
+  const paneClosure = { requestPaneClose: vi.fn(async () => true), confirmPaneClose: vi.fn(async () => true) };
+  const recoverySupervisor = { recoverBinding: vi.fn(async () => ({ outcome: "none" as const, selectedStage: "recovered" as const, stage: "recovered" as const, reason: "no_recovery_debt", executionReason: "no_detached_prompt", recoveredTurns: 0, promptCount: 0, workerTurnCount: 0 })) };
+  const primaryCardRedelivery = { redeliver: vi.fn(() => ({ outcome: "scheduled" as const, mainScheduled: true as const, answerScheduled: true })) };
   const worker = { id: "worker", name: "reviewer", workerSessionGeneration: 1 }; const instanceControl = { createWorker: vi.fn(async () => ({ status: "created" as const, instance: worker })), inspect: vi.fn(() => ({ instance: worker })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const resolver = new SwarmCommandContextResolver({ config, store, activeTurn });
   const wakeCardContext = vi.fn();
   let gateway!: SwarmCommandGateway;
   const wakeCommand = vi.fn((intentId: string) => { queueMicrotask(() => gateway.wakeAcceptedIntent({ id: intentId })); });
-  gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, wakeCardContext, wakeCommand, presentation: applicationPresentation } as never);
+  gateway = new SwarmCommandGateway({ store, primaryPrompts: store, resolver, outbound, logger, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, recoverySupervisor, primaryCardRedelivery, instanceControl, wakeCardContext, wakeCommand, presentation: applicationPresentation } as never);
   const workerCreation = new ProgrammaticWorkerCreation(gateway, 1_000);
-  return { store, gateway, workerCreation, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, promptRun, instanceControl, outbound, wakeCardContext, wakeCommand };
+  return { store, gateway, workerCreation, provisioning, operationsQuery, sessionAdministration, modelSelection, paneControl, paneClosure, recoverySupervisor, primaryCardRedelivery, instanceControl, outbound, wakeCardContext, wakeCommand };
 }
 
 function capturingLogger() {
@@ -59,6 +58,41 @@ describe("SwarmCommandGateway", () => {
     fixture.store.close();
   });
 
+  it("requires confirmation for literal Orchestrator clear without admitting work", async () => {
+    const fixture = setup();
+    await expect(fixture.gateway.submit({ source: "literal", message, command: { kind: "clear" } })).resolves.toMatchObject({ outcome: "confirmation-required", commandKind: "clear", context: { primary: { bindingId: "binding" } } });
+    expect(fixture.store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 0 });
+    fixture.store.close();
+  });
+
+  it("keeps the concrete steer rejection reason on the command status card without a duplicate rejection card", async () => {
+    const fixture = setup();
+    fixture.paneControl.steer.mockResolvedValueOnce({ accepted: false, code: "turn_changed", detail: "Runtime turn identity changed", operationKind: null, operationId: null });
+
+    await handle(fixture.gateway, { ...message, messageId: "steer-rejected" }, { kind: "steer", text: "focus" });
+    await waitForIntentState(fixture.store, "rejected");
+
+    const intent = fixture.store.database.prepare("SELECT id FROM swarm_command_intents").get() as { id: string };
+    expect(fixture.store.getCommandIntent(intent.id)).toMatchObject({ outcome: { code: "turn_changed", detail: "Runtime turn identity changed" } });
+    const status = fixture.store.database.prepare("SELECT card_json FROM command_status_views WHERE intent_id = ?").get(intent.id) as { card_json: string };
+    expect(status.card_json).toContain("Runtime turn identity changed");
+    expect(status.card_json).toContain("具体原因如下");
+    expect(fixture.outbound.enqueueCard).not.toHaveBeenCalled();
+    fixture.store.close();
+  });
+
+  it("records idle steer as an accepted priority prompt", async () => {
+    const fixture = setup(() => null);
+    fixture.paneControl.steer.mockResolvedValueOnce({ accepted: true, code: "priority_accepted", detail: "已创建优先任务 `priority-1`，将在普通队列之前执行。", operationKind: "prompt", operationId: "priority-1" });
+
+    await handle(fixture.gateway, { ...message, messageId: "steer-idle" }, { kind: "steer", text: "urgent" });
+    await waitForIntentState(fixture.store, "succeeded");
+
+    const row = fixture.store.database.prepare("SELECT id FROM swarm_command_intents").get() as { id: string };
+    expect(fixture.store.getCommandIntent(row.id)).toMatchObject({ outcome: { code: "priority_accepted", operationKind: "prompt", operationId: "priority-1" } });
+    fixture.store.close();
+  });
+
   it("logs correlation metadata without raw command arguments", async () => {
     const capture = capturingLogger();
     const fixture = setup(undefined, capture.logger);
@@ -80,7 +114,6 @@ describe("SwarmCommandGateway", () => {
 
   it.each([
     [{ kind: "stop" as const }, "confirmation-required"],
-    [{ kind: "skip" as const }, "confirmation-required"],
     [{ kind: "pane_close_confirm" as const, code: "ABC123" }, "confirmation-required"],
     [{ kind: "rename" as const, title: "Next" }, "accepted"]
   ])("applies natural-language risk admission for %j", async (command, outcome) => {
@@ -148,6 +181,8 @@ describe("SwarmCommandGateway", () => {
     expect(fixture.instanceControl.createWorker).toHaveBeenCalledOnce();
     expect(fixture.store.database.prepare("SELECT worker_id, root_message_id, state FROM worker_thread_entry_requests").all()).toEqual([{ worker_id: "worker-tool", root_message_id: "root", state: "pending" }]);
     await expect(fixture.workerCreation.createWorkerFromPrimaryTool({ ...input, sourceMessageId: "forged" })).rejects.toThrow(/active prompt changed/);
+    fixture.store.database.prepare("UPDATE prompt_jobs SET lark_message_id = NULL, ingress_source = 'internal', source_message_key = 'internal:primary-tool-prompt' WHERE id = 'primary-tool-prompt'").run();
+    await expect(fixture.workerCreation.createWorkerFromPrimaryTool(input)).rejects.toThrow(/active prompt changed/);
     fixture.store.close();
   });
 
@@ -160,8 +195,7 @@ describe("SwarmCommandGateway", () => {
     [{ kind: "pane_close_request" }, "paneClosure", "requestPaneClose"],
     [{ kind: "pane_close_confirm", code: "ABC123" }, "paneClosure", "confirmPaneClose"],
     [{ kind: "resume" }, "sessionAdministration", "resume"],
-    [{ kind: "awake" }, "promptRun", "awake"],
-    [{ kind: "skip" }, "promptRun", "skipDetached"],
+    [{ kind: "awake" }, "recoverySupervisor", "recoverBinding"],
     [{ kind: "stop" }, "paneControl", "stop"],
     [{ kind: "steer", text: "focus" }, "paneControl", "steer"],
     [{ kind: "model", name: "gpt" }, "modelSelection", "runModel"],
@@ -175,31 +209,14 @@ describe("SwarmCommandGateway", () => {
     fixture.store.close();
   });
 
-  it("skips a durable detached blocker without requiring an in-memory active turn and deduplicates redelivery", async () => {
+  it("admits awake for an idle Primary session and schedules card redelivery", async () => {
     const fixture = setup(() => null);
-    const skipMessage = { ...message, messageId: "skip-message" };
-
-    await handle(fixture.gateway, skipMessage, { kind: "skip" });
-    await handle(fixture.gateway, skipMessage, { kind: "skip" });
-
-    await vi.waitFor(() => expect(fixture.promptRun.skipDetached).toHaveBeenCalledOnce());
-    expect(fixture.promptRun.skipDetached).toHaveBeenCalledWith("binding", 1, "admin", "skip-message", "root");
-    expect(fixture.outbound.enqueueCard).toHaveBeenCalledWith("root", "skip:skip-message", expect.any(Object));
-    expect(JSON.stringify(fixture.outbound.enqueueCard.mock.calls.at(-1)?.[2])).toMatch(/detached-prompt|结果仍不确定/);
-    await vi.waitFor(() => expect(fixture.store.database.prepare("SELECT state, attempt_count FROM swarm_command_intents").all()).toEqual([{ state: "succeeded", attempt_count: 1 }]));
-    fixture.store.close();
-  });
-
-  it.each([
-    [{ outcome: "none" as const }, "当前没有 detached prompt", "succeeded"],
-    [{ outcome: "stale" as const }, "上下文已变化", "rejected"]
-  ])("renders detached skip outcome %# without changing another prompt", async (result, expectedText, intentState) => {
-    const fixture = setup(() => null);
-    fixture.promptRun.skipDetached.mockReturnValueOnce(result);
-    await handle(fixture.gateway, { ...message, messageId: `skip-${result.outcome}` }, { kind: "skip" });
-    await waitForIntentState(fixture.store, intentState);
-    expect(JSON.stringify(fixture.outbound.enqueueCard.mock.calls.at(-1)?.[2])).toContain(expectedText);
-    expect(fixture.store.database.prepare("SELECT state FROM swarm_command_intents").get()).toEqual({ state: intentState });
+    await handle(fixture.gateway, { ...message, messageId: "awake-idle" }, { kind: "awake" });
+    await waitForIntentState(fixture.store, "succeeded");
+    expect(fixture.recoverySupervisor.recoverBinding).toHaveBeenCalledWith("binding");
+    expect(fixture.primaryCardRedelivery.redeliver).toHaveBeenCalledWith(expect.objectContaining({ bindingId: "binding", expectedBindingGeneration: 1 }));
+    const intent = fixture.store.database.prepare("SELECT context_json FROM swarm_command_intents").get() as { context_json: string };
+    expect(JSON.parse(intent.context_json).primary.activePromptId).toBeNull();
     fixture.store.close();
   });
 
@@ -247,7 +264,7 @@ describe("SwarmCommandGateway", () => {
     fixture.store.close();
   });
 
-  it("rejects an accepted active-turn command after the turn changes", async () => {
+  it("does not freeze legacy Prompt identity into active-turn command context", async () => {
     let promptId = "prompt";
     const fixture = setup(() => ({ promptId, paneId: "w1:p1" }));
     const resolved = new SwarmCommandContextResolver({ config, store: fixture.store, activeTurn: () => ({ promptId, paneId: "w1:p1" }) }).resolve(message, { kind: "stop" });
@@ -255,8 +272,8 @@ describe("SwarmCommandGateway", () => {
     fixture.store.acceptCommandIntent({ id: "stale-turn", idempotencyKey: "stale-turn-key", laneKey: resolved.laneKey, command: { kind: "stop" }, context: resolved.context, replayPolicy: "non-replayable", acceptedAt: "2026-09-05T00:00:00.000Z" });
     promptId = "replacement-prompt";
     await fixture.gateway.recover();
-    expect(fixture.paneControl.stop).not.toHaveBeenCalled();
-    expect(fixture.store.getCommandIntent("stale-turn")).toMatchObject({ state: "rejected", outcome: { code: "stale_context" } });
+    expect(fixture.paneControl.stop).toHaveBeenCalledOnce();
+    expect(fixture.store.getCommandIntent("stale-turn")).toMatchObject({ state: "succeeded" });
     fixture.store.close();
   });
 

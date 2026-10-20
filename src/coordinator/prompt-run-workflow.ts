@@ -1,8 +1,9 @@
 import type { Logger } from "pino";
 import { createBridgeEvent, type BridgeEventOf } from "../domain/create-bridge-event.js";
 import type { BridgeEvent } from "../domain/events.js";
-import type { HerdrPort, TraexControlPort, TraexTranscriptObservation, TraexTranscriptReaderPort } from "../domain/ports/external.js";
+import type { HerdrPort, AgentTranscriptObservation, AgentTranscriptReaderPort } from "../domain/ports/external.js";
 import type { DetachedPromptSkipResult } from "../domain/ports/prompt-acceptance.js";
+import type { BindingPromptWorkflowPort } from "../domain/ports/prompt-acceptance.js";
 import type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "../domain/ports/prompt-run.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
@@ -21,6 +22,7 @@ import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { ActiveTurnSnapshot, PrimaryRuntimeStatePort } from "../domain/ports/primary-runtime-state.js";
 import { DetachedPromptObserver } from "./detached-prompt-observer.js";
 import { PrimaryPromptDispatcher } from "./primary-prompt-dispatcher.js";
+import { assessDetachedPromptReceipt } from "./core-event-recovery.js";
 
 export interface PromptRunWorkflowPort extends PrimaryRuntimeStatePort {
   prepareRecovery(): void;
@@ -35,24 +37,27 @@ export interface PromptRunWorkflowPort extends PrimaryRuntimeStatePort {
 interface PromptRunWorkflowOptions {
   stores: { dispatch: PromptDispatchStore; recovery: PromptRecoveryStore; session: PromptSessionStore };
   herdr: HerdrPort;
-  traexControl?: TraexControlPort;
   bus: LifecycleEventPublisher;
   scheduler: PromptWorkScheduler;
   outboundWork: OutboundWorkNotifier;
   logger: Logger;
-  presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard">;
+  presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "primaryHumanReviewNotification">;
   turnTimeoutMs: number;
   agentDrivers?: AgentDriverCatalog;
   shutdownGraceMs?: number;
   safetyScanIntervalMs?: number;
+  supervisedSafetyScan?: boolean;
   staleClaimGraceMs?: number;
-  transcriptReader?: TraexTranscriptReaderPort;
+  detachedPromptAutoSkipMs?: number;
+  transcriptReader?: AgentTranscriptReaderPort;
   adoptRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: import("../domain/types.js").HerdrPane }): import("../domain/types.js").RuntimeObservationApplication;
   transcriptPolling?: { identityMs: number; attachedMs: number };
   handoffExternalTurns?: (bindingId: string) => Promise<void>;
-  observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: TraexTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
+  observeSupersedingExternalTurn?: (binding: Binding, prompt: PromptJob, observation: AgentTranscriptObservation) => Promise<"ignored" | "pending" | "observing" | "completed">;
   recoverExternalTurns?: (binding: Binding, prompt: PromptJob) => Promise<{ outcome: "recovered"; recoveredTurns: number } | { outcome: "none" | "unavailable"; reason: string }>;
+  onRecoveredPromptSettled?(promptId: string): void | Promise<void>;
   mainCards?: Pick<MainCardConvergencePort, "converge">;
+  bindingPrompts: Pick<BindingPromptWorkflowPort, "applyCoreObservation" | "drainDueNativeInputBatch">;
 }
 
 export class PromptRunWorkflow implements PromptRunWorkflowPort {
@@ -63,6 +68,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
   private readonly detachedObserver: DetachedPromptObserver;
   private readonly turnExecutor: PromptTurnExecutor;
   private readonly dispatcher: PrimaryPromptDispatcher;
+  private readonly batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly batchReconciliations = new Map<string, Promise<void>>();
+  private readonly pendingWorkerWakes = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private started = false;
   private stopping = false;
@@ -73,7 +81,8 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       store: options.stores.recovery, scheduler: options.scheduler, logger: options.logger, intervalMs,
       staleClaimGraceMs: options.staleClaimGraceMs ?? Math.max(10_000, intervalMs * 2),
       isBindingOwned: (bindingId) => this.registry.hasWorker(bindingId) || this.registry.hasTurn(bindingId),
-      maintainObserverCaches: () => this.transcriptObserver.prune()
+      maintainObserverCaches: () => this.transcriptObserver.prune(),
+      externallyScheduled: options.supervisedSafetyScan ?? false
     });
     this.transcriptObserver = new TranscriptObserver({
       store: options.stores.dispatch, herdr: options.herdr, adoptRuntimeIdentity: options.adoptRuntimeIdentity, ...(options.transcriptReader ? { reader: options.transcriptReader } : {}), logger: options.logger,
@@ -81,18 +90,23 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       publishObservation: async (bindingId, promptId, observation) => {
         await this.publish(bindingId, "TurnOutputObserved", "herdr", { promptId, observation });
-      }
+      },
+      workflow: options.bindingPrompts
     });
     this.detachedObserver = new DetachedPromptObserver({
       store: options.stores.recovery, herdr: options.herdr, transcript: this.transcriptObserver, registry: this.registry, logger: options.logger,
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       ...(options.observeSupersedingExternalTurn ? { observeSupersedingExternalTurn: options.observeSupersedingExternalTurn } : {}),
+      ...(options.onRecoveredPromptSettled ? { onSettled: options.onRecoveredPromptSettled } : {}),
+      renderRunCard: options.presentation.answerCard,
       publish: (bindingId, type, origin, payload) => this.publish(bindingId, type, origin, payload)
     });
     this.turnExecutor = new PromptTurnExecutor({
-      store: options.stores.dispatch, herdr: options.herdr, ...(options.traexControl ? { traexControl: options.traexControl } : {}), ...(options.agentDrivers ? { agentDrivers: options.agentDrivers } : {}), transcript: this.transcriptObserver, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
+      store: options.stores.dispatch, herdr: options.herdr, ...(options.agentDrivers ? { agentDrivers: options.agentDrivers } : {}), transcript: this.transcriptObserver, bindingPrompts: options.bindingPrompts, logger: options.logger, turnTimeoutMs: options.turnTimeoutMs,
       isBindingActive: (bindingId) => this.isBindingActive(bindingId), isStopping: () => this.stopping,
       updateTurnState: (bindingId, promptId, state) => this.registry.updateTurnState(bindingId, promptId, state),
+      renderHumanReviewNotification: options.presentation.primaryHumanReviewNotification,
+      wakeOutbound: () => options.outboundWork.wake(),
       convergeMainCard: (bindingId) => this.convergeMainCard(bindingId),
       releaseUndispatched: ({ binding, prompt }) => this.options.stores.recovery.releaseUndispatchedPromptClaim({ promptId: prompt.id, bindingId: binding.id, updatedAt: prompt.updatedAt, bindingGeneration: binding.generation, paneId: binding.paneId! }),
       observeDetached: (prompt, binding, source, controller) => this.detachedObserver.observeSource(prompt, binding, source, controller),
@@ -130,6 +144,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     return {
       state: this.stopping ? "stopping" : this.started ? "running" : "idle",
       activeTurnWorkers: this.registry.activeWorkerCount,
+      nativeSubmissionWorkers: 0,
       ...safety
     };
   }
@@ -139,10 +154,18 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     try {
       if (event.kind === "detached-observer-ready") {
         const prompt = this.options.stores.recovery.getPrompt(event.promptId);
-        if (prompt?.bindingId === event.bindingId && prompt.state === "running" && prompt.observationState === "detached") this.scheduleDetachedObserver(prompt);
+        if (prompt?.bindingId === event.bindingId && prompt.executionOrigin !== "herdr" && (
+          ((prompt.state === "running" || prompt.state === "recovering") && prompt.observationState === "detached")
+          || ((prompt.state === "uncertain" || prompt.state === "cancelled") && prompt.observationState === "completed")
+        )) this.scheduleDetachedObserver(prompt);
         return;
       }
       if (event.kind === "binding-runtime-changed" && !this.isBindingActive(event.bindingId)) this.registry.abortTurn(event.bindingId);
+      if (event.kind === "prompt-ready" && this.registry.hasWorker(event.bindingId)) {
+        this.pendingWorkerWakes.add(event.bindingId);
+        void this.reconcileNativeInputBatch(event.bindingId);
+        return;
+      }
       this.scheduleWorker(event.bindingId);
     } finally {
       this.safetyScanner.resetCadence();
@@ -173,7 +196,9 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     const worker = recovery.then(() => undefined);
     this.registry.registerWorker(bindingId, worker);
     try {
-      return await recovery;
+      const result = await recovery;
+      if (result.outcome === "recovered") await this.notifyRecoveredPromptSettled(prompt.id);
+      return result;
     } finally {
       this.registry.releaseWorker(bindingId, worker);
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
@@ -190,6 +215,7 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     if (result.outcome === "skipped") {
       this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
       if (result.outboxReserved) this.options.outboundWork.wake();
+      this.safetyScanner.request();
     }
     return result;
   }
@@ -198,9 +224,12 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     this.stopping = true;
     this.transcriptObserver.clear();
     this.safetyScanner.stop();
+    for (const timer of this.batchTimers.values()) clearTimeout(timer);
+    this.batchTimers.clear();
+    this.pendingWorkerWakes.clear();
     this.unsubscribe?.();
     this.unsubscribe = null;
-    const pending = this.registry.pendingWorkers;
+    const pending = [...this.registry.pendingWorkers, ...this.batchReconciliations.values()];
     if (!pending.length) return;
     const settled = Promise.allSettled(pending);
     let didSettle = false;
@@ -224,22 +253,176 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
 
   private scheduleWorker(bindingId: string): void {
     if (this.registry.hasWorker(bindingId)) return;
-    const worker = this.dispatcher.drain(bindingId).finally(() => {
-      this.registry.releaseWorker(bindingId, worker);
-    });
+    const worker = this.reconcileNativeInputBatch(bindingId)
+      .then(() => this.dispatcher.drain(bindingId))
+      .finally(() => {
+        this.registry.releaseWorker(bindingId, worker);
+        if (!this.stopping && this.pendingWorkerWakes.delete(bindingId)) this.scheduleWorker(bindingId);
+      });
     this.registry.registerWorker(bindingId, worker);
+  }
+
+  private reconcileNativeInputBatch(bindingId: string): Promise<void> {
+    const existing = this.batchReconciliations.get(bindingId);
+    if (existing) return existing;
+    const reconciliation = this.options.bindingPrompts.drainDueNativeInputBatch(bindingId)
+      .then((result) => this.scheduleNativeInputBatchWake(bindingId, result.nextDueAt))
+      .catch((error) => {
+        this.options.logger.warn({ event: "native-input-batch-reconciliation-failed", err: safeLogError(error), bindingId, outcome: "deferred_to_reconciliation" }, "deferred Native Input Batch reconciliation after a transient failure");
+      })
+      .finally(() => this.batchReconciliations.delete(bindingId));
+    this.batchReconciliations.set(bindingId, reconciliation);
+    return reconciliation;
+  }
+
+  private scheduleNativeInputBatchWake(bindingId: string, dueAt: string | null): void {
+    const existing = this.batchTimers.get(bindingId);
+    if (existing) clearTimeout(existing);
+    this.batchTimers.delete(bindingId);
+    if (!dueAt || this.stopping) return;
+    const timer = setTimeout(() => {
+      this.batchTimers.delete(bindingId);
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId });
+    }, Math.max(0, Date.parse(dueAt) - Date.now()));
+    timer.unref?.();
+    this.batchTimers.set(bindingId, timer);
   }
 
   private scheduleDetachedObserver(prompt: PromptJob): void {
     if (this.registry.hasWorker(prompt.bindingId)) return;
-    const worker = this.detachedObserver.observe(prompt).finally(() => {
-      this.registry.releaseWorker(prompt.bindingId, worker);
-      const latest = this.options.stores.recovery.getPrompt(prompt.id);
-      if (!this.stopping && latest && !(latest.state === "running" && latest.observationState === "detached")) {
-        this.options.scheduler.wake({ kind: "prompt-ready", bindingId: prompt.bindingId });
-      }
-    });
+    let requestRecoveryRescan = false;
+    const worker = this.tryRecoverProjectedBridgeTurn(prompt)
+      .then(async (historicalRecovery) => {
+        if (historicalRecovery === "recovered" || historicalRecovery === "needs_human") return;
+        if (historicalRecovery === "turn_owned_by_other_prompt") {
+          requestRecoveryRescan = await this.tryAutoSkip(prompt);
+          return;
+        }
+        const recovery = await assessDetachedPromptReceipt({ prompt, store: this.options.stores.dispatch, ...(this.options.transcriptReader ? { reader: this.options.transcriptReader } : {}) });
+        if (recovery.outcome === "owned") await this.detachedObserver.observe(recovery.prompt);
+        else if (recovery.outcome === "accepted") {
+          this.persistRecoveredNativeReceipt(recovery.prompt);
+          requestRecoveryRescan = await this.tryAutoSkip(recovery.prompt);
+        } else if (recovery.outcome === "uncertain") {
+          this.persistRecoveredNativeReceipt(recovery.prompt, "Core reported an uncertain native submission; it will not be replayed");
+          requestRecoveryRescan = await this.tryAutoSkip(recovery.prompt);
+        } else if (recovery.outcome === "rejected") {
+          requestRecoveryRescan = this.releaseRejectedNativeReceipt(recovery.prompt);
+        }
+        else if (isQualifyingDetachedRecovery(recovery)) requestRecoveryRescan = await this.tryAutoSkip(prompt);
+      }).catch((error) => {
+        this.options.logger.warn({ event: "detached-prompt-ownership-recovery-failed", err: safeLogError(error), bindingId: prompt.bindingId, promptId: prompt.id, outcome: "deferred" }, "deferred detached Prompt ownership recovery after a transient Core failure");
+      }).finally(() => {
+        this.registry.releaseWorker(prompt.bindingId, worker);
+        const latest = this.options.stores.recovery.getPrompt(prompt.id);
+        const stillOwnsExecutionSlot = latest?.state === "running" && latest.observationState === "detached";
+        if (!this.stopping && latest && !stillOwnsExecutionSlot) {
+          this.options.scheduler.wake({ kind: "prompt-ready", bindingId: prompt.bindingId });
+        }
+        if (!this.stopping && requestRecoveryRescan) this.safetyScanner.request();
+      });
     this.registry.registerWorker(prompt.bindingId, worker);
+  }
+
+  private async tryRecoverProjectedBridgeTurn(prompt: PromptJob): Promise<"recovered" | "needs_human" | "turn_owned_by_other_prompt" | "unresolved"> {
+    if (typeof this.options.stores.recovery.recoverProjectedBridgeTurn !== "function") return "unresolved";
+    const binding = this.options.stores.recovery.getBinding(prompt.bindingId);
+    if (!binding?.paneId || !binding.agentSessionValue) return "unresolved";
+    const recovery = this.options.stores.recovery.recoverProjectedBridgeTurn({
+      promptId: prompt.id,
+      bindingId: binding.id,
+      expectedBindingGeneration: binding.generation,
+      expectedPaneId: binding.paneId,
+      expectedNativeSessionId: binding.agentSessionValue,
+      occurredAt: new Date().toISOString(),
+      renderRunCard: this.options.presentation.answerCard
+    });
+    if (recovery.outcome === "turn_owned_by_other_prompt") return recovery.outcome;
+    if (recovery.outcome === "needs_human") {
+      if (recovery.outboxReserved) this.options.outboundWork.wake();
+      await this.notifyRecoveredPromptSettled(prompt.id);
+      return "needs_human";
+    }
+    if (recovery.outcome !== "recovered") return "unresolved";
+    if ("recoveryMode" in recovery && recovery.recoveryMode === "late") {
+      if (recovery.outboxReserved) this.options.outboundWork.wake();
+      await this.notifyRecoveredPromptSettled(prompt.id);
+      this.options.logger.info({
+        event: "uncertain-prompt-projected-turn-repaired", bindingId: binding.id, promptId: prompt.id,
+        paneId: binding.paneId, turnId: recovery.turnId, terminalState: recovery.terminalState, outcome: "recovered"
+      }, "repaired an uncertain Bridge Prompt from exact projected Core evidence on a separate continuation");
+      return "recovered";
+    }
+    if (recovery.terminalState === "completed") {
+      await this.publish(binding.id, "TurnCompleted", "herdr", {
+        promptId: prompt.id,
+        answer: recovery.answer,
+        queueDepth: this.options.stores.recovery.countPendingPrompts(binding.id)
+      });
+    } else {
+      await this.publish(binding.id, "TurnFailed", "herdr", {
+        promptId: prompt.id,
+        error: recovery.error,
+        queueDepth: this.options.stores.recovery.countPendingPrompts(binding.id)
+      });
+    }
+    await this.notifyRecoveredPromptSettled(prompt.id);
+    this.options.logger.info({
+      event: "detached-prompt-projected-turn-recovered", bindingId: binding.id, promptId: prompt.id,
+      paneId: binding.paneId, turnId: recovery.turnId, terminalState: recovery.terminalState, outcome: "recovered"
+    }, "recovered detached Bridge Prompt from durable projected Core events");
+    return "recovered";
+  }
+
+  private persistRecoveredNativeReceipt(prompt: PromptJob, uncertainReason?: string): void {
+    if (!prompt.nativeSubmissionId || !prompt.dispatchedAt) return;
+    this.options.stores.dispatch.applyPromptNativeSubmissionReceipt({
+      promptId: prompt.id, bindingId: prompt.bindingId, submissionId: prompt.nativeSubmissionId,
+      dispatchedAt: prompt.dispatchedAt, state: uncertainReason ? "uncertain" : "accepted",
+      notice: uncertainReason ?? "Core confirmed the native submission; observing execution without replay"
+    });
+  }
+
+  private releaseRejectedNativeReceipt(prompt: PromptJob): boolean {
+    if (!prompt.nativeSubmissionId || !prompt.dispatchedAt) return false;
+    return this.options.stores.dispatch.releaseRejectedNativeSubmission({
+      promptId: prompt.id, bindingId: prompt.bindingId, submissionId: prompt.nativeSubmissionId, dispatchedAt: prompt.dispatchedAt
+    });
+  }
+
+  private async tryAutoSkip(prompt: PromptJob): Promise<boolean> {
+    const timeoutMs = this.options.detachedPromptAutoSkipMs ?? 0;
+    if (timeoutMs === 0) return false;
+    const current = this.options.stores.recovery.getPrompt(prompt.id);
+    const binding = this.options.stores.recovery.getBinding(prompt.bindingId);
+    if (!current || !binding?.paneId || !binding.agentSessionValue || current.state !== "recovering" || current.observationState !== "detached" || current.transcriptTurnId || current.transcriptTurnStartedAt) return false;
+    const dispatchedAt = Date.parse(current.dispatchedAt ?? current.createdAt);
+    const occurredAt = new Date();
+    if (!Number.isFinite(dispatchedAt)) return false;
+    const runtime = await this.options.herdr.observeRuntime(binding.paneId);
+    if (!runtime.pane || runtime.pane.paneId !== binding.paneId || runtime.pane.agentSession?.value !== binding.agentSessionValue || !["idle", "done"].includes(runtime.pane.agentState)) return false;
+    const result = this.options.stores.recovery.advanceDetachedPromptRecovery({
+      promptId: current.id,
+      bindingId: binding.id,
+      expectedBindingGeneration: binding.generation,
+      expectedPaneId: binding.paneId,
+      expectedNativeSessionId: binding.agentSessionValue,
+      expiredBefore: new Date(occurredAt.getTime() - timeoutMs).toISOString(),
+      reason: "⚠ 无法确认该请求的最终执行结果，已跳过；请求不会自动重放，后续队列继续处理。",
+      occurredAt: occurredAt.toISOString(),
+      renderRunCard: this.options.presentation.answerCard
+    });
+    this.options.logger.warn({
+      event: "detached-prompt-recovery-advanced", bindingId: binding.id, promptId: current.id, paneId: binding.paneId,
+      outcome: result.outcome, attemptCount: result.outcome === "stale" ? null : result.attemptCount,
+      nextAttemptAt: result.outcome === "deferred" || result.outcome === "observed" ? result.nextAttemptAt : null
+    }, "advanced bounded recovery for a Core-unrecoverable detached Prompt without replay");
+    if (result.outcome === "skipped") {
+      this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id });
+      if (result.outboxReserved) this.options.outboundWork.wake();
+      return true;
+    }
+    return false;
   }
 
   private isBindingActive(bindingId: string): boolean {
@@ -269,6 +452,30 @@ export class PromptRunWorkflow implements PromptRunWorkflowPort {
     try { await this.options.mainCards?.converge(bindingId); }
     catch (error) { this.options.logger.warn({ event: "model-main-card-convergence-failed", err: safeLogError(error), bindingId, outcome: "deferred" }, "deferred model state projection to normal Main Card convergence"); }
   }
+
+  private async notifyRecoveredPromptSettled(promptId: string): Promise<void> {
+    try { await this.options.onRecoveredPromptSettled?.(promptId); }
+    catch (error) {
+      this.options.logger.warn({ event: "recovered-prompt-delivery-wake-failed", err: safeLogError(error), promptId, outcome: "deferred_to_scan" }, "Could not wake downstream delivery recovery; periodic recovery will retry");
+    }
+  }
+}
+
+const QUALIFYING_DETACHED_RECOVERY_REASONS = new Set([
+  "missing_submission_identity",
+  "submission_identity_mismatch",
+  "submission_not_observed",
+  "submission_receipt_unavailable",
+  "submission_cancelled",
+  "legacy_submission_unavailable",
+  "submission_receipt_identity_mismatch",
+  "submission_receipt_session_mismatch",
+  "submission_terminal_without_event"
+]);
+
+function isQualifyingDetachedRecovery(recovery: Awaited<ReturnType<typeof assessDetachedPromptReceipt>>): boolean {
+  if (recovery.outcome !== "pending" && recovery.outcome !== "unavailable") return false;
+  return QUALIFYING_DETACHED_RECOVERY_REASONS.has(recovery.reason);
 }
 
 function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {

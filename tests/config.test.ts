@@ -36,6 +36,40 @@ describe("project registry configuration", () => {
     });
   });
 
+  it("validates an optional fixed Orchestrator route on a project", () => {
+    expect(validateProjectRegistry({
+      defaultProjectId: "bridge",
+      projects: [{
+        id: "bridge", displayName: "Bridge", description: "Bridge service",
+        workspaceId: "wH", cwd: "/work/bridge",
+        orchestrator: { enabled: true, cwd: "/tmp" }
+      }]
+    })).toEqual({
+      defaultProjectId: "bridge",
+      projects: [{
+        id: "bridge", displayName: "Bridge", description: "Bridge service",
+        workspaceId: "wH", cwd: "/work/bridge", maxInstances: 8,
+        orchestrator: { enabled: true, cwd: "/tmp" }
+      }]
+    });
+    expect(() => validateProjectRegistry({
+      defaultProjectId: "bridge",
+      projects: [{
+        id: "bridge", displayName: "Bridge", description: "Bridge service",
+        workspaceId: "wH", cwd: "/work/bridge",
+        orchestrator: { enabled: true, cwd: "relative/path" }
+      }]
+    })).toThrow(/cwd must be an absolute path/);
+    expect(validateProjectRegistry({
+      defaultProjectId: "bridge",
+      projects: [{ id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge", orchestrator: { enabled: false, cwd: "/unused" } }]
+    }).projects[0]?.orchestrator).toEqual({ enabled: false, cwd: "/unused" });
+    expect(() => validateProjectRegistry({
+      defaultProjectId: "bridge",
+      projects: [{ id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "wH", cwd: "/work/bridge", orchestrator: { enabled: true, cwd: "/work", typo: true } }]
+    })).toThrow(/typo/);
+  });
+
   it("validates an environment with an explicit registry object", () => {
     const registry = validateProjectRegistry({
       defaultProjectId: "bridge",
@@ -103,6 +137,27 @@ describe("project registry configuration", () => {
     expect(loadConfig({ ...requiredEnvironment }).instanceLease).toEqual({ ttlMs: 15_000, heartbeatMs: 5_000 });
   });
 
+  it("keeps SQLite lock and retry waits inside the lease heartbeat safety budget", () => {
+    expect(loadConfig(requiredEnvironment).sqlite).toEqual({
+      busyTimeoutMs: 250,
+      busyRetryBudgetMs: 1_000,
+      slowTransactionThresholdMs: 100
+    });
+    expect(loadConfig({
+      ...requiredEnvironment,
+      SQLITE_BUSY_TIMEOUT_MS: "200",
+      SQLITE_BUSY_RETRY_BUDGET_MS: "250",
+      SQLITE_SLOW_TRANSACTION_MS: "50"
+    }).sqlite).toEqual({ busyTimeoutMs: 200, busyRetryBudgetMs: 250, slowTransactionThresholdMs: 50 });
+    expect(() => loadConfig({
+      ...requiredEnvironment,
+      INSTANCE_LEASE_TTL_MS: "3000",
+      INSTANCE_LEASE_HEARTBEAT_MS: "1000",
+      SQLITE_BUSY_TIMEOUT_MS: "500",
+      SQLITE_BUSY_RETRY_BUDGET_MS: "500"
+    })).toThrow(/SQLite.*lease heartbeat safety budget/i);
+  });
+
   it("uses only TraeX-supported permission modes", () => {
     expect(loadConfig({ ...requiredEnvironment }).traex.permissionMode).toBe("auto");
     expect(loadConfig({ ...requiredEnvironment, TRAEX_PERMISSION_MODE: "auto" }).traex.permissionMode).toBe("auto");
@@ -112,6 +167,12 @@ describe("project registry configuration", () => {
 
   it("supports an explicit TraeX transcript sessions root", () => {
     expect(loadConfig({ ...requiredEnvironment, TRAEX_SESSIONS_ROOT: "/runtime/traex/sessions" }).traex.sessionsRoot).toBe("/runtime/traex/sessions");
+  });
+
+  it("keeps Herdr reply observation opt-in until shadow validation completes", () => {
+    expect(loadConfig(requiredEnvironment).herdr.replyObservation).toBe("events");
+    expect(loadConfig({ ...requiredEnvironment, HERDR_REPLY_OBSERVATION: "shadow" }).herdr.replyObservation).toBe("shadow");
+    expect(loadConfig({ ...requiredEnvironment, HERDR_REPLY_OBSERVATION: "jsonl" }).herdr.replyObservation).toBe("jsonl");
   });
 
   it("configures every supported agent executable independently", () => {
@@ -162,9 +223,22 @@ describe("project registry configuration", () => {
   });
 
   it("bounds retention catch-up batches independently from batch size", () => {
-    expect(loadConfig({ ...requiredEnvironment }).outboxRetention).toEqual({ days: 14, batchSize: 500, maxBatches: 20 });
+    expect(loadConfig({ ...requiredEnvironment }).outboxRetention).toEqual({
+      days: 14, payloadDays: 30, batchSize: 500, maxBatches: 20, timeBudgetMs: 250,
+      payloadCompactionEnabled: false, coreEventMode: "off", coreEventRetentionHours: 24
+    });
     expect(loadConfig({ ...requiredEnvironment, OUTBOX_RETENTION_MAX_BATCHES: "3" }).outboxRetention.maxBatches).toBe(3);
     expect(() => loadConfig({ ...requiredEnvironment, OUTBOX_RETENTION_MAX_BATCHES: "0" })).toThrow();
+    expect(loadConfig({ ...requiredEnvironment, RETENTION_COMPACTION_TIME_BUDGET_MS: "1000" }).outboxRetention.timeBudgetMs).toBe(1_000);
+    expect(() => loadConfig({ ...requiredEnvironment, RETENTION_COMPACTION_TIME_BUDGET_MS: "9" })).toThrow();
+    expect(loadConfig({ ...requiredEnvironment, RETENTION_PAYLOAD_COMPACTION_ENABLED: "true" }).outboxRetention.payloadCompactionEnabled).toBe(true);
+    expect(() => loadConfig({ ...requiredEnvironment, RETENTION_PAYLOAD_COMPACTION_ENABLED: "yes" })).toThrow();
+    expect(loadConfig({
+      ...requiredEnvironment, CORE_EVENT_RETENTION_MODE: "audit", CORE_EVENT_RETENTION_HOURS: "48"
+    }).outboxRetention).toMatchObject({ coreEventMode: "audit", coreEventRetentionHours: 48 });
+    expect(loadConfig({ ...requiredEnvironment, CORE_EVENT_RETENTION_MODE: "compact" }).outboxRetention.coreEventMode).toBe("compact");
+    expect(() => loadConfig({ ...requiredEnvironment, CORE_EVENT_RETENTION_MODE: "enabled" })).toThrow();
+    expect(() => loadConfig({ ...requiredEnvironment, CORE_EVENT_RETENTION_HOURS: "0" })).toThrow();
   });
 
   it("configures a low-frequency SQLite integrity audit", () => {
@@ -173,12 +247,20 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, SQLITE_INTEGRITY_AUDIT_INTERVAL_MS: "59999" })).toThrow();
   });
 
+  it("configures bounded detached Prompt auto-skip with zero as an explicit disable", () => {
+    expect(loadConfig(requiredEnvironment).detachedPromptAutoSkipMs).toBe(1_800_000);
+    expect(loadConfig({ ...requiredEnvironment, DETACHED_PROMPT_AUTO_SKIP_MS: "0" }).detachedPromptAutoSkipMs).toBe(0);
+    expect(loadConfig({ ...requiredEnvironment, DETACHED_PROMPT_AUTO_SKIP_MS: "60000" }).detachedPromptAutoSkipMs).toBe(60_000);
+    expect(() => loadConfig({ ...requiredEnvironment, DETACHED_PROMPT_AUTO_SKIP_MS: "59999" })).toThrow();
+  });
+
   it("configures bounded runtime cache, safety scan, and debounce intervals", () => {
     expect(loadConfig(requiredEnvironment).runtimeTuning).toEqual({
       polling: { transcriptIdentityMs: 50, attachedTranscriptMs: 250, workerTurnMs: 250, externalTurnMs: 2_000 },
       cache: { herdrSnapshotTtlMs: 2_000 },
-      cards: { updateDebounceMs: 500, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 9_000 },
+      cards: { updateDebounceMs: 250, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 21_000, reasoningDisplay: "visible" },
       paneClosure: { confirmationTtlMs: 60_000 },
+      recovery: { externalTurnNotFoundMaxAttempts: 3 },
       outboxSafetyScanIntervalMs: 30_000
     });
     expect(loadConfig({ ...requiredEnvironment, OUTBOX_SAFETY_SCAN_INTERVAL_MS: "1000" }).runtimeTuning.outboxSafetyScanIntervalMs).toBe(1_000);
@@ -192,8 +274,9 @@ describe("project registry configuration", () => {
     expect(loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path }).runtimeTuning).toEqual({
       polling: { transcriptIdentityMs: 50, attachedTranscriptMs: 250, workerTurnMs: 40, externalTurnMs: 2_000 },
       cache: { herdrSnapshotTtlMs: 2_000 },
-      cards: { updateDebounceMs: 0, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 8_000 },
+      cards: { updateDebounceMs: 0, payloadLimitChars: 12_000, answerStreamLimitChars: 28_000, answerPageLimitChars: 8_000, reasoningDisplay: "visible" },
       paneClosure: { confirmationTtlMs: 60_000 },
+      recovery: { externalTurnNotFoundMaxAttempts: 3 },
       outboxSafetyScanIntervalMs: 30_000
     });
   });
@@ -207,6 +290,15 @@ describe("project registry configuration", () => {
     expect(() => loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path })).toThrow(/typoMs/);
     writeFileSync(path, "runtime:\n  cards:\n    answerStreamLimitChars: 8000\n    answerPageLimitChars: 9000\n");
     expect(() => loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path })).toThrow(/answerPageLimitChars/);
+    writeFileSync(path, "runtime:\n  cards:\n    reasoningDisplay: full\n");
+    expect(() => loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path })).toThrow(/reasoningDisplay/);
+  });
+
+  it("accepts explicit Pane-visible reasoning display", () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-runtime-visible-reasoning-"));
+    const path = join(directory, "runtime.yaml");
+    writeFileSync(path, "runtime:\n  cards:\n    reasoningDisplay: visible\n");
+    expect(loadConfig({ ...requiredEnvironment, RUNTIME_CONFIG_PATH: path }).runtimeTuning.cards.reasoningDisplay).toBe("visible");
   });
 
   it("rejects retired runtime environment overrides with migration guidance", () => {
@@ -222,5 +314,7 @@ describe("project registry configuration", () => {
     expect(() => validateProjectDirectories([{ id: "missing", displayName: "Missing", description: "Missing", workspaceId: "w1", cwd: join(directory, "missing") }])).toThrow(/not accessible/);
     expect(() => validateProjectDirectories([{ id: "file", displayName: "File", description: "File", workspaceId: "w1", cwd: filePath }])).toThrow(/not accessible/);
     expect(() => validateProjectDirectories([{ id: "valid", displayName: "Valid", description: "Valid", workspaceId: "w1", cwd: directory }])).not.toThrow();
+    expect(() => validateProjectDirectories([{ id: "orchestrator", displayName: "Orchestrator", description: "Orchestrator", workspaceId: "w1", cwd: directory, orchestrator: { enabled: true, cwd: join(directory, "missing") } }])).toThrow(/Orchestrator directory is not accessible/);
+    expect(() => validateProjectDirectories([{ id: "disabled", displayName: "Disabled", description: "Disabled", workspaceId: "w1", cwd: directory, orchestrator: { enabled: false, cwd: join(directory, "missing") } }])).not.toThrow();
   });
 });

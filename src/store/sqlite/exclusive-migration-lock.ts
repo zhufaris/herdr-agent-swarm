@@ -1,21 +1,25 @@
 import type { SqliteContext } from "./context.js";
 
-export function runWithExclusiveMigrationLock<T>(context: SqliteContext, operation: () => T): T {
-  const database = context.database;
-  database.exec("PRAGMA locking_mode = EXCLUSIVE");
-  try {
-    database.exec("BEGIN IMMEDIATE; COMMIT");
-  } catch (error) {
-    if (database.isTransaction) database.exec("ROLLBACK");
-    database.exec("PRAGMA locking_mode = NORMAL");
-    throw error;
-  }
-  try {
-    return operation();
-  } finally {
-    if (database.isTransaction) database.exec("ROLLBACK");
-    database.exec("PRAGMA locking_mode = NORMAL; BEGIN; SELECT name FROM sqlite_schema LIMIT 1; COMMIT");
-    const mode = database.prepare("PRAGMA locking_mode").get() as { locking_mode: string };
-    if (mode.locking_mode.toLowerCase() !== "normal") throw new Error("Failed to restore normal SQLite locking mode after migrations");
-  }
+const exclusiveMigrationLease = Symbol("exclusive-migration-lease");
+
+export interface ExclusiveMigrationLeaseAuthorization {
+  readonly ownerId: string;
+  readonly fencingToken: number;
+  readonly [exclusiveMigrationLease]: true;
+}
+
+export function runWithExclusiveMigrationLock<T>(
+  context: SqliteContext,
+  owner: { ownerId: string; fencingToken: number },
+  operation: (authorization: ExclusiveMigrationLeaseAuthorization) => T
+): T {
+  // Bootstrap must not own a transaction: route selection happens inside the
+  // store bundle, and historical compatibility deliberately retains its
+  // independent durable steps (including foreign-key-safe rebuilds). The
+  // fresh route opens its own short transaction after selection.
+  return context.withMigrationLeaseGuard(owner, () => context.observeManualTransactions("sqlite.migrations.bootstrap", () => operation(Object.freeze({
+    ownerId: owner.ownerId,
+    fencingToken: owner.fencingToken,
+    [exclusiveMigrationLease]: true as const
+  }))));
 }

@@ -7,6 +7,7 @@ export interface BuildIdentity {
   version: string;
   buildId: string;
   gitCommit: string | null;
+  gitBranch?: string | null;
 }
 
 export function loadBuildIdentity(path: string, expectedBuildId?: string): BuildIdentity {
@@ -19,8 +20,9 @@ export function loadBuildIdentity(path: string, expectedBuildId?: string): Build
   if (typeof record.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(record.version)) throw new Error(`invalid build identity version at ${path}`);
   if (typeof record.buildId !== "string" || !/^sha256:[A-Za-z0-9._-]{6,128}$/.test(record.buildId)) throw new Error(`invalid build identity buildId at ${path}`);
   if (record.gitCommit !== null && (typeof record.gitCommit !== "string" || !/^[a-f0-9]{40}$/.test(record.gitCommit))) throw new Error(`invalid build identity gitCommit at ${path}`);
+  if (record.gitBranch !== undefined && record.gitBranch !== null && (typeof record.gitBranch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(record.gitBranch))) throw new Error(`invalid build identity gitBranch at ${path}`);
   if (expectedBuildId && record.buildId !== expectedBuildId) throw new Error(`build identity ${record.buildId} does not match expected ${expectedBuildId}`);
-  return { serviceId: record.serviceId, version: record.version, buildId: record.buildId, gitCommit: record.gitCommit as string | null };
+  return { serviceId: record.serviceId, version: record.version, buildId: record.buildId, gitCommit: record.gitCommit as string | null, gitBranch: record.gitBranch as string | null | undefined ?? null };
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

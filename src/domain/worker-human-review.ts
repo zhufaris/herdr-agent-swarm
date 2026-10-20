@@ -1,4 +1,5 @@
 export interface WorkerHumanReviewNotificationInput {
+  state: "waiting" | "resolved";
   workerId: string;
   workerSessionGeneration: number;
   workerName: string;
@@ -6,16 +7,16 @@ export interface WorkerHumanReviewNotificationInput {
   taskTitle: string;
   primaryName: string;
   parentPaneId: string;
+  parentPaneToken?: string | null;
   workerPaneId: string;
+  workerPaneToken?: string | null;
   notice: string;
   creatorOpenId: string | null;
   workerMainMessageId: string | null;
 }
 
 export type WorkerHumanReviewReservation =
-  | { outcome: "reserved"; mention: "included" | "omitted"; eventId: number }
+  | { outcome: "reserved"; kind: "requested" | "updated" | "resolved"; mention: "included" | "omitted"; eventId: number | null; episodeId: string }
   | { outcome: "skipped"; reason: "not-blocked-transition" | "stale-routing" };
 
-export function canMentionFeishuOpenId(value: string | null): value is string {
-  return value !== null && /^[A-Za-z0-9_-]{1,128}$/.test(value);
-}
+export { canMentionFeishuOpenId } from "./human-review.js";

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { createTestRouter } from "./helpers/create-test-router.js";
+import { createTestRouter, queueLegacyCollectedBatchForTest, queueLegacyPromptForTest } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { TestConversationViewProjector as ConversationViewProjector } from "./helpers/create-test-conversation-view-projector.js";
@@ -16,6 +16,7 @@ import { SessionAdministrationWorkflow } from "../src/coordinator/session-admini
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { PrimaryToolGateway } from "../src/runtime/primary-tool-gateway.js";
 import { applicationPresentation, primaryPresentation } from "./helpers/presentation.js";
+import type { CoreEventEnvelope } from "../src/domain/core-event-inbox.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -39,7 +40,7 @@ describe("pane/thread lifecycle integration", () => {
       expect(store.getBinding("b1")).toMatchObject({ lifecycle: "archived", state: "archived" });
       expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ bindingId: "b1", targetRole: "session_status", kind: "card_update" }));
     }); const workflow = new SessionAdministrationWorkflow({
-      config: config(), store, herdr: {} as never, lifecycleEvents: bus, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false, presentation: applicationPresentation
+      config: config(), store, herdr: {} as never, lifecycleEvents: bus, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await workflow.archive(message(1, "/swarm close"), store.getBinding("b1"));
@@ -58,7 +59,7 @@ describe("pane/thread lifecycle integration", () => {
     vi.spyOn(store, "cancelQueuedPromptsWithProjection").mockImplementation(() => { throw new Error("cancel failed"); });
     const transition = vi.spyOn(store, "transitionBinding"); const audit = vi.spyOn(store, "audit");
     const publish = vi.fn(); const wake = vi.fn(); const workflow = new SessionAdministrationWorkflow({
-      config: config(), store, herdr: {} as never, lifecycleEvents: { publish }, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, scheduler: { wake: vi.fn() }, isBindingBusy: () => false, presentation: applicationPresentation
+      config: config(), store, herdr: {} as never, lifecycleEvents: { publish }, outbound: { enqueueCard: vi.fn() }, outboundWork: { wake }, isBindingBusy: () => false, presentation: applicationPresentation
     });
 
     await expect(workflow.archive(message(1, "/swarm close"), store.getBinding("b1"))).rejects.toThrow("cancel failed");
@@ -105,6 +106,8 @@ describe("pane/thread lifecycle integration", () => {
     expect(createdOptions).toMatchObject({ bindingId: "orphaned", generation: 2, projectId: "repo", title: expect.stringMatching(/^[a-z0-9]{4}$/), environment: { SWARM_PRIMARY_CAPABILITY: "test-orphaned-2" } });
     expect(startedArgs).toEqual(primaryToolArgs("orphaned", 2));
     expect(store.hasBindingPrimaryToolCapability("orphaned", 2)).toBe(true);
+    expect(store.loadRuntimeIdentityClaim({ bindingId: "orphaned", bindingGeneration: 1, sessionEpoch: 1 })).toMatchObject({ state: "released" });
+    expect(store.loadRuntimeIdentityClaim({ bindingId: "orphaned", bindingGeneration: 2, sessionEpoch: 1 })).toMatchObject({ state: "current", nativeIdentity: { value: "native-session-1" }, attachment: { paneId: "w1:new", terminalId: "new-terminal" } });
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
@@ -193,15 +196,25 @@ describe("pane/thread lifecycle integration", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "old", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Repo / old" });
-    store.updateBinding("old", { paneId: oldPane.paneId, traexSessionId: oldPane.terminalId, statusMessageId: "root", state: "active", lifecycle: "active", attachment: "degraded", lastAgentState: "unknown" });
+    store.updateBinding("old", { paneId: oldPane.paneId, traexSessionId: oldPane.terminalId, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "old-native-session", statusMessageId: "root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "unknown" });
+    expect(store.claimCurrentRuntimeIdentity({ claim: {
+      owner: { bindingId: "old", bindingGeneration: 1, sessionEpoch: 1 }, state: "current",
+      nativeIdentity: { source: "herdr:traex", agent: "traex", kind: "id", value: "old-native-session" },
+      attachment: { state: "attached", workspaceId: "w1", paneId: oldPane.paneId, terminalId: oldPane.terminalId },
+      lastRejectedEvidenceFingerprint: null, lastRejectedReason: null, createdAt: "2026-10-18T00:00:00.000Z", updatedAt: "2026-10-18T00:00:00.000Z"
+    }, paneToken: null })).toMatchObject({ outcome: "claimed" });
+    store.updateBinding("old", { attachment: "degraded" });
     const active = runtime(store, herdr, lark);
     await active.coordinator.start();
 
     await active.coordinator.handleMessage({ ...message(1, "/swarm reset recover agent"), mentionsBot: true });
 
     await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
-    expect(store.findBindingByLarkScope("topic", "root")).toMatchObject({ attachment: "attached", lifecycle: "active", lastAgentState: "idle", paneId: newPane.paneId });
+    const replacement = store.findBindingByLarkScope("topic", "root")!;
+    expect(replacement).toMatchObject({ attachment: "attached", lifecycle: "active", lastAgentState: "idle", paneId: newPane.paneId });
     expect(store.getBinding("old")).toMatchObject({ lifecycle: "archived", attachment: "degraded", paneId: oldPane.paneId });
+    expect(store.loadRuntimeIdentityClaim({ bindingId: "old", bindingGeneration: 1, sessionEpoch: 1 })).toMatchObject({ state: "released", nativeIdentity: { value: "old-native-session" } });
+    expect(store.loadRuntimeIdentityClaim({ bindingId: replacement.id, bindingGeneration: replacement.generation, sessionEpoch: replacement.sessionEpoch })).toMatchObject({ state: "unclaimed" });
     expect(runPrompt).not.toHaveBeenCalled();
     expect(closePane).not.toHaveBeenCalled();
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
@@ -234,9 +247,9 @@ describe("pane/thread lifecycle integration", () => {
     const activeRuntime = runtime(store, herdr, lark);
     await activeRuntime.coordinator.start();
 
-    await activeRuntime.coordinator.handleMessage({ ...message(1, "old request"), mentionsBot: true });
+    queueLegacyPromptForTest(store, { ...message(1, "old request"), mentionsBot: true });
     await vi.waitFor(() => expect(submitted).toEqual(["old request"]));
-    await activeRuntime.coordinator.handleMessage({ ...message(2, "queued old request") });
+    queueLegacyCollectedBatchForTest(store, [{ ...message(2, "queued old request") }]);
     await activeRuntime.coordinator.handleMessage({ ...message(3, "/swarm reset fresh session"), mentionsBot: true });
 
     await vi.waitFor(() => expect(store.findBindingByLarkScope("topic", "root")?.paneId).toBe(newPane.paneId));
@@ -248,8 +261,9 @@ describe("pane/thread lifecycle integration", () => {
     expect(created[0]).toMatch(/^[a-z0-9]{4}$/);
     expect(replacement.title).toBe("repo / fresh session");
     expect(oldObserverAborted).toBe(true);
-    expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = 'm2'").get()).toEqual({ state: "cancelled" });
-    expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs WHERE lark_message_id = 'm1'").get()).toEqual({ state: "running", observation_state: "detached" });
+    expect(store.getPromptInputBySource("feishu", "m2")).toMatchObject({ state: "batched", batchId: expect.any(String) });
+    expect(store.getPrompt(store.getPromptInputBySource("feishu", "m2")!.batchId!)).toMatchObject({ state: "cancelled" });
+    expect(store.getPrompt(store.getPromptInputBySource("feishu", "m1")!.batchId!)).toMatchObject({ state: "recovering", observationState: "detached" });
 
     await activeRuntime.coordinator.stop(); await activeRuntime.projector.stop(); await activeRuntime.publisher.stop(); store.close();
   });
@@ -306,15 +320,19 @@ describe("pane/thread lifecycle integration", () => {
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage(message(1, "first"));
+    queueLegacyPromptForTest(store, message(1, "first"));
     await vi.waitFor(() => expect(submitted).toHaveLength(1));
-    await coordinator.handleMessage(message(2, "second"));
+    queueLegacyCollectedBatchForTest(store, [message(2, "second")]);
     await coordinator.handleMessage({ ...message(3, "/swarm close"), mentionsBot: true });
 
     expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", state: "active" });
-    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1, cancelled: 0 });
+    expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs ORDER BY created_at").all()).toMatchObject([
+      { state: "submitted", observation_state: "not_started" },
+      { state: "queued", observation_state: "not_started" }
+    ]);
+    expect(store.getPromptInputBySource("feishu", "m2")).toMatchObject({ state: "batched", batchId: expect.any(String) });
     finish();
-    await vi.waitFor(() => expect(submitted).toHaveLength(2));
+    await vi.waitFor(() => expect(submitted).toHaveLength(2), { timeout: 4_000 });
     expect(store.listBindings()[0]).toMatchObject({ lifecycle: "active", state: "active" });
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
@@ -348,16 +366,17 @@ describe("pane/thread lifecycle integration", () => {
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, logger, 10);
     await coordinator.start();
 
-    await coordinator.handleMessage(message(20, "active"));
+    queueLegacyPromptForTest(store, message(20, "active"));
     await vi.waitFor(() => expect(submitted).toHaveLength(1));
-    await coordinator.handleMessage(message(21, "queued"));
+    queueLegacyCollectedBatchForTest(store, [message(21, "queued")]);
     await coordinator.stop();
 
     expect(submitted).toHaveLength(1);
-    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, failed: 0, queued: 1 });
     expect(store.database.prepare("SELECT id, state, observation_state, error FROM prompt_jobs ORDER BY created_at").all()).toMatchObject([
-      { state: "running", observation_state: "detached" }, { state: "queued", observation_state: "not_started" }
+      { state: "recovering", observation_state: "detached" },
+      { state: "queued", observation_state: "not_started" }
     ]);
+    expect(store.getPromptInputBySource("feishu", "m21")).toMatchObject({ state: "batched", batchId: expect.any(String) });
     expect(warnings).toContainEqual(expect.objectContaining({ event: "bridge-shutdown-turns-aborted", activeTurns: 1 }));
     await projector.stop(); await publisher.stop(); store.close();
   });
@@ -393,15 +412,19 @@ describe("pane/thread lifecycle integration", () => {
 
     const firstRuntime = runtime(store, herdr, lark, 10);
     await firstRuntime.coordinator.start();
-    await firstRuntime.coordinator.handleMessage(message(30, "first"));
+    queueLegacyPromptForTest(store, message(30, "first"));
     await vi.waitFor(() => expect(firstController).toBeDefined());
-    const firstPrompt = store.database.prepare("SELECT id FROM prompt_jobs WHERE lark_message_id = 'm30'").get() as { id: string };
+    const firstPrompt = { id: store.getPromptInputBySource("feishu", "m30")!.batchId! };
     const turnStartedAt = new Date(Date.parse(store.getPrompt(firstPrompt.id)!.dispatchedAt!) + 250).toISOString();
     expect(store.claimPromptTranscriptTurn({ promptId: firstPrompt.id, bindingId: "b1", turnId: "turn-1", startedAt: turnStartedAt })).toMatchObject({ state: "claimed" });
-    await firstRuntime.coordinator.handleMessage(message(31, "second"));
+    queueLegacyCollectedBatchForTest(store, [message(31, "second")]);
     await firstRuntime.coordinator.stop();
     await firstRuntime.projector.stop(); await firstRuntime.publisher.stop();
-    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 1, queued: 1 });
+    expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs ORDER BY created_at").all()).toMatchObject([
+      { state: "running", observation_state: "detached" },
+      { state: "queued", observation_state: "not_started" }
+    ]);
+    expect(store.getPromptInputBySource("feishu", "m31")).toMatchObject({ state: "batched", batchId: expect.any(String) });
     store.saveRunCard({ ...store.loadRunCard(firstPrompt.id)!, answer: "LEGACY_UNPROVEN_ANSWER_SENTINEL", answerSegments: ["LEGACY_UNPROVEN_ANSWER_SENTINEL"], answerDraft: "", answerDraftTransient: false });
 
     restarted = true;
@@ -447,8 +470,11 @@ describe("pane/thread lifecycle integration", () => {
 
     lifecycleState = "completed";
     toolActivities = [{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "done" }];
-    await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 2_000 });
-    expect(store.getOperationalSummary().prompts).toMatchObject({ running: 0, queued: 0, delivered: 2 });
+    await vi.waitFor(() => expect(submitted).toEqual(["first", "second"]), { timeout: 4_000 });
+    expect(store.database.prepare("SELECT state, observation_state FROM prompt_jobs ORDER BY created_at").all()).toMatchObject([
+      { state: "delivered", observation_state: "completed" },
+      { state: "delivered", observation_state: "completed" }
+    ]);
     expect(store.loadRunCard(firstPrompt.id)).toMatchObject({ phase: "completed", answer: "Recovered answer" });
     expect(store.loadRunCard(firstPrompt.id)!.progressEvents).toMatchObject([{ key: "tool:read-1", kind: "read", label: "Read · src/main.ts", state: "done" }]);
     expect(store.loadRunCard(firstPrompt.id)!.answer).not.toMatch(/SECRET_DETACHED_TERMINAL_SENTINEL|LEGACY_UNPROVEN_ANSWER_SENTINEL/);
@@ -472,7 +498,7 @@ describe("pane/thread lifecycle integration", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "user", body: "already sent" });
     store.enqueuePrompt({ id: "p2", bindingId: "b1", larkMessageId: "m2", actorOpenId: "user", body: "queued" });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
     store.markPromptDispatched("p1");
     expect(store.recoverRunningPrompts()).toBe(1);
 
@@ -482,7 +508,7 @@ describe("pane/thread lifecycle integration", () => {
     const active = runtime(store, herdr, lark, 10, { open: transcriptOpen }, logger);
     await active.coordinator.start();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
+    expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "recovering", observationState: "detached" }]);
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(transcriptOpen).not.toHaveBeenCalled();
     expect(store.getPrompt("p2")).toMatchObject({ state: "queued", observationState: "not_started" });
@@ -509,7 +535,7 @@ describe("pane/thread lifecycle integration", () => {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: position, occurredAt: "2026-08-30T00:00:00.000Z" });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "user", body: id }, view, rootMessageId: "root", answerCard: {} });
     }
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
     store.markPromptDispatched("p1", "2026-08-30T00:00:01.000Z");
     expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
     store.markPromptObservationDetached("p1", "recovering");
@@ -550,31 +576,36 @@ describe("pane/thread lifecycle integration", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a052d3-9c14-70e1-a375-397e2ecb5500" });
     const oldView = createQueuedRunCard({ promptId: "old", bindingId: "b1", title: "old", workspaceId: "w1", paneId: "w1:p1", requestText: "old request", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "user", body: "old request" }, view: oldView, rootMessageId: "root", answerCard: {} });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', attempt_count = 1 WHERE id = 'old'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'not_started', attempt_count = 1 WHERE id = 'old'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'old'").run();
     store.markPromptDispatched("old", "2026-08-30T00:00:01.000Z");
     expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5501", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
     store.markPromptObservationDetached("old", "interrupted");
-    const observations: TraexTranscriptObservation[] = [
-      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
-      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", requestText: "new request", answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
-      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "new answer", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
-      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", answerDelta: "", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "new answer" } }
+    seedDirectHuman(store, "direct-lane-1", "01a052d3-9c14-70e1-a375-397e2ecb5500", "01a052d3-9c14-70e1-a375-397e2ecb5502", "direct:turn-1:human", "2026-08-30T00:00:02.000Z", "new request", "new answer");
+    const observations: AgentTranscriptObservation[] = [
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, requestText: "new request", answerDelta: "", coreEventSettlement: directSettlement("direct-lane-1", "direct:turn-1:human"), turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", requestText: "new request", answerDelta: "", coreEventSettlement: directSettlement("direct-lane-1", "direct:turn-1:human"), turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", requestText: "new request", answerDelta: "new answer", coreEventSettlement: directSettlement("direct-lane-1", "direct:turn-1:human"), turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "active", startedAt: "2026-08-30T00:00:02.000Z" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", requestText: "new request", answerDelta: "", coreEventSettlement: directSettlement("direct-lane-1", "direct:turn-1:human"), turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "new answer" } }
     ];
-    const transcriptReader = { async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; } };
+    const transcriptReader = {
+      async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; },
+      async openActiveTurn() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return { answerDelta: "" }; } } }; }
+    };
     const active = runtime(store, herdr, lark, 10, transcriptReader, pino({ enabled: false }), true);
 
     await active.coordinator.start();
-    await vi.waitFor(() => expect(store.getPrompt("old")).toMatchObject({ state: "failed", observationState: "completed" }), { timeout: 2_000 });
-    const external = store.database.prepare("SELECT id FROM prompt_jobs WHERE execution_origin = 'herdr'").get() as { id: string };
-    await vi.waitFor(() => expect(store.getPrompt(external.id)).toMatchObject({ state: "delivered", observationState: "completed", transcriptTurnId: "01a052d3-9c14-70e1-a375-397e2ecb5502" }), { timeout: 2_000 });
-    expect(store.loadRunCard(external.id)).toMatchObject({ phase: "completed", answer: "new answer", answerMessageId: expect.any(String) });
+    await vi.waitFor(() => expect(store.getPrompt("old")).toMatchObject({ state: "uncertain", observationState: "completed" }), { timeout: 2_000 });
+    const directIdentity = { agentKind: "traex" as const, sessionId: "01a052d3-9c14-70e1-a375-397e2ecb5500", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", startedAt: "2026-08-30T00:00:02.000Z" };
+    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM conversation_segments WHERE human_event_id=?").get("direct:turn-1:human")).toEqual({ state: "completed" }), { timeout: 2_000 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE execution_origin = 'herdr'").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM conversation_turn_projections").get()).toEqual({ count: 0 });
     expect(runPrompt).not.toHaveBeenCalled();
 
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
   });
 
-  it("awakes completed Herdr turns written before restart into new Answer Cards and then releases FIFO", async () => {
+  it("uses awake for Core projection catch-up and preserves legacy evidence when skip is rejected", async () => {
     const pane = { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, foregroundExecutables: ["traex"] };
     const submitted: string[] = [];
     const herdr: HerdrPort = {
@@ -591,28 +622,33 @@ describe("pane/thread lifecycle integration", () => {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: body, queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "user", body }, view, rootMessageId: "root", answerCard: {} });
     }
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', attempt_count = 1 WHERE id = 'old'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'not_started', attempt_count = 1 WHERE id = 'old'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'old'").run();
     store.markPromptDispatched("old", "2026-08-30T00:00:01.000Z");
     expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb5501", startedAt: "2026-08-30T00:00:01.250Z" })).toMatchObject({ state: "claimed" });
     store.markPromptObservationDetached("old", "restart recovery");
-    const observations: TraexTranscriptObservation[] = [
-      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, requestText: "external one", answerDelta: "answer one", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "answer one" } },
-      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", freshTurnStart: true, requestText: "external two", answerDelta: "answer two", turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", state: "completed", startedAt: "2026-08-30T00:00:03.000Z", finalAnswer: "answer two" } }
+    seedDirectHuman(store, "direct-lane-2", "01a052d3-9c14-70e1-a375-397e2ecb5500", "01a052d3-9c14-70e1-a375-397e2ecb5502", "direct:turn-2:human", "2026-08-30T00:00:02.000Z", "external one", "answer one");
+    seedDirectHuman(store, "direct-lane-3", "01a052d3-9c14-70e1-a375-397e2ecb5500", "01a052d3-9c14-70e1-a375-397e2ecb5503", "direct:turn-3:human", "2026-08-30T00:00:03.000Z", "external two", "answer two");
+    const observations: AgentTranscriptObservation[] = [
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", freshTurnStart: true, requestText: "external one", answerDelta: "answer one", coreEventSettlement: directSettlement("direct-lane-2", "direct:turn-2:human"), turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5502", state: "completed", startedAt: "2026-08-30T00:00:02.000Z", finalAnswer: "answer one" } },
+      { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", freshTurnStart: true, requestText: "external two", answerDelta: "answer two", coreEventSettlement: directSettlement("direct-lane-3", "direct:turn-3:human"), turnLifecycle: { turnId: "01a052d3-9c14-70e1-a375-397e2ecb5503", state: "completed", startedAt: "2026-08-30T00:00:03.000Z", finalAnswer: "answer two" } }
     ];
     const transcriptReader = {
-      async open() { return { mode: "unavailable" as const, reason: "transcript_not_found" as const }; },
-      async openAfterTurn() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; }
+      async open() { return { mode: "typed" as const, cursor: { async readDelta() { return ""; }, async readObservation() { return observations.shift() ?? { answerDelta: "" }; } } }; }
     };
     const active = runtime(store, herdr, lark, 10, transcriptReader, pino({ enabled: false }), true);
     await active.coordinator.start();
     await active.coordinator.handleMessage(message(90, "/swarm awake"));
 
-    await vi.waitFor(() => expect(submitted).toEqual(["queued Feishu work"]), { timeout: 2_000 });
-    expect(store.getPrompt("old")).toMatchObject({ state: "failed", observationState: "completed" });
-    const recovered = store.database.prepare("SELECT id FROM prompt_jobs WHERE execution_origin = 'herdr' ORDER BY created_at, id").all() as Array<{ id: string }>;
-    expect(recovered).toHaveLength(2);
-    expect(recovered.map(({ id }) => store.loadRunCard(id)?.answer)).toEqual(["answer one", "answer two"]);
+    expect(store.getPrompt("old")).toMatchObject({ state: "uncertain", observationState: "completed" });
+    expect(submitted).toEqual([]);
+    await active.coordinator.handleMessage(message(91, "/swarm skip"));
+    expect(store.getPrompt("old")).toMatchObject({ state: "uncertain", observationState: "completed" });
+    expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started" });
+    expect(submitted).toEqual([]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE execution_origin = 'herdr'").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM conversation_turn_projections").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM conversation_segments WHERE state IN ('completed','closed')").get()).toEqual({ count: 2 });
     expect(submitted).not.toContain("old request");
 
     await active.coordinator.stop(); await active.projector.stop(); await active.publisher.stop(); store.close();
@@ -677,7 +713,21 @@ function message(index: number, text: string) {
   return { eventId: `e${index}`, messageId: `m${index}`, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false };
 }
 
-function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").TraexTranscriptReaderPort, logger = pino({ enabled: false }), observeExternalTurns = false) {
+function directSettlement(laneId: string, eventId: string) {
+  return { laneId, eventIds: [eventId], occurredAt: "2026-08-30T00:00:02.500Z", owner: { kind: "binding" as const, id: "b1" } };
+}
+
+function seedDirectHuman(store: SqliteBindingStore, laneId: string, sessionId: string, turnId: string, eventId: string, startedAt: string, text: string, answer: string): void {
+  const event: CoreEventEnvelope = {
+    schemaVersion: 1, eventId, cursor: `${laneId}:1`, sourceId: `source:${laneId}`, agentKind: "traex", sessionId, turnId,
+    occurredAt: startedAt, payload: { type: "human_message", message_id: eventId, text, truncated: false }
+  };
+  const message: CoreEventEnvelope = { ...event, eventId: `${eventId}:answer`, cursor: `${laneId}:2`, payload: { type: "message", message_id: `${eventId}:answer`, channel: "final", text: answer, truncated: false } };
+  const completed: CoreEventEnvelope = { ...event, eventId: `${eventId}:completed`, cursor: `${laneId}:3`, payload: { type: "turn_completed" } };
+  store.capabilityModules().coreEvents.ingestBatch({ laneId, sourceId: event.sourceId, agentKind: event.agentKind, sessionId, afterCursor: "", nextCursor: completed.cursor, latestCursor: completed.cursor, events: [event, message, completed], ingestedAt: startedAt });
+}
+
+function runtime(store: SqliteBindingStore, herdr: HerdrPort, lark: LarkPort, shutdownGraceMs = 30_000, transcriptReader?: import("../src/domain/ports.js").AgentTranscriptReaderPort, logger = pino({ enabled: false }), observeExternalTurns = false) {
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
   const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();

@@ -1,16 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { CardInteractionWorkflow } from "../src/coordinator/card-interaction-workflow.js";
-import { parseCardActionCommand } from "../src/coordinator/card-action-command.js";
-import type { IncomingLarkCardAction } from "../src/domain/types.js";
-
-function handle(workflow: CardInteractionWorkflow, action: IncomingLarkCardAction) {
-  const command = parseCardActionCommand(action.value, action.option);
-  if (command.kind !== "session") throw new Error(`Expected session action, received ${command.kind}`);
-  return workflow.handle(action, command);
-}
 import { SessionOperationWorkflow } from "../src/coordinator/session-operation-workflow.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
-import { applicationPresentation } from "./helpers/presentation.js";
 
 function harness() {
   const store = new SqliteBindingStore(":memory:");
@@ -25,180 +15,85 @@ function harness() {
   return { store, workflow, rename, resume, reattach, replace, logger };
 }
 
-function interaction(store: SqliteBindingStore, id: string): void {
-  store.createCardInteraction({ id, bindingId: "b1", bindingGeneration: 1, actorOpenId: "creator", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2099-01-01T00:00:00.000Z" });
+function seedLegacy(store: SqliteBindingStore, id: string, kind: "rename" | "resume" | "reattach", argument: string | null): void {
+  store.createCardInteraction({ id: `interaction-${id}`, bindingId: "b1", bindingGeneration: 1, actorOpenId: "creator", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2099-01-01T00:00:00.000Z" });
+  expect(store.acceptSessionOperation({
+    id, idempotencyKey: `legacy:${id}`, interactionId: `interaction-${id}`, actorOpenId: "creator",
+    bindingId: "b1", bindingGeneration: 1, expectedPaneId: "w1:p1", expectedTerminalId: "terminal-1",
+    kind: "rename", argument: argument ?? "Legacy", now: new Date().toISOString()
+  }).outcome).toBe("accepted");
+  store.database.prepare("UPDATE session_operations SET kind = ?, argument = ? WHERE id = ?").run(kind, argument, id);
 }
 
-const action = { messageId: "card-message", chatId: "chat", operatorOpenId: "creator", value: {} };
-
-describe("Session operation workflow", () => {
-  it("accepts before waiting for Herdr work and executes once after start", async () => {
+describe("Session operation startup recovery", () => {
+  it("marks interrupted running work uncertain without invoking its handler", async () => {
     const h = harness();
-    interaction(h.store, "i1");
-    let release!: () => void;
-    h.rename.mockImplementation(() => new Promise<boolean>((resolve) => { release = () => resolve(true); }));
-
-    expect(h.workflow.accept(action, h.store.getBinding("b1")!, "i1", "rename", "New title")).toBe("accepted");
-    expect(h.store.getCardInteraction("i1")).toMatchObject({ state: "consumed" });
-    h.workflow.start();
-    await vi.waitFor(() => expect(h.rename).toHaveBeenCalledOnce());
-    expect(h.store.getSessionOperation(h.store.listRecoverableSessionOperations()[0]!.id)).toMatchObject({ state: "running" });
-    release();
-    await h.workflow.stop();
-    expect(h.rename).toHaveBeenCalledOnce();
-    expect(h.store.listRecoverableSessionOperations()).toEqual([]);
-    h.store.close();
-  });
-
-  it("deduplicates repeated callbacks without repeating the external operation", async () => {
-    const h = harness();
-    interaction(h.store, "i1");
-    h.store.updateBinding("b1", { state: "orphaned", attachment: "orphaned" });
-    const binding = h.store.getBinding("b1")!;
-
-    expect(h.workflow.accept(action, binding, "i1", "replace")).toBe("accepted");
-    expect(h.workflow.accept(action, binding, "i1", "replace")).toBe("duplicate");
-    h.workflow.start();
-    await vi.waitFor(() => expect(h.replace).toHaveBeenCalledOnce());
-    await h.workflow.stop();
-    expect(h.replace).toHaveBeenCalledOnce();
-    h.store.close();
-  });
-
-  it("accepts a real More Actions callback before external execution", async () => {
-    const h = harness();
-    const cards = new CardInteractionWorkflow({
-      store: h.store,
-      adminOpenIds: ["creator"],
-      sessionAdministration: { emitStatus: vi.fn(async () => {}) },
-      sessionOperations: h.workflow,
-      wakePrompt: vi.fn(),
-      presentation: applicationPresentation,
-      logger: { info: vi.fn(), warn: vi.fn() }
-    });
-
-    const opened = await handle(cards, { messageId: "main-card", chatId: "chat", operatorOpenId: "creator", value: { action: "open_more_actions", bindingId: "b1", bindingGeneration: 1 } });
-    const callback = callbackValue(opened!.card!, "session_archive");
-    const result = await handle(cards, { messageId: "more-card", chatId: "chat", operatorOpenId: "creator", value: callback });
-
-    expect(result?.toast).toEqual({ type: "success", content: "操作已受理。" });
-    expect(h.store.listRecoverableSessionOperations()).toEqual([expect.objectContaining({ kind: "archive", state: "accepted" })]);
-    expect(h.store.getCardInteraction(String(callback.interactionId))).toMatchObject({ actionKind: "more_actions", state: "consumed" });
-    await h.workflow.stop();
-    h.store.close();
-  });
-
-  it("rejects an accepted operation when the binding identity changed before dispatch", async () => {
-    const h = harness();
-    interaction(h.store, "i1");
-    h.workflow.accept(action, h.store.getBinding("b1")!, "i1", "rename", "New title");
-    h.store.updateBinding("b1", { generation: 2, paneId: "w1:p2", traexSessionId: "terminal-2" });
-
-    h.workflow.start();
-    await vi.waitFor(() => expect(h.store.listRecoverableSessionOperations()).toEqual([]));
-    expect(h.rename).not.toHaveBeenCalled();
-    expect(h.store.database.prepare("SELECT state FROM session_operations").get()).toEqual({ state: "rejected" });
-    await h.workflow.stop();
-    h.store.close();
-  });
-
-  it("rejects a persisted legacy model operation without creating pane-control work", async () => {
-    const h = harness();
-    interaction(h.store, "i1");
-    h.workflow.accept(action, h.store.getBinding("b1")!, "i1", "rename", "Legacy model payload");
-    h.store.database.prepare("UPDATE session_operations SET kind = 'model', argument = NULL WHERE interaction_id = 'i1'").run();
-
-    h.workflow.start();
-    await vi.waitFor(() => expect(h.store.listRecoverableSessionOperations()).toEqual([]));
-
-    expect(h.store.database.prepare("SELECT state, detail FROM session_operations WHERE interaction_id = 'i1'").get()).toEqual({
-      state: "rejected",
-      detail: "运行中的 Agent 不支持远程切换模型。请在创建 Agent 时选择模型，或显式替换 Agent 后使用新模型。"
-    });
-    await h.workflow.stop();
-    h.store.close();
-  });
-
-  it("marks interrupted running work uncertain without replaying it", async () => {
-    const h = harness();
-    interaction(h.store, "i1");
-    h.store.updateBinding("b1", { state: "orphaned", attachment: "orphaned" });
-    h.workflow.accept(action, h.store.getBinding("b1")!, "i1", "reattach", "w1:p2");
-    const operation = h.store.claimNextSessionOperation()!;
+    seedLegacy(h.store, "op-1", "reattach", "w1:p2");
+    h.store.claimNextSessionOperation();
 
     await h.workflow.recover();
 
-    expect(h.store.getSessionOperation(operation.id)).toMatchObject({ state: "uncertain" });
+    expect(h.store.getSessionOperation("op-1")).toMatchObject({ state: "uncertain", attemptCount: 1 });
     expect(h.reattach).not.toHaveBeenCalled();
     expect(h.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "session-operation-recovered-uncertain", outcome: "uncertain" }), expect.any(String));
     h.store.close();
   });
 
-  it("does not claim another operation after shutdown begins", async () => {
+  it("drains all accepted legacy operations sequentially to terminal state", async () => {
     const h = harness();
-    interaction(h.store, "i1");
-    interaction(h.store, "i2");
-    let release!: () => void;
-    h.rename.mockImplementationOnce(() => new Promise<boolean>((resolve) => { release = () => resolve(true); }));
-    h.workflow.accept(action, h.store.getBinding("b1")!, "i1", "rename", "First");
-    h.workflow.accept(action, h.store.getBinding("b1")!, "i2", "rename", "Second");
-
-    h.workflow.start();
-    await vi.waitFor(() => expect(h.rename).toHaveBeenCalledOnce());
-    const stopping = h.workflow.stop();
-    release();
-    await stopping;
-
-    expect(h.rename).toHaveBeenCalledOnce();
-    expect(h.store.database.prepare("SELECT state FROM session_operations WHERE argument = 'Second'").get()).toEqual({ state: "accepted" });
-    h.store.close();
-  });
-
-  it("periodically scans durable accepted work when a wake-up is missed", async () => {
-    vi.useFakeTimers();
-    const h = harness();
-    interaction(h.store, "i1");
-    h.workflow.start(1_000);
-    h.store.acceptSessionOperation({
-      id: "op-missed-wake", idempotencyKey: "interaction:i1:rename", interactionId: "i1", actorOpenId: "creator",
-      bindingId: "b1", bindingGeneration: 1, expectedPaneId: "w1:p1", expectedTerminalId: "terminal-1",
-      kind: "rename", argument: "Recovered", now: new Date().toISOString()
+    seedLegacy(h.store, "op-1", "rename", "First");
+    seedLegacy(h.store, "op-2", "resume", null);
+    let active = 0;
+    let maximumActive = 0;
+    const order: string[] = [];
+    h.rename.mockImplementation(async () => {
+      active += 1; maximumActive = Math.max(maximumActive, active); order.push("rename:start");
+      await Promise.resolve();
+      order.push("rename:end"); active -= 1;
+      return true;
+    });
+    h.resume.mockImplementation(async () => {
+      active += 1; maximumActive = Math.max(maximumActive, active); order.push("resume:start");
+      await Promise.resolve();
+      order.push("resume:end"); active -= 1;
+      return true;
     });
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(h.rename).toHaveBeenCalledOnce());
-    await h.workflow.stop();
+    await h.workflow.recover();
+
+    expect(order).toEqual(["rename:start", "rename:end", "resume:start", "resume:end"]);
+    expect(maximumActive).toBe(1);
+    expect(h.store.getSessionOperation("op-1")).toMatchObject({ state: "succeeded", attemptCount: 1 });
+    expect(h.store.getSessionOperation("op-2")).toMatchObject({ state: "succeeded", attemptCount: 1 });
+    expect(h.store.listRecoverableSessionOperations()).toEqual([]);
+    h.store.close();
+  });
+
+  it("has no production admission or periodic scanner surface", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+
+    expect("accept" in h.workflow).toBe(false);
+    expect("start" in h.workflow).toBe(false);
+    expect("wake" in h.workflow).toBe(false);
+    await h.workflow.recover();
+    seedLegacy(h.store, "op-1", "rename", "Late legacy row");
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(h.rename).not.toHaveBeenCalled();
+    expect(h.store.getSessionOperation("op-1")).toMatchObject({ state: "accepted", attemptCount: 0 });
     vi.useRealTimers();
     h.store.close();
   });
 
-  it("contains a drain failure and lets periodic anti-entropy retry", async () => {
-    vi.useFakeTimers();
+  it("fails startup recovery when the accepted legacy queue cannot be claimed", async () => {
     const h = harness();
-    interaction(h.store, "i1");
-    h.workflow.accept(action, h.store.getBinding("b1")!, "i1", "rename", "Recovered");
-    const claim = vi.spyOn(h.store, "claimNextSessionOperation");
-    claim.mockImplementationOnce(() => { throw new Error("sqlite busy"); });
+    seedLegacy(h.store, "op-1", "rename", "Pending");
+    vi.spyOn(h.store, "claimNextSessionOperation").mockImplementationOnce(() => { throw new Error("sqlite busy"); });
 
-    h.workflow.start(1_000);
-    await vi.waitFor(() => expect(h.logger.error).toHaveBeenCalledWith(expect.objectContaining({ event: "session-operation-drain-failed", outcome: "deferred" }), expect.any(String)));
-    expect(h.workflow.snapshot()).toMatchObject({ lastFailure: "sqlite busy" });
-    await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(h.rename).toHaveBeenCalledOnce());
-    await h.workflow.stop();
-    vi.useRealTimers();
+    await expect(h.workflow.recover()).rejects.toThrow("sqlite busy");
+    expect(h.rename).not.toHaveBeenCalled();
+    expect(h.store.getSessionOperation("op-1")).toMatchObject({ state: "accepted" });
     h.store.close();
   });
 });
-
-function callbackValue(card: object, action: string): Record<string, unknown> {
-  const stack: unknown[] = [card];
-  while (stack.length) {
-    const item = stack.pop();
-    if (!item || typeof item !== "object") continue;
-    const record = item as Record<string, unknown>;
-    if (record.value && typeof record.value === "object" && (record.value as Record<string, unknown>).action === action) return record.value as Record<string, unknown>;
-    stack.push(...Object.values(record));
-  }
-  throw new Error(`action not found: ${action}`);
-}

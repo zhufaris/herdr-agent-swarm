@@ -9,10 +9,11 @@ import { TestConversationViewProjector as ConversationViewProjector } from "./he
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { primaryPresentation } from "./helpers/presentation.js";
+import { primaryManagedAgentName } from "../src/domain/managed-agent-name.js";
 
 describe("project selection flow", () => {
   for (const command of ["/swarm new", "/swarm projects"] as const) {
-    it(`waits for the immediate selector delivery attempt for ${command}`, async () => {
+    it(`returns after durable selector reservation for ${command} while Ring delivery continues`, async () => {
       let releaseDelivery!: () => void;
       let markDeliveryStarted!: () => void;
       const deliveryStarted = new Promise<void>((resolve) => { markDeliveryStarted = resolve; });
@@ -31,24 +32,24 @@ describe("project selection flow", () => {
 
       let handled = false;
       const handling = coordinator.handleMessage({ eventId: `event-${command}`, messageId: `message-${command}`, chatId: "chat", topicId: null, rootMessageId: `message-${command}`, actorOpenId: "user-1", text: command, mentionsBot: true, isRootMessage: true }).then(() => { handled = true; });
-      await deliveryStarted;
-      await Promise.resolve();
-
-      expect(handled).toBe(false);
-      const selection = store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get(`message-${command}`) as { id: string };
-      expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE selection_id = ? AND state = 'pending'").get(selection.id)).toEqual({ count: 1 });
-      releaseDelivery();
       await handling;
+
+      expect(handled).toBe(true);
+      const selection = await waitForProjectSelection(store, `message-${command}`);
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE selection_id = ? AND state = 'pending'").get(selection.id)).toEqual({ count: 1 });
+      await deliveryStarted;
+      releaseDelivery();
+      await publisher.drain();
       expect(replyCard).toHaveBeenCalled();
       expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE selection_id = ? AND state = 'pending'").get(selection.id)).toEqual({ count: 0 });
       await coordinator.stop(); await publisher.stop(); store.close();
     });
   }
 
-  it("keeps a failed immediate selector delivery durable for retry", async () => {
+  it("keeps a failed Global head durable and leaves the selector behind it", async () => {
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true, async createTopic() { throw new Error("not used"); },
-      async replyText() { return { messageId: "text" }; }, async replyCard() { throw Object.assign(new Error("temporary Lark failure"), { response: { status: 503 } }); }, async updateCard() {}
+      async replyText() { return { messageId: "text" }; }, async replyCard() { throw Object.assign(new Error("rate limited"), { response: { status: 429 } }); }, async updateCard() {}
     };
     const herdr = { async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {} } as HerdrPort;
     const store = new SqliteBindingStore(":memory:");
@@ -58,10 +59,12 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await expect(coordinator.handleMessage({ eventId: "event-failed-selector", messageId: "message-failed-selector", chatId: "chat", topicId: null, rootMessageId: "message-failed-selector", actorOpenId: "user-1", text: "/swarm new", mentionsBot: true, isRootMessage: true })).resolves.toBeUndefined();
+    const selection = await waitForProjectSelection(store, "message-failed-selector");
+    await publisher.drain();
 
-    const selection = store.database.prepare("SELECT id, state FROM project_selections WHERE command_message_id = ?").get("message-failed-selector") as { id: string; state: string };
     expect(selection.state).toBe("pending");
-    expect(store.database.prepare("SELECT state, attempt_count FROM outbound_replies WHERE selection_id = ?").get(selection.id)).toMatchObject({ state: "pending", attempt_count: 1 });
+    expect(store.database.prepare("SELECT state, attempt_count FROM outbound_replies WHERE selection_id = ?").get(selection.id)).toMatchObject({ state: "pending", attempt_count: 0 });
+    expect(store.database.prepare("SELECT state, attempt_count FROM outbound_replies WHERE projection_key LIKE 'command-status:%' ORDER BY delivery_order LIMIT 1").get()).toMatchObject({ state: "pending", attempt_count: 1 });
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
@@ -79,6 +82,7 @@ describe("project selection flow", () => {
 
     await coordinator.handleMessage({ eventId: "event-pi", messageId: "message-pi", chatId: "chat", topicId: null, rootMessageId: "message-pi", actorOpenId: "user-1", text: "/swarm new investigate --agent pi", mentionsBot: true, isRootMessage: true });
 
+    await waitForProjectSelection(store, "message-pi");
     expect(store.database.prepare("SELECT requested_title, agent_kind FROM project_selections WHERE command_message_id = ?").get("message-pi")).toEqual({ requested_title: "investigate", agent_kind: "pi" });
     await coordinator.stop(); await publisher.stop(); store.close();
   });
@@ -88,7 +92,6 @@ describe("project selection flow", () => {
     let selectorCard: object | undefined;
     let paneCreated = false;
     const startAgent = vi.fn(async () => undefined);
-    const runPrompt = vi.fn(async (_pane: string, _text: string, _timeout: number, _observation: unknown, _signal: unknown, onDispatched: () => Promise<void>) => { await onDispatched(); return "done" as const; });
     const lark: LarkPort = {
       async start(_onMessage, callback) { onAction = callback; }, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "pi-topic", rootMessageId: "pi-root" }; }, async replyText() { return { messageId: "text" }; },
@@ -98,7 +101,7 @@ describe("project selection flow", () => {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return paneCreated ? { paneId: "w1:pi", terminalId: "term-pi", workspaceId: "w1", cwd: "/work/alpha", label: "pi-primary", agentKind: "pi", agentSession: { source: "herdr:pi", agent: "pi", kind: "id", value: "pi-session" }, agentState: "idle", foregroundExecutables: ["pi"] } : null; },
       async createPane(workspaceId, cwd, options) { paneCreated = true; return { paneId: "w1:pi", workspaceId, cwd, label: options?.title ?? null, agentState: "idle", foregroundExecutables: [] }; },
       async observeRuntime() { return { pane: { paneId: "w1:pi", terminalId: "term-pi", workspaceId: "w1", cwd: "/work/alpha", label: "pi-primary", agentKind: "pi", agentSession: { source: "herdr:pi", agent: "pi", kind: "id", value: "pi-session" }, agentState: "idle", foregroundExecutables: ["pi"] }, traexProcess: false, composerReady: false, evidenceSource: "structured" }; },
-      startAgent, async startTraex() { throw new Error("TraeX must not start"); }, runPrompt, async renamePane() {}
+      startAgent, async startTraex() { throw new Error("TraeX must not start"); }, async runPrompt() { throw new Error("legacy Prompt executor must not run"); }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -106,18 +109,23 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "event-pi-create", messageId: "message-pi-create", chatId: "chat", topicId: null, rootMessageId: "message-pi-create", actorOpenId: "user-1", text: "/swarm new investigate --agent pi", mentionsBot: true, isRootMessage: true });
+    await waitForProjectSelection(store, "message-pi-create");
+    await publisher.drain();
     const value = findProjectButton(selectorCard!, "alpha").value as { selectionId: string; projectId: string; action: string };
     await onAction!({ messageId: "selector-card", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
 
-    expect(startAgent).toHaveBeenCalledWith("w1:pi", { name: "alpha-primary", kind: "pi", executable: "pi", args: [] });
     const piBinding = store.findBindingByPane("w1:pi")!;
+    expect(startAgent).toHaveBeenCalledWith("w1:pi", { name: primaryManagedAgentName("alpha", piBinding.id, piBinding.generation), kind: "pi", executable: "pi", args: [] });
     expect(piBinding).toMatchObject({ agentKind: "pi", state: "active" });
     expect(store.hasBindingPrimaryToolCapability(piBinding.id, piBinding.generation)).toBe(false);
     await vi.waitFor(() => expect(store.loadTopicView(piBinding.id)).toMatchObject({ agentKind: "pi", primaryToolsAvailable: false, primaryToolsNotice: expect.stringContaining("pi Primary") }));
     await coordinator.handleMessage({ eventId: "pi-prompt-event", messageId: "pi-prompt", chatId: "chat", topicId: "pi-topic", rootMessageId: "pi-root", actorOpenId: "user-1", text: "run with pi", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledWith("w1:pi", "run with pi", expect.any(Number), expect.any(Function), expect.any(AbortSignal), expect.any(Function)));
-    await vi.waitFor(() => expect(store.database.prepare("SELECT state FROM prompt_jobs WHERE lark_message_id = ?").get("pi-prompt")).toEqual({ state: "delivered" }));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT text, owner_id, pane_id, terminal_id, expected_agent_kind, expected_session_id, state FROM submission_intents WHERE source_message_key = ?").get("pi-prompt")).toEqual({
+      text: "run with pi", owner_id: piBinding.id, pane_id: "w1:pi", terminal_id: "term-pi",
+      expected_agent_kind: "pi", expected_session_id: "pi-session", state: "prepared"
+    }));
+    expect(store.getPromptInputBySource("feishu", "pi-prompt")).toBeNull();
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
@@ -145,6 +153,8 @@ describe("project selection flow", () => {
     const coordinator = createTestRouter(configForTests(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     await coordinator.handleMessage({ eventId: "e-async", messageId: "m-async", chatId: "chat", topicId: "m-async", rootMessageId: "m-async", actorOpenId: "user-1", text: "/swarm new title", mentionsBot: true, isRootMessage: true });
+    await waitForProjectSelection(store, "m-async");
+    await publisher.drain();
     await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
     const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value as { selectionId: string; projectId: string; action: string };
 
@@ -156,17 +166,23 @@ describe("project selection flow", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("dispatches a mentioned natural-language root request through the default project exactly once", async () => {
+  it("submits a mentioned default-project bootstrap as one first-session Agent Input", async () => {
     const created: string[] = [];
     const prompts: string[] = [];
     const selectorCards: object[] = [];
     const groupCards: object[] = [];
+    const answerUpdates: object[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic(card) { groupCards.push(card); return { topicId: "task-topic", rootMessageId: "task-root" }; },
       async replyText() { return { messageId: "text-1" }; },
       async replyCard(_root, card) { selectorCards.push(card); return { messageId: "selector-card" }; },
-      async updateCard() {}
+      async updateCard() {},
+      async createStreamingCard(card) { selectorCards.push(card); return { cardId: "answer-card" }; },
+      async replyStreamingCardReference() { return { messageId: "selector-card" }; },
+      async streamCardContent() {},
+      async finishStreamingCard() {},
+      async updateCardKit(_messageId, card) { answerUpdates.push(card); }
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; },
@@ -184,11 +200,17 @@ describe("project selection flow", () => {
     const message = { eventId: "natural-e1", messageId: "natural-m1", chatId: "chat", topicId: "natural-topic", rootMessageId: "natural-m1", actorOpenId: "user-1", text: "帮我排查登录超时", mentionsBot: true, isRootMessage: true };
     await coordinator.handleMessage(message);
     await coordinator.handleMessage(message);
-    await vi.waitFor(() => expect(prompts).toEqual(["帮我排查登录超时"]));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT COUNT(*) AS count FROM submission_intents WHERE source_message_key = ?").get("natural-m1")).toEqual({ count: 1 }));
+    expect(store.database.prepare("SELECT ingress_source, source_message_key, text, owner_kind, expected_session_id, state FROM submission_intents WHERE source_message_key = ?").get("natural-m1")).toEqual({
+      ingress_source: "feishu:primary", source_message_key: "natural-m1", text: "帮我排查登录超时", owner_kind: "primary", expected_session_id: null, state: "prepared"
+    });
+    expect(prompts).toEqual([]);
+    expect(store.database.prepare("SELECT (SELECT COUNT(*) FROM prompt_inputs) AS inputs, (SELECT COUNT(*) FROM native_input_batches) AS batches, (SELECT COUNT(*) FROM prompt_jobs) AS jobs").get()).toEqual({ inputs: 0, batches: 0, jobs: 0 });
     expect(created).toHaveLength(1);
     expect(created[0]).toMatch(/^[a-z0-9]{4}$/);
-    expect(selectorCards).toHaveLength(1);
-    expect(JSON.stringify(selectorCards)).not.toContain('\"action\":\"project_select\"');
+    expect(selectorCards).toHaveLength(0);
+    expect(answerUpdates).toHaveLength(0);
+    expect(answerUpdates.some((card) => JSON.stringify(card).includes('"action":"completion_action"'))).toBe(false);
     expect(groupCards).toHaveLength(1);
     expect(store.findBindingByPane("w1:p1")).toMatchObject({ creatorOpenId: "user-1", projectId: "alpha", workspaceId: "w1", title: `herdr / ${created[0]}` });
     const selection = store.database.prepare("SELECT id FROM project_selections WHERE command_message_id = ?").get("natural-m1") as { id: string };
@@ -273,22 +295,27 @@ describe("project selection flow", () => {
     store.updateBinding("existing-binding", { paneId: "wH:p1", state: "active" });
 
     await coordinator.handleMessage({ eventId: "e1", messageId: "command-1", chatId: "chat", topicId: "existing-topic", rootMessageId: "existing-root", actorOpenId: "user-1", text: "/swarm new Fix login", mentionsBot: true, isRootMessage: false });
+    await waitForProjectSelection(store, "command-1");
+    await publisher.drain();
     expect(created).toEqual([]);
     await vi.waitFor(() => expect(findProjectCard(cards, "datasage")).toBeDefined());
     const button = findProjectButton(findProjectCard(cards, "datasage")!, "datasage");
     const value = button.value as { selectionId: string; projectId: string; action: string };
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ selectorMessageId: "selector-card-1", requestedTitle: "Fix login" });
 
+    const updatesBeforeUnauthorizedAction = updates.length;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "another-user", value });
-    expect(updates).toEqual([]);
+    expect(updates).toHaveLength(updatesBeforeUnauthorizedAction);
     expect(created).toEqual([]);
 
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection(value.selectionId)?.state).toBe("completed"));
+    await publisher.drain();
 
     expect(created).toEqual([["wD", "/work/datasage", {
       bindingId: expect.any(String), generation: 1, projectId: "datasage", placement: "dedicated-tab", title: expect.stringMatching(/^[a-z0-9]{4}$/),
+      displayIdentity: { role: { kind: "managed-primary" } },
       environment: { SWARM_PRIMARY_CAPABILITY: expect.stringMatching(/^test-.+-1$/) }
     }]]);
     const bindingId = (created[0]![2] as { bindingId: string }).bindingId;
@@ -307,21 +334,25 @@ describe("project selection flow", () => {
       topicId: "project-topic-1", rootMessageId: "project-root-1", statusMessageId: "project-root-1", lastAgentState: "idle"
     });
     expect(store.getProjectSelection(value.selectionId)).toMatchObject({ state: "completed", selectedProjectId: "datasage" });
-    expect(JSON.stringify(updates.at(-1))).toContain("项目已打开");
-    expect(JSON.stringify(updates.at(-1))).toContain("datasage_semantic_knowledge");
-    expect(JSON.stringify(updates.at(-1))).toContain("发送话题入口");
-    const completedCard = updates.at(-1)!;
+    const completedCard = updates.findLast((card) => JSON.stringify(card).includes("项目已打开"));
+    expect(completedCard).toBeDefined();
+    expect(JSON.stringify(completedCard)).toContain("datasage_semantic_knowledge");
+    expect(JSON.stringify(completedCard)).toContain("发送话题入口");
     expect(JSON.stringify(completedCard)).toContain('\"action\":\"open_project_thread\"');
     expect(JSON.stringify(completedCard)).not.toContain("openMessageId");
     expect(JSON.stringify(completedCard)).not.toContain("client/chat/open");
-    expect(JSON.stringify(updates.at(-1))).not.toContain("当前话题");
-    expect(JSON.stringify(updates.at(-1))).not.toContain("**Workspace**");
+    expect(JSON.stringify(completedCard)).not.toContain("当前话题");
+    expect(JSON.stringify(completedCard)).not.toContain("**Workspace**");
 
     await coordinator.handleMessage({
       eventId: "e-first-prompt", messageId: "first-prompt", chatId: "chat", topicId: "project-topic-1", rootMessageId: "project-root-1",
       actorOpenId: "user-1", text: "start the task", mentionsBot: false, isRootMessage: false
     });
-    await vi.waitFor(() => expect(prompts).toEqual(["start the task"]));
+    await vi.waitFor(() => expect(store.database.prepare("SELECT text, pane_id, terminal_id, expected_agent_kind, state FROM submission_intents WHERE source_message_key = ?").get("first-prompt")).toEqual({
+      text: "start the task", pane_id: "wD:p9", terminal_id: "term-9", expected_agent_kind: "traex", state: "prepared"
+    }));
+    expect(prompts).toEqual([]);
+    expect(store.getPromptInputBySource("feishu", "first-prompt")).toBeNull();
 
     const openButton = findActionButton(completedCard, "open_project_thread");
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value: openButton.value });
@@ -359,6 +390,8 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-random", messageId: "command-random", chatId: "chat", topicId: "topic-random", rootMessageId: "root-random", actorOpenId: "user-1", text: "/swarm new", mentionsBot: true, isRootMessage: true });
+    await waitForProjectSelection(store, "command-random");
+    await publisher.drain();
     await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
     const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value as { selectionId: string; projectId: string; action: string };
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
@@ -435,10 +468,13 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-fail", messageId: "command-fail", chatId: "chat", topicId: null, rootMessageId: "command-fail", actorOpenId: "user-1", text: "/swarm new Broken", mentionsBot: true, isRootMessage: true });
+    await waitForProjectSelection(store, "command-fail");
+    await publisher.drain();
     await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
     const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
     await vi.waitFor(() => expect(store.getProjectSelection((value as { selectionId: string }).selectionId)?.error).toBe("group card unavailable"));
+    await publisher.drain();
 
     expect(store.listBindings()).toHaveLength(1);
     expect(store.listBindings()[0]).toMatchObject({ state: "pending", lifecycle: "provisioning", provisioningCheckpoint: "runtime_started", paneId: "w1:p7", topicId: null, rootMessageId: null, statusMessageId: null });
@@ -472,6 +508,8 @@ describe("project selection flow", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "e-not-ready", messageId: "command-not-ready", chatId: "chat", topicId: null, rootMessageId: "command-not-ready", actorOpenId: "user-1", text: "/swarm new Not ready", mentionsBot: true, isRootMessage: true });
+    await waitForProjectSelection(store, "command-not-ready");
+    await publisher.drain();
     await vi.waitFor(() => expect(findProjectCard(selectorCards, "alpha")).toBeDefined());
     const value = findProjectButton(findProjectCard(selectorCards, "alpha")!, "alpha").value;
     await onAction!({ messageId: "selector-card-1", chatId: "chat", operatorOpenId: "user-1", value });
@@ -517,4 +555,13 @@ function findActionButton(card: object, action: string): { value: unknown } {
   const button = elements.find((element) => element.behaviors?.some((behavior) => behavior.type === "callback" && behavior.value?.action === action));
   if (!button) throw new Error(`Missing action button: ${action}`);
   return { value: button.behaviors!.find((behavior) => behavior.type === "callback")!.value };
+}
+
+async function waitForProjectSelection(store: SqliteBindingStore, commandMessageId: string): Promise<{ id: string; state: string }> {
+  let selection: { id: string; state: string } | undefined;
+  await vi.waitFor(() => {
+    selection = store.database.prepare("SELECT id, state FROM project_selections WHERE command_message_id = ?").get(commandMessageId) as { id: string; state: string } | undefined;
+    expect(selection).toBeDefined();
+  });
+  return selection!;
 }

@@ -1,1899 +1,590 @@
 # Herdr Agent Swarm Architecture
 
-## Who this is for
+This document describes the current standalone service. Historical Prompt FIFO designs under `docs/archive/`, `docs/superpowers/`, or completed spec records are not runtime authority.
 
-This document is for an engineer taking ownership of the bridge or diagnosing a
-production session. After reading it, they should be able to identify the
-authority for any observed state and follow a request from the configured
-Conversation Gateway through Herdr and back to durable delivery. They should also be able to place a change
-at the correct workflow, port, adapter, or composition seam without weakening
-durability or recovery behavior.
+## Authority boundaries
 
-## System purpose
+| Fact | Authority | Consequence |
+| --- | --- | --- |
+| Pane, terminal, foreground process, Agent session, active Turn | Herdr Core | Re-observe Herdr before a fenced control action; socket events are wake-up hints only. |
+| Final conversation event order | Core JSONL for the exact Agent session | Never sort or merge conversation events by Feishu arrival, timestamp, hash, ID, SQLite row order, batch ordinal, or submission receipt. |
+| Binding, Submission Intent, projection checkpoint/gap, outbox, audit, lease | SQLite | Persist intent before effects and make multi-row transitions atomic. |
+| Visible messages and CardKit cards | Feishu/Lark | Cards are delivery output, never workflow truth. |
+| Service process | user systemd | Use `npm run swarm:*`; the application does not own a PID lifecycle. |
 
-Herdr Agent Swarm manages human-controlled Primary and Worker instances across
-multiple projects on the Herdr headless runtime. It connects each managed Lark
-topic to an agent process in a real Herdr pane, letting a person
-start work, queue later requests, and see safe structured TraeX output in Lark while
-preserving Herdr as the place for local observation and high-risk approval.
+High-risk Agent approval remains local to the Herdr Pane. The bridge has no remote approval, denial, arbitrary terminal-input, process-kill, or Pane-kill capability.
 
-The bridge is a durable workflow coordinator, not a message relay. It does not
-assume that a Lark API call, a Herdr snapshot, or a runtime event is a complete
-transaction by itself.
-
-## Architecture at a glance
-
-The system is a ports-and-adapters application with one production composition
-root. Application workflows depend on consumer-shaped domain ports. A statically
-registered Conversation Gateway, Herdr, and SQLite adapters satisfy those ports
-at the outside of the application. SQLite stores durable workflow facts; Herdr
-remains authoritative for live runtime identity; the active Gateway displays
-projections. Feishu is the only production Gateway in this milestone.
+## Current request path
 
 ```text
-┌──────────────────────────── External systems ────────────────────────────┐
-│ Gateway / Feishu            Herdr / TraeX                  user systemd │
-│ messages and views          panes, sessions, turns         process owner │
-└──────────────┬──────────────────────┬───────────────────────────┬────────┘
-               │ SDK / WebSocket      │ CLI / Socket / JSONL      │ lifecycle
-               v                      v                           v
-┌──────────────────────── Infrastructure adapters ────────────────────────┐
-│ Gateway plugin · Herdr adapter · PaneHost · TranscriptReader · health  │
-│ command runner · Agent drivers · worktree manager · SQLite bundle       │
-└─────────────────────────────┬────────────────────────────────────────────┘
-                              │ concrete implementations
-                              v
-┌────────────────────────── Composition root ──────────────────────────────┐
-│ Creates adapters, selects implementations, injects ports, and connects  │
-│ lifecycle events, durable-work wake-ups, and runtime reconciliation.    │
-└───────────────┬────────────────────┬───────────────────────┬─────────────┘
-                │                    │                       │
-                v                    v                       v
-┌──────────────────────┐  ┌──────────────────────┐  ┌────────────────────┐
-│ Ingress / Primary    │  │ Worker / Control     │  │ Projection / Outbox│
-│ routing, acceptance  │  │ instance FIFO, exact│  │ card views, durable│
-│ prompt FIFO, recovery│  │ turn observation     │  │ Gateway delivery   │
-└──────────┬───────────┘  └──────────┬───────────┘  └─────────┬──────────┘
-           └─────────────────────────┼────────────────────────┘
-                                     │ consumer-shaped ports
-                                     v
-┌────────────────────────── Domain contracts ─────────────────────────────┐
-│ Binding · Prompt · Instance · Turn · lifecycle transitions · reducers   │
-│ FIFO · generation fences · exact-turn identity · no-replay invariants   │
-└─────────────────────────────┬────────────────────────────────────────────┘
-                              │ implemented by
-                              v
-┌────────────────────── SQLite capability graph ──────────────────────────┐
-│ One SqliteContext and one primary connection; named workflow, projection│
-│ and delivery capabilities share transactions and a fenced writer lease. │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-The shortest useful request trace is:
-
-```text
-Gateway input
-  -> plugin validation and provider-neutral normalization
-  -> authorization
+configured Lark message or card action
   -> durable inbound record
-  -> routing and atomic prompt or command acceptance
-  -> FIFO claim
-  -> one fenced Herdr / TraeX effect
-  -> exact transcript observation
-  -> durable view reduction and outbox intent
-  -> frozen Gateway plan and Gateway-scoped lane claim
-  -> ordered Gateway delivery
+  -> explicit Swarm/Worker control grammar?
+       yes -> durable CommandIntent / scoped control workflow
+       no  -> immutable Submission Intent
+               -> versioned Herdr Core Agent Input submission
+  -> canonical Core JSONL session events
+  -> continuous exact-session ingestion into the durable inbox
+  -> Conversation Projection checkpoint / gap handling
+  -> durable Lark outbox
+  -> Primary-Pane or Global Delivery Ring
+  -> CardKit delivery
 ```
 
-Every arrow across an external-effect boundary has a durable fact on the SQLite
-side. Process-local events and wake-ups reduce latency; durable scans and fresh
-Herdr observations provide convergence when a hint is lost.
+Ordinary Primary and Worker text uses the same Agent Input abstraction. It does not create a Prompt Input, Native Input Batch, Prompt Job, queue position, scheduler wake, or Binding execution slot.
 
-Explicit bot mentions in the configured group have one additional bounded
-interpretation path behind the `NaturalLanguageCommandRuntime` deep module. Its
-small `start`, `stop`, and `interpret` interface hides deterministic selection,
-Controller lifecycle, durable job execution, and the private tool endpoint from
-Ingress and bridge lifecycle. A deterministic parser applies explicit ordered
-rule groups for unsupported controls, exact queries, ambiguity, project and
-Primary commands, Worker commands, current-session mutations, and task
-classification. Only unresolved phrases enter a durable FIFO owned by the
-service-managed `herdr-swarm-controller` Agent in a dedicated background tab. That Agent runs
-read-only, receives only three request-scoped MCP tools, and can submit a typed
-proposal but cannot execute Swarm, Herdr, terminal, or approval actions. Queries
-reuse the existing gateways; mutations first create a durable confirmation card.
-Possible Controller prompt delivery is never replayed after restart: the job is
-marked uncertain and only a late, generation-fenced structured result may settle
-it. The Controller pane is not a Primary or Worker and consumes no project slot.
-When Controller startup is unavailable, the module remains active in
-deterministic-only degraded mode.
+## Core invariants
 
-Delivery intent schema version 2 stores only the typed intent kind; the
-canonical materialized body remains in the row's immutable `payload` column.
-Version 1 envelopes with an embedded `materializedPayload` remain readable. The
-retention maintainer incrementally converts only byte-equivalent, inactive v1
-envelopes in bounded batches, leaving active claims and ambiguous legacy rows
-unchanged. This removes duplicate durable bodies without changing Gateway plans,
-claim fences, retry identity, or recovery evidence.
+1. Each authorized source message admits at most one immutable Submission Intent for its exact Agent route.
+2. Inputs are independently eligible. An earlier running, detached, recovering, or uncertain legacy item never blocks a later input.
+3. Persist `attempting` before calling Core. After an attempt may have crossed the external-effect boundary, query the receipt; never submit the body again automatically.
+4. Core JSONL is the sole final conversation-order authority. Submission identity is for idempotency and correlation, not sorting.
+5. Conversation projection preserves Core order exactly. Live batches, recovery pages, and staged snapshots are never locally re-sorted.
+6. A completed exact-recovery snapshot atomically replaces a projection only when it is compatible with existing stable event identities. Ambiguity opens a gap and preserves the old view.
+7. Persist projection and delivery intent before Lark delivery. Retrying an outbox item never repeats Agent Input.
+8. CardKit stream sequence is ordered within one card element. Frozen Answer pages are never patched.
+9. Possible-effect legacy Prompt rows remain evidence/recovery-only. Only rows durably proven never attempted may have been migrated into Agent Input.
+10. The service remains fenced by one SQLite instance lease.
 
-## Composition root
+## Agent Input and Human Turn Cards
 
-The composition root is the only production location that knows the complete
-runtime topology. It creates concrete adapters, selects production
-implementations for domain ports, constructs workflows, connects event and
-wake-up handlers, and returns the runtime modules owned by process lifecycle.
-It answers **who is connected to whom**; it does not decide **what business
-transition should happen next**.
+The visible model has three durable objects: an Input Intent (immutable route,
+body, receipt and no-replay evidence), a Conversation Segment (one canonical
+Human Message boundary plus its ordered Core items), and Card Pages (the
+CardKit delivery projection). A Feishu admission creates only the Input Intent.
+It does not create a Conversation Segment, Card Page, `input_card_views`,
+Primary Answer, or Worker Task row. The original Feishu message is the visible
+receipt while Core submission is in flight.
 
-The top-level composition is divided into focused factories so the full graph
-remains reviewable:
+Only ingestion of the exact session-fenced canonical
+`human_message.submission_id` creates the Conversation Segment, page zero, and
+first `working` Turn Card delivery intent atomically; a `prepared` receipt is
+not evidence. Missing or ambiguous ownership creates no speculative card and
+never attaches content to a nearby card. Terminal status is `completed`,
+`failed`, or `cancelled`.
+
+Primary, Worker, exact-turn steering, and direct-Herdr Human Messages use the
+same segment/page lifecycle and renderer. Direct-Herdr has no Input Intent or
+pre-card phase: its canonical Human event creates a `working` segment directly.
+The owner label and task metadata differ, but lifecycle, status evidence, and
+delivery fencing are identical.
+
+Human boundaries and content pagination are independent. A new canonical Human
+Message creates a new segment; the configured 9,000-character CardKit limit
+creates a continuation page in that segment. Continuation pages repeat compact
+request context and page number. Frozen pages are never patched; late facts are
+rendered on an old-segment correction continuation.
+
+### Semantic Turn Card rollout
+
+SQLite owns the durable rollout phase, immutable per-page delivery cohort,
+shadow evidence, and backup/restore rehearsal evidence. Expansion adds nullable
+cohort metadata without enabling semantic writers and assigns all existing
+pages to `legacy`. During shadow, convergence derives both legacy and semantic
+plans for an eligible legacy page, compares bounded cursor and budget evidence,
+records the fingerprints, and reserves only the legacy outbox effect. Shadow
+derivation never calls the Gateway or creates a second Delivery.
+
+The guarded cohort transition requires recorded shadow evidence with no
+mismatch, no ambiguous actionable Turn Card rows, only supported snapshot,
+planner, renderer, and Gateway-profile versions, no unresolved semantic
+settlement gap, and no semantic retention blocker. Only pages inserted after
+that committed transition receive the `semantic` cohort. Historical and active
+legacy pages remain legacy, and a page cohort cannot be changed after
+assignment. Frozen pages are never replanned. Consumer retries use the frozen
+provider-neutral snapshot and plan already persisted with the outbox row.
+
+Startup refuses only an incoherent rollout phase/cohort assignment or semantic
+pages that predate cohort enablement. It does not reject ordinary pending
+semantic work: restart recovery must still refill that work from SQLite.
+Status exposes bounded phase, cohort, parity, blocker, version, and rehearsal
+diagnostics without payload content. Contraction readiness additionally
+requires a successful backup/restore rehearsal against isolated database files;
+the rehearsal validates quick-check, foreign keys, current schema, semantic
+integrity, and matching schema fingerprints before its evidence is recorded.
+This guard does not perform contraction, delete legacy history, or add an
+operator mutation surface. A provider success observed before local settlement
+remains an uncertain effect and cannot be cleared by rollout evidence.
+
+### Frozen route
+
+A Submission Intent freezes:
+
+- ingress source and source message key;
+- exact body;
+- Binding and generation;
+- Pane and terminal identity;
+- Agent kind and native session identity;
+- caller-generated submission ID.
+
+These fields are immutable. A duplicate with the same source identity and same frozen content converges on the existing intent; conflicting reuse fails closed.
+
+### Receipt states
 
 ```text
-createBridgeRuntime
-│
-├─ RuntimeEventIntegration
-├─ createInfrastructureRuntime
-│    └─ built-in Gateway registry/session, Herdr, PaneHost, transcripts, drivers, worktrees
-├─ createOutboundRuntime
-│    └─ projections, Answer/Main Card workflows, GatewayView, durable outbox drain
-├─ createPrimaryRuntime
-│    └─ prompt FIFO, exact turn supervision, external-turn observation
-├─ createWorkerRuntime
-│    └─ Worker acceptance, FIFO dispatch, observation, reconciliation
-└─ createApplicationRuntime
-     ├─ createBindingSessionRuntime
-     ├─ createCommandControlRuntime
-     └─ createIngressRecoveryRuntime
+recorded -> attempting -> prepared -> observed -> terminal
+                    \-> uncertain --receipt query only--/
+prepared/observed -------------------------------> cancelled
 ```
 
-Each child factory receives only a typed selection of the capabilities it can
-compose. Only the parent composition sees the complete SQLite bundle. This makes
-an accidental cross-context dependency a compile-time error and keeps the
-workflow interface visible at its construction site.
-`createBridgeRuntime()` exports the completed graph in three responsibility-shaped
-groups instead of leaking every internal module as a flat result: `lifecycle`
-contains capabilities ordered by `ManagedBridgeRuntime`, `health` contains
-runtime-owned diagnostic providers, and `operations` contains the remaining
-externally consumed transport capability. Worker diagnostics are assembled inside
-the Worker factory beside their dispatch and observation sources. Host-owned HTTP
-configuration, stores, lease, projects, build identity, and lifecycle policy stay
-in managed process composition.
-
-The composition root may:
-
-- create adapters and workflows;
-- inject consumer-shaped ports and validated configuration;
-- connect lifecycle subscribers, durable-work wake-ups, and Herdr hint routes;
-- select the production presentation and Agent drivers;
-- return startable, stoppable, and observable runtime modules.
-
-It must not:
-
-- claim or reorder a Prompt or Worker-turn FIFO;
-- decide whether an uncertain effect is safe to replay;
-- perform Binding, Prompt, Instance, or outbox state transitions;
-- parse terminal output or render cards;
-- bypass a workflow by writing raw SQLite state or terminal input.
-
-Three similarly shaped modules have deliberately different scopes:
-
-| Module | Scope | Responsibility |
-| --- | --- | --- |
-| Application composition root | Whole running bridge | Connect external adapters, workflows, events, and lifecycle-owned modules |
-| `SqliteCapabilityGraph` | SQLite adapter implementation | Create the single transactional context, run migrations, and expose named capabilities |
-| `RuntimeEventIntegration` | Process-local runtime wiring | Connect four reliability-specific event and wake-up channels without creating another durable authority |
-
-## Key design rules
-
-The following rules define where new behavior belongs and which shortcuts are
-unsafe. The detailed lifecycle, recovery, streaming, and delivery sections below
-explain their implementation.
-
-### Authority is split, not replicated
-
-```text
-Herdr  -> live pane, process, native session, and Agent-state authority
-SQLite -> workflow intent, queues, fences, projections, outbox, audit, lease
-Lark   -> visible messages and cards only
-```
-
-Never infer runtime truth from a card, and never repair SQLite from Lark output.
-Reconcile live identity from Herdr, persist the resulting workflow transition,
-then let projections and the outbox repair Lark.
-
-### Consumer-shaped ports preserve deep modules
-
-A workflow receives the smallest named interface that expresses its complete
-responsibility. Startup view convergence receives `StartupViewStore` plus the
-Answer-page and Main-Card convergence ports; only outbound composition constructs
-those projection workflows from their stores. Instance messaging, turn
-supervision, exact observation, runtime reconciliation, and lifecycle control
-each use a named consumer port. The concrete SQLite capability can satisfy
-several ports while keeping SQL and transaction ownership internal. Narrowing an
-interface must not split an atomic aggregate transition.
-
-### One SQLite context owns atomic workflow transitions
-
-Production constructs one `SqliteContext` and one primary `DatabaseSync`
-connection. Prompt acceptance, Run Card projection, Worker-turn events, card
-invalidation, and outbox intent can therefore participate in the same outer
-transaction. The read-only integrity worker is the deliberate separate-connection
-exception. New capability modules share the existing context; they do not create
-their own connection or emulate a transaction across repositories.
-
-### External effects are fenced and never guessed
-
-Ordinary Prompt and Worker-turn queues are durable FIFO queues with one active
-ordinary turn per owner. Before steering, stopping, observing, or settling a
-turn, workflows fence the applicable binding or instance generation, pane,
-native session, logical turn, runtime turn, and canonical runtime start time.
-Work proven not to have started may return to dispatch. Work that may have
-reached TraeX becomes detached or uncertain and is observed or explicitly
-resolved; it is never automatically replayed.
-
-### Delivery intent precedes delivery
-
-User-visible workflow intent is committed before any Lark call. The durable
-outbox provides idempotency, strict ordering within a lane, compare-and-swap
-delivery checkpoints, bounded retry, dead-letter handling, and recovery. A Lark
-retry can repeat only the delivery effect, never the corresponding TraeX prompt.
-Frozen Answer pages are immutable; continuation proceeds on a new card.
-Successful inbound routing emits one structured completion record containing
-the route decision and disposition; Primary prompt acceptance also includes the
-durable `promptId`, preserving direct `eventId` to Prompt/turn correlation
-without duplicating steady-state info logs.
-
-### Events have four different reliability contracts
-
-| Channel | Contract | Recovery authority |
-| --- | --- | --- |
-| Inbound notification | Durable SQLite record plus a wake-up hint | Inbox scan and interrupted-claim recovery |
-| Lifecycle event | Committed canonical state plus typed process-local fan-out | Current SQLite projections |
-| Work wake-up | Best-effort, coalescing, and owner-keyed | Durable queue scan |
-| Herdr event | Bounded reconciliation hint | Fresh Herdr snapshot or targeted observation |
-
-These channels share composition but not semantics. There is no generic durable
-event log, no event sourcing, and no assumption that receiving an event proves a
-state transition.
-
-`RuntimeEventBus` owns the common typed envelope, named subscriptions, startup
-buffering, work-key coalescing, failure diagnostics, and shutdown settlement.
-Callers receive only narrow lifecycle, inbound, work, or Herdr interfaces; they
-cannot publish an untyped event. Work envelopes contain durable owner identifiers
-only, never Prompt, steering, terminal, or answer content.
-Inbound envelopes carry only the durable `eventId`; subscriber failure cannot
-fail the already durable Gateway acknowledgement or become workflow authority.
-
-Active-turn control follows a separate durable-effect seam.
-`TurnControlWorkflow` validates the caller and exact target, commits an accepted
-operation plus any result-card intent, and emits `turn-control-ready`. The
-owner-serialized `TurnControlDispatcher` reloads that intent, refreshes the Herdr
-turn fence, claims it, performs the permitted native interrupt (or explicitly
-rejects unsupported steering), persists the terminal result, and wakes delivery.
-Different owners progress independently. On startup, accepted work is resumed;
-an operation already in `dispatching` becomes `uncertain` and is never replayed.
-
-Primary binding and Worker instance reconciliation each own an independent
-`PriorityReconciliationRunner`. The shared runner is a domain-free single-writer
-scheduler: it coalesces only bounded Pane/workspace identifiers and one full-scan
-bit, then selects pending work in `pane -> workspace -> full` order. A Pane hint
-accepted during a broader pass is never treated as covered by that older pass; it
-runs immediately afterward, ahead of lower-priority pending work. The two runner
-instances do not share an execution queue or failure boundary. Their process-local
-scope state carries no Prompt, turn, card, or delivery payload, and a lost hint is
-recovered by startup or periodic full reconciliation against SQLite and Herdr.
-Within one Worker instance reconciliation execution, projects that share a Herdr
-workspace also share one pane snapshot and pane-ID map. Project iteration and
-project-scoped instance queries remain independent; the snapshot is not retained
-across executions, so periodic and retry passes still obtain fresh Herdr state.
-During the ordered startup recovery window, the shared Herdr snapshot cache may
-retain an observation beyond its normal TTL so instance recovery, turn recovery,
-and binding baselines do not repeat the same CLI snapshot. Pane mutations and
-explicit forced reads still invalidate or refresh that observation. Because the
-socket subscriber starts only after recovery, startup reuse has its own bounded
-maximum age; socket topology hints resume normal invalidation afterward. Retention
-scanning remains outside the window and always forces a fresh snapshot.
-
-### Recovery converges from canonical state
-
-Startup begins Agent capability detection while it acquires the fenced SQLite
-lease and runs migrations, then joins the detection result before constructing
-the runtime graph. Integrity checks, interrupted local-claim recovery, durable
-view convergence, runtime baselines, and reconciliation against fresh Herdr state
-remain ordered lifecycle phases. Lost events and process restarts may delay
-convergence but must not change the final state. Recovery never treats stale card
-text or a coarse idle observation as proof that an exact turn completed.
-The Primary tool socket and natural-language Controller runtime are independent
-local ingress resources, so they start concurrently. Both startup attempts settle
-before failure cleanup begins; recovery and external ingress remain gated on their
-successful completion.
-
-## Lark authorization
-
-The configured chat is necessary but not sufficient for access.
-`LARK_ALLOWED_OPEN_IDS` is a mandatory prompt and card-action allowlist.
-`LARK_ADMIN_OPEN_IDS` is a mandatory subset that gates Worker lifecycle and
-session-topology changes. Unauthorized inbound messages are discarded before
-durable ingress; unauthorized card callbacks return a generic denial. Per-thread
-creator and generation checks remain additional fences for stateful operations.
-
-## Ownership and authority
-
-| Concern | Authority | Why |
-| --- | --- | --- |
-| Pane identity, terminal identity, native Agent session reference, agent state, foreground process | Herdr snapshot and targeted runtime observation | Herdr owns panes and the TraeX process. |
-| Typed turn output, live status heading, structured plan, and token counters for an active turn | Exactly identified TraeX JSONL transcript | The transcript is parsed once into `TurnOutputObservation`; Answer Card and Main Card consume separate sub-projections without parsing each other's rendered text. |
-| Binding lifecycle, prompt queue, delivery intent, retry state, audit, lease | SQLite | These facts must survive a bridge restart. |
-| Visible cards and messages | Lark | Lark is the external delivery target, not the source of workflow truth. |
-| Process lifecycle | user systemd service | The standalone `npm run swarm:*` commands control the service; the application does not manage PID files. |
-| Runtime event integration | `RuntimeEventIntegration` with four explicit reliability classes | It composes lifecycle fan-out and wake-up channels without making them one delivery or replay contract. |
-| Herdr socket events | bounded wake-up hints | Events improve latency but do not create a second event log. |
-
-When these sources disagree, do not repair SQLite from a Lark card or infer a
-pane state from a card. Reconcile against Herdr, then let the normal projection
-and durable Lark outbox converge the visible state.
-
-An operator can explicitly observe a binding blocked by an exact-owned detached
-prompt with `/swarm awake`. This path reopens the matching TraeX transcript
-immediately after the detached turn's exact completion boundary, or at the next
-distinct turn start when interruption left no completion record, adopts later
-turns in chronological order into separate Answer Cards, and then wakes the
-ordinary prompt FIFO. It never submits text to TraeX. Missing, incomplete, or
-mismatched boundaries fail closed and leave the detached prompt unchanged.
-
-When observation cannot recover that blocker, the topic creator may use
-`/swarm skip`. One durable command invocation atomically fails only the oldest
-ordinary `running` / `detached` prompt for the frozen binding generation, updates
-its Run Card and outbox intent, records an audit entry, and then wakes the FIFO.
-The prior runtime outcome remains explicitly uncertain; skip never sends terminal
-input, interrupts TraeX, or replays the prompt.
-
-## Architecture and dependency direction
-
-Dependencies point inward: domain contracts define the language and capabilities
-required by workflows; workflows coordinate use cases; infrastructure adapters
-implement ports for SQLite, Herdr, Lark, and the host runtime. A concrete adapter
-must not become the source of workflow policy. Workflows do not embed Lark SDK
-calls, Herdr CLI parsing, or SQLite-specific decisions.
-
-The process entry point only loads configuration and build identity, registers
-signal handlers, reports startup, and applies exit-code policy.
-`createManagedBridgeRuntime()` constructs the store, lease, runtime graph, and
-health server dependencies. `ManagedBridgeRuntime` is the lifecycle authority
-for ordered startup, lease-loss handling, partial-start cleanup, and idempotent
-shutdown. Runtime modules do not read deployment paths or process-manager state
-directly.
-
-### Current implementation map
-
-The production implementation uses the following modules and seams.
-
-| Module | Responsibility | Seam |
-| --- | --- | --- |
-| `ManagedBridgeRuntime` / `createManagedBridgeRuntime` | Runtime lifecycle policy and production resource composition | The process entry point sees only `start()` and `stop(reason)`; component order and partial-start state remain internal |
-| `HealthSnapshotCollector` / `startHealthServer` | Coherent readiness/status observation and the loopback HTTP transport | The collector owns provider reads, bounded failure isolation, degradation policy, and caches; the server owns only routes, methods, status codes, and JSON |
-| `InboundRouter` | Normalized inbound routing and durable acceptance | Workflow ports only; concrete construction remains in the composition factories |
-| `SwarmCommandGateway` / `CommandIntentDispatcher` | Unified command ingress/admission and durable mutation execution, including CardKit and Primary-tool Worker creation | The facade owns resolution, queries, admission, and result adaptation; the dispatcher hides lane FIFO claims, frozen-context revalidation, external-effect uncertainty, accepted-only recovery, and shutdown |
-| `PromptRunWorkflow` / `PrimaryPromptDispatcher` / `DetachedPromptObserver` | Primary lifecycle scheduling, durable FIFO dispatch, and exact no-replay observation | The facade owns worker exclusion and shutdown; `drain(bindingId)` hides fresh-pane preflight and live execution, while `observe(prompt)` reloads and fences the exact persisted transcript turn |
-| `ProjectCatalog` | Canonical project lookup, route disambiguation, and binding-to-visible-space resolution | Pure immutable catalog over validated project configuration; stale and ambiguous routes fail closed |
-| `InstanceMessagingWorkflow` / `WorkerTurnDispatcher` | Worker turn acceptance, exact steering, FIFO dispatch, task-card intent, and no-replay recovery | Messaging persists through its focused store; dispatch uses `WorkerTurnDispatchStore`, Agent driver hooks, and exact observation watches |
-| `WorkerTurnObserver` | Claims and follows the exact structured transcript owned by a Worker turn | Runtime turn ID, canonical start time, and instance generation must all match |
-| Worker task-card projection | Per-turn lifecycle, result pages, recent-history summaries, and navigation | Pure reducers/renderers over durable Worker turn/card state |
-| `HerdrRuntimeReconciler` / `BindingReconciliationPass` / `BindingRuntimeConverger` | Reconciliation lifecycle, authoritative snapshot/pass traversal, and one generation-fenced Binding convergence | The facade owns cooldown, priority, diagnostics, and shutdown; the pass hides classification/discovery/pruning; the converger owns `RuntimeReconciliationStore` transitions and downstream effects |
-| `ModelSelectionWorkflow` / `PaneControlWorkflow` | Session-scoped model catalog/preferences plus Primary command adaptation and legacy control-row recovery | `TraexControlPort` plus shared exact-turn `TurnControlWorkflow`; no raw terminal-input seam |
-| `TurnControlWorkflow` | Durable Primary/Worker priority follow-up and exact-turn stop | Generation, pane, native-session, logical-turn, and runtime-turn fences before Herdr effects |
-| `PaneClosureWorkflow` / `SessionAdministrationWorkflow` | Destructive pane closure and non-destructive session administration | Separate lifecycle capabilities |
-| `OperationsQueryWorkflow` / `DeliveryRecoveryWorkflow` | Read-only operational cards and delivery recovery decisions | Query and recovery capabilities separated from control |
-| `ConversationViewProjector` | Run-card and topic-view reduction plus outbound intent creation | `ProjectionStore` and `OutboundIntentPort` |
-| `StartupViewConverger` | Rebuilds startup-visible Answer and Main Card state from durable canonical projections | Named `StartupViewProjectionStores`; startup recovery, Answer pages, and Main Cards are explicit stores with no type assertion |
-| `GatewayOutboxDispatcher` / `OutboundLaneDrain` / `OutboundDeliveryExecutor` | Outbound lifecycle, bounded lane scheduling, and one frozen claim-to-checkpoint attempt | Lifecycle facade over `OutboundScanStore` and `OutboundDeliveryStore` plus one negotiated `GatewayDeliveryPort`; no direct aggregate mutation |
-| `createSqliteStoreBundle` / `SqliteCapabilityGraph` | Constructs the SQLite implementation once and exposes consumer-specific port views | One shared `SqliteContext`; production code cannot import the broad compatibility facade |
-| `SqliteStoreKernel` / `SqliteBindingStore` | Test and headless-smoke compatibility facades | Non-production adapters over the capability graph; they contain no schema ownership and cannot be imported by production source |
-| `SqliteBindingLifecycleStore` / `SqliteBindingProjectionStore` | Binding lifecycle, reset, cleanup, runtime convergence, and binding-owned projections | Keep lifecycle and projection responsibilities separate while sharing one transaction context |
-| `SqlitePromptAcceptanceStore` / `SqlitePromptDispatchStore` / `SqlitePromptRecoveryStore` / `SqliteExternalTurnAdoptionStore` | Primary Prompt admission, exact dispatch, no-replay recovery, and Herdr-originated ownership | Each deep module owns one protocol while sharing the same context for cross-table Prompt, projection, invalidation, and outbox transactions |
-| `SqlitePromptStore` / `SqliteWorkerTurnStore` / `SqliteTurnControlStore` | Primary queue feedback and control helpers, Worker turns, and exact-turn control | Adjacent capabilities remain separate from the Prompt execution protocols while preserving atomic aggregate operations |
-| `SqliteInstanceStore` / `SqliteInstanceOperationStore` | Agent instance, workspace lease, conversation target, and instance-operation persistence | Instance identity and generation fences remain inside capability operations |
-| `SqliteProjectionStore` / `SqliteCardContextStore` / `SqliteOutboxStore` | Card projections/pages, invalidation state, and durable delivery lifecycle | Internal transaction-participating seams over the shared context |
-| `SqliteInboundProjectStore` / `SqlitePaneOperationStore` | Durable inbound/project selection and pane operation capabilities | Workflow-specific atomic transitions, not table repositories |
-| `SqliteLeaseStore` / `SqliteApprovalStore` / `SqliteCommandIntentStore` / `SqliteSessionOperationStore` / `SqliteOperationsStore` | Lease/fencing, approvals, commands, session operations, diagnostics, audit, and recovery | Low-coupling capabilities over the same context and write fence |
-| `createLatestSchema` / `SqliteMigrations` | Latest-schema bootstrap and ordered compatibility migration | Separate modules run in order during capability-graph construction before capability use |
-
-### Ubiquitous language and target module names
-
-Use domain terms for business concepts and workflow terms for application use
-cases. Do not name a module after its current technical mechanism when its
-responsibility is a business or application concern.
-
-| Current or broad term | Target term | Meaning |
-| --- | --- | --- |
-| `Binding` | `TopicPaneBinding` in explanatory and external-facing contexts | The controlled association between a Lark topic or root message and a Herdr pane. `Binding` remains an acceptable short internal domain term. |
-| `SyncCoordinator` | `InboundRouter` | Routes normalized Lark input to capability-focused workflows; it does not own execution, reconciliation, or delivery. |
-| prompt execution | `PromptRunWorkflow` | Lifecycle facade for scheduling, safety, process-local ownership, recovery controls, and prompt-specific shutdown; dispatch and detached polling stay behind dedicated deep modules. |
-| `SessionReconciler` | `HerdrRuntimeReconciler` | Converges the authoritative Herdr pane and agent runtime into durable binding state. |
-| runtime event wiring | `RuntimeEventIntegration` | Composition owner for lifecycle fan-out, durable-work wake-ups, and the bounded Herdr hint connection; it exposes only reliability-specific interfaces. |
-| workflow wake-up bus | `PromptWorkScheduler` | A coalescing, best-effort scheduler that asks the prompt-run workflow to reload and claim durable work. |
-| `BridgeEventBus` | `LifecycleEventPublisher` | Distributes typed lifecycle outcomes to projections; durable inbound work uses a separate notifier and SQLite authority. |
-| `CardProjector` | `ConversationViewProjector` | Reduces lifecycle outcomes into topic and run-card read models, then records delivery intent. |
-| legacy channel publisher | `GatewayOutboxDispatcher` | Drains durable outbox work through the active Gateway with ordering, retries, and dead-letter handling. |
-| `BindingStorePort` | capability-focused stores | Prompt acceptance, startup recovery/view convergence, prompt execution, projection, outbox, binding provisioning, runtime reconciliation, operations, and lease ports expose consumer-specific capabilities over one transactional SQLite context. |
-
-`RunCardView`, `TopicViewState`, and Answer-page state are projections or read
-models. They are not domain entities alongside `Binding` and `Prompt`, nor are
-they execution concepts like `Turn` or exact-turn control. Their renderers and reducers
-belong to the presentation and projection side of the application, while
-durable storage for them remains an infrastructure concern.
-Answer-page delivery convergence reads the newest content, pending finish,
-next-page continuation, and final-fold state through separate bounded SQLite
-queries keyed by Prompt, kind, state, and structural stream metadata. Modern
-rows treat `stream_page_index` as authoritative; only legacy rows where that
-column is null consult their JSON payload. This keeps retained outbox history
-out of the JavaScript read path without changing delivery or replay semantics.
-Revisioned static and final Answer snapshots are coalesced inside their existing
-projection transaction. Before reserving a changed snapshot, the store removes
-only older pending rows for the exact `projection_key` that have never been
-claimed, attempted, checkpointed, or retained as an active recovery replacement.
-The next revision is derived before deletion, so revision identity stays strictly
-monotonic. Claimed or otherwise delivery-relevant rows remain immutable; an
-in-flight revision therefore stays ahead of the one newest desired revision.
-Existing foreign-key cascades remove coverage and candidate evidence belonging
-only to a deleted untouched row, while outbox delete/insert triggers recompute
-the durable lane head in the same transaction.
-Outbound lane construction accepts a SQLite-internal binding-generation hint
-from projection paths that already hold an authoritative Run Card. Other prompt
-paths read only `run_cards.binding_generation`; they do not materialize the
-JSON-heavy `run_cards_view` merely to derive a lane key. Retention keeps active
-delivery-recovery endpoints through separate failed-reply and replacement-reply
-anti-joins, preserving the same deletion boundary without an unindexed `OR`.
-Primary Main and Answer Worker summaries are dedicated set-based SQLite read
-models. Main summary loading uses a constant number of queries and window-ranked
-task state rather than repeatedly loading each full Worker Main projection;
-Answer activity aggregates task count and latest-card identity in SQL, so old
-task history is not materialized in JavaScript. Existing domain selectors remain
-responsible for the visible eight-Worker limit and presentation ordering.
-
-`MainCardWorkflow` is the single live, startup, and delivery-checkpoint
-convergence path for the topic's Main Card. `TopicViewState.viewVersion` is the
-durable desired presentation version and `deliveredVersion` is the highest
-version confirmed visible by a successful Lark delivery. Only visible field
-changes advance `viewVersion`; event IDs and duplicate observations do not.
-
-### Ports and persistence
-
-Ports belong to the core-facing boundary and describe a consumer's capability,
-not a database table or SDK. For example, prompt acceptance, prompt execution,
-projection, outbound delivery, binding provisioning, operations, and lease
-ownership should each depend only on the operations they use. SQLite can
-implement several such ports through one concrete store and one transaction.
-
-SQLite is infrastructure, but it is the durable authority for workflow facts:
-bindings, inbound acceptance, FIFO queue order, command intents, dispatch
-checkpoints, detached observation, card projections, outbox intent, audit data,
-and the fenced instance lease. Atomic acceptance and claim transitions must remain atomic
-when ports are narrowed; splitting a large store interface must not split a
-workflow transaction.
-
-The production composition root first opens one lease bootstrap over one
-`SqliteContext` and `DatabaseSync` connection. That bootstrap creates only the
-idempotent `instance_lease` table. After the process acquires the durable lease,
-the bootstrap runs business-schema migrations and constructs one internal
-`SqliteCapabilityGraph` over the same connection. A contender that cannot acquire
-the lease closes its bootstrap without inspecting or mutating business schema.
-Capability-graph construction is explicit and fixed: it first adopts the context
-and runs migrations, then creates low-coupling foundation-store factories plus
-one transaction-participating store cluster, and finally publishes
-consumer-shaped capabilities. Foundation factories are invoked at their
-historical construction positions, so late-bound callbacks retain the same
-initialization order while every store continues to share the one context. They
-are private construction seams, not a container, registry, or resource-owner
-boundary.
-
-`SqliteMigrations.run()` is likewise a fixed sequence of named phases: stale-view
-preparation, latest-schema creation, initial compatibility, Binding and Prompt
-compatibility, Worker and projection compatibility, delivery and control
-compatibility, view/index restoration, historical Answer convergence, and final
-delivery/Gateway compatibility. Calls retain their absolute historical order.
-Versions 2, 3, and 4 remain separate `BEGIN IMMEDIATE` transactions, and repeated
-outbound-order, Gateway-identity, and claim passes remain deliberate convergence
-steps rather than dynamically sorted migrations.
-
-All production bundle entries are named capabilities;
-none route through `SqliteStoreKernel`. Cross-table operations remain in focused
-prompt, binding-session, control, recovery, instance, and outbox aggregate modules
-that share the same context and preserve their outer transaction. Each workflow receives only
-the domain port it consumes, such as `PromptDispatchStore`, `PromptRecoveryStore`, `PromptSessionStore`, `InstanceLifecycleStore`, `InstanceTurnStore`,
-`OutboxStore`, or `MainCardStore`; it does not receive raw SQLite or the broad
-facade type. A test-only `SqliteBindingStore` compatibility helper remains for
-migration-fixture inspection, but production code does not expose that name. New
-workflow tests use `createTestStoreBundle()` with named capabilities.
-
-The outbound, Primary, Worker, and application composition factories declare
-consumer-specific `Pick<SqliteStoreBundle, ...>` inputs. Only the parent bridge
-composition receives the full bundle. New cross-context capability access in a
-child factory is therefore a TypeScript error.
-Startup view composition passes `StartupViewStore` for recovery and traversal,
-then reuses the `AnswerPageConvergencePort` and `MainCardConvergencePort` adapters
-already created by outbound composition. `StartupViewConverger` neither receives
-the underlying Answer/Main stores nor constructs projection workflows. Live,
-checkpoint, and startup convergence therefore share one pair of serialized
-workflow instances without exposing their storage capabilities to consumers.
-
-Instance orchestration follows the same consumer-first rule. Messaging, turn
-supervision, exact transcript observation, runtime reconciliation, and lifecycle
-control each depend on a named store interface containing exactly their durable
-operations. The single SQLite instance capability structurally satisfies those
-interfaces, so narrowing the workflow seams adds no forwarding adapter and does
-not split generation-fenced transactions.
-`npm run architecture:check` additionally parses static source imports and
-enforces dependency direction in CI: only the SQLite bundle may import the
-capability graph, no production source may import the compatibility kernel,
-SQLite implementation modules cannot depend outward on workflow or delivery
-layers, and non-composition modules cannot import composition code.
-
-All extracted SQLite capability modules share that context. Their transactional
-entry points use `SqliteContext.transaction()`, where only the outermost call
-issues `BEGIN IMMEDIATE`, `COMMIT`, or `ROLLBACK`; nested Prompt, Worker-turn,
-projection, and outbox calls participate in the existing transaction. Capability
-modules never instantiate their own database connection. The compatibility
-facade remains only for legacy test fixtures and the bounded headless smoke
-script. Static import checks make it unreachable from production source. It
-retains legacy convenience forwarding while fixtures migrate to named
-capabilities; business SQL and transaction ownership live in the capability
-modules. This
-keeps prompt/card/outbox and Worker
-turn/card/page/event changes atomic even though their implementations live in
-separate files.
-
-Durable inbox insertion, claim, acceptance, release, and interrupted-claim
-recovery belong exclusively to `InboundMessageDispatchStore` and are orchestrated
-by `DurableInboundPipeline`. Message routing retains only binding/project lookup;
-bridge-message classification is part of pipeline admission, and the kernel does
-not mirror the pipeline operations as forwarding methods.
-
-Some atomic store operations still accept a renderer callback or an already
-materialized card. These are bounded transition seams for prompt and Worker-turn
-acceptance, detached-prompt skip, queued-prompt cancellation, Worker card
-projection, card-context convergence, turn-control recovery, and startup renderer
-convergence. In each case the
-canonical state transition, projection version, and durable outbox row must be
-computed and committed in the same outer SQLite transaction. Moving rendering
-outside those calls would require rendering a speculative view or introduce a
-delivery gap. New delivery rows are nevertheless persisted with schema-versioned
-typed intent plus a pinned materialized payload, so retry does not rerender
-against mutable state. New renderer-bearing store APIs require an explicit atomic
-transition justification and an architecture-test allowlist update.
-
-### Swarm command bounded context
-
-Every parsed `/swarm` command enters the `SwarmCommandRuntime`; the inbound router no
-longer owns per-command authorization or dispatch branches. The runtime resolves
-one immutable context containing the chat/project scope and, for Primary-scoped
-commands, the binding generation plus both runtime identity dimensions:
-
-```text
-Lark text ───────────────┐
-CardKit Worker create ───┼─> SwarmCommandRuntime
-Primary Tool create ─────┘      |
-                               +─ query -> handler + audit
-                               |           (no CommandIntent)
-                               +─ mutation -> accept -> CommandIntentDispatcher
-                                                        -> lane claim -> revalidate
-                                                        -> owning aggregate
-```
-
-The runtime owns normalized context resolution, source/risk policy, query routing,
-durable mutation admission, and observation. `CommandIntentDispatcher` owns claim,
-execution, settlement, recovery, and shutdown. Mutation lanes serialize commands
-for the same chat, project, or Primary while
-allowing unrelated Primary sessions to proceed independently. `CommandIntent`
-records orchestration and references only; Binding, Prompt, Worker, pane-control,
-session-administration, provisioning, and delivery aggregates keep ownership of
-their own state machines.
-
-Startup marks any interrupted `executing` intent `uncertain` and drains only
-intents that never started. A handler error after invocation is also conservative
-`uncertain`, because an external Herdr effect may already have occurred. Neither
-case is blindly replayed. Queries use the same parser, context, policy, and
-authorization path but create no command intent. Mutation admission atomically
-creates the intent, Command Status view, and outbox create intent, then returns
-without waiting for the external effect. Intent-ID hints reduce latency; periodic
-SQLite scans converge missed hints. Programmatic Worker callers reconstruct results
-from durable outcome identity and Instance state, including after restart. Only
-destructive natural-language commands require durable confirmation.
-Shutdown first stops new Lark, card, and inbound acceptance, then waits for all
-claimed command lanes to settle before the remaining workflows and SQLite store
-are stopped.
-
-A read-only SQLite integrity auditor runs before startup completes and every 15
-minutes afterward. It caches bounded results from `quick_check`,
-`foreign_key_check`, bridge-owned reference checks, and outbox lane-index
-consistency checks. Findings degrade `/status` without failing `/ready`; the
-auditor never repairs rows or exposes prompt, payload, or terminal content.
-
-Herdr and Lark are external systems behind ports. Herdr observations establish
-the live pane and TraeX state; Lark receives visible messages and cards. Neither
-adapter defines business-state transitions, and no workflow may infer durable
-truth from a Lark card.
-
-Project workspace configuration controls only new provisioning and discovery. A
-full reconciliation also observes the persisted workspaces of active and
-orphaned bindings, so changing a project's target Space does not abandon its
-existing panes. An orphaned binding is recovered automatically only when the
-authoritative pane still has the same workspace, pane, generation, terminal,
-and (when persisted) native Agent session identity. Recovery does not recreate
-or replay prompt work that orphaning already made terminal.
-
-The configured Lark group uses `defaultProjectId` for an otherwise unbound root
-text message that explicitly mentions the bot. This automatic route atomically
-persists a processing project selection with its selected project already
-frozen, then reuses the normal binding provisioning checkpoints. It creates no
-selector card. A duplicate source message converges on the same selection,
-binding, pane, thread, and initial Prompt. Existing bindings always retain their
-persisted project and workspace route. A project without an explicit
-`spaceName` resolves to the display and attach name `herdr`; the explicit
-`workspaceId` remains the Herdr runtime identity.
-
-Pane lookup retains historical bindings so an archived pane remains owned and
-cannot be rediscovered as a new session. Runtime convergence itself accepts only
-`active` and `draining` lifecycles. `provisioning`, `archived`, `closed`, and
-`failed` bindings ignore live runtime observations until an explicit lifecycle
-workflow makes them eligible; reconciliation does not mutate terminal history.
-
-### Events and scheduling
-
-`RuntimeEventIntegration` owns composition-time wiring for four reliability
-classes: durable inbound records plus a hint, transactional lifecycle/outbox
-state plus process-local fan-out, best-effort work wake-ups, and bounded Herdr
-socket hints. It deliberately has no generic `publish(any)` interface. SQLite
-and fresh Herdr observation remain authoritative. The two process-local roles
-below remain separate contracts and are not sources of persistent state.
-The Herdr hint path uses one deferred function link because infrastructure owns
-the socket subscriber while application composition constructs its router later.
-The link hides that construction cycle: callers receive a stable hint consumer,
-and `RuntimeEventIntegration` does not proxy individual event calls.
-
-| Role | Meaning | Consumer behavior | Reliability boundary |
-| --- | --- | --- | --- |
-| Domain lifecycle event | A description of a business outcome, such as `PromptQueued`, `TurnStarted`, `TurnCompleted`, or a binding state change. | Project deterministic run-card and topic views, then record any outbound intent. | Process-local notification; durable terminal RunCard and TopicView state is rebuilt into missing delivery intent during startup convergence. |
-| Workflow wake-up | A bounded hint that a scoped binding or detached prompt may now have executable work. | Reload SQLite facts and atomically claim eligible work. | Best effort only: duplicate, reordered, or lost hints are safe because startup and periodic reconciliation scan durable work. |
-
-A wake-up is not a domain event and does not carry prompt text or authoritative
-workflow state. It is an application scheduling mechanism, provided by
-`PromptWorkScheduler`, and is conceptually closer to `wakeBinding(bindingId)`
-than to a business event. A domain lifecycle event, published through
-`LifecycleEventPublisher`, must not be used as a worker command merely because
-it was observed by a projector.
-
-Every workflow-wake-up producer follows the durable-before-wake rule:
-
-1. Commit the SQLite state transition.
-2. Publish the scoped wake-up.
-3. Return without assuming delivery of that wake-up.
-
-For Herdr pane hints, `HerdrRuntimeReconciler` owns binding convergence and the
-corresponding external-turn observation as one ordered path. The event router
-must not invoke `ExternalTurnObserver` in parallel with binding reconciliation:
-that would duplicate transcript reads and race against binding lifecycle
-changes. Instance-turn observation and retired-pane cleanup remain separate
-consumers because they own different durable aggregates.
-
-An in-process event dispatcher is infrastructure, not storage. The SQLite
-outbox is the durable delivery mechanism for Lark work. If a future requirement
-needs reliable cross-process event consumption, it requires a separately
-designed durable dispatcher or transactional event outbox; an in-memory bus
-cannot provide that guarantee.
-
-Prompt terminal paths update Prompt, Binding, RunCard, and TopicView state in one
-SQLite transaction. Startup convergence compares durable view and delivery
-versions and recreates missing Answer stream content/finalization plus main-card
-updates. Intermediate lifecycle notifications remain process-local, so
-`lifecycle_events` is not a complete event-sourcing log.
-
-The target contract is that every user-visible lifecycle transition is either
-projected transactionally with its durable state change or reconstructible from
-persisted aggregate state. This is separate from workflow wake-ups: wake-ups may
-remain best effort because workers always reload durable state.
-
-### Target runtime shape
-
-```text
-Lark message or card action                 Herdr Socket event
-             |                                |
-             v                                v
-   SQLite inbound record -> quick ACK      bounded wake-up hint
-             |                                |
-             v                                |
-   single-flight durable dispatcher           |
-             +-------> application workflows <+
-                              |             |
-                              |             +--> HerdrRuntimeReconciler
-                              |                    -> authoritative snapshot
-                              v
-                       PromptRunWorkflow
-                     lifecycle facade / ownership
-                        /                    \
-          PrimaryPromptDispatcher    DetachedPromptObserver
-              FIFO live attempt       exact no-replay recovery
-                              |
-                              v
-                     Herdr port -> TraeX
-                              |
-                     durable lifecycle result
-                              |
-                              v
-                  lifecycle event -> projection
-                              |
-                              v
-                    SQLite outbox -> Lark port
-```
-
-The Worker task path is a parallel durable flow with a task aggregate per turn
-and a session aggregate per Worker session generation:
-
-```text
-Lark inbound -> atomic InstanceTurn + WorkerTurnCard projection + invalidations
-             -> FIFO scheduler -> exact structured observation
-             -> SQLite result/page projection + durable context invalidations
-             -> WorkerTurnCardWorkflow
-                  +-> ordered progress/content/finish intents
-                  `-> immutable continuation pages
-             -> CardContextRebuilder
-                  +-> Worker Main snapshot
-                  +-> exact Primary Main generation
-                  `-> mutable originating Primary Answer
-             -> independent SQLite outbox lanes -> Lark CardKit
-```
-
-Acceptance persists the turn, its internal queued projection, and Worker-session
-context invalidation before waking the scheduler. A Worker claims at most one ordinary turn at
-a time. The Agent driver's dispatch receipt proves only that submission crossed
-the boundary; it is never interpreted as the task result. `WorkerTurnObserver`
-claims output ownership only when the instance generation, runtime turn ID, and
-canonical turn start time all match. Restart recovery reopens that transcript
-boundary for observation and never calls the submission boundary again.
-The wake target is `WorkerTurnDispatcher`, a coordinator module rather than event
-infrastructure. Its process-local per-instance single flight only schedules work;
-every attempt reloads the current instance generation and claims the next durable
-SQLite turn. Driver exceptions or uncertain receipts after possible delivery do
-not advance FIFO or submit again.
-
-One stable Worker Main Card and one paginated Worker Task Card aggregate are
-updated through independent durable lanes. `WorkerTurnCardWorkflow` is the sole
-convergence path for live output, terminal hydration, finish, and continuation
-reservation. View changes and delivery checkpoints invoke the same idempotent
-`converge(turnId)` interface; startup scans active checkpointed pages so a crash
-between projection persistence and intent reservation cannot strand a card. The
-workflow never sends to Lark directly and never replays an Agent turn.
-
-The Worker Main Card is updated on the
-`worker-main:<workerId>:<workerSessionGeneration>` lane. For new Worker Session
-generations, its initial create is a durable group-root effect on
-`worker-thread:<workerId>:<workerSessionGeneration>`; the returned root becomes
-both the sole Main Card target and the fixed Worker interaction thread. It shows the current
-request, lifecycle, bounded progress/output, queue state, and recent terminal
-history. Completion remains visible until a newer task becomes current. SQLite
-retains the full sanitized canonical result and internal turn projection. A long
-Task result finishes its current page and creates a continuation with deterministic
-source offsets; frozen Task pages are immutable. Main cards expose only targets
-whose message identity has already been checkpointed in SQLite.
-
-A real non-`blocked` to `blocked` Worker transition is also the reservation seam
-for a one-time Human Review notification. The transition inserts `turn.blocked`
-and uses that event row ID as the episode identity. In the same SQLite transaction
-it updates the Worker turn projection, invalidates dependent cards, fences the
-current Worker session and active parent Binding generation/pane/root, and reserves
-an immutable `card_reply` on its own reply lane. The idempotency key includes the
-Worker ID, Worker Session generation, turn ID, and event ID, so repeated blocked
-observations and restart recovery cannot duplicate a notification, while a later
-blocked episode can create a new one. The card mentions the persisted Binding
-creator when that opaque Open ID is safe; otherwise it remains an ordinary group
-notification. Stale parent routing skips only the notification. Gateway retry or
-dead-letter handling never rolls back Worker state and never repeats Agent work.
-The notification can navigate to the canonical Worker Main Card but deliberately
-contains no approval, denial, terminal-input, process, or pane-control action.
-
-The other card contexts are explicit durable projection boundaries. Primary Main
-contains only bounded summaries for Workers owned by its exact binding and pane.
-Primary Answer contains only activity whose persisted `parentPromptId` names that
-Primary turn, and freezes that summary when its Answer page becomes terminal.
-Worker Main is keyed by `(workerId, workerSessionGeneration)`; runtime generation,
-pane replacement, and native-session renewal update that card rather than creating
-a new session card. Termination freezes it, while same-name recreation creates a
-new Worker identity and card. Worker output is shown only in the stable Worker
-Main Card and remains bounded at render time.
-
-`show_worker_cards` is an explicit read-only observation surface, not another
-projection owner. It selects the current Worker Main state and emits one
-consolidated immutable `card_reply` with a captured snapshot timestamp. The
-snapshot has no Worker mutation controls and is never rebound to later context
-invalidations. When the canonical Worker Main message identity is available, the
-snapshot may link to that continuously updated card.
-
-Context invalidations are committed in the same SQLite transaction as the owning
-Worker transition. Startup, notifier hints, and periodic scans rebuild unfinished
-revisions, so a lost wake-up cannot lose a refresh. Replaceable snapshots use
-`worker-main:<workerId>:<workerSessionGeneration>`,
-`primary-main:<bindingId>:<bindingGeneration>`, and
-`primary-answer:<promptId>:<bindingGeneration>` lanes. The persisted `lane_key` is
-the delivery and quarantine authority; retrying a card can never repeat Agent work.
-The `/instances` create-form path emits the same best-effort notifier wake after
-the durable Worker result is available. That wake promptly turns the committed
-`worker.created` invalidation into the canonical Worker Main group-card intent;
-the periodic scan remains the recovery path when the hint is lost. The callback
-detail card is immediate feedback only and is not the Worker Main authority.
-
-`worker_session_threads` is a separate routing aggregate from
-`binding_thread_aliases`. It binds one Lark root to the exact Worker ID, Worker
-Session generation, parent Binding generation, and parent pane. Ordinary text in
-an active Worker thread creates a new turn in the existing per-Worker FIFO;
-thread-local `/steer` and `/stop` reload and fence the exact active turn. The
-route never depends on Worker name or `conversation_targets`. Existing Worker
-Sessions are classified as `legacy-unpublished` during upgrade without any Lark
-write. An explicit `/instances` action may turn that marker into one passive
-entry root while leaving the already delivered canonical Main Card untouched.
-
-The protocol is exposed through two deep modules.
-`WorkerSessionThreadWorkflow` owns scope precedence, thread-local commands,
-authorization, fixed-Worker submission, feedback cards, and legacy-entry callback
-behavior behind `handleMessage` and `publishFromCard`.
-`SqliteWorkerSessionThreadStore` owns tagged scope resolution, canonical/legacy
-publication decisions, delivery settlement, Main Card placement, and retirement.
-Ingress, instance interaction, card-context convergence, outbox delivery, and
-instance lifecycle consume semantic outcomes and do not interpret thread table
-states or repeat ownership SQL.
-
-Direct replies use the normalized Lark `parent_id`, not the topic root or selected
-Worker. A reply to the exact active card is rejected while runtime steering is
-unsupported. A reply
-to a settled card atomically creates a follow-up with the original turn as parent.
-Queued and `dispatch-uncertain` cards reject contextual replies. Explicit `/to`
-and `/steer` commands remain authoritative and do not inherit reply context.
-
-## Request lifecycle
-
-This section describes current externally observable behavior. Module names may
-change during the target decomposition without changing these steps.
-
-1. The Lark adapter normalizes an incoming message or card action. For messages,
-   the WebSocket callback returns after the configured-chat and bridge-message
-   checks plus a successful SQLite inbound insert; it does not wait for Herdr or
-   command handling.
-   Serialized message content is rejected before JSON parsing above 64 KiB;
-   normalized prompt-bearing text is bounded to 12,000 characters and 32 KiB
-   of UTF-8.
-   Oversized messages are reduced to a compact durable rejection marker before
-   SQLite persistence, then terminally acknowledged only after the rejection card
-   is reserved. Worker and continuation forms apply the same policy before they
-   can create or steer work; input is rejected rather than silently truncated.
-2. `DurableInboundPipeline` claims persisted messages in FIFO order per scope,
-   marks each accepted only after business handling completes, and releases a
-   failed item back to `received`. A retryable scope does not block independent
-   scopes. Failures retry automatically with bounded exponential backoff, while a
-   newly persisted message requests an immediate drain and also publishes a
-   content-free best-effort wake hint. Startup returns interrupted `processing`
-   rows to `received`;
-   shutdown cancels retry timers and waits only for the active drain, leaving any
-   unclaimed rows durable for the next start.
-   `/status` exposes aggregate-only inbound counts, retry backlog age, the most
-   recent bounded failure, and dispatcher retry state. It never includes message
-   text or the stored payload. A pending inbound head older than five minutes
-   degrades operational status without changing readiness.
-   Accepted inbound rows share the configured outbox retention window and are
-   pruned in an independently bounded batch loop. Rows still in `received` or
-   `processing` are never removed by retention.
-3. `InboundMessageRoutingWorkflow.route` applies the fixed route precedence and
-   returns one structured decision/disposition. A command is handled as a binding
-   or operational workflow. Ordinary text in
-   an active bound topic normally becomes a FIFO prompt job. A conservative
-   classifier may route an eligible short continuation to the exact active turn;
-   all other ordinary messages remain FIFO. One SQLite acceptance transaction
-   is owned by `PromptAdmissionWorkflow`, shared by ordinary replies and recovered
-   initial-project prompts. The transaction
-   rechecks the binding generation and queue limit.
-   Exact, case-insensitive `/swarm stop` uses a freshly identity-checked,
-   best-effort local interruption
-   while the bridge has a supervised active turn; it bypasses queued ordinary
-   prompts and creates no prompt job. Explicit `/swarm steer <text>` persists a
-   priority turn when the Primary is idle. An active turn is rejected as
-   unsupported without transport delivery or queue conversion. Both outcomes
-   fence binding generation, pane, and native Agent session.
-   `/swarm awake` observes detached transcript state without terminalizing an
-   unrecoverable prompt. `/swarm skip` is the separate creator-authorized,
-   generation-fenced action that atomically fails one oldest detached ordinary
-   prompt and wakes the existing FIFO dispatcher.
-   Mutating Session card actions use a separate durable handoff: the callback
-   atomically consumes its scoped interaction and inserts one idempotent
-   `session_operations` row, then returns an accepted Toast. A coalescing
-   single-flight dispatcher validates the persisted binding generation and pane
-   identity before handing work to the owning workflow. Stop/model, reset, and
-   pane-close then retain their existing pane-control, provisioning-checkpoint,
-   and close-confirmation authorities. Interrupted running Session operations
-   become `uncertain` and are never blindly replayed.
-   A natural-language root mention from an administrator atomically persists a
-   processing selection for `defaultProjectId` and provisions it without a
-   selector callback. The original message ID is reused as the prompt
-   idempotency key, including startup recovery after selection completion. A
-   processing automatic selection with no linked binding is safe to resume
-   because pane creation has not started; once a binding exists, the ordinary
-   conservative checkpoint rules prevent blind pane or Prompt replay.
-   Main/Answer Card callbacks carry only binding and prompt identity. The focused
-   card-interaction workflow reloads SQLite state, checks binding generation,
-   creator or operator scope, expiry, and the captured parent turn before
-   delegating to existing workflows. Current cards do not advertise supplement
-   or queued-to-steering actions. Callbacks from older cards are rejected without
-   terminal input, and queued prompts keep their FIFO position. Legacy durable
-   prompt-steering rows are terminalized during migration and their retired schema is removed.
-   Queued rows are rejected before delivery; running rows become uncertain and are never replayed.
-4. A per-binding worker claims one dispatchable job. The user text is sent to
-   Herdr unchanged through `herdr agent prompt`; the bridge adds no hidden prompt
-   suffix and has no raw Pane-input fallback. Structured `agent_not_found`,
-   `agent_not_ready`, and `agent_blocked` errors are confirmed non-delivery. A
-   successful command, `agent_prompt_stalled`, or an unclassified failure after
-   the command process starts is potentially delivered and is never replayed.
-5. Herdr runs or observes TraeX. Structured Agent state is authoritative; process
-   evidence can confirm that TraeX exists but cannot turn `unknown` into ready or done.
-   During startup recovery, a `pane_created` checkpoint occupied by an older TraeX
-   process without structured Agent readiness is not hot-adopted. The bridge retains
-   that pane for operator inspection, creates a lifecycle-aware replacement, and
-   atomically advances the binding generation only after it owns the replacement
-   pane identity. No prompt is replayed as part of this replacement.
-   Ordinary managed TraeX submission uses Herdr's native `agent prompt --wait`
-   operation for both Primary and Worker dispatch. The bridge records dispatch
-   as potentially delivered once the command starts unless Herdr returns a
-   structured pre-dispatch rejection. Changed or incomplete evidence remains
-   uncertain and is never replayed.
-6. Workflows commit user-visible lifecycle transitions to SQLite before publishing
-   process-local lifecycle events. For structured tab/worktree changes, the
-   sanitized desired TopicView and Main Card delivery intent are one transaction.
-   For a confirmed missing pane, the binding, affected prompt
-   jobs and run cards, desired TopicView, and applicable delivery intents are one
-   transaction. Queued work is cancelled and running work is failed rather than
-   replayed. `RuntimeEventIntegration` composes `BridgeEventBus` and the
-   post-commit outbox wake-up as distinct best-effort
-   low-latency hints over durable SQLite state; the event bus is not a
-   recovery record and full lifecycle-event replay is not required for these
-   transitions.
-7. The publisher delivers outbox work, retaining retries and dead letters. A
-   delivery failure never repeats a submitted TraeX prompt.
-
-### Turn output projection
-
-`PromptRunWorkflow` and passive `HerdrRuntimeReconciler` observations normalize
-their source into `TurnOutputObservation`. The validated active-turn JSONL path
-is the only Answer source; when it is unavailable, the Answer uses a fixed safe
-notice and never terminal text. One observation has
-two explicit consumer payloads: `answer` supplies answer text and tool activity
-to `RunCardView`, while `main` supplies the status heading, plan snapshot, model,
-context, elapsed time, and reliable token usage to `TopicViewState`. The two
-cards retain independent persistence, versioning, pagination, and delivery. No
-renderer recovers one card's state by parsing the other card's text. Reasoning
-events contribute only their bounded leading heading; reasoning prose is never
-projected. A finished Answer page receives one final non-streaming green card
-update and is not subsequently patched.
-
-Interrupted running prompts are detached instead of replayed. On restart the
-bridge observes the surviving pane and canonical transcript. Answer and Main Card
-projection resumes only for observations whose turn ID matches the prompt's exact
-persisted transcript identity. Completing the detached prompt and waking the next
-FIFO item requires stronger evidence: the matching turn ID, the exact persisted
-canonical start time, a canonical `task_complete`, and a surviving TraeX process.
-Dispatch time admits only the first fresh `task_started` ownership claim. Herdr
-`idle` or composer readiness alone cannot settle a detached turn.
-Legacy detached prompts without an exact persisted turn identity remain uncertain,
-are not scheduled for automatic transcript observation, cannot consume later pane
-turns, and are never replayed. If completion cannot be proven, the prompt remains
-explicitly uncertain. If its binding later becomes archived, closed,
-failed, or orphaned, the durable work scan atomically fails both the detached
-prompt and its Run Card with an explicit no-replay notice; this retains audit
-history while preventing an unobservable turn from remaining operationally
-running forever. Detached turns on active, attached bindings remain automatically
-observable only when their exact transcript turn ID and canonical start time are
-persisted.
-Jobs that never started remain queued.
-
-Runtime Primary model selection is scoped to the exact binding generation and
-TraeX session. Model control uses a separate TraeX adapter rather than becoming
-a fictional Herdr command.
-`model/list` supplies the canonical selectable catalog; a selection remains
-pending until the next ordinary FIFO prompt claims it atomically. The TraeX
-adapter then prepares an owner-only operation record, SQLite
-records that operation and the no-replay dispatch fence, and one `turn/start`
-sends both prompt text and model. A failure before prepare returns the preference
-to pending. After prepare, an explicit compare-and-swap abort can still prove
-that commit never acquired the dispatch claim and safely roll back the SQLite
-fence. Once commit owns that claim, restart or response loss detaches the prompt
-and marks the preference uncertain unless exact turn acceptance is known. No
-terminal `/model` interaction or prompt replay is used.
-
-## Reconciliation and events
-
-The process uses one Herdr Unix Socket client with a persistent event-stream
-connection and one short-lived connection per RPC. The currently supported
-Herdr 0.9 contract dedicates an event connection after `events.subscribe` and
-closes an RPC connection after one response. Read-only snapshots, structured Agent lookups, and process-info
-prefer Socket RPC and fall back to the matching CLI operation when unavailable.
-The bridge starts TraeX through Herdr 0.9's native `agent start --kind traex`
-surface and never substitutes the separate Codex executable. A live TraeX
-session must have the exact tuple `herdr:traex` / `traex` / `id` / non-empty
-thread ID. Legacy persisted `herdr:codex` and `herdr-traex-shim` tuples remain
-unaltered audit history, but are never treated as aliases and cannot pass
-reconciliation, recovery, transcript, model-control, or exact-turn fences.
-Ordinary prompt submission uses the Agent CLI surface exclusively so its
-uncertain-dispatch/no-replay boundary is explicit.
-Active Herdr calls pass through a global transport circuit breaker inside the
-snapshot cache. Three consecutive transport failures open it for 15 seconds;
-after the cooldown one read-only call is admitted as a half-open probe. Commands,
-including prompt submission, never act as probes and the breaker never retries
-them. Domain errors do not count as transport failures.
-
-The subscriber currently names each Pane for `pane.agent_status_changed`, so it
-reconnects and refreshes that set after Pane create
-or move events. It validates newline-delimited frames, reconnects with bounded
-backoff, and reports the event stream connected only after Herdr acknowledges
-the `events.subscribe` request. A rejected or timed-out subscription reconnects
-without claiming event health. Successful subscription recovery requests full
-convergence. Socket health is not a readiness gate.
-
-Herdr Socket events carry only bounded identity metadata. The subscriber
-normalizes dotted and underscore protocol spellings and assigns an explicit
-Pane, workspace, or full scope. The event router uses that scope to request the
-smallest applicable binding, instance, observable-turn, external-turn, and
-retired-Pane reconciliation path; it never mutates SQLite from event payloads.
-Each target performs a fresh authoritative read before applying existing
-identity and generation fences. Periodic reconciliation remains the convergence
-path when an event is unavailable.
-
-Native Pane events also wake active and detached turn observers. The wait is
-bounded and always falls back to polling, so a missing event cannot stall a turn.
-`state_change_seq` prevents an older native observation from regressing projected
-Agent state for the same terminal identity. Output reads remain gated by the
-snapshot revision and are retried when a read fails.
-
-`HerdrRuntimeReconciler` is the sole convergence path for event-driven and periodic
-recovery:
-
-Startup recovery is split into named stages. Local database recovery and
-configured-workspace validation remain fail-fast gates. View repair, terminal
-baselines, control recovery, retired-pane cleanup, runtime reconciliation, and
-provisioning recovery are isolated stages whose failures are logged and exposed
-through `/status`; durable work remains eligible for normal convergence. Within
-view and runtime batches, one binding or pane failure does not stop later items.
-
-1. Read one current Herdr snapshot when available, with a compatibility fallback
-   for older Herdr installations.
-2. Restrict the result to configured workspaces.
-3. Detect missing panes, terminal identity changes, optional native Agent session
-   references, unknown agent states, and eligible unbound TraeX panes. A new
-   terminal identity is accepted only when the persisted native session reference
-   exactly matches; a conflicting persisted reference is never overwritten.
-4. Use native Agent identity and structured state exclusively for lifecycle
-   convergence. An `unknown` state remains unknown; process identity cannot make
-   it ready or complete.
-5. Startup baselines record only structured Agent sequence, tab, and worktree
-   metadata. Commit reconciler-owned visible transitions before publishing lifecycle events
-   or waking eligible queues. A stale pane/generation or stale desired view
-   rejects the observation without advancing its fingerprint or lifecycle state,
-   so a later reconciliation can recompute from current SQLite state.
-
-Agent-status events are scoped to affected Panes. Topology events are scoped to
-affected workspaces and may additionally wake Pane-specific observers. Reconnect,
-malformed, unknown, or identity-free events request full convergence. Binding
-reconciliation emits `binding-runtime-changed` and `prompt-ready` hints only when
-freshly observed state and durable queue eligibility require work; periodic
-durable scans remain the safety net for lost hints.
-
-Periodic reconciliation remains required. A missed native Socket event may
-delay an update, but must not change the final converged state.
-
-Workspace discovery is failure-isolated but not reported as success. A physical
-Binding reconciliation pass continues converging every workspace whose snapshot
-was obtained, applies the existing bounded degradation policy to unavailable
-workspaces, and returns structured partial failures to its scheduler. Only
-successful workspace IDs enter the event cooldown. Any failed workspace makes the
-latest pass outcome failed and exposes a bounded `lastFailures` list in `/status`;
-a later complete pass clears it. `/ready` continues to use its direct short-lived
-workspace probes rather than stale reconciliation diagnostics.
-
-## Answer streaming and pagination
-
-Every new prompt owns an Answer CardKit entity and run-card entry. Explicit native
-steering is a separate exact-turn control operation rather than a prompt job. Its fixed
-Markdown element is updated through CardKit streaming rather than by repeatedly
-replacing the whole Lark message. The original Lark message remains the request
-record.
-
-For transcripts that expose structured history, `answer_timeline_items` is the
-canonical Primary and Worker Answer projection. Agent Markdown, Tool calls and
-results, lifecycle status, and the final answer retain transcript order and stable
-item IDs. Primary and Worker cards use the same pure CardKit timeline renderer;
-Tool items are collapsed by default and their redacted command/result details are
-bounded before delivery. Historical rows without timeline items keep the legacy
-sanitized Markdown path.
-
-Timeline pagination uses an item cursor `(itemIndex, markdownOffset)`. Agent
-Markdown may split at Markdown-safe boundaries, but Tool and status panels remain
-whole. `answer_timeline_page_checkpoints` persists each page start, delivered
-cursor, item fingerprints, and pending outbox reply. The cursor advances only in
-the same transaction that marks the matching Lark delivery successful. Frozen
-pages are never patched: a changed Tool result from a frozen page is represented
-once on the active page by deterministic `late:<tool-id>` projection. Both timeline
-tables participate in the instance write fence and are rebuilt through additive
-migration 50/51 rather than rewriting legacy Answer content.
-
-Managed TraeX startup uses Herdr 0.9's native `agent start --kind traex`
-surface. Herdr publishes the canonical TraeX thread UUID through the
-`herdr:traex` integration source and owns Agent lifecycle state. Normal Herdr
-reconciliation persists `agent_session_source`,
-`agent_session_agent`, `agent_session_kind`, and `agent_session_value` in SQLite.
-This canonical Herdr tuple is the only transcript identity; the bridge has no
-session-report socket or fallback identity.
-
-`PromptTurnExecutor` opens the corresponding transcript at EOF before dispatch,
-but only when exactly one filename matches
-the UUID and its `session_meta` record carries the same ID. It reads complete
-newline-terminated records from a byte cursor. While `agent prompt --wait` owns
-submission and settlement, one attached
-observer polls that cursor every 250 ms so exact-turn Answer deltas do not wait
-for the Herdr command to return. A fresh `task_started` record first establishes
-the durable dispatch and transcript-turn fence; inherited or unscoped output is
-never published. Command settlement stops the observer before the bounded final
-drain, and their shared observation signature suppresses duplicate publication.
-If the Herdr waiter becomes uncertain after dispatch, the same binding worker
-hands its live cursor and accumulated Answer state directly to
-`DetachedPromptObserver`. This closes the EOF reopen gap without replaying the
-prompt. After restart, `observe(prompt)` reloads the durable Prompt and Binding,
-opens a new cursor, and fences output with the persisted turn ID and start
-timestamp because cursor internals are deliberately process-local.
-`history_mutation.payload.items`
-in append mutations is the canonical typed Answer-content source. Assistant
-`message` items contribute only their ordered `output_text` parts. A
-`function_call` stores a compact descriptor but emits no Answer content. Its
-exact paired `function_call_output` emits one consistently ordered row such as
-<code>✓ Command · `npm test` · 70 files / 680 tests passed</code> or
-`✓ Read · application entrypoint`. Generic completion words are omitted because `✓` already
-expresses success. Successful tool stdout, file contents, serialized arguments,
-patch bodies, and agent payloads never enter the Answer. Explicit failures
-contribute `✗ <Type> · <Target> · <Summary>` plus only the last 20 non-empty,
-redacted diagnostic lines, with the whole failure entry capped at 4,000
-characters. Running asynchronous results use
-`… <Type> · <Target> · 运行中`; a later terminal result may append its completion
-row because Answer delivery is append-only. Calls are classified as Skill, Read, Search, Edit,
-Command, Wait, Agent, or the generic Tool fallback from their declared name and
-bounded structured fields; displayed targets are single-line, redacted, and at
-most 160 characters. Command targets are rendered as Markdown inline code;
-other activity targets remain plain text.
-
-Absolute `SKILL.md` reads under configured TraeX or agent skill roots
-are deferred until their exact result arrives. A successful load emits only
-`✓ Skill · <name>` and discards the skill document output completely; a
-failed load follows the same bounded diagnostic policy as other failures.
-Ordinary file reads, relative or untrusted paths, and assistant prose that
-mentions `SKILL.md` are not reclassified. Item IDs are deduplicated, and the
-compact call descriptor is retained across reads so later results can pair by
-exact `call_id`. Reasoning, developer, system, and user messages; unmatched or
-malformed results; metadata; and unknown items are ignored. Top-level
-`event_msg` records are not streamed Answer-content authority. The bounded
-`task_started` / matching `task_complete` pair is lifecycle authority for
-detached recovery; `last_agent_message` is redacted and bounded before it may
-replace the recovered final Answer. A reopened cursor reconstructs only the
-latest lifecycle pair from its bounded tail scan. Completion must also fall in
-the detached prompt's Run Card start window, so an older completed turn cannot
-advance the FIFO.
-`TRAEX_SESSIONS_ROOT` selects the transcript root and defaults to
-`~/.trae/cli/sessions`.
-
-Each turn selects one Answer source mode before dispatch. An exact, validated
-transcript selects typed mode; otherwise structured output is unavailable and the
-turn logs one bounded reason: `missing_session_identity`,
-`unsupported_session_identity`, `transcript_not_found`,
-`ambiguous_transcript`, or `transcript_validation_failed`. These diagnostics do
-not include prompt text, transcript content, paths, or secrets. If a transcript
-read fails before any typed content is published, the turn changes to unavailable
-with `transcript_read_failed`. After any typed content has been published, the
-turn remains typed and finalizes from its accumulated typed chunks. When no typed
-content exists, completion uses the fixed safe notice
-`⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。`
-A transcript failure does not fail or replay the prompt.
-
-For a bound pane, reconciliation also keeps an independent external-turn cursor
-with a lightweight two-second transcript poll between full Herdr reconciliations.
-It boundedly replays only the latest active turn so a process restart or late
-observer registration does not lose a direct Herdr request; completed history is
-never imported. Background polling pauses while the binding worker owns the turn
-boundary. Before that worker claims each queued Lark prompt, it performs one
-serialized handoff scan so external transcript work is adopted before the next
-bridge dispatch; external completion wakes the binding worker to resume its FIFO.
-
-TraeX can return to `idle` without writing a matching `task_complete` or
-`turn_aborted` record. That absence is not success evidence. For an exact external
-turn that remains `running` and `attached`, the observer requires two distinct
-durable Herdr observations later than the turn start, both `idle` or `done`, with
-no intervening transcript observation. Any transcript activity or non-idle state
-resets the confirmation. It then attempts one transactional fail-closed transition
-fenced by Binding generation and attachment, Pane, Agent session, Prompt origin and
-state, exact turn ID/start time, Run Card generation, and durable runtime state.
-The Prompt and Run Card become failed with an explicitly unknown outcome, a
-`TurnFailed` event updates durable projections, and the Prompt FIFO is woken. The
-request is never replayed and the bridge never fabricates a successful answer.
-The scan reads only durable active bindings and their transcript files; it does
-not perform a Herdr snapshot or treat socket payloads as authoritative state. A
-new `task_started` plus its scoped user message may adopt exactly one queued
-ordinary prompt only when binding generation, pane, native session, request
-body (apart from line-ending normalization), and creation time all match. An
-ambiguous or absent match creates a separate durable prompt and Answer Card.
-The atomic SQLite transition records `execution_origin = 'herdr'`, claims the
-full transcript turn ID, and reserves any initial card delivery before events
-enter the normal `BridgeEventBus` projection path; it never submits the request
-to TraeX again. A newer external turn may terminalize an identity-less detached
-prompt as uncertain. It may also supersede an exact-owned detached prompt, but
-only when the same cursor observes a different `task_started` with a strictly
-later start time and its scoped `user_message`. That handoff atomically fails
-the old prompt without replay, creates a separate external prompt and Answer
-Card, and retains the new exact turn fence. It never consumes a queued Lark
-prompt even when the request text matches. `PromptRunWorkflow` keeps the live
-cursor through this handoff so the start or request record cannot be lost
-between observers. Other turn conflicts remain ignored. Periodic scans and
-explicit handoffs are serialized per binding so two external cursor reads
-cannot race.
-The transcript projector accepts both the legacy `user_message` event and the
-current `history_mutation` user message plus `item_completed/UserMessage` pair.
-The current formats share a message ID and are deduplicated before adoption.
-System/developer messages and user messages outside an active turn remain ignored.
-
-Herdr pane hints explicitly observe Primary external turns after the affected
-Binding reconciliation completes. Instance reconciliation, Worker turn
-observation, and retired-pane cleanup remain independent consumers of the same
-bounded hint. The Primary observer publishes the existing lifecycle events, so
-`ConversationViewProjector` independently converges the corresponding Answer
-Card and the owning Main Card through their durable outbox paths. Bridge-owned
-and direct Herdr turns therefore share Answer pagination, continuation handoff,
-delivery checkpointing, Main Card navigation, retry, and restart recovery;
-`execution_origin` changes ownership evidence, not card delivery semantics.
-Ordinary Bridge dispatch still establishes an EOF baseline. An external observation may replay
-only the latest active turn within its bounded scan window; it never imports
-completed history. Lost or failed hints retain the periodic observer scan as the
-convergence path.
-
-After a service restart, a detached prompt that already owns an exact transcript
-turn ID and start time reopens that turn instead of establishing a new EOF
-baseline. Exact-turn lookup scans only the final 64 MiB of a larger transcript
-and ignores the partial record at the beginning of that bounded window. The
-replay keeps the durable RunCard answer as its baseline, appends transcript text
-only when the replay proves a strict missing suffix, and independently publishes
-the latest Main status snapshot. A Run Card ending at the legacy 64 KiB
-truncation marker is the narrow exception: replay removes only that exact marker,
-requires the exact owned transcript to match the remaining prefix, and then
-publishes the longer bounded snapshot as one `replace-all` update. If the prefix
-does not match, the old truncation fence remains intact. This restores plan steps
-and phase text written before the restart without duplicating Answer content or
-replaying a prompt. If the exact boundary is unavailable, observation falls back
-to the live EOF tail.
-
-Terminal content is not a control-plane source. Live pane/process/session
-identity uses Herdr; detached completion uses the canonical typed transcript;
-ordinary prompts use `agent prompt --wait`, and
-interrupts use `agent send-keys`. Runtime text steering is unsupported and fails
-fast without invoking a transport or converting active work into another prompt. Terminal text
-never becomes Answer content, either live or during detached restart recovery.
-Typed detached recovery retains the persisted RunCard answer and may append only
-a bounded, redacted suffix whose replayed canonical text begins with that exact
-answer. Unprovable historical transcript text is ignored; a later canonical
-completion still supplies the final answer or the fixed safe notice when no
-typed answer exists.
-
-Typed output uses one shared 512 KiB per-turn aggregate bound in the transcript
-reader and observer accumulator. Crossing that hard limit records a stable
-truncation marker and suppresses later prose while lifecycle and progress
-observation continue. The larger aggregate feeds the existing 9,000-character
-Answer pagination protocol; it does not increase any single CardKit page. Worker
-output retains its separate per-fragment sanitization before entering the shared
-bounded accumulator.
-
-Rollout does not infer or migrate session identity. Existing panes without a
-native TraeX session identity complete with the fixed safe notice. A
-fresh bridge-created pane, or a pane explicitly reset through the bridge,
-becomes eligible for typed mode only after Herdr has published the native TraeX
-UUID and reconciliation has persisted it in SQLite. The bridge never matches a transcript
-from cwd, timestamps, titles, or newest-file order, and it does not automatically
-restart or replace existing panes to enable typed output.
-
-`AnswerPageWorkflow` is the single live and startup convergence path for Primary
-Answer delivery, while `WorkerTurnCardWorkflow` applies the same durable handoff
-policy to Worker Task output. The Primary workflow uses a deterministic planner to compare the canonical RunCard answer
-with the authoritative active page, then asks SQLite to reserve the next content,
-finish, or continuation transition. Page sequence advancement, the compatibility
-RunCard mirror, and the corresponding outbox intent are committed atomically.
-
-Each page stores its Lark message ID, CardKit ID, element ID, source start offset,
-page index, and reserved sequence high-water mark. When content reaches the safe
-CardKit size, the workflow finishes the active page, creates a continuation card
-with a stable page idempotency key, and makes that page active after Lark identity
-checkpointing. Frozen pages are never patched again. Markdown fences are closed
-and reopened only in the render copy; the persisted Answer remains canonical
-source text.
-
-Every initial page and cumulative stream update passes through the same pure,
-source-aware Markdown renderer. It preserves supported Markdown and language-tagged
-code fences, renders consecutive TraeX numbered diff rows in a `diff` fence,
-converts tables to fenced `text` blocks, removes HTML, and limits clickable links
-to HTTP or HTTPS. These transformations do not change the canonical Answer or its
-source offsets. Synthetic table, diff, and continuation fences count
-toward the 9,000-character rendered limit, while `source_start` always remains an
-offset into the unmodified canonical Answer. This keeps live delivery and restart
-recovery deterministic even when normalization changes the displayed length.
-For each page request, the renderer builds one ephemeral source index for Markdown
-blocks, line boundaries, and atomic tool activities. It advances through indexed
-boundaries once, accounts for render-only wrappers while selecting the page, and
-renders only the selected canonical range. The index is not persisted or cached
-across revisions, so it cannot become workflow authority or retain large answers.
-When a completed page is converted from streaming Markdown to a static CardKit
-card, recognized command activities remain collapsed detail panels. If the full
-bounded command output would exceed the remaining card payload budget, only the
-displayed output is shortened and marked as truncated; canonical page content and
-source offsets are unchanged.
-When a live page has canonical continuation content, its render copy reserves
-space for a short next-card notice. The notice is not persisted as answer text,
-and continuation advances from the source offset returned by the same bounded
-Markdown renderer.
-
-After `stream_finish`, the existing final `card_update` may replace a finished
-Answer page with a structured snapshot. Complete fenced blocks over 80 lines or
-6,000 code characters become independent collapsed panels with semantic labels
-for commands, execution output, diffs, configuration, or known code languages.
-Short and malformed fences remain Markdown; active, frozen, and failed pages are
-not upgraded through this completed-page path.
-
-Compact Main Card and initial Answer Card previews may instead retain the start
-and end of oversized content around a deterministic omission marker. This is a
-render-only copy: canonical `RunCardView.answer`, SQLite state, fingerprints, and
-`answer_pages.source_start` remain unchanged. It is not Answer pagination and
-does not alter frozen pages, continuation creation, or CardKit stream sequences.
-
-The `answer_pages` table records each page's message/CardKit/element identity,
-source offset, sequence, and `creating`, `active`, `frozen`, or `finished` state.
-It is the lifecycle authority and target validation uses its active page. The
-current-page fields remain mirrored in `RunCardView` during the compatibility
-migration; they are a read-model cache, not a second transition authority.
-
-## Main Card convergence
-
-The Main Card is independent from Answer pagination. Its latest desired content
-and delivery checkpoint live in `TopicViewState`; no in-memory counter is a
-delivery authority. Live lifecycle projection and startup repair both call
-`MainCardWorkflow`, which serializes convergence per binding.
-
-SQLite saves the desired TopicView and reserves its `session_status` outbox row
-in one transaction. Initial creation uses `status-card:<bindingId>`; subsequent
-updates use `main-card:update:<bindingId>:<viewVersion>`. A pending or
-dead-lettered row for the current version is not recreated. After successful
-creation or update, the same transaction marks the outbox row delivered, records
-the created `statusMessageId` when applicable, and advances `deliveredVersion`
-monotonically. The resulting checkpoint hint immediately asks the workflow to
-check whether a newer persisted version arrived while the prior card was in
-flight.
-
-Primary and Worker Main Cards deliberately do not duplicate the Answer timeline.
-Both use the same compact `当前活动` selection: the active non-plan activity when
-one exists, otherwise the newest non-plan activity. The full ordered Agent/Tool
-history stays in the Answer or Worker Task Card. Blocked state remains an orange
-Human Review notice, while Command Status cards remain a separate command
-admission/execution projection; neither surface adds remote approval or arbitrary
-terminal input.
-
-Startup compares `viewVersion` with `deliveredVersion` and recreates only missing
-intent. It does not re-read terminal scrollback or replay a TraeX prompt to
-reconstruct a reconciler projection, and it does not emit timestamp-keyed
-unconditional updates. A lost in-process wake-up may delay delivery, but cannot
-lose the desired Main Card state or cause the corresponding TraeX work to run
-again.
-
-## Conversation Gateway delivery
-
-Production selects one built-in Gateway from a compile-time registry. The
-registry does not scan directories, dynamically import packages, or execute a
-module path from configuration. Startup creates one negotiated session with
-separate ingress and delivery ports; its capability profile remains frozen for
-the process lifetime. Existing `LARK_*` configuration continues to configure
-the built-in Feishu plugin.
-
-Core workflows render a bounded `GatewayView` document: heading, Markdown,
-dividers, columns, panels, buttons, forms, inputs, and static selects. Every
-document includes required fallback text. The Feishu plugin owns conversion
-between this document and CardKit. A Gateway without rich views can consume the
-same fallback text without importing or interpreting CardKit. Historical
-provider-materialized payloads remain readable through an explicit legacy
-envelope; new providers must reject that compatibility format.
-
-Before the first claim, the dispatcher asks the active plugin to prepare a
-deterministic delivery plan. SQLite stores the Gateway ID, negotiated profile,
-serialized plan, and SHA-256 plan hash. Identity, plan, and hash become
-immutable once claimed; retries execute the same frozen plan and never render
-again. A released pending row created before this migration may receive exactly
-one plan while both plan fields are null.
-
-All user-visible replies are first represented as SQLite outbox rows with stable
-idempotency keys. The dispatcher executes provider-neutral create, reply,
-replace, stream, finish, and share plans. It marks successful rows
-delivered; transient failures are retried with backoff; repeated failures become
-dead letters that an operator can retry or dismiss.
-
-The delivery path has three explicit modules. `GatewayOutboxDispatcher` is the
-lifecycle facade: it owns notifier subscription, scan coalescing, safety and retry
-timers, transient dead-letter recovery, diagnostics, and shutdown settlement.
-`OutboundLaneDrain` owns only one bounded work-conserving scan: four-way
-concurrency across independent lanes, strict per-lane exclusion, live-to-history
-3:1 preference, same-reply suppression, and stop-on-fatal-checkpoint behavior.
-`OutboundDeliveryExecutor` owns one candidate attempt from frozen plan through
-claim, external effect, and fenced checkpoint. The first two consume
-`OutboundScanStore`; the executor consumes `OutboundDeliveryStore`. Their
-process-local scheduling state never replaces SQLite lane heads or claims.
-
-`/swarm panes` may reserve a `group_card_create` intent for a selected active
-pane. Unlike a reply intent, it carries a validated chat target and durable
-thread-alias identity while leaving `root_message_id` null. Its accepted ACK
-atomically records the returned group root/thread IDs and activates the alias.
-The published card remains a passive interaction surface, but it mirrors each
-new durable TopicView alongside the Binding's canonical Main Card. Each active
-alias uses an isolated `pane-entry:<aliasId>` lane and a versioned idempotency
-key, so one failed alias cannot block the canonical Main Card or another alias.
-Within that lane, a newer Pane Entry snapshot replaces every older update that
-has never been claimed or attempted; claimed and uncertain revisions remain as
-durable delivery evidence. This keeps bursty Main Card projection to one pending
-alias update without changing canonical TopicView history.
-The TopicView plus canonical and alias delivery intents are reserved in one
-SQLite transaction; startup can repair a missing alias version even when the
-canonical target already delivered it.
-
-An active alias resolves to its exact Binding generation and pane. Ordinary
-replies use the alias root for their Answer Card while sharing the Binding's
-existing Prompt FIFO and Agent session. Alias lookup fails closed after a
-generation, pane, lifecycle, or attachment change. Topology-changing commands
-are rejected from alias threads and must be run from the canonical topic. The
-alias table and group-create intent are lease-fenced; no route exists only in
-memory.
-
-Worker Session roots use the same `group_card_create` transport with a mutually
-exclusive `worker_thread_id` target. The delivery ACK transaction activates the
-route and, for `canonical-main` mode only, checkpoints the sole Worker Main
-message identity. A `legacy-entry` ACK activates only the route. Claimed target
-identity is immutable; an uncertain external create is not issued again.
-
-Lane keys are prefixed with the Gateway ID before entering SQLite, so equal
-provider-local targets cannot collide. Before external delivery, the executor transactionally claims a fresh, due lane
-head. The returned frozen receipt carries the row, snapshot revision, SHA-256
-payload hash, lease fencing token, and a unique attempt ID. Delivery ACK, card
-creation checkpoint, and failure settlement must match that claim. Each retry
-gets a new attempt ID; late receipts cannot settle a later attempt or advance its
-projection. Successful checkpoint hints are emitted only after SQLite accepts
-the ACK. Retired in-flight rows retain their claim until settlement, and their
-late ACK can release the claim but cannot advance the retired projection.
-
-After the first claim, SQLite guards the payload, target identity, intent,
-sequence, revision, and first-claim timestamp against mutation. An active claim
-also prevents row deletion and further dispatch in its lane. Coalescing only
-removes eligible successors that were never claimed, attempted, or card-ID
-checkpointed; numbered Answer projection revisions are retained separately.
-Changed input under an already attempted pending idempotency key is rejected as
-`outbound_idempotency_conflict` rather than replacing the in-flight payload.
-
-Static, closed, and final Answer snapshots compare serialized visible payloads.
-Unchanged content does not reopen delivered, dismissed, or rejected rows, even
-when the view version increases. Changed content appends a numbered successor;
-A-to-B-to-A creates three revisions. Failed static replacement creates are not
-automatically reopened by convergence. Frozen pages do not reserve new final
-updates. Retention preserves the latest numbered projection revision as the
-current deduplication checkpoint; an independent projection checkpoint table and
-incremental startup candidate scan are not yet implemented.
-
-If an external request succeeds but its local ACK or card-ID checkpoint fails,
-the executor reports `outbound_checkpoint_uncertain` and does not turn that
-uncertainty into an ordinary retry. An unsettled claim keeps its lane blocked.
-Transport failures also carry a durable effect-certainty classification. DNS,
-connection refusal, and explicit connect timeout prove the request did not start
-and remain eligible for ordinary retry. HTTP/Lark responses are definite
-rejections and retain their existing semantic handling. Request or headers
-timeouts, connection resets, and transport failures without pre-send proof are
-stored as `uncertain` unknown dead letters with a blocked quarantine; they are
-never automatically reopened, though an authorized operator may explicitly
-retry or dismiss them.
-When a new lease owner activates its write fence, persisted claims belonging to
-a different owner or fence become unknown dead letters with active, blocked
-quarantines. Their payloads and existing card-ID checkpoints remain intact for
-inspection and authorized recovery. Because the claim alone does not prove
-whether HTTP began, even a crash immediately after claim is treated
-conservatively. This is not an exactly-once guarantee: endpoint-specific
-endpoint-specific reconciliation and idempotency policies remain follow-up work.
-None of these recovery paths replays a TraeX prompt.
-
-Order is important inside one CardKit element because sequences must increase.
-The publisher assigns every outbox row a durable delivery order and drains only
-the head of each target lane. Updates to one card and operations in one Answer
-stream are serial within their target lane, including retries. Independent
-`card_reply` and `text` rows each use their own durable reply lane because they
-create separate Lark messages and have no cross-reply completion-order
-dependency. Up to four independent lanes may make progress concurrently, so a
-blocked first reply does not prevent a later independent reply from completing.
-A failed or future-due head blocks only its own lane.
-
-SQLite remains the queue authority. Every row persists its `live` or `history`
-work class; normal user-visible projection work is live, while explicit Main or
-Answer recovery rebuilds are history. Startup view convergence also marks every
-newly reserved Main or Answer repair as history, so a restart cannot place a
-large recovery batch ahead of current interactive cards. An intent already
-persisted before restart keeps its original class because work class is part of
-the immutable claimed revision. The dispatcher keeps only ephemeral
-active-lane, wake-up, and concurrency-slot state. Its work-conserving pump fills
-a slot as soon as one delivery settles or a wake-up announces new durable work;
-it does not wait for a fixed batch to finish. When both classes are due, dispatch
-selection follows a fixed three-live-to-one-history cycle. If one class is empty,
-the other borrows every available slot. Multi-slot fill passes read one bounded
-set of lane heads per work class and apply that cycle in memory, instead of
-repeating the same SQLite head query for every open slot. Single-slot refill
-keeps the cheaper preferred-class query with fallback. This bounds history
-starvation without cancelling work already in flight. The class is part of a claimed revision's
-immutable identity and is reconstructed from SQLite after restart.
-
-The pump stops claiming new rows during shutdown and waits for already started
-effects. If one external effect succeeds but its local checkpoint becomes
-uncertain, the scan likewise stops claiming, waits for sibling effects to
-settle, and then reports the error. This preserves the global concurrency bound
-across the next scan. Every 100 claims the dispatcher yields and schedules
-another scan. Lark requests use a dedicated bounded timeout; HTTP 429 responses
-honor a bounded `Retry-After`, and other transient failures use jittered
-exponential backoff. Existing shared reply lanes are migrated transactionally;
-dead-letter audit and quarantine state remain attached to the failed reply, and
-the migration never replays TraeX or Worker work.
-
-Because every delivery uses one configured Lark application identity and current
-429 responses do not expose a trustworthy narrower quota scope, a definite 429
-also extends one durable app-wide cooldown. The failed reply retry deadline and
-the cooldown are committed under the same claim fence. Lane selection and direct
-claim both reject new work until the deadline, so force scans and restarts cannot
-bypass the gate; already in-flight requests are allowed to settle. Multiple 429s
-can extend but never shorten the deadline. The next-wake query combines the
-earliest lane deadline with the active cooldown, and the dispatcher adds at most
-250 ms of local post-boundary jitter before normal work-conserving delivery
-resumes. The cooldown blocks only Lark delivery, remains visible in `/status`,
-and does not change readiness or Prompt/Worker scheduling.
-
-Permanent failures and transient failures that exhaust their single cooled
-recovery round are handled by a durable lane quarantine. Answer stream failures
-never allow a later content sequence or finish operation to skip the failed
-head: unsafe successors are dismissed and `AnswerPageWorkflow` reconstructs
-delivery from the canonical RunCard state. Main Card and other replaceable card
-lanes may advance only to a newer durable snapshot. Immutable card creation,
-text, and unknown work normally remain blocked until an operator retries or
-dismisses the failed head. Startup may automatically dismiss an immutable
-`card_reply` only when the Gateway durably rejected it and its isolated lane has
-no pending work. The dead letter, recovery ledger, quarantine decision,
-successor changes, and lane-head update are committed in one SQLite transaction.
-
-### Recovery evidence versus lane release
-
-`delivery_recoveries` keeps one durable obligation per failed outbox revision,
-independent of the replaceable lane-quarantine pointer. Entering dead-letter
-state records the initial failure in the same SQLite transaction. Releasing a
-lane, reserving a rebuild, or retrying a failed row does not mean delivery
-recovered. `unresolvedDeadLetters` excludes only obligations with recorded
-recovery or dismissal, not rows whose lane was merely released. The separate
-`deliveryRecoveries` counters retain unresolved/replacement-pending work even
-while a manual retry is pending; these counters do not yet change readiness.
-
-Semantic provider recovery is authorized at the exact external-call boundary.
-The Feishu plugin combines its bounded operation and view purpose with the
-normalized business code, then returns provider-neutral failure certainty and
-recovery kind. Core delivery code does not interpret Feishu codes. Only a
-Primary Main Card `updateCard`/`updateCardKit` rejection with
-`230099`, a Primary Main Card `updateCardKit` rejection with `300317`, or a
-Primary Answer `streamCardContent` rejection with `300309` can produce a semantic
-recovery kind. SQLite consumes that explicit kind and never infers recovery from
-the raw code. `230028` is a permanent content rejection of the current revision
-and is not automatically retried or rewritten. Nonmatching endpoints remain
-dead-lettered without rebuilding an unrelated card or Answer stream. Timeout and
-reset uncertainty takes precedence and remains blocked for operator inspection.
-
-Physical SQLite names such as `lark_error_code` and
-`lark_delivery_cooldowns` are retained for additive migration and rollback
-compatibility. They are storage details, not current application contracts. New
-core code uses Gateway identity, provider codes, and provider-neutral failure
-semantics.
-
-An accepted delivery ACK also commits matching recovery evidence: the same
-failed row after retry, an explicitly linked Main Card rebuild in its original
-binding generation, or a later card update with matching target, lane, owning
-identities, roles, and a newer view/revision. Versionless legacy updates use
-strict delivery order within the same identity and target. The record retains
-the successful reply ID, message ID, and confirmation time after outbox history
-is pruned. Failed rebuilds create their own obligation without resolving the
-original. Authorized dismissal is recorded separately from recovery; retries
-preserve the original failure evidence.
-
-Migration 31 backfills legacy dead letters conservatively. A released-snapshot
-quarantine plus a matching delivered successor can prove recovery; missing or
-ambiguous evidence remains unresolved. Unknown effects and cross-Answer-page
-rebuilds are not inferred from lane release or card creation. The ledger is not
-a per-attempt event log.
-
-Startup can close one narrower class of uncertain old Answer updates when a
-replacement target is already authoritative end to end. The failed update must
-target an older message; the current Run Card and active static Answer page must
-agree on a different message, card, and page; and a later delivered
-`stream_card_create` on the same Gateway must carry matching message and card
-checkpoints. Every pending row behind the quarantine must be an unclaimed
-revision of the same current static-Answer projection. Recovery then records the
-replacement create as proof, releases the quarantine, dismisses all but the
-newest pending revision, and refreshes the lane head atomically. The uncertain
-failed update remains a dead letter and is never retried. Missing identity, an
-unrelated pending row, or any prior claim keeps the whole candidate blocked.
-Legacy rows that classified such an Answer `card_update` lane as `immutable`
-remain eligible only for this same complete replacement-target proof; no
-immutable create, text, or other operation is admitted by that compatibility
-case.
-
-Startup can also advance one narrower same-target Worker Main quarantine. The
-failed effect must be an uncertain `card_update`; the current Worker Main view
-must retain the same message and exact Worker Session identity; and its newest
-pending revision must match that authoritative view version. Every pending row
-in the lane must be an unclaimed update with the same Gateway, binding, Worker,
-generation, message, and roles. Older pending snapshots are dismissed, the
-newest remains eligible, and the recovery obligation stays replacement-pending
-until that exact update receives a delivery ACK. The failed row is never
-retried and its uncertainty remains in the audit history.
-
-For a closed Primary Answer stream replaced by one static page, migration 32
-adds explicit content-coverage evidence. Before claiming a stream update or a
-new static snapshot, the reservation transaction records its canonical source
-range and SHA-256 hash. Ranges use the source-aware renderer's actual page
-boundary, not rendered Markdown length. Coverage cannot be updated or attached
-after a claim. Reserving the replacement page also links the failed revision to
-that page and its create intent in the same transaction.
-
-A replacement create ACK alone leaves the obligation `replacement_pending`.
-Only an accepted static `card_update` ACK can resolve it: the recorded candidate
-must begin at the same source offset, cover the entire failed range, and match
-its canonical prefix hash. The delivered update and replacement create must
-identify the same page message, Prompt, and current binding generation. Appended
-content is allowed; shortened or rewritten failed content is not proof. These
-facts are committed with delivery settlement, so stale attempt receipts cannot
-resolve recovery. This records accepted delivery, not a read receipt from a
-human or a separate inspection of Lark's visible card.
-
-Unresolved obligations retain their failed outbox rows and replacement creates
-through history pruning. After resolution, normal pruning may remove those
-rows; the ledger retains the successful reply/message/time and the recovery
-link retains the failed source range/hash. Restart does not guess coverage for
-legacy rows that lack it. This bounded path does not implement multi-page
-coverage unions, multi-hop replacement chains, changed-source reconciliation,
-or Worker Answer coverage. Those cases, recovery-ledger retention, candidate
-rescans, and current-versus-historical health classification remain follow-up
-work; missing proof stays unresolved.
-
-## Process lifecycle and diagnostics
-
-The supported production owner is `herdr-agent-swarm.service`, installed and
-operated through `./install.sh` and `npm run swarm:*`. Herdr remains the
-mandatory headless pane/process authority through its CLI and socket API; its
-TUI is not a runtime dependency. The application also holds a fenced SQLite lease,
-which protects against accidental duplicate processes sharing one database.
-First-run setup requires a build followed by `npm run swarm:setup`. Once private
-configuration is valid, `./install.sh` builds and stages the immutable release
-and enables the unit without starting it; `npm run swarm:start` performs the
-explicit start. Operators use `npm run swarm:status`, `npm run swarm:restart`,
-`npm run swarm:stop`, and `npm run swarm:logs` for normal lifecycle work.
-The generated unit permits at most five starts in 60 seconds while retaining a
-five-second restart delay, so permanent startup failures converge to a failed
-unit instead of producing an unbounded restart loop. Explicit `swarm:start` and
-`swarm:restart` clear that rate-limit state only after rewriting and reloading
-the unit; restart still passes the active-work safety gate before any lifecycle
-mutation.
-Pino remains the application-side structured JSON logger. In installed mode it
-owns one private file destination; foreground development still uses stdout. A
-user-systemd timer invokes the lifecycle CLI, which verifies the file and exact
-MainPID, rotates at 16 MiB, and sends `SIGUSR2` for an in-process reopen. The
-lifecycle owns permissions and rotation, retaining one rotated generation.
-`swarm:logs` retains its bounded default and can include rotated generations or
-filter JSON records by level, time, component, and correlation identifiers.
-The outbound dispatcher emits one debug summary for each non-empty scan, with
-attempt, success, failure, provider-call, and durable-checkpoint timing. Delivery
-failures carry the same phase timing at warn or error level without including
-message or card payloads.
-Staging creates an inactive candidate and does not change `current`. The install
-lifecycle validates that candidate, snapshots the prior unit and enabled state,
-reloads and enables the candidate-pinned unit, and atomically switches `current`
-only as the final activation commit. A caught pre-commit failure restores the old
-unit and enabled state. An interrupted activation or failed compensation leaves a
-private `.release-activation.json` marker; later install, start, and restart
-commands fail closed until the operator reconciles that evidence. Release pruning
-runs only after activation and retains the current release, the previous `current`
-target, and any valid release directory referenced by the previously installed
-unit's `WorkingDirectory`. This protects a still-running old process when multiple
-candidates are installed before the normal safety-gated restart.
-Source installs cache the locked production dependency tree under the private
-state directory. The cache key fences the package manifests, Node/ABI/N-API and
-npm version and effective configuration, platform and architecture, kernel and
-operating-system release, and libc. A private cache lock admits one builder; an
-archive checksum and exact manifest validate every hit. Missing or corrupt entries
-are rebuilt into a temporary directory and atomically published. Each release
-extracts its own `node_modules` copy, so releases remain immutable and never share
-writable dependency inodes. The cache prepares only an inactive candidate and does
-not participate in the transactional `current` activation. Packaged releases
-remain self-contained and do not use this source-install cache.
-
-Inside the process, `ManagedBridgeRuntime` starts components in explicit phases:
-ownership and fencing; recovery preparation and integrity checks; instance, turn,
-and binding runtime recovery; the health surface; durable delivery and projection;
-external ingress and remaining startup convergence; then periodic and external
-observation. The lease heartbeat begins before the long
-integrity audit and initial reconciliations. Each possibly started component is
-recorded before an asynchronous start that may partially succeed, so a startup
-failure reuses the same shutdown policy instead of a separate cleanup path.
-`RuntimeLifecycleLedger` owns this cleanup-before-start mechanic for ordinary
-runtime modules through their structural `start` and `stop` interface, including
-start-argument and shutdown-context forwarding. It retains asynchronously created
-resource handles for their cleanup. The managed runtime keeps recovery, convergence,
-concurrent ingress startup, and the two-step socket shutdown explicit because those
-operations encode lifecycle policy.
-
-SIGINT, SIGTERM, lease loss, and startup failure converge on one cached stop
-promise. Shutdown stops new prompt/tool and socket ingress first, then periodic
-and external observers, instance work, integrity and coordination, projection
-and delivery, and finally the health server. Only after every tracked
-write-capable component settles does it deactivate the write fence, release the
-lease, and close SQLite. If a writer remains unsettled after the shared deadline
-and final settlement allowance, the result is `ownership_retained`: the fence,
-lease, and store deliberately remain held and the process receives a non-zero
-exit code. This conservative outcome prevents a replacement process from writing
-while an old task may still hold SQLite access.
-Herdr socket shutdown has two explicit ingress-phase steps. It first closes the
-socket admission gate without waiting, then waits for the current event drain
-before stopping that callback's observer and reconciliation dependencies. The
-drain is part of the writer gate because its callback can still reconcile
-durable SQLite state. A failed or unsettled drain therefore retains ownership
-under the same policy as other writers.
-The drain also forwards the shared shutdown deadline through an event-scoped
-abort signal. Subscriber and router checkpoints discard queued hints and skip
-dependent work that has not started after that signal fires. Cancellation is
-cooperative: already-started Herdr calls and durable transitions still settle
-normally, and the writer drain does not report completion until the real event
-callback returns.
-
-### First-run setup boundary
-
-The standalone `swarm:setup` command uses one deterministic workflow. That
-workflow depends on explicit ports for terminal
-prompts, configuration persistence, local/Herdr/Lark probes, and service
-lifecycle operations. Terminal handling, atomic private-file replacement,
-external commands, bounded HTTP calls, and systemd remain behind their adapters;
-the workflow itself decides only collection, check policy, review, save, and the
-separately confirmed lifecycle steps. `swarm:doctor` reuses the validation and
-probe ports without prompts or mutations.
-
-Setup validation is observational. The Herdr adapter may list and inspect
-workspaces and agent capabilities, but it may not create panes or start agents.
-The Lark adapter may authenticate and read the configured chat and bot identity,
-but it has no message-send or tenant-management operation. Therefore successful
-probes do not claim that event subscriptions, permissions, application
-publication, or group membership were configured; those remain operator checks.
-Failures block persistence and lifecycle changes, warnings require explicit
-acceptance, and explicitly skipped network checks permit save but prohibit the
-one-flow install/start path.
-
-Configuration is committed as one logical `.env`/`projects.json` pair. The
-configuration directory is private, drafts and final files are mode `0600`, and
-a valid replaced pair is copied to a timestamped private backup first. A caught
-partial replacement restores both old files. An ambiguous pair or transaction
-marker blocks overwrite and requires operator recovery. The standalone installer
-performs a narrower non-interactive guard after staging: missing configuration
-or an exact shipped placeholder stops before lifecycle installation and points
-the operator to `swarm:setup`; it never launches the wizard implicitly.
-
-Health endpoints have separate meanings:
-
-- `/health` means the process can answer requests.
-- `/ready` additionally requires the lease, configured project paths, Herdr,
-  Lark, and completion of the first multi-agent runtime reconciliation.
-- `/status` returns a sanitized operational snapshot even when dependencies are
-  degraded.
-
-`HealthSnapshotCollector` is the sole owner of readiness and status aggregation.
-It shares bounded Herdr workspace probes, reads each volatile readiness provider
-once per response, isolates and redacts diagnostic failures, and applies the
-degradation policy. The HTTP server does not inspect stores or runtime providers;
-it maps the collector results to the stable endpoint contract.
-
-Diagnostics are observational and must not become a new availability hazard.
-Each provider is collected independently; a synchronous provider failure becomes
-a bounded error object, leaves sibling diagnostics visible, and degrades the
-aggregate status instead of aborting the HTTP request. Readiness dependencies
-fail closed: if lease, Lark, or initial instance-runtime state cannot be read,
-`/ready` returns not ready. One request reads each volatile readiness provider at
-most once and reuses that observation in `/status`, so a response cannot combine
-contradictory lease or reconciliation snapshots.
-
-`/status` reports active and released outbox quarantines by lane and failure
-class, plus due lane heads that have made no progress for five minutes. An
-active quarantine or stalled head degrades status without changing readiness,
-so one broken Lark target remains visible without stopping unrelated work.
-Pending Lark work is also reported as an exhaustive durable partition:
-`ready`, `inFlight`, `retryWait`, `cooldownWait`, and `waitingBehindLane`. Their
-sum equals `pendingOutbox`. The durable `inFlight` count comes from SQLite claim
-identity and may legitimately differ momentarily from the dispatcher's
-process-local `activeDeliveries`; diagnostics expose the difference but never use
-one to repair the other. Normal in-flight or waiting work does not itself degrade
-status. The oldest claim timestamp and age are informational and do not create a
-new timeout policy.
-The same endpoint reports the Herdr circuit state, bounded last failure, recovery
-time, and rejection/failure counters. Open and half-open states degrade status.
-It also reports each startup recovery stage with its bounded duration and error;
-an isolated failed stage degrades status without making the process unavailable.
-The operational summary includes queued-card counts with or without wait
-estimates. It does not expose prompt
-text or actor identity.
-
-Queued ordinary turns carry durable presentation feedback. The exact queue
-position counts only earlier waiting FIFO turns; the active turn is not counted
-as a queued item. After at least three eligible completed ordinary turns, the
-bridge estimates a coarse range from the median of the most recent ten durations,
-subtracts elapsed time from the active turn, and rounds the range outward to
-30-second boundaries. A separate stoppable projector refreshes changed buckets
-on lifecycle events and while queued work exists. Each Run Card update and its
-replaceable outbox intent are committed atomically, so restart convergence cannot
-persist a newer view without retaining its delivery intent.
-
-Shutdown uses one shared deadline and never starts a second cleanup path. It does
-not replay work or delete user state. Logs and status deliberately exclude
-prompt bodies, raw terminal output, card payloads, and credentials.
-
-## Safety rules
-
-- Lark may not approve a high-risk TraeX action. Approval remains in Herdr.
-- `/swarm stop` is a freshly identity-checked, best-effort Herdr-local `Ctrl+C`
-  control, not an atomic exact-turn CAS or a remote process or pane kill.
-  `/swarm steer <text>` and Worker `/steer <name> <text>` create a durable
-  priority turn only when the target is idle. Active-turn steering is rejected
-  as unsupported. They reject blocked approval or question states and cannot approve,
-  reject, or bypass a high-risk operation.
-- A prompt is never automatically replayed after uncertain dispatch or restart.
-- Pane attachment and replacement validate workspace, project directory, and
-  terminal identity before changing a binding.
-- Herdr event hints and Lark cards are not trusted business-state sources.
-- Runtime SQLite files are service-owned data and are never version-controlled.
-
-## Multi-agent ownership and recovery
-
-SQLite owns project selection, Primary/Worker roles, immutable Worker parent
-identity, desired state, instance generation, queues, approval identity, and
-workspace leases. A Worker is a derived session of one exact Primary binding and
-pane; its worktree may outlive the session but cannot rehydrate it. Herdr owns
-whether the recorded pane and expected agent process actually exist. Git
-inspection owns dirty, conflict, branch-head, and worktree removal facts. Feishu
-cards are only controls and projections.
-
-`InstanceRuntimeReconciler` is the single startup, periodic, and event-woken
-convergence path. It updates only recorded instance/pane identities and never
-adopts an unrecorded pane. A missing or mismatched Worker pane terminalizes that
-Worker behind a generation fence: queued work is cancelled, work that may have
-been dispatched remains uncertain, and the Worker cannot be restarted in a
-replacement pane.
-
-Confirming a Primary-pane close creates durable child close steps for Workers
-whose immutable parent binding/pane identity exactly matches the captured parent.
-The service terminalizes those child sessions before external effects, closes each
-recorded child pane before the parent pane, and preserves child worktrees. A
-restart probes unresolved child close steps and records success or uncertainty;
-it never replays `closePane` or a Worker turn.
-
-Approval policy has fixed `routine`, `remote-confirmation`, and `local-only`
-tiers. Remote grants are persisted and bind the actor, project, instance
-generation, canonical action fingerprint, resource scope, policy version,
-expiry, and single-use state. Any mismatch fails closed.
-
-## Related documents
-
-- [Feishu group usage](feishu-group-usage.md) explains user commands and safety
-  behavior.
-- Historical design and iteration records live in
-  [archive/](archive/), including [archive/designs](archive/designs/) and
-  [archive/superpowers](archive/superpowers/).
-- The [archive manifest](superpowers/archive-manifest.json) declares the
-  archive policy. Run `npm run docs:audit` after a reviewed Git move to verify
-  that the historical archive exists and that active material does not present
-  it as current work.
+- `recorded` is safe to submit.
+- `attempting` is persisted before the Core call.
+- `prepared` means Core durably accepted the submission.
+- `observed` means canonical session evidence has correlated it.
+- `terminal` and `cancelled` are settled receipt outcomes.
+- `uncertain` may have had an effect and therefore is never automatically resubmitted.
+
+No transition checks a predecessor Submission Intent. Concurrent drainers use per-intent compare-and-swap ownership, not a per-Binding ordinary-turn lock.
+
+### Continuous session ingestion
+
+`CoreSessionIngestionSupervisor` is the sole current-session producer for each
+exact Primary or Worker session identity. It runs independently of Prompt and
+Turn ownership, consumes bounded Core pages from the committed session-lane
+cursor, and wakes the matching durable projector only after inbox commit.
+`ExternalTurnObserver` consumes the durable lane for current v2 sessions; it
+does not compete for another live Core read.
+
+The producer identity includes owner generation, Pane, terminal, Agent kind,
+native session and the Core stream source. Primary and Worker routes are
+revalidated before each read, including Worker-session and parent-Binding
+fences. Concurrent hints coalesce, and one failing route is isolated from the
+other sessions. Transient failures use per-owner bounded exponential backoff;
+cursor expiry remains a typed failure and invokes receipt-proven exact-turn
+recovery for historical Pending-first Input Card rows. Neither path resubmits
+the input body.
+
+For v2 session rings, ordinary retained-window expiry and an epoch transition
+are deliberately different checkpoint actions. An ordinary expiry in the same
+ring epoch is eligible only when Core returns typed `cursor_expired` evidence
+with a `resume_cursor`; SQLite rebases that exact checkpoint to the supplied
+cursor and records the expiry gap. An untyped same-epoch `invalid_cursor` never
+advances a checkpoint.
+
+Before the first v2 read, the reader compares the durable checkpoint with a
+fresh ring-open descriptor. When the stable ring/source, native session, and
+Agent kind still match but the epoch differs, it atomically records a
+`cursor_epoch_changed` projection gap and replaces the exact fenced checkpoint
+with the live epoch, `start` read cursor, and live latest cursor. The reader
+reloads that checkpoint before it reads the new retained window. Identity
+mismatch, a lost checkpoint race, missing epoch evidence, or a changed ring
+fails closed; a generic read error is not reinterpreted as an epoch transition.
+
+One ingestion attempt may make at most one identity-stable epoch-transition
+rebase and then at most one typed same-epoch expiry rebase. A second transition
+or expiry fails closed for bounded retry from fresh observation. These durable
+recovery actions do not replay Agent Input and do not derive canonical truth
+from CardKit state: Core events remain the authority, then the durable
+projector and outbox advance their own effects.
+
+An active Primary Binding can temporarily have no native session before its
+first Agent Input creates one. While no durable Input requires ingestion, this
+normal window is reported as `awaiting_session`; it is neither lag nor a
+readiness failure. A pending durable Input without an exact route remains
+`route_unavailable` and fails Agent Input readiness closed. A Binding that
+already has a persisted exact session but whose live route cannot be resolved
+is also treated as a route problem, not as awaiting its first session.
+
+Canonical evidence reconciliation for pre-cutover data is bounded and indexed.
+It joins historical pending Input Cards to the durable
+`human_message.submission_id` ledger; the compatibility-only
+`admitLegacyPendingCard` and `admitLegacyPending` writers are not used by live
+ingress. New segments are created only by the canonical segment projector.
+Missing, incomplete or ambiguous historical evidence leaves the legacy card
+pending. Exact-recovery outcomes are recorded per Submission Intent: `indexing`
+receives bounded retry, while `not_found`, `ambiguous`, and `unavailable`
+remain visible as `needs_human`. These rows are excluded from the next bounded
+candidate page, so old unresolved Inputs cannot starve later independent
+Inputs.
+
+Legacy Input Card withdrawal is a separate compatibility aggregate. A bounded
+startup and periodic scan requires the immutable Submission Intent route, exact
+delivered message ID, canonical Human correlation, matching Core turn, and a
+terminal Conversation Segment before it atomically records one retirement and
+one history-class `message_delete` outbox intent. Delivery acknowledgement is
+the ordinary path from `deleting` to `retired`; retryable failures remain
+pending, while terminal failures retain their evidence as `failed`. One
+startup-only historical correction is evidence fenced to a persisted Feishu
+CardKit `message_delete` whose exact retirement route and message ID match, and
+whose dead letter records permanent, rejected provider code `230009` (message
+already expired). That pre-upgrade row moves from `failed` to
+`retired/already_absent` in the same transaction that dismisses its dead letter
+and recovery and releases its quarantine. Uncertain effects and all other
+provider codes remain failed for human review. The historical `input_card_views`
+row is not erased, and the withdrawal path does not mutate Conversation,
+Answer, Prompt, Main, or Worker projections.
+
+### First-session submission
+
+Provisioning uses the advertised Core `agentInputSubmissionV3` capability. V3 receipts require an exact native session and expose explicit millisecond timestamps; the older v2 capability remains a Core compatibility surface but is insufficient for Swarm readiness. The exact post-start Pane, terminal, Agent, and session fences are resolved before admission. There is no sessionless `runPrompt` fallback. If capability or identity is unavailable, readiness fails closed and the user gets a visible rejection.
+
+### Trace-end Completion Review
+
+Eligible Swarm-managed TraeX traces receive repository-owned
+`herdr-choice-list` context from the `UserPromptSubmit` Hook after the
+Pane/owner/generation route passes the private eligibility check. The Agent
+includes at most one bounded terminal version-3 decision fence in its original
+final answer. The shipped Skill, OpenAI prompt, UserPromptSubmit context, and
+Stop Hook agree on the compact v3 shape: `{"version":3}` for no review, or a
+choice containing `defaultOption`, `alternatives`, and real `submitText` values.
+Version 2 remains read-compatible for historical text recovery, but is never
+producer output. For an eligible turn, Stop classifies the collective Final
+Trace Envelope rather than looking only at the physical end of the message; a
+complete terminal memory citation may follow the choice fence. A first missing
+or invalid v3 protocol may block Stop once and require a protocol-only repair
+for the same turn; a repeated Stop with `stop_hook_active` fails open.
+
+The Final Trace Envelope is a domain-only bounded suffix parser over the
+visible answer, optional requester syntax, optional inline Skill invocation,
+choice fence, and one terminal memory citation. It returns derived copies:
+`projectionMarkdown` removes recognized transport and legacy requester syntax
+but preserves a valid citation as canonical evidence, while
+`presentationMarkdown` additionally hides that one citation. Live event
+projection consumes the former; completed Answer streams and Answer Timeline
+cards consume the latter. This never rewrites Core events, Segment items,
+canonical positions, source cursors, or recovery evidence. Malformed,
+incomplete, mid-body, duplicate, nested, fenced, or otherwise ineligible
+protocol and citation text remains visible; arbitrary trailing prose cannot
+make a choice valid. Presentation item fingerprints and page counts may reflect
+the hidden metadata.
+
+Core attaches a validated decision to its canonical final message as
+`completion_choice`; a valid terminal `intent: none` is normalized to the
+durable Continue action (`continue` / `继续`) so the user can advance even when
+the agent has no explicit review options. Native typed completion-choice
+metadata remains authoritative. Only when that metadata is absent, text
+compatibility recovery folds non-truncated v2/v3 envelopes in canonical Core
+lane order: the latest valid explicit review selects and the latest valid
+explicit none replaces an older review with the same durable Continue action.
+Missing, malformed, truncated, or ordinary answer text remains without
+controls. Embedded requester syntax or an OpenID is compatibility evidence only.
+Notification authority always comes from the exact trusted Submission Intent
+actor, never from Markdown.
+Swarm stores a valid `human_review`
+decision as the exact Primary Prompt, canonical Primary or Worker Conversation
+Segment, or Worker Turn's immutable choice specification. Once the final card
+target is known, a later fenced projection transaction creates one Completion
+Action Set and reserves its own immutable, fresh Completion Review card. The
+frozen Answer, Turn Card, or Worker Task card is never patched with new
+controls and no standalone reminder is reserved for this new flow. In the
+supported compatibility path, a linked historical text reminder is dismissed in that
+same reservation transaction only when it is pristine and has no possible
+external effect; claimed, attempted, checkpointed, delivered, uncertain, or
+otherwise conflicting evidence fails closed and prevents replacement.
+
+The supported path remains the existing `UserPromptSubmit` writer Hook plus
+bounded one-repair Stop Hook; Core emits canonical `completion_choice`, which
+Swarm and Feishu consume. The writer Hook is not scheduled for removal.
+
+The initial Completion Review payload contains the responsible actor mention,
+the declared question, one to four ordered business choices, and system-owned
+Ignore. A business callback is deliberately minimal: it carries only the
+Action Set ID and option ID. The authenticated Gateway envelope supplies the
+actor and source message; SQLite supplies owner, generation, route, and all
+other fences. The transaction revalidates those facts and uses the persisted
+server-side option text to create ordinary independent Agent Input; Ignore is
+local and creates no Prompt or Turn. A Worker-owned canonical Segment routes a
+business choice to the active Worker instance and its Worker Thread root, so
+the resulting Submission Intent is Worker-owned; it still checks the Worker
+generation/session and parent Binding fences. Duplicate, stale, or wrong-user
+callbacks cannot create work. The same lifecycle applies to a Primary Prompt,
+Primary Segment, Worker Segment, and Worker Turn. The Worker keeps its own
+Worker Thread and name. Its actual Pane Identity supplies its own Delivery
+Ring; the parent Primary supplies only the parent Binding/generation/Pane
+fences, not delivery ordering or a parent-owned conversation thread.
+
+The outbox records delivery before calling Lark and ACK evidence activates the
+same Action Set. At startup, Swarm adopts only an exact linked, `delivered`
+outbox receipt with a delivered message identity. A pending receipt stays
+`presenting`; an uncertain, missing, or conflicting receipt also stays
+`presenting`, records a durable recovery diagnostic, and is never replaced or
+replayed automatically. Retention keeps a live `presenting` or `active`
+Completion Review's Action Set-to-outbox link and frozen payload; terminal safe
+history may later compact. Operational status exposes bounded lifecycle and
+receipt counts only, never the review payload or choice text. This path does not
+approve native tools, write terminal input directly, or resolve the separate
+Herdr `blocked` Human Review episode. Historical `legacy-inline` records retain
+their compatibility behavior but are not a template for new reviews.
+
+## Explicit control routing
+
+Only documented `/swarm ...` commands and authenticated CardKit actions are
+Swarm controls. For every other eligible text, durable admission and receipt
+evidence—not an acknowledgement card—determine its treatment and conversation
+authority.
+
+`/swarm steer <text>` has two safe outcomes:
+
+- when Herdr proves an exact active Turn, inject exact-turn steering;
+- otherwise submit the text as a new independent Agent Input under a dedicated source identity.
+
+The earlier state does not gate the second outcome. `/swarm stop` revalidates Herdr's exact active Turn immediately before control. Neither command derives identity from legacy Prompt state.
+
+`/swarm resume` only reactivates an archived Binding whose Pane is still proven. It does not resume, release, or wake a Prompt FIFO.
+
+`/swarm awake` performs Core projection catch-up and durable card redelivery. It does not wake a Prompt dispatcher and does not submit Agent Input.
+
+`/swarm skip` is not a command. Historical possible-effect evidence is preserved until exact recovery or explicit administrative migration outside the message surface.
+
+## Conversation Projection
+
+The projector consumes ordered Core lane events for an exact Agent session. A lane checkpoint stores the last committed Core position; pending and quarantined lane items expose lag without inventing order.
+
+For live ingestion, each accepted event is reduced in the array order received from Core. Stable IDs deduplicate exact semantic repeats but never act as sort keys. First admission stores the complete projected event exactly as supplied by Core: `submission_id`, typed `choice`, and projected content are immutable. Identity comparison canonicalizes a missing legacy `turnId` as `null`. Core's `record_skipped` diagnostic generates its observation time while decoding, so that time is transport metadata and is excluded only for that diagnostic; business-event occurrence times remain identity-bearing and fail closed when they change. A `source_error` is retained as durable diagnostic evidence but is ignored before conversation projection; its lane settlement and checkpoint advancement remain in the same inbox transaction. A changed `submission_id`, typed choice, or projected content for an existing event ID is a lane-local settled semantic conflict: Swarm records only bounded diagnostics, advances that lane position, and never rewrites historical event, submission ledger, or Conversation Segment state. Projector failures are isolated by an event-scoped savepoint, which rolls back that event's view and `outbound_replies` effects while retaining its pending immutable payload and allowing the Core cursor to progress. Pending recovery reuses the original lane sequence and the existing `outbound_replies` outbox; it does not enrich, replace, rebind, or replay Core history.
+
+Exact recovery is staged before it affects formal views:
+
+- incomplete pages remain staging-only;
+- `indexing` stays retryable;
+- `not_found` opens a projection gap;
+- `ambiguous` preserves the old projection and requires evidence;
+- a complete compatible snapshot atomically replaces the Turn projection, checkpoint, and repair delivery intent.
+
+A late terminal repair creates a continuation delivery when needed. It does not patch a frozen Answer page or rewrite Core state.
+
+## Delivery
+
+Conversation Projection reserves a versioned Delivery Intent in the same
+durable transition that changes the view. Reservation also freezes the complete
+immutable `PreparedDelivery`: Gateway plan, idempotency and projection identity,
+owner fence, checkpoints, snapshot revision, work class, and delivery order.
+SQLite remains the restart and recovery authority. After commit, the prepared
+value is offered directly to the process-local Delivery Engine so the hot path
+does not reload or re-materialize it before the atomic claim.
+
+The Delivery Engine owns exactly one full-data Ring for each actual Pane,
+identified by `workspaceId + paneId`, plus one Global Ring for effects that are
+truly not Pane-owned. Primary effects use the Primary Pane Ring. New Worker
+effects use the exact current Worker Pane Ring and separately freeze the parent
+Primary Pane fence. Historical Worker rows whose scope was already the parent
+Pane retain that legacy Ring key and remain claimable without rescope or replay.
+Missing or stale Worker runtime, parent Pane, or generation ownership fails
+closed and never falls back to Global. A session or generation change updates
+the item fence, not the Ring identity; `/swarm clear` therefore keeps the same
+Ring while a newly created physical Pane gets a new one.
+
+Each Ring permits one external effect at a time and advances by durable
+`delivery_order`. The ready scheduler may run up to four different Rings in
+parallel and applies live/history fairness across ready Rings. A quarantine
+starts in grace blocking for the whole Ring. When its bounded attempt/time
+budget expires, it becomes conflict-isolated: later work with another stable
+conflict key may bypass it, while same-key work and explicit dependents remain
+blocked. Bypass is not release—the failed Delivery, effect certainty,
+quarantine, recovery link, and contiguous checkpoint gap remain durable and
+queryable.
+
+A positively proven stale, superseded, delivered, dismissed, or
+completed-replacement head may be advanced transactionally. Safe supersession
+requires durable `not-started` or `rejected` evidence, reconstructible current
+state, a non-frozen target, stable identity, current owner/fence, no existing
+effect checkpoint, and an unused recovery generation. It retains the original
+Delivery as `dismissed`/`superseded`, transfers prerequisites to exactly one
+replacement, and waits for that replacement's ACK before dependents advance.
+At most one replay-safe replacement can therefore produce one visible
+duplicate. Outside the prepared Conversation Page path, `uncertain` effects,
+frozen pages, and message deletion are never automatically replayed,
+replaced, dismissed, or offered as a direct one-click retry. Prepared
+Conversation Page deliveries are the bounded exception: they keep the same
+reply ID, plan identity, snapshot identity, and idempotency key across the
+approved three-attempt policy. An uncertain attempt may already have applied in
+Lark, so a later attempt may duplicate or overwrite that effect. After the
+third failed attempt, the delivery is terminally dismissed, its local pending
+page link is released in the same transaction, and newer page snapshots become
+eligible through ordinary ordering.
+
+Entering conflict isolation reserves one durable Human Review card on an
+independent conflict key. The review survives restart or Gateway outage,
+mentions the responsible Feishu actor when known, and exposes only bounded,
+redacted evidence. Repeated recovery converges on the same review identity.
+Dismiss preserves the original Delivery audit; Retry appears only for
+confirmed-non-application effect kinds that the action handler independently
+revalidates.
+
+Commit notifications are latency hints. Startup, retry timers, overflow repair,
+and periodic safety scans discover the oldest nonterminal item for each scope
+from the scope/order index and hydrate full prepared values into their Rings.
+This cold path makes lost hints and process restarts safe without restoring the
+retired lane-head table. Delivery acknowledgement is persisted before the
+process-local `DeliveryCheckpointBus` fans out convergence callbacks; a lost
+callback is repaired from durable projection and delivery state.
+
+Each observed Pane or Global scope has a durable Delivery Ring checkpoint. It
+is a derived, rebasable scan watermark rather than effect authority: refill
+uses the same authoritative nonterminal predicate as head selection, computes
+`earliestNonterminal - 1` (or the scope maximum when no nonterminal row
+exists), persists that value, and selects the current head in one SQLite
+transaction. A late manual retry or recovery can therefore move the watermark
+backward without changing outbox state. ACK and safe supersession may advance
+the watermark as a hot-path optimization, but no recovery, Binding,
+notification, or presentation writer depends on it. Refill pagination uses an
+ephemeral `pageToken`; it is never persisted and is unrelated to Core cursors.
+
+Delivery order is a presentation constraint only. It never controls Agent Input eligibility, Core conversation order, or Turn recovery.
+
+## Legacy contraction
+
+Production composition no longer constructs `PromptRunWorkflow`, `PrimaryPromptDispatcher`, or `QueueFeedbackProjector`. Startup and periodic recovery do not scan legacy Prompt work for execution, and status/restart safety do not treat legacy Prompt counters as ordinary work authority.
+
+Dormant Prompt tables and recovery modules are intentionally retained while unresolved possible-effect evidence exists. They are compatibility evidence, not a dispatch surface. Test-only fixtures may start the retired workflow to prove migration and no-replay behavior; production composition must not.
+
+Schema migration 109 is the outbound scheduler contraction boundary. It refuses
+to run while any pending delivery is legacy-owned or unscoped, then removes the
+legacy scheduler control, derived lane-head table, lane-head triggers/indexes,
+and per-row scheduler ownership column. It preserves durable scope,
+`delivery_order`, frozen Gateway plan and idempotency identity, checkpoints,
+quarantine, and recovery history. The pre-contraction delivery rollback command
+is no longer part of the operator surface.
+
+## Worker runtime
+
+Worker identity remains fenced by Worker generation, Worker-session generation, owning Primary Binding generation, and parent Pane. New Worker Session text and bootstrap text use Agent Input. Worker topology controls stay outside ordinary input.
+
+Worker Task projections remain durable CardKit read models. Worker process-local execution and exact active controls are still considered by graceful shutdown because they can be actively observed by this process.
+
+## Binding and runtime convergence
+
+`SessionReconciler` is the single path for event-driven and periodic Herdr convergence. It reloads a fresh snapshot, applies identity and generation fences, then updates Binding/runtime projections. Herdr socket events and in-process notifiers are bounded hints; lost, duplicate, or reordered hints are safe.
+
+An orphaned Binding is never repaired from card text. Reattach or replace must prove the actual Pane route. Pane creation and Agent start are checkpointed so startup can resume or fail closed without duplicating effects.
+
+## Core session event transport
+
+Core session observation negotiates two independent server capabilities. The
+generic Herdr event subscriber selects either one global Agent-status
+subscription or the legacy per-Pane subscriptions. Separately, the session
+event subscriber attempts one v3 multiplex connection for the active Core
+session targets. Any of the four combinations is valid: v2 or v3 session events
+with per-Pane or global Agent status. A missing or rejected v3 capability keeps
+the existing v2 ingestion path active.
+
+Composition injects the Herdr-events adapter's one-shot capability probe plus
+acknowledgement and frame normalizers into the multiplex transport. Core serves
+one initial RPC per socket, so the probe uses its own short connection and the
+acknowledged multiplex feed starts with `session.events.subscribe.v3` on a new
+long-lived connection. The transport owns only that feed socket,
+its acknowledged generation, target replacement, and local zero-target clear;
+it imports neither the adapter nor a store. Single-assignment runtime links are
+connected only after `CoreSessionIngestionSupervisor` exists: synchronous
+activation reaches the supervisor before buffered frames, reconnect target
+refresh reloads bounded durable cursors through the supervisor/reader, and
+frames cross their narrow callback with the acknowledged transport generation.
+
+Durable cursor authority stays in the Core event inbox and its ingestor. The
+multiplex subscriber never reads or writes a cursor store. The supervisor
+prepares targets from durable read cursors, accepts the generation returned
+after subscription acknowledgement, serializes each frame on the matching
+owner tail, and advances durable state only through the ingestor. Shutdown
+closes multiplex ingress before waiting for those supervisor tails, so no new
+batch can enter while durable ingestion drains.
+
+## Recovery supervisor
+
+Recovery proceeds in this order:
+
+1. catch up canonical Core projection;
+2. inspect projection gaps and staged exact-recovery work;
+3. rebuild eligible durable view delivery;
+4. redeliver through the outbox;
+5. require human evidence for ambiguity.
+
+Execution recovery is not a Primary Prompt replay stage. Possible-effect legacy data can inform exact observation, but never creates new submission work.
+
+## Operational status and restart safety
+
+`npm run swarm:status` and `/status` report:
+
+- Agent Input capability/readiness and Submission Intent receipt states;
+- Core session-ingestion state, run count, active/awaiting/lagging sessions,
+  oldest observed lag, retry attempt/deadline, last successful ingest and last
+  typed failure;
+- Core projection lanes, pending/quarantined events, lag age, and open gaps;
+- Delivery Ring scope counts and bytes, Pane/Global pending work, ready work,
+  waiting-behind-scope work, active claims, retries, cooldown, and dead letters;
+- Delivery checkpoint scope count, lowest nonterminal order/age, and bounded
+  uncertain-effect and active-quarantine blocker counts, without payload data;
+- bounded-degradation counts for grace-blocked scopes, isolated conflicts,
+  isolated uncertainty, completed bypasses, pending Human Review, and oldest
+  review age, without card or Delivery payload data;
+- recovery stages and latest projection failure;
+- Binding, Worker, lease, ingress, and SQLite-integrity facts.
+
+They do not expose ordinary Prompt queue counters as current execution state.
+
+An unforced restart gates on process-local Worker activity, actionable Ring work,
+active delivery, startup recovery, lease/integrity failures, and other
+non-recoverable local effects. Durable Submission Intents and legacy
+possible-effect evidence are restart-recoverable and are not treated as a FIFO
+blocker.
+
+After a separately authorized rollout, epoch-transition verification is
+read-only: confirm service readiness and `agentInput` readiness, then confirm
+that session-ingestion lag and retry state converge. For the affected lane,
+inspect the exact durable checkpoint to verify that its epoch and read cursor
+move to the live ring. Only after Core final projection has caught up should
+the corresponding card/outbox progress be expected. Installing, restarting,
+deploying, or mutating production data are separate operator operations, not
+automatic recovery commands.
+
+### Reversible SQLite maintenance
+
+Core Inbox payload retention has its own `CORE_EVENT_RETENTION_MODE` gate:
+`off` performs no Core audit or payload write, `audit` evaluates bounded
+24-hour eligibility and records semantic Audit Skeleton evidence without
+clearing `event_json`, and `compact` revalidates the same barriers before the
+atomic JSON-null transition. The Core source is independent from the generic
+Delivery/Timeline/Conversation payload-compaction switch. Human Messages,
+pending or quarantined lanes, open projection gaps, unresolved recovery, and
+nonterminal or unreconstructible Turns retain their full payloads. `/status`
+reports Core verified/compacted counts and eligible bytes; maintenance logs
+contain aggregate counts and refusal categories, never payload text.
+
+Logical compaction makes SQLite pages reusable by the same database. It does
+not shrink the database file or release filesystem blocks. Switching the mode
+back to `off` stops new Core maintenance without undoing semantic skeletons or
+already compacted rows.
+
+`npm run swarm:maintenance -- [--deadline-ms N] [--resume CYCLE_ID]` is the
+only supported physical-compaction path. It initiates the service's graceful
+stop, confirms the canonical unit and SQLite lease are inactive, takes a
+consistent SQLite backup, drains only retention work that passes the durable
+Audit Skeleton barriers under a short-lived fenced maintenance lease, and
+creates a separate `VACUUM INTO` candidate. Both backup and candidate must pass
+SQLite quick-check, foreign-key, current-schema, and semantic-integrity checks.
+
+Activation is a same-directory rename. The prior database and any WAL/SHM
+sidecars move together to a cycle-specific `.original` path before the
+candidate becomes active, so stale sidecars cannot attach to it. The command
+then starts the canonical user service and requires healthy `/health`, `/ready`,
+and `/status` smoke results. Failure after activation moves the candidate to a
+`.failed` path and restores the byte-identical original plus sidecars. Backup,
+original, failed candidate, and the mode-`0600` phase journal are retained for
+audit and manual recovery; the command never deletes them. A bounded resume
+validates the journal and exact file identities before continuing.
+
+## Fixed group Orchestrator
+
+The optional fixed Orchestrator reuses one managed TraeX Pane and one fixed Orchestrator Thread for the default project. Its native Core Pane token must equal `orch`, its label is `herdr`, and stable identity is checked through `pane.identity_reconcile.v1`.
+
+`/swarm clear` persists an `OrchestratorClearOperation`, increments `sessionEpoch`, rotates the Agent session, and withdraws prior Answer cards through the `message.delete` effect. Capability discovery checks `agent session-rotate --help`; absence fails closed. New session events are fenced by the new epoch so late old-session observations cannot overwrite current projection state.
+
+## Module ownership
+
+| Area | Primary modules |
+| --- | --- |
+| Composition | `src/main.ts`, `src/composition/` |
+| Inbound durability and routing | `DurableInboundPipeline`, `InboundMessageRoutingWorkflow` |
+| Agent Input | `AgentInputWorkflow`, `AgentInputDrainer`, `HerdrAgentInputAdapter`, SQLite agent-input store |
+| Core session ingestion | `CoreSessionIngestionSupervisor`, `HerdrSessionEventSubscriber`, Herdr events adapter/reader, durable Core inbox |
+| Turn observation | `ExternalTurnObserver` over durable current-session lanes and exact historical recovery |
+| Projection and exact recovery | conversation projector, lane projector, exact-recovery stores/workflows |
+| Explicit controls | `SwarmCommandGateway`, `CommandIntentDispatcher`, `TurnControlWorkflow` |
+| Binding/Pane convergence | `SessionReconciler`, provisioning and session workflows |
+| Worker runtime | instance/Worker session workflows and supervisors |
+| Delivery | `OutboundIntentWriter`, `RingDeliveryEngine`, `DeliveryCheckpointBus`, CardKit renderers |
+| Operations | health snapshot collector, service lifecycle CLI, SQLite operations store |
+
+Adapters normalize external data; coordinators own decisions; domain ports define consumer-shaped contracts; SQLite owns atomic persistence; card renderers remain pure presentation.
+
+## Security boundary
+
+Only configured-chat, user-originated messages and configured-chat card actions enter the service. Project routes, actor allowlists, creator/admin permissions, body limits, and generation fences remain enforced before Agent Input admission. Prompt text is redacted from command errors and logs; terminal/Core content passes bounded parsing and secret redaction before persistence or delivery.

@@ -14,6 +14,8 @@ import { createBindingSessionRuntime, type BindingSessionStores } from "./create
 import { createCommandControlRuntime, type CommandControlStores } from "./create-command-control-runtime.js";
 import { createIngressRecoveryRuntime, type IngressRecoveryStores } from "./create-ingress-recovery-runtime.js";
 import type { NaturalLanguageCommandRuntime } from "../runtime/natural-language-command-runtime.js";
+import type { RecoverySupervisorPort } from "../coordinator/recovery-supervisor.js";
+import type { AgentInputWorkflowPort } from "../domain/ports/agent-input.js";
 
 export interface ApplicationRuntimeStores extends BindingSessionStores, CommandControlStores, IngressRecoveryStores {}
 
@@ -24,6 +26,8 @@ export function createApplicationRuntime(options: {
   primary: ReturnType<typeof createPrimaryRuntime>; worker: ReturnType<typeof createWorkerRuntime>;
   presentation?: { application: ApplicationPresentation; primary: PrimaryPresentation; pane: PanePresentation };
   naturalLanguageCommands: NaturalLanguageCommandRuntime;
+  agentInput: AgentInputWorkflowPort;
+  recoverySupervisor: Pick<RecoverySupervisorPort, "recoverBinding">;
   runtimeEvents?: Pick<import("./runtime-event-integration.js").RuntimeEventIntegration, "onWork" | "wakeSwarmCommand">;
 }) {
   const { config, stores, logger, turnControl, bus, scheduler, inboundWork, infrastructure, delivery, primary, worker } = options;
@@ -31,7 +35,7 @@ export function createApplicationRuntime(options: {
   const shared = { config, stores, logger, scheduler, infrastructure, delivery, primary, worker, presentation };
   const bindingSession = createBindingSessionRuntime({ ...shared, bus });
   const runtimeCommandEvents = options.runtimeEvents ? { onWork: options.runtimeEvents.onWork.bind(options.runtimeEvents), wakeSwarmCommand: options.runtimeEvents.wakeSwarmCommand.bind(options.runtimeEvents) } : {};
-  const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession, ...runtimeCommandEvents });
-  const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl, naturalLanguageCommands: options.naturalLanguageCommands });
+  const commandControl = createCommandControlRuntime({ ...shared, turnControl, bindingSession, agentInput: options.agentInput, recoverySupervisor: options.recoverySupervisor, ...runtimeCommandEvents });
+  const ingress = createIngressRecoveryRuntime({ ...shared, bus, inboundWork, bindingSession, commandControl, naturalLanguageCommands: options.naturalLanguageCommands, agentInput: options.agentInput });
   return { coordinator: ingress.coordinator, paneRetention: bindingSession.paneRetention, sessionOperations: commandControl.sessionOperations, reconciler: bindingSession.reconciler, retiredPaneCleanup: bindingSession.retiredPaneCleanup, herdrEventRouter: bindingSession.herdrEventRouter, swarmCommands: commandControl.swarmCommands, programmaticWorkerCreation: commandControl.programmaticWorkerCreation };
 }

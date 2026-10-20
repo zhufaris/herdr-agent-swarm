@@ -5,6 +5,7 @@ import { renderInstanceCreateCard, renderInstanceRemovalPlanCard, renderInstance
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { renderWorkerMainCard } from "../src/cards/worker-main-card.js";
 import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
+import { renderPrimaryHumanReviewNotification } from "../src/cards/primary-human-review-notification.js";
 import { createQueuedWorkerTurnCard, reduceWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { workerPresentation } from "./helpers/presentation.js";
 
@@ -31,6 +32,7 @@ describe("instance cards", () => {
 
   it("mentions the Primary creator in a bounded local-only Worker review notification", () => {
     const card = renderWorkerHumanReviewNotification({
+      state: "waiting",
       workerId: "i1",
       workerSessionGeneration: 3,
       workerName: "reviewer",
@@ -66,6 +68,7 @@ describe("instance cards", () => {
 
   it.each([null, 'unsafe" open-id'])("falls back to an ordinary group review notification for creator identity %s", (creatorOpenId) => {
     const text = JSON.stringify(renderWorkerHumanReviewNotification({
+      state: "waiting",
       workerId: "i1", workerSessionGeneration: 3, workerName: "reviewer", turnId: "turn-review", taskTitle: "review",
       primaryName: "primary-review", parentPaneId: "w1:p0", workerPaneId: "w1:p1", notice: "needs local input",
       creatorOpenId, workerMainMessageId: null
@@ -74,6 +77,28 @@ describe("instance cards", () => {
     expect(text).toContain("正在等待用户处理");
     expect(text).not.toContain("<at id=");
     expect(text).not.toContain("card_target_open");
+  });
+
+  it("renders local-only Primary Human Review and non-mentioning resolution cards", () => {
+    const base = {
+      bindingId: "binding-1", bindingGeneration: 3, primaryName: "primary-review", promptId: "prompt-review",
+      requestText: `deploy ${"x".repeat(4_000)}`, paneId: "w1:p0", paneToken: "51g1", notice: "Bearer live-secret"
+    };
+    const waiting = JSON.stringify(renderPrimaryHumanReviewNotification({ ...base, state: "waiting", creatorOpenId: "ou_primary_123" }));
+    const resolved = JSON.stringify(renderPrimaryHumanReviewNotification({ ...base, state: "resolved", creatorOpenId: null, notice: "Primary is working" }));
+
+    expect(waiting).toContain("<at id=ou_primary_123></at>");
+    expect(waiting).toContain("等待用户处理");
+    expect(waiting).toContain("审批和本地操作仍须在对应 Herdr Pane 完成");
+    expect(waiting).toContain("51g1");
+    expect(waiting).not.toContain("live-secret");
+    expect(waiting).not.toContain("approve");
+    expect(waiting).not.toContain("deny");
+    expect(resolved).toContain("已离开等待状态");
+    expect(resolved).toContain("之前的处理提醒现已失效");
+    expect(resolved).not.toContain("<at id=");
+    expect(waiting.length).toBeLessThan(12_000);
+    expect(resolved.length).toBeLessThan(12_000);
   });
 
   it.each(["queued", "preparing", "running", "blocked", "completed", "failed", "cancelled", "dispatch-uncertain"] as const)("renders a bounded and actionable %s Worker task card", (phase) => {
@@ -111,6 +136,59 @@ describe("instance cards", () => {
     expect(completedText).toContain("继续这个任务"); expect(completedText).not.toContain("停止当前任务");
   });
 
+  it("renders the mentioned Human and four completion actions on a completed Worker Task", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-completion-actions", instanceId: "i1", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const completed = { ...reduceWorkerTurnCard(queued, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "done" }), messageId: "task-message" };
+    const text = JSON.stringify(renderWorkerTurnCard(completed, undefined, { completionActions: {
+      id: "action-set-1",
+      ownerKind: "worker-turn",
+      ownerId: completed.turnId,
+      ownerGeneration: completed.instanceGeneration,
+      cardMessageId: "task-message",
+      state: "available",
+      mentionOpenId: "ou_actor"
+    } }));
+
+    expect(text).toContain("<at id=ou_actor></at> 已完成，等待你的下一条消息。");
+    expect(text.match(/\"action\":\"completion_action\"/g)).toHaveLength(4);
+    expect(text).toContain('"selection":"default"');
+    expect(text).toContain('"selection":"approve"');
+    expect(text).toContain('"selection":"continue"');
+    expect(text).toContain('"selection":"reject"');
+    expect(text).toContain('"ownerKind":"worker-turn"');
+    expect(text).toContain('"ownerId":"turn-completion-actions"');
+    expect(text).toContain('"ownerGeneration":2');
+    expect(text).toContain('"cardMessageId":"task-message"');
+  });
+
+  it("renders ordered dynamic Worker choices without callback messages", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-choice", instanceId: "i1", instanceGeneration: 2, workerSessionGeneration: 3, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const completed = { ...reduceWorkerTurnCard(queued, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "choose" }), messageId: "task-message" };
+    const text = JSON.stringify(renderWorkerTurnCard(completed, undefined, { completionActions: {
+      id: "choice-set", ownerKind: "worker-turn", ownerId: completed.turnId, ownerGeneration: 3, cardMessageId: "task-message", state: "available", mentionOpenId: "ou_actor",
+      choicePrompt: { question: "选择下一步", defaultOption: { id: "one", label: "One", submitText: "default" }, alternatives: [
+        { id: "two", label: "Two", submitText: "server message" }
+      ] }
+    } }));
+    expect(text.match(/"action":"completion_action"/g)).toHaveLength(3);
+    expect(text).toContain("选择下一步");
+    expect(text).toContain('"optionId":"one"');
+    expect(text).toContain('"optionId":"two"');
+    expect(text).toContain('"optionId":"ignore"');
+    expect(text).not.toContain("server message");
+  });
+
+  it("renders Edit diff detail through the Worker Task Card", () => {
+    const queued = createQueuedWorkerTurnCard({ turnId: "turn-edit-diff", instanceId: "i1", instanceGeneration: 2, workerName: "reviewer", parentTurnId: null, rootMessageId: "root-1", requestText: "edit", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
+    const completed = reduceWorkerTurnCard(queued, { type: "completed", occurredAt: "2026-09-01T00:01:00.000Z", answer: "done" });
+    completed.timelineItems = [{
+      kind: "tool", id: "tool:edit", sequence: 1, category: "edit", label: "src/main.ts (+1 -1)",
+      diff: "*** Update File: src/main.ts\n@@\n-old\n+new", state: "succeeded"
+    }];
+
+    expect(JSON.stringify(renderWorkerTurnCard(completed))).toContain("**Diff**\\n\\n```diff\\n*** Update File: src/main.ts\\n@@\\n-old\\n+new\\n```");
+  });
+
   it("uses only Schema V2-supported elements in Worker Main cards", () => {
     const view = {
       workerId: "i1", workerName: "reviewer", workerSessionGeneration: 1, ownerName: "owner", parentPaneId: "w1:p0",
@@ -143,9 +221,9 @@ describe("instance cards", () => {
     };
     const rendered = JSON.stringify(renderWorkerMainCard(view, { projectDisplayName: "Herdr Agent Swarm" }));
     expect(rendered).toContain("🧭 Worker · reviewer");
-    expect(rendered).toContain("HERDR WORKER · PRIMARY primary-review · ✅ 空闲");
+    expect(rendered).toContain("HERDR WORKER · PRIMARY w1:p0 · ✅ 空闲");
     expect(rendered).toContain("Project Herdr Agent Swarm (`swarm`)");
-    expect(rendered).toContain("Primary primary-review (`w1:p0`)");
+    expect(rendered).toContain("Primary `w1:p0`");
   });
 
   it("never binds continuation-card actions to an earlier page message", () => {
@@ -201,7 +279,7 @@ describe("instance cards", () => {
     const text = JSON.stringify(renderWorkerTurnCard(completed));
 
     expect(text).toContain("Worker before");
-    expect(text).toContain("✏️ Edit · src/store.ts · ✓ 完成");
+    expect(text).toContain("✏️ Edited src/store.ts");
     expect(text).toContain("Worker after");
     expect(text).not.toContain("legacy duplicate");
   });

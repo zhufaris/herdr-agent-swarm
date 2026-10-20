@@ -4,7 +4,7 @@ import type { PrimaryIdentity, PrimaryWorkerCreationPort } from "../runtime/prim
 import type { WorkerCreationGateway } from "./instance-interactions/worker-lifecycle-actions.js";
 import type { SwarmCommandRequest, SwarmCommandRuntime } from "./swarm-command-gateway.js";
 
-type WorkerCreateCommand = Extract<SwarmCommandRequest, { source: "card" }>["command"];
+type WorkerCreateCommand = Extract<Extract<SwarmCommandRequest, { source: "card" }>["command"], { kind: "worker_create" }>;
 
 export class ProgrammaticWorkerCreation implements WorkerCreationGateway, PrimaryWorkerCreationPort {
   constructor(private readonly runtime: Pick<SwarmCommandRuntime, "submit" | "observe">, private readonly timeoutMs: number) {}

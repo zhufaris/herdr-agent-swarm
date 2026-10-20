@@ -2,17 +2,36 @@ import { randomUUID } from "node:crypto";
 import type { AgentInstance, WorkspaceLease } from "../../domain/agent-instance.js";
 import type { CardContextInvalidation, CardContextTarget } from "../../domain/card-context-invalidation.js";
 import { selectPrimaryWorkerActivity, selectPrimaryWorkerSummaries, type PrimaryWorkerActivitySummary, type PrimaryWorkerSummary } from "../../domain/card-context-summary.js";
-import type { OutboxStore } from "../../domain/ports/outbox.js";
+import type { OutboxStore, PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
 import type { RunCardView } from "../../domain/run-card-view.js";
 import { updateRunCardWorkerContext } from "../../domain/run-card-view.js";
 import type { TopicViewState } from "../../domain/topic-view.js";
-import { updateTopicCurrentAnswer, updateTopicWorkerContext } from "../../domain/topic-view.js";
+import { topicSessionIdentityFor, updateTopicCurrentAnswer, updateTopicWorkerContext } from "../../domain/topic-view.js";
 import { selectWorkerMainView, type WorkerMainProjectionSource } from "../../domain/worker-main-selector.js";
-import type { WorkerMainView } from "../../domain/worker-main-view.js";
+import { createPaneIdentitySnapshot, emptyModelUsage, type ModelUsageSnapshot, type WorkerMainView } from "../../domain/worker-main-view.js";
 import type { WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
 import type { Binding, MainCardReservationOutcome } from "../../domain/types.js";
 import type { SqliteContext } from "./context.js";
+import { incrementPrimaryAnswerPageSequence } from "./answer-page-sequence.js";
 import { mapWorkerTurnCard } from "./worker-turn-store.js";
+import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
+
+const WORKER_TASK_SUMMARY_COLUMNS = "turn_id, request_text, phase, created_at, started_at, finished_at, message_id, instance_generation, updated_at";
+export const workerMainCandidateSelectionSql = `
+  SELECT ${WORKER_TASK_SUMMARY_COLUMNS},
+    (SELECT COUNT(*) FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase = 'queued') AS queue_count,
+    (SELECT request_text FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase = 'queued' ORDER BY created_at, turn_id LIMIT 1) AS next_request_text,
+    (SELECT MIN(created_at) FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2) AS first_created_at
+  FROM worker_turn_cards AS candidate
+  WHERE candidate.instance_id = ?1 AND candidate.worker_session_generation = ?2
+    AND candidate.turn_id = COALESCE(
+      (SELECT turn_id FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase = 'blocked' ORDER BY created_at DESC, turn_id DESC LIMIT 1),
+      (SELECT turn_id FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase = 'running' ORDER BY created_at DESC, turn_id DESC LIMIT 1),
+      (SELECT turn_id FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase = 'preparing' ORDER BY created_at DESC, turn_id DESC LIMIT 1),
+      (SELECT turn_id FROM worker_turn_cards INDEXED BY worker_turn_cards_session_terminal_updated WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase IN ('completed','failed','cancelled','dispatch-uncertain') ORDER BY updated_at DESC, turn_id DESC LIMIT 1),
+      (SELECT turn_id FROM worker_turn_cards INDEXED BY worker_turn_cards_session_phase WHERE instance_id = ?1 AND worker_session_generation = ?2 AND phase = 'queued' ORDER BY created_at, turn_id LIMIT 1)
+    )
+`;
 
 export interface SqliteCardContextStoreDependencies {
   getAgentInstance(id: string): AgentInstance | null;
@@ -30,7 +49,14 @@ export interface SqliteCardContextStoreDependencies {
 }
 
 export class SqliteCardContextStore {
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext, private readonly dependencies: SqliteCardContextStoreDependencies) {}
+
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void {
+    this.preparedDeliveryReservation = reservation;
+    this.preparedDeliveryConsumer = consumer;
+  }
 
   private get database() { return this.context.database; }
 
@@ -54,16 +80,19 @@ export class SqliteCardContextStore {
   }
 
   reserveWorkerMainCard(view: WorkerMainView, rootMessageId: string, card: object): WorkerMainView | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.card-context-store.write", () => {
       const saved = this.saveWorkerMainView(view);
       if (!saved) return null;
       const creating = saved.messageId === null;
       if (creating && this.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ? AND (first_claimed_at IS NOT NULL OR attempt_count > 0 OR card_id_checkpoint IS NOT NULL)").get(`worker-main:create:${saved.workerId}:${saved.workerSessionGeneration}`)) return saved;
-      this.dependencies.enqueueOutboundReply({
+      const outbound = {
         id: randomUUID(), idempotencyKey: creating ? `worker-main:create:${saved.workerId}:${saved.workerSessionGeneration}` : `worker-main:update:${saved.workerId}:${saved.workerSessionGeneration}:${saved.viewVersion}`,
         bindingId: saved.parentBindingId, workerId: saved.workerId, workerSessionGeneration: saved.workerSessionGeneration, viewVersion: saved.viewVersion,
-        rootMessageId: creating ? rootMessageId : saved.messageId!, kind: creating ? "card_reply" : "card_update", payload: JSON.stringify(card)
-      });
+        rootMessageId: creating ? rootMessageId : saved.messageId!, kind: creating ? "card_reply" as const : "card_update" as const, payload: JSON.stringify(card),
+        projectionKey: `worker-main:${saved.workerId}:${saved.workerSessionGeneration}`, snapshotRevision: saved.viewVersion
+      };
+      if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Card Context prepared delivery is not connected");
+      this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(outbound));
       return saved;
     });
   }
@@ -71,7 +100,7 @@ export class SqliteCardContextStore {
   invalidateCardContexts(targets: readonly (CardContextTarget & { reason: string })[]): CardContextInvalidation[] {
     if (targets.length === 0) return [];
     const timestamp = now();
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.card-context-store.write", () => {
       const statement = this.database.prepare(`
         INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
         VALUES (?, ?, ?, 1, 0, ?, ?, ?)
@@ -117,7 +146,7 @@ export class SqliteCardContextStore {
   }
 
   projectCardContext(invalidation: CardContextInvalidation, renderers: { workerMain(view: WorkerMainView): object; workerThreadEntryReady(input: { workerName: string; workerId: string; workerSessionGeneration: number; messageId: string }): object; workerTask(view: WorkerTurnCardView): object; primaryMain(view: TopicViewState): object; primaryPaneEntry(view: TopicViewState): object; primaryAnswer(view: RunCardView): object }): "reserved" | "current" | "stale" {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.card-context-store.write", () => {
       const current = this.loadCardContextInvalidation(invalidation);
       if (!current || current.projectedDependencyRevision >= invalidation.requestedDependencyRevision) return "current";
       let reserved = false;
@@ -130,10 +159,11 @@ export class SqliteCardContextStore {
           const next = invalidation.reason === "worker-main.delivered" && previous?.messageId && selected.viewVersion <= selected.deliveredVersion
             ? { ...selected, viewVersion: selected.viewVersion + 1, updatedAt: now() }
             : selected;
-          const placement = this.dependencies.reserveWorkerMainPlacement(next, renderers.workerMain(next));
+          const fenced = next.messageId ? this.fenceClaimedWorkerMainUpdateConflict(next, renderers.workerMain) : next;
+          const placement = this.dependencies.reserveWorkerMainPlacement(fenced, renderers.workerMain(fenced));
           if (placement === "stale") return "stale";
-          const threadEntryReserved = next.messageId
-            ? this.reserveWorkerThreadEntries(next, renderers.workerThreadEntryReady)
+          const threadEntryReserved = fenced.messageId
+            ? this.reserveWorkerThreadEntries(fenced, renderers.workerThreadEntryReady)
             : false;
           return placement === "reserved" || threadEntryReserved ? "reserved" : "current";
         });
@@ -145,9 +175,11 @@ export class SqliteCardContextStore {
         return this.projectSessionMain(invalidation, () => {
           const binding = this.dependencies.getBinding(invalidation.targetId);
           const previous = this.dependencies.loadTopicView(invalidation.targetId);
-          if (!binding || binding.generation !== invalidation.targetGeneration || !previous || !binding.rootMessageId) return "stale";
+          if (!binding || !previous || !isCurrentPrimarySessionOwner(binding, invalidation.targetGeneration)) return "stale";
+          if (!samePrimarySessionIdentity(previous.sessionIdentity, topicSessionIdentityFor(binding))) return "stale";
+          const current = previous;
           const selected = selectPrimaryWorkerSummaries(this.loadPrimaryWorkerSummaries(binding.id, binding.generation));
-          const withWorkers = updateTopicWorkerContext(previous, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
+          const withWorkers = updateTopicWorkerContext(current, selected.workers, selected.overflowCount, invalidation.requestedDependencyRevision);
           const latestRun = this.database.prepare("SELECT prompt_id FROM run_cards_view WHERE binding_id = ? AND binding_generation = ? AND answer_message_id IS NOT NULL ORDER BY created_at DESC, prompt_id DESC LIMIT 1").get(binding.id, binding.generation) as { prompt_id: string } | undefined;
           const run = latestRun ? this.dependencies.loadRunCard(latestRun.prompt_id) : null;
           const next = updateTopicCurrentAnswer(withWorkers, run ? { aggregateKind: "primary-turn", aggregateId: run.promptId, generation: run.bindingGeneration, messageId: run.answerMessageId } : null);
@@ -156,19 +188,95 @@ export class SqliteCardContextStore {
         });
       } else {
         const previous = this.dependencies.loadRunCard(invalidation.targetId);
-        const page = previous ? this.database.prepare("SELECT state FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string } | undefined : undefined;
-        if (!previous || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null || page?.state === "frozen" || page?.state === "finished") return this.markStale(invalidation);
+        const page = previous ? this.database.prepare("SELECT state, delivery_mode FROM answer_pages WHERE prompt_id = ? AND page_index = ?").get(previous.promptId, previous.answerPageIndex) as { state: string; delivery_mode: string } | undefined : undefined;
+        const binding = previous ? this.dependencies.getBinding(previous.bindingId) : null;
+        if (!previous || !binding || binding.generation !== previous.bindingGeneration
+          || (this.preparedDeliveryReservation && (binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached"))
+          || previous.bindingGeneration !== invalidation.targetGeneration || previous.workerContextFrozenAt !== null
+          || page?.state === "frozen" || page?.state === "finished") return this.markStale(invalidation);
         const activity = selectPrimaryWorkerActivity(this.loadPrimaryWorkerActivity(previous.promptId, invalidation.targetGeneration));
-        const next = updateRunCardWorkerContext(previous, activity, invalidation.requestedDependencyRevision, now());
+        let next = updateRunCardWorkerContext(previous, activity, invalidation.requestedDependencyRevision, now());
+        if (next.answerMessageId && next.viewVersion > next.answerDeliveredVersion) next = this.fenceClaimedAnswerUpdateConflict(next, renderers.primaryAnswer);
         if (next !== previous) this.dependencies.saveRunCard(next);
         if (next.answerMessageId && next.viewVersion > next.answerDeliveredVersion) {
-          this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, promptId: next.promptId, viewVersion: next.viewVersion, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(renderers.primaryAnswer(next)) });
+          const cardSequence = next.answerCardId
+            ? incrementPrimaryAnswerPageSequence(this.context, next.promptId, next.answerPageIndex)
+            : null;
+          this.reservePrimaryAnswer({ id: randomUUID(), idempotencyKey: `run-card:update:${next.promptId}:answer:${next.viewVersion}`, bindingId: next.bindingId, bindingGeneration: next.bindingGeneration, promptId: next.promptId, viewVersion: next.viewVersion, cardSequence, streamPageIndex: next.answerPageIndex, cardRole: "answer", rootMessageId: next.answerMessageId, kind: "card_update", payload: JSON.stringify(renderers.primaryAnswer(next)), projectionKey: `run-card:answer:${next.promptId}:${next.answerPageIndex}`, snapshotRevision: next.viewVersion });
           reserved = true;
         }
       }
       this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision);
       return reserved ? "reserved" : "current";
     });
+  }
+
+  private reservePrimaryAnswer(input: EnqueueOutboundReplyInput & { bindingGeneration: number }): void {
+    if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Card Context prepared delivery is not connected");
+    this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(input));
+  }
+
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void {
+    queueMicrotask(() => {
+      for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery);
+    });
+  }
+
+  /** Preserve a claimed Answer effect and put changed content under a new key. */
+  private fenceClaimedAnswerUpdateConflict(view: RunCardView, render: (view: RunCardView) => object): RunCardView {
+    let candidate = view;
+    for (;;) {
+      const key = `run-card:update:${candidate.promptId}:answer:${candidate.viewVersion}`;
+      const existing = this.database.prepare(`
+        SELECT binding_id, prompt_id, view_version, stream_page_index,
+          card_role, root_message_id, kind, payload, state, work_class,
+          first_claimed_at, attempt_count, card_id_checkpoint
+        FROM outbound_replies WHERE idempotency_key = ?
+      `).get(key) as ClaimedAnswerUpdateRow | undefined;
+      if (!existing) return candidate;
+      const exactTarget = existing.binding_id === candidate.bindingId
+        && existing.prompt_id === candidate.promptId
+        && Number(existing.view_version) === candidate.viewVersion
+        && (existing.stream_page_index === null || Number(existing.stream_page_index) === candidate.answerPageIndex)
+        && existing.card_role === "answer"
+        && existing.root_message_id === candidate.answerMessageId
+        && existing.kind === "card_update"
+        && existing.work_class === "live";
+      if (!exactTarget) throw new Error("outbound_idempotency_conflict");
+      const payload = JSON.stringify(render(candidate));
+      if (existing.payload === payload) return candidate;
+      const attempted = existing.first_claimed_at !== null || existing.attempt_count > 0 || existing.card_id_checkpoint !== null;
+      if (existing.state === "pending" && !attempted) return candidate;
+      candidate = { ...candidate, viewVersion: candidate.viewVersion + 1, updatedAt: now() };
+    }
+  }
+
+  /** Preserve a claimed Worker Main effect and put changed content under a new key. */
+  private fenceClaimedWorkerMainUpdateConflict(view: WorkerMainView, render: (view: WorkerMainView) => object): WorkerMainView {
+    let candidate = view;
+    for (;;) {
+      const key = `worker-main:update:${candidate.workerId}:${candidate.workerSessionGeneration}:${candidate.viewVersion}`;
+      const existing = this.database.prepare(`
+        SELECT binding_id, worker_id, worker_session_generation, view_version,
+          root_message_id, kind, payload, state, work_class,
+          first_claimed_at, attempt_count, card_id_checkpoint
+        FROM outbound_replies WHERE idempotency_key = ?
+      `).get(key) as ClaimedWorkerMainUpdateRow | undefined;
+      if (!existing) return candidate;
+      const exactTarget = existing.binding_id === candidate.parentBindingId
+        && existing.worker_id === candidate.workerId
+        && Number(existing.worker_session_generation) === candidate.workerSessionGeneration
+        && Number(existing.view_version) === candidate.viewVersion
+        && existing.root_message_id === candidate.messageId
+        && existing.kind === "card_update"
+        && existing.work_class === "live";
+      if (!exactTarget) throw new Error("outbound_idempotency_conflict");
+      const payload = JSON.stringify(render(candidate));
+      if (existing.payload === payload) return candidate;
+      const attempted = existing.first_claimed_at !== null || existing.attempt_count > 0 || existing.card_id_checkpoint !== null;
+      if (existing.state === "pending" && !attempted) return candidate;
+      candidate = { ...candidate, viewVersion: candidate.viewVersion + 1, updatedAt: now() };
+    }
   }
 
   /** Shared durable lifecycle for a Primary or Worker pane-session main card. */
@@ -196,11 +304,29 @@ export class SqliteCardContextStore {
     for (const request of requests) {
       const changed = this.database.prepare("UPDATE worker_thread_entry_requests SET state = 'reserved', updated_at = ? WHERE command_intent_id = ? AND state = 'pending'").run(now(), request.command_intent_id).changes;
       if (changed !== 1) continue;
-      this.dependencies.enqueueOutboundReply({
-        id: randomUUID(), idempotencyKey: `worker-thread-entry:${request.command_intent_id}`, bindingId: request.binding_id, rootMessageId: request.root_message_id, kind: "card_reply",
-        payload: JSON.stringify(render({ workerName: view.workerName, workerId: view.workerId, workerSessionGeneration: view.workerSessionGeneration, messageId: view.messageId })),
-        laneKeyOverride: `worker-thread-entry:${request.command_intent_id}`
-      });
+      const key = `worker-thread-entry:${request.command_intent_id}`;
+      const payload = JSON.stringify(render({ workerName: view.workerName, workerId: view.workerId, workerSessionGeneration: view.workerSessionGeneration, messageId: view.messageId }));
+      const existing = this.database.prepare("SELECT binding_id, root_message_id, kind, payload, state, work_class, first_claimed_at, attempt_count, card_id_checkpoint FROM outbound_replies WHERE idempotency_key = ?").get(key) as ReusableThreadEntryRow | undefined;
+      if (existing) {
+        const exactTarget = existing.binding_id === request.binding_id && existing.root_message_id === request.root_message_id && existing.kind === "card_reply" && existing.work_class === "live";
+        if (!exactTarget) throw new Error("outbound_idempotency_conflict");
+        const attempted = existing.first_claimed_at !== null || existing.attempt_count > 0 || existing.card_id_checkpoint !== null;
+        if (existing.payload === payload || existing.state !== "pending" || attempted) {
+          reserved = existing.state === "pending" || reserved;
+          continue;
+        }
+      }
+      const outbound = {
+        id: randomUUID(), idempotencyKey: key, bindingId: request.binding_id, workerId: view.workerId,
+        workerSessionGeneration: view.workerSessionGeneration, viewVersion: view.viewVersion,
+        rootMessageId: request.root_message_id, kind: "card_reply" as const,
+        payload,
+        laneKeyOverride: `worker-thread-entry:${request.command_intent_id}`,
+        projectionKey: `worker-thread-entry:${request.command_intent_id}`,
+        snapshotRevision: view.viewVersion
+      };
+      if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Card Context prepared delivery is not connected");
+      this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(outbound));
       reserved = true;
     }
     return reserved;
@@ -213,29 +339,28 @@ export class SqliteCardContextStore {
 
   loadWorkerMainProjectionSource(workerId: string, generation: number): WorkerMainProjectionSource | null {
     const instance = this.dependencies.getAgentInstance(workerId);
-    if (!instance || instance.role !== "worker" || instance.workerSessionGeneration !== generation || !instance.parent?.bindingGeneration) return null;
+    if (!instance || instance.role !== "worker" || instance.workerSessionLifecycle !== "active"
+      || instance.workerSessionGeneration !== generation || !instance.parent?.bindingGeneration) return null;
     const lease = this.dependencies.getWorkspaceLease(instance.workspaceLeaseId);
     if (!lease) return null;
-    const summaryColumns = "turn_id, request_text, phase, started_at, finished_at, message_id, instance_generation, updated_at";
-    const active = this.database.prepare(`SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('blocked','running','preparing') ORDER BY CASE phase WHEN 'blocked' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, created_at DESC, turn_id DESC LIMIT 1`).get(workerId, generation) as Record<string, unknown> | undefined;
-    const queue = this.database.prepare("SELECT COUNT(*) AS count, MIN(created_at) AS first_created_at FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'queued'").get(workerId, generation) as { count: number; first_created_at: string | null };
-    const nextQueued = queue.first_created_at === null ? undefined : this.database.prepare("SELECT request_text FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'queued' ORDER BY created_at, turn_id LIMIT 1").get(workerId, generation) as { request_text: string } | undefined;
-    const recent = this.database.prepare(`SELECT ${summaryColumns} FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('completed','failed','cancelled','dispatch-uncertain') ORDER BY created_at DESC, turn_id DESC LIMIT 5`).all(workerId, generation) as unknown as WorkerTaskSummaryRow[];
-    const first = this.database.prepare("SELECT MIN(created_at) AS created_at FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ?").get(workerId, generation) as { created_at: string | null };
-    const queued = this.database.prepare(`SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase = 'queued' ORDER BY created_at, turn_id LIMIT 1`).get(workerId, generation) as Record<string, unknown> | undefined;
-    const terminal = this.database.prepare(`SELECT * FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('completed','failed','cancelled','dispatch-uncertain') ORDER BY updated_at DESC, turn_id DESC LIMIT 1`).get(workerId, generation) as Record<string, unknown> | undefined;
+    const selected = this.database.prepare(workerMainCandidateSelectionSql).get(workerId, generation) as WorkerMainSelectedRow | undefined;
+    const recent = this.database.prepare(`SELECT ${WORKER_TASK_SUMMARY_COLUMNS} FROM worker_turn_cards WHERE instance_id = ? AND worker_session_generation = ? AND phase IN ('completed','failed','cancelled','dispatch-uncertain') ORDER BY created_at DESC, turn_id DESC LIMIT 5`).all(workerId, generation) as unknown as WorkerTaskSummaryRow[];
     const summary = (row: WorkerTaskSummaryRow) => ({ turnId: row.turn_id, title: summarizeTaskTitle(row.request_text), phase: row.phase as WorkerTurnCardView["phase"], durationSeconds: durationSeconds(row.started_at, row.finished_at), taskCard: { aggregateKind: "worker-turn" as const, aggregateId: row.turn_id, generation: Number(row.instance_generation), messageId: row.message_id }, updatedAt: row.updated_at });
-    const currentRow = active ?? terminal ?? queued;
-    const currentTask = currentRow ? (() => {
-      const card = mapWorkerTurnCard(currentRow);
-      return card ? { ...summary(currentRow as unknown as WorkerTaskSummaryRow), requestText: card.requestText, answer: card.answer, statusTitle: card.statusTitle, tokenCount: card.tokenCount, progressEvents: card.progressEvents, notice: card.notice, resultCapture: card.resultCapture } : null;
+    const currentTask = selected ? (() => {
+      const row = this.database.prepare("SELECT * FROM worker_turn_cards WHERE turn_id = ? AND instance_id = ? AND worker_session_generation = ?").get(selected.turn_id, workerId, generation) as Record<string, unknown> | undefined;
+      const card = row ? mapWorkerTurnCard(row) : null;
+      return card ? { ...summary(selected), requestText: card.requestText, answer: card.answer, statusTitle: card.statusTitle, tokenCount: card.tokenCount, progressEvents: card.progressEvents, notice: card.notice, resultCapture: card.resultCapture } : null;
     })() : null;
+    const parentBinding = this.dependencies.getBinding(instance.parent.bindingId);
     return {
-      workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null,
-      runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: (() => { const parent = this.dependencies.getBinding(instance.parent.bindingId); return parent?.generation === instance.parent!.bindingGeneration && parent.paneId === instance.parent!.paneId && parent.state === "active" && parent.lifecycle === "active" && parent.attachment === "attached"; })(),
-      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, primaryPaneName: instance.sourcePrimaryPaneLabel ?? instance.parent.paneId, projectId: instance.projectId, ownerName: this.dependencies.getBinding(instance.parent.bindingId)?.title ?? "Primary",
-      workspace: lease.cwd, branch: lease.branch, currentTask, queueCount: Number(queue.count), nextTaskTitle: nextQueued ? summarizeTaskTitle(nextQueued.request_text) : null,
-      recentTasks: recent.map(summary), createdAt: first.created_at ?? now()
+      workerId, workerSessionGeneration: generation, workerName: instance.name, model: instance.model, runtimeGeneration: instance.generation, runtimeState: instance.observedState, paneId: instance.runtimeRef?.paneId ?? null, paneToken: instance.runtimeRef?.paneToken ?? null,
+      runtimeAttached: instance.runtimeRef !== null, desiredState: instance.desiredState, parentActive: parentBinding?.generation === instance.parent.bindingGeneration && parentBinding.paneId === instance.parent.paneId && parentBinding.state === "active" && parentBinding.lifecycle === "active" && parentBinding.attachment === "attached",
+      lifecycle: instance.workerSessionLifecycle ?? "legacy", parentBindingId: instance.parent.bindingId, parentBindingGeneration: instance.parent.bindingGeneration, parentPaneId: instance.parent.paneId, parentPaneToken: parentBinding?.paneToken ?? null, primaryPaneName: instance.sourcePrimaryPaneLabel ?? instance.parent.paneId, projectId: instance.projectId, ownerName: parentBinding?.title ?? "Primary",
+      workspace: lease.cwd, branch: lease.branch, worktreeName: worktreeNameForLease(lease),
+      paneIdentity: createPaneIdentitySnapshot({ workspace: lease.cwd, worktreeName: worktreeNameForLease(lease), branch: lease.branch, paneId: instance.runtimeRef?.paneId ?? null, paneToken: instance.runtimeRef?.paneToken ?? null }),
+      modelUsage: workerModelUsage(instance.model, selected),
+      currentTask, queueCount: Number(selected?.queue_count ?? 0), nextTaskTitle: selected?.next_request_text ? summarizeTaskTitle(selected.next_request_text) : null,
+      recentTasks: recent.map(summary), createdAt: selected?.first_created_at ?? now()
     };
   }
 
@@ -244,9 +369,16 @@ export class SqliteCardContextStore {
     if (!binding?.pane_id) return [];
     const rows = this.database.prepare(`
       WITH candidate_workers AS MATERIALIZED (
-        SELECT * FROM agent_instances INDEXED BY agent_instances_worker_parent_name
+        SELECT worker.* FROM agent_instances worker INDEXED BY agent_instances_worker_parent_name
         WHERE role = 'worker' AND worker_session_lifecycle = 'active'
           AND parent_binding_id = ? AND parent_binding_generation = ? AND parent_pane_id = ?
+          AND (
+            NOT EXISTS (SELECT 1 FROM worker_turn_cards cards WHERE cards.instance_id = worker.id AND cards.worker_session_generation = worker.worker_session_generation)
+            OR EXISTS (SELECT 1 FROM worker_turn_cards cards WHERE cards.instance_id = worker.id AND cards.worker_session_generation = worker.worker_session_generation
+              AND cards.phase IN ('queued', 'running', 'preparing', 'blocked'))
+          )
+          AND (observed_state NOT IN ('failed', 'stopped') OR EXISTS (SELECT 1 FROM worker_turn_cards cards WHERE cards.instance_id = worker.id AND cards.worker_session_generation = worker.worker_session_generation
+            AND cards.phase IN ('queued', 'running', 'preparing', 'blocked')))
       ), ranked_cards AS (
         SELECT cards.instance_id, cards.worker_session_generation, cards.request_text, cards.phase, cards.created_at, cards.updated_at, cards.turn_id,
           SUM(CASE WHEN cards.phase = 'queued' THEN 1 ELSE 0 END) OVER (PARTITION BY cards.instance_id, cards.worker_session_generation) AS queue_count,
@@ -311,10 +443,43 @@ export class SqliteCardContextStore {
   private markStale(invalidation: CardContextInvalidation): "stale" { this.markCardContextProjected(invalidation, invalidation.requestedDependencyRevision); return "stale"; }
 }
 
+function isCurrentPrimarySessionOwner(binding: Binding, generation: number): boolean {
+  return binding.generation === generation && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached"
+    && binding.paneId !== null && binding.rootMessageId !== null;
+}
+
+function samePrimarySessionIdentity(left: TopicViewState["sessionIdentity"], right: TopicViewState["sessionIdentity"]): boolean {
+  return left === right || Boolean(left && right
+    && left.bindingGeneration === right.bindingGeneration && left.sessionEpoch === right.sessionEpoch
+    && left.nativeSessionId === right.nativeSessionId && left.paneId === right.paneId && left.rootMessageId === right.rootMessageId);
+}
+
 function now(): string { return new Date().toISOString(); }
-interface WorkerTaskSummaryRow { turn_id: string; request_text: string; phase: string; started_at: string | null; finished_at: string | null; message_id: string | null; instance_generation: number; updated_at: string; }
+interface ClaimedAnswerUpdateRow { binding_id: string | null; prompt_id: string | null; view_version: number | null; stream_page_index: number | null; card_role: string | null; root_message_id: string | null; kind: string; payload: string; state: string; work_class: string; first_claimed_at: string | null; attempt_count: number; card_id_checkpoint: string | null; }
+interface ClaimedWorkerMainUpdateRow { binding_id: string | null; worker_id: string | null; worker_session_generation: number | null; view_version: number | null; root_message_id: string | null; kind: string; payload: string; state: string; work_class: string; first_claimed_at: string | null; attempt_count: number; card_id_checkpoint: string | null; }
+interface ReusableThreadEntryRow { binding_id: string | null; root_message_id: string | null; kind: string; payload: string; state: string; work_class: string; first_claimed_at: string | null; attempt_count: number; card_id_checkpoint: string | null; }
+interface WorkerTaskSummaryRow { turn_id: string; request_text: string; phase: string; created_at: string; started_at: string | null; finished_at: string | null; message_id: string | null; instance_generation: number; updated_at: string; }
+interface WorkerMainSelectedRow extends WorkerTaskSummaryRow { queue_count: number; next_request_text: string | null; first_created_at: string | null; }
 interface PrimaryWorkerSummaryRow { worker_id: string; worker_session_generation: number; name: string; observed_state: string; request_text: string | null; phase: string | null; queue_count: number; first_created_at: string | null; message_id: string | null }
 interface PrimaryWorkerActivityRow { instance_id: string; worker_session_generation: number; worker_name: string; phase: string; request_text: string; turn_id: string; instance_generation: number; message_id: string | null; updated_at: string; task_count: number }
 function summarizeTaskTitle(text: string): string { return text.trim().split(/\r?\n/, 1)[0]!.slice(0, 120) || "Untitled task"; }
 function durationSeconds(startedAt: string | null, finishedAt: string | null): number | null { const start = startedAt ? Date.parse(startedAt) : NaN; const finish = Date.parse(finishedAt ?? now()); return Number.isFinite(start) && Number.isFinite(finish) ? Math.max(0, Math.floor((finish - start) / 1_000)) : null; }
+function workerModelUsage(model: string | null, selected: WorkerMainSelectedRow | undefined): ModelUsageSnapshot {
+  const usage = emptyModelUsage(model);
+  if (!selected) return usage;
+  const queuedAt = selected.created_at;
+  const started = selected.started_at ? Date.parse(selected.started_at) : NaN;
+  const queued = queuedAt ? Date.parse(queuedAt) : NaN;
+  return {
+    ...usage,
+    queuedAt,
+    completedAt: selected.finished_at,
+    waitMs: Number.isFinite(started) && Number.isFinite(queued) ? Math.max(0, started - queued) : null
+  };
+}
+function worktreeNameForLease(lease: WorkspaceLease): string | null {
+  if (lease.kind !== "git-worktree") return null;
+  const segments = lease.cwd.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return segments.at(-1) || null;
+}
 function mapCardContextInvalidation(row: Record<string, unknown>): CardContextInvalidation { return { targetKind: String(row.target_kind) as CardContextInvalidation["targetKind"], targetId: String(row.target_id), targetGeneration: Number(row.target_generation), requestedDependencyRevision: Number(row.requested_dependency_revision), projectedDependencyRevision: Number(row.projected_dependency_revision), reason: String(row.reason), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }

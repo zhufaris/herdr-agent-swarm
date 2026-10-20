@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { NaturalLanguageCommandConfirmation } from "../domain/natural-language-command-confirmation.js";
+import type { FrozenCommandTarget, NaturalLanguageCommandConfirmation } from "../domain/natural-language-command-confirmation.js";
 import type { NaturalLanguageCommandResult } from "../domain/natural-language-command.js";
 import type { NaturalLanguageCommandConfirmationStore } from "../domain/ports/natural-language-command-confirmation.js";
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
@@ -18,6 +18,7 @@ interface Options {
 
 export interface NaturalLanguageCommandWorkflowPort {
   handle(message: IncomingLarkMessage, result: Exclude<NaturalLanguageCommandResult, { outcome: "task" | "unresolved" }>): Promise<void>;
+  requestSwarmConfirmation(message: IncomingLarkMessage, command: import("../domain/types.js").BridgeCommand, context: SwarmCommandContext): Promise<void>;
   decide(action: IncomingLarkCardAction, confirmationId: string, decision: "confirm" | "cancel"): Promise<LarkCardActionResult>;
 }
 
@@ -43,12 +44,20 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
       await this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `natural-language-rejected:${message.messageId}`, this.options.presentation.requestRejected(frozen.message));
       return;
     }
+    await this.stage(message, result.family, result.command, frozen.target);
+  }
+
+  async requestSwarmConfirmation(message: IncomingLarkMessage, command: import("../domain/types.js").BridgeCommand, context: SwarmCommandContext): Promise<void> {
+    await this.stage(message, "swarm", command, frozenSwarmContext(context).target);
+  }
+
+  private async stage(message: IncomingLarkMessage, family: "swarm" | "instance", command: import("../domain/types.js").BridgeCommand | InstanceCommand, target: FrozenCommandTarget): Promise<void> {
     const createdAt = (this.options.now ?? (() => new Date()))();
     const id = (this.options.idFactory ?? randomUUID)();
-    const confirmation: NaturalLanguageCommandConfirmation = {
+    const confirmation: NaturalLanguageCommandConfirmation & { frozenTarget: FrozenCommandTarget } = {
       id, sourceMessageId: message.messageId, actorOpenId: message.actorOpenId, chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId ?? message.messageId,
-      envelope: { version: 1, family: result.family, command: result.command } as NaturalLanguageCommandConfirmation["envelope"],
-      expectedBindingId: frozen.bindingId, expectedBindingGeneration: frozen.bindingGeneration, expectedInstanceId: frozen.instanceId, expectedInstanceGeneration: frozen.instanceGeneration,
+      envelope: { version: 1, family, command } as NaturalLanguageCommandConfirmation["envelope"],
+      frozenTarget: target,
       state: "pending", expiresAt: new Date(createdAt.getTime() + (this.options.confirmationTtlMs ?? 10 * 60_000)).toISOString(), resultDetail: null, createdAt: createdAt.toISOString(), updatedAt: createdAt.toISOString(), resolvedAt: null
     };
     const staged = this.options.store.stageNaturalLanguageCommandConfirmation({ confirmation, outbox: { id: randomUUID(), idempotencyKey: `natural-language-confirmation:${id}`, card: this.options.presentation.naturalLanguageCommandConfirmation(confirmation) } });
@@ -57,10 +66,18 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
   }
 
   async decide(action: IncomingLarkCardAction, confirmationId: string, decision: "confirm" | "cancel"): Promise<LarkCardActionResult> {
-    const current = this.options.store.getNaturalLanguageCommandConfirmation(confirmationId);
-    if (!current) return stale();
-    if (decision === "confirm" && !this.currentlyAuthorized(current, action)) return { toast: { type: "error", content: "当前权限或目标上下文已变化，未执行命令。" } };
     const decidedAt = (this.options.now ?? (() => new Date()))().toISOString();
+    if (decision === "cancel") {
+      const result = this.options.store.decideNaturalLanguageCommandConfirmation({ id: confirmationId, decision, actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt });
+      if (result.outcome === "unauthorized") return { toast: { type: "error", content: "只有原请求人可以确认或取消。" } };
+      if (result.outcome !== "cancelled") return stale();
+      return { toast: { type: "success", content: "已取消，不会执行命令。" } };
+    }
+    const current = this.options.store.getNaturalLanguageCommandConfirmation(confirmationId);
+    if (!current) {
+      this.options.store.decideNaturalLanguageCommandConfirmation({ id: confirmationId, decision: "confirm", actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt });
+      return stale();
+    }
     if (decision === "confirm" && current.envelope.family === "swarm") {
       const message = syntheticMessage(current, action.operatorOpenId);
       const resolution = this.options.swarmCommands.resolve(message, current.envelope.command);
@@ -69,6 +86,7 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
       if (policy.mode !== "mutation" || policy.replay === "none") return stale();
       const accepted = this.options.store.confirmNaturalLanguageSwarmCommand({
         id: confirmationId, actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt,
+        resolvedTarget: resolution.target,
         commandIntent: { id: randomUUID(), idempotencyKey: `natural-language-confirmation:${confirmationId}:${current.envelope.command.kind}`, laneKey: resolution.laneKey, command: current.envelope.command, context: resolution.context, replayPolicy: policy.replay, acceptedAt: decidedAt },
         renderStatus: this.options.presentation.commandStatus
       });
@@ -78,29 +96,27 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
       this.options.swarmCommands.wakeAcceptedIntent(accepted.commandIntent.intent);
       return { toast: { type: "success", content: "已确认，命令已提交。" } };
     }
-    const result = this.options.store.decideNaturalLanguageCommandConfirmation({ id: confirmationId, decision, actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt });
-    if (result.outcome === "unauthorized") return { toast: { type: "error", content: "只有原请求人可以确认或取消。" } };
-    if (result.outcome === "expired" || result.outcome === "stale" || result.outcome === "already-resolved" || result.outcome === "missing") return stale();
-    if (result.outcome === "cancelled") return { toast: { type: "success", content: "已取消，不会执行命令。" } };
-    await this.execute(result.confirmation!);
-    return { toast: { type: "success", content: "已确认，命令已提交。" } };
+    if (decision === "confirm" && current.envelope.family === "instance") {
+      if (isInstanceQuery(current.envelope.command) || !this.options.instanceInteractions) return stale();
+      const resolution = this.options.instanceInteractions.resolveNaturalLanguageMutationTarget(syntheticMessage(current, action.operatorOpenId), current.envelope.command);
+      if (resolution.outcome === "rejected") return { toast: { type: "error", content: resolution.message } };
+      const result = this.options.store.decideNaturalLanguageCommandConfirmation({ id: confirmationId, decision, actorOpenId: action.operatorOpenId, chatId: action.chatId, decidedAt, resolvedTarget: resolution.target });
+      if (result.outcome === "unauthorized") return { toast: { type: "error", content: "只有原请求人可以确认或取消。" } };
+      if (result.outcome !== "consumed") return stale();
+      await this.execute(result.confirmation);
+      return { toast: { type: "success", content: "已确认，命令已提交。" } };
+    }
+    return stale();
   }
 
-  private freeze(message: IncomingLarkMessage, result: Extract<NaturalLanguageCommandResult, { outcome: "command" }>): { outcome: "resolved"; bindingId: string | null; bindingGeneration: number | null; instanceId: string | null; instanceGeneration: number | null } | { outcome: "rejected"; message: string } {
+  private freeze(message: IncomingLarkMessage, result: Extract<NaturalLanguageCommandResult, { outcome: "command" }>): { outcome: "resolved"; target: FrozenCommandTarget } | { outcome: "rejected"; message: string } {
     if (result.family === "swarm") {
       const resolution = this.options.swarmCommands.resolve(message, result.command);
-      return resolution.outcome === "rejected" ? resolution : { outcome: "resolved", bindingId: resolution.context.primary?.bindingId ?? null, bindingGeneration: resolution.context.primary?.bindingGeneration ?? null, instanceId: null, instanceGeneration: null };
+      return resolution.outcome === "rejected" ? resolution : { outcome: "resolved", target: resolution.target };
     }
     if (!this.options.instanceInteractions || isInstanceQuery(result.command)) return { outcome: "rejected", message: "Agent 控制功能不可用。" };
     const resolution = this.options.instanceInteractions.resolveNaturalLanguageMutationTarget(message, result.command);
-    return resolution.outcome === "rejected" ? resolution : { outcome: "resolved", bindingId: resolution.binding?.id ?? null, bindingGeneration: resolution.binding?.generation ?? null, instanceId: resolution.instance.id, instanceGeneration: resolution.instance.generation };
-  }
-
-  private currentlyAuthorized(value: NaturalLanguageCommandConfirmation, action: IncomingLarkCardAction): boolean {
-    const message = syntheticMessage(value, action.operatorOpenId);
-    if (value.envelope.family === "swarm") return this.options.swarmCommands.resolve(message, value.envelope.command).outcome === "resolved";
-    if (isInstanceQuery(value.envelope.command) || !this.options.instanceInteractions) return false;
-    return this.options.instanceInteractions.resolveNaturalLanguageMutationTarget(message, value.envelope.command).outcome === "resolved";
+    return resolution.outcome === "rejected" ? resolution : { outcome: "resolved", target: resolution.target };
   }
 
   private async execute(value: NaturalLanguageCommandConfirmation): Promise<void> {
@@ -110,8 +126,8 @@ export class NaturalLanguageCommandWorkflow implements NaturalLanguageCommandWor
 }
 
 function syntheticMessage(value: NaturalLanguageCommandConfirmation, actorOpenId: string): IncomingLarkMessage { return { eventId: `natural-language-confirmation:${value.id}`, messageId: `natural-language-confirmation:${value.id}`, parentMessageId: null, chatId: value.chatId, topicId: value.topicId, rootMessageId: value.rootMessageId, actorOpenId, text: "", mentionsBot: true, isRootMessage: false }; }
-function frozenSwarmContext(context: SwarmCommandContext): { outcome: "resolved"; bindingId: string | null; bindingGeneration: number | null; instanceId: null; instanceGeneration: null } {
-  return { outcome: "resolved", bindingId: context.primary?.bindingId ?? null, bindingGeneration: context.primary?.bindingGeneration ?? null, instanceId: null, instanceGeneration: null };
+function frozenSwarmContext(context: SwarmCommandContext): { outcome: "resolved"; target: FrozenCommandTarget } {
+  return { outcome: "resolved", target: { version: 1, kind: "swarm", bindingId: context.primary?.bindingId ?? null, bindingGeneration: context.primary?.bindingGeneration ?? null, paneId: context.primary?.paneId ?? null, terminalId: context.primary?.terminalId ?? null, nativeSession: context.primary?.nativeSession ?? null, activePromptId: context.primary?.activePromptId ?? null } };
 }
 function isInstanceQuery(command: InstanceCommand): command is Extract<InstanceCommand, { kind: "projects" | "project" | "instances" | "instance" }> { return command.kind === "projects" || command.kind === "project" || command.kind === "instances" || command.kind === "instance"; }
 function stale(): LarkCardActionResult { return { toast: { type: "warning", content: "该确认已失效，请重新发送请求。" } }; }

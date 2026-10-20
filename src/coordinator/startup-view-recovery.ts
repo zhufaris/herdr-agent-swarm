@@ -1,7 +1,9 @@
 import type { StartupViewRecoveryDiagnostics } from "../domain/ports/startup-view-recovery.js";
+import type { StartupViewConvergenceResult } from "./startup-view-converger.js";
 
 export interface StartupViewRecoveryOptions {
-  convergeAll(): Promise<readonly string[]>;
+  convergeAll(): Promise<StartupViewConvergenceResult>;
+  continueRetainedActivity?(): Promise<StartupViewConvergenceResult>;
   convergeBindings(bindingIds: readonly string[]): Promise<readonly string[]>;
   maxPendingIds?: number;
   baseDelayMs?: number;
@@ -14,6 +16,7 @@ export class StartupViewRecovery {
   private readonly baseDelayMs: number;
   private readonly maxDelayMs: number;
   private fullRescanPending = false;
+  private continuationPending = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private active: Promise<void> | null = null;
   private started = false;
@@ -43,6 +46,11 @@ export class StartupViewRecovery {
     if (this.started) this.schedule();
   }
 
+  requestRetainedContinuation(): void {
+    this.continuationPending = true;
+    if (this.started) this.schedule();
+  }
+
   start(): void {
     if (this.started || this.stopping) return;
     this.started = true;
@@ -59,7 +67,8 @@ export class StartupViewRecovery {
   snapshot(): StartupViewRecoveryDiagnostics {
     return {
       state: this.stopping ? "stopping" : this.active ? "running" : this.timer ? "retry_wait" : "idle",
-      pendingCount: this.pending.size, fullRescanPending: this.fullRescanPending, retryCount: this.retryCount, recoveredCount: this.recoveredCount,
+      pendingCount: this.pending.size, fullRescanPending: this.fullRescanPending, continuationPending: this.continuationPending,
+      retryCount: this.retryCount, recoveredCount: this.recoveredCount,
       lastFailureAt: this.lastFailureAt, lastFailure: this.lastFailure
     };
   }
@@ -84,26 +93,48 @@ export class StartupViewRecovery {
 
   private async run(): Promise<void> {
     const full = this.fullRescanPending;
+    const continuation = !full && this.continuationPending;
     const captured = [...this.pending];
     this.fullRescanPending = false;
+    if (continuation) this.continuationPending = false;
     this.pending.clear();
     this.retryCount += 1;
     try {
-      const failed = full ? await this.options.convergeAll() : await this.options.convergeBindings(captured);
+      const result = full
+        ? await this.options.convergeAll()
+        : continuation
+          ? await requireRetainedContinuation(this.options.continueRetainedActivity)()
+          : { failedBindingIds: await this.options.convergeBindings(captured), fullRescanRequired: false };
+      const failed = result.failedBindingIds;
       const failedSet = new Set(failed);
       this.recoveredCount += captured.filter((bindingId) => !failedSet.has(bindingId)).length;
-      this.attempt = failed.length > 0 ? this.attempt + 1 : 0;
+      if (failed.length > 0) this.attempt += 1;
+      else if (!result.fullRescanRequired) this.attempt = 0;
       this.add(failed);
-      this.lastFailure = failed.length > 0 ? `${failed.length} startup view bindings remain unconverged` : null;
-      this.lastFailureAt = failed.length > 0 ? new Date().toISOString() : null;
+      if ((full || continuation) && result.fullRescanRequired) this.continuationPending = true;
+      if (failed.length > 0) {
+        this.lastFailure = `${failed.length} startup view bindings remain unconverged`;
+        this.lastFailureAt = new Date().toISOString();
+      } else if (!result.fullRescanRequired) {
+        this.lastFailure = null;
+        this.lastFailureAt = null;
+      }
     } catch (error) {
       this.attempt += 1;
       this.lastFailureAt = new Date().toISOString();
       this.lastFailure = error instanceof Error ? error.message : String(error);
       if (full) this.fullRescanPending = true;
+      else if (continuation) this.continuationPending = true;
       this.add(captured);
     }
   }
 
-  private hasPending(): boolean { return this.fullRescanPending || this.pending.size > 0; }
+  private hasPending(): boolean { return this.fullRescanPending || this.continuationPending || this.pending.size > 0; }
+}
+
+function requireRetainedContinuation(
+  continuation: StartupViewRecoveryOptions["continueRetainedActivity"]
+): NonNullable<StartupViewRecoveryOptions["continueRetainedActivity"]> {
+  if (!continuation) throw new Error("Retained startup-view continuation is not configured");
+  return continuation;
 }

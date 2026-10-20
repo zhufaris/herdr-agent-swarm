@@ -22,10 +22,8 @@ export async function detectAgentRuntimeAvailabilities(input: {
     pi: discoverExecutable(input.agents.pi, input.pathValue) !== null
   };
   if (!executables.codex && !executables.claude && !executables.pi) return executables;
-  try {
-    const kinds = await detectHerdrAgentKinds(input.runner, input.herdrExecutable);
-    return { codex: executables.codex && kinds.has("codex"), claude: executables.claude && kinds.has("claude"), pi: executables.pi && kinds.has("pi") };
-  } catch { return { codex: false, claude: false, pi: false }; }
+  const kinds = await detectHerdrAgentKinds(input.runner, input.herdrExecutable);
+  return { codex: executables.codex && kinds.has("codex"), claude: executables.claude && kinds.has("claude"), pi: executables.pi && kinds.has("pi") };
 }
 
 async function detectHerdrAgentKinds(runner: CommandRunner, herdrExecutable: string): Promise<ReadonlySet<string>> {

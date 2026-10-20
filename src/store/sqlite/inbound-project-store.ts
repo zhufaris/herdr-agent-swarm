@@ -5,13 +5,22 @@ import type { SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import { inboundMessageScopeKey } from "../../domain/inbound-message-scope.js";
 import type { AgentKind } from "../../domain/agent-instance.js";
+import type { PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
+import type { OutboundReply } from "../../domain/types.js";
 
 export class SqliteInboundProjectStore {
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext) {}
   private get database() { return this.context.database; }
 
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void {
+    this.preparedDeliveryReservation = reservation;
+    this.preparedDeliveryConsumer = consumer;
+  }
+
   recordInboundMessage(message: IncomingLarkMessage): boolean {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.inbound-project-store.write", () => {
       if (this.database.prepare("SELECT 1 FROM inbound_messages WHERE event_id = ? OR message_id = ?").get(message.eventId, message.messageId)) return false;
       const timestamp = now();
       return this.database.prepare(`INSERT INTO inbound_messages(event_id, gateway_id, message_id, payload_json, scope_key, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'received', ?, ?)`).run(message.eventId, message.gatewayId ?? "feishu:primary", message.messageId, JSON.stringify(message), inboundMessageScopeKey(message), timestamp, timestamp).changes === 1;
@@ -19,7 +28,7 @@ export class SqliteInboundProjectStore {
   }
 
   claimNextInboundMessage(excludedScopeKeys: readonly string[] = []): IncomingLarkMessage | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.inbound-project-store.write", () => {
       const exclusions = excludedScopeKeys.length ? ` AND scope_key NOT IN (${excludedScopeKeys.map(() => "?").join(", ")})` : "";
       const row = this.database.prepare(`SELECT event_id, payload_json FROM inbound_messages WHERE state = 'received'${exclusions} ORDER BY created_at, event_id LIMIT 1`).get(...excludedScopeKeys) as { event_id: string; payload_json: string } | undefined;
       if (!row) return null;
@@ -28,6 +37,7 @@ export class SqliteInboundProjectStore {
     });
   }
 
+  deferInboundMessage(eventId: string): void { this.database.prepare("UPDATE inbound_messages SET state = 'received', error = NULL, updated_at = ? WHERE event_id = ? AND state = 'processing'").run(now(), eventId); }
   markInboundMessageAccepted(eventId: string): void { this.database.prepare("UPDATE inbound_messages SET state = 'accepted', error = NULL, updated_at = ? WHERE event_id = ?").run(now(), eventId); }
   releaseInboundMessage(eventId: string, error: string): void { this.database.prepare("UPDATE inbound_messages SET state = 'received', error = ?, updated_at = ? WHERE event_id = ?").run(error, now(), eventId); }
   recoverProcessingInboundMessages(): number { return Number(this.database.prepare("UPDATE inbound_messages SET state = 'received', error = 'Interrupted during inbound acceptance; retrying', updated_at = ? WHERE state = 'processing'").run(now()).changes); }
@@ -40,18 +50,27 @@ export class SqliteInboundProjectStore {
   recordBridgeMessage(messageId: string): void { this.database.prepare("INSERT OR IGNORE INTO bridge_messages(message_id, created_at) VALUES (?, ?)").run(messageId, now()); }
 
   createProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; expiresAt: string; card: object }): ProjectSelection {
-    return this.context.transaction(() => {
+    let receipt: PreparedDeliveryReceipt | null = null;
+    const selection = this.context.transaction("sqlite.inbound-project-store.write", () => {
       const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
       if (existing) return mapProjectSelection(existing);
       const timestamp = now();
       this.database.prepare(`INSERT INTO project_selections(id, command_message_id, chat_id, topic_id, root_message_id, actor_open_id, requested_title, initial_prompt_text, agent_kind, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(input.id, input.commandMessageId, input.chatId, input.topicId, input.rootMessageId, input.actorOpenId, input.requestedTitle, input.initialPromptText ?? null, input.agentKind ?? "traex", input.expiresAt, timestamp, timestamp);
-      this.database.prepare(`INSERT INTO outbound_replies(id, idempotency_key, selection_id, root_message_id, kind, payload, lane_key, state, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'card_reply', ?, ?, 'pending', 0, ?, ?, ?)`).run(randomUUID(), `project-selection:create:${input.id}`, input.id, input.rootMessageId, JSON.stringify(input.card), `gateway:feishu:primary:message:${input.rootMessageId}`, timestamp, timestamp, timestamp);
+      const outbound = { id: randomUUID(), idempotencyKey: `project-selection:create:${input.id}`, bindingId: null, selectionId: input.id, rootMessageId: input.rootMessageId, kind: "card_reply" as const, payload: JSON.stringify(input.card), laneKeyOverride: `message:${input.rootMessageId}`, globalDelivery: true as const };
+      if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Inbound Project prepared delivery is not connected");
+      receipt = this.preparedDeliveryReservation.reservePreparedOutboundReply(outbound);
       return this.getProjectSelection(input.id)!;
     });
+    if (receipt) this.handoffAfterCommit(receipt);
+    return selection;
+  }
+
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void {
+    queueMicrotask(() => { for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery); });
   }
 
   createAutomaticProjectSelection(input: { id: string; commandMessageId: string; chatId: string; topicId: string | null; rootMessageId: string; actorOpenId: string; requestedTitle: string | null; initialPromptText?: string | null; agentKind?: AgentKind; projectId: string; expiresAt: string }): ProjectSelection {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.inbound-project-store.write", () => {
       const existing = this.database.prepare("SELECT * FROM project_selections WHERE command_message_id = ?").get(input.commandMessageId) as ProjectSelectionRow | undefined;
       if (existing) return mapProjectSelection(existing);
       const timestamp = now();
@@ -63,7 +82,7 @@ export class SqliteInboundProjectStore {
   getProjectSelection(id: string): ProjectSelection | null { const row = this.database.prepare("SELECT * FROM project_selections WHERE id = ?").get(id) as ProjectSelectionRow | undefined; return row ? mapProjectSelection(row) : null; }
 
   claimProjectSelection(input: { selectionId: string; projectId: string; messageId: string; chatId: string; actorOpenId: string; allowedProjectIds: string[] }): ProjectSelectionClaim {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.inbound-project-store.write", () => {
       const selection = this.getProjectSelection(input.selectionId);
       if (!selection) return { outcome: "missing", selection: null };
       if (selection.chatId !== input.chatId || selection.selectorMessageId !== input.messageId || !input.allowedProjectIds.includes(input.projectId)) return { outcome: "invalid", selection };
@@ -83,11 +102,17 @@ export class SqliteInboundProjectStore {
     return (this.database.prepare(`
       SELECT selection.*
       FROM project_selections selection
+      LEFT JOIN bindings binding ON binding.id = selection.binding_id
       WHERE selection.state = 'completed'
         AND selection.initial_prompt_text IS NOT NULL
         AND NOT EXISTS (
           SELECT 1 FROM prompt_jobs prompt
           WHERE prompt.lark_message_id = selection.command_message_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM submission_intents input
+          WHERE input.ingress_source = COALESCE(binding.gateway_id, 'feishu:primary')
+            AND input.source_message_key = selection.command_message_id
         )
       ORDER BY selection.created_at
     `).all() as ProjectSelectionRow[]).map(mapProjectSelection);

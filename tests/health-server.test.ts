@@ -1,13 +1,34 @@
-import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { startHealthServer } from "../src/health/server.js";
+import { startHealthServer as startProductionHealthServer } from "../src/health/server.js";
+import type { HealthSnapshotOptions } from "../src/health/health-snapshot-collector.js";
+import { createShutdownContext } from "../src/runtime/shutdown-context.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
+
+function startHealthServer(options: Omit<HealthSnapshotOptions, "diagnostics"> & { diagnostics?: HealthSnapshotOptions["diagnostics"]; host: string; port: number; store: SqliteBindingStore }) {
+  return startProductionHealthServer({ ...options, diagnostics: options.diagnostics ?? diagnosticsFor(options.store) });
+}
+
+function diagnosticsFor(store: SqliteBindingStore): HealthSnapshotOptions["diagnostics"] {
+  return { async inspectDiagnostics({ includePhysical }) {
+    const inspection = store.inspectIntegrity(20);
+    return {
+      operational: store.getOperationalSummary(),
+      semantic: { issues: inspection.issues.filter((issue) => issue.rule !== "sqlite_quick_check" && issue.rule !== "sqlite_foreign_key"), truncated: inspection.truncated },
+      physical: includePhysical ? {
+        quickCheck: inspection.quickCheck,
+        foreignKeyIssues: inspection.issues.filter((issue) => issue.rule === "sqlite_foreign_key").map((issue) => ({ table: issue.table, rowId: issue.rowId ?? null })),
+        truncated: inspection.truncated
+      } : undefined,
+      connection: { queryOnly: true, busyTimeoutMs: 25 }
+    };
+  } };
+}
 
 let server: Awaited<ReturnType<typeof startHealthServer>> | undefined;
 let store: SqliteBindingStore | undefined;
 afterEach(async () => {
-  if (server) { server.close(); await once(server, "close"); server = undefined; }
+  if (server) { await server.stop(createShutdownContext(1_000).context); server = undefined; }
   store?.close(); store = undefined;
 });
 
@@ -79,6 +100,36 @@ describe("health server", () => {
     });
   });
 
+  it("exposes failed unified recovery diagnostics without changing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      recoverySupervisor: { snapshot: () => ({
+        version: 2, state: "idle", lastPassAt: "2026-10-02T05:00:00.000Z", lastPassOutcome: "failed",
+        stageCounts: { observing_execution: 1, rebuilding_projection: 0, delivering: 0, awaiting_ack: 0, recovered: 0, needs_human: 0 },
+        oldestPendingAt: "2026-10-02T04:59:00.000Z", oldestPendingAgeSeconds: 60, lastFailure: "execution unavailable", items: [],
+        historical: { runCount: 3, lastSliceAt: "2026-10-02T04:58:00.000Z", lastResult: {
+          projected: 8, retried: 1, quarantined: 0, stale: 1, processed: 10,
+          cardsReserved: 2, cardsStale: 0, cardsRemaining: true, remaining: true,
+          oldestEligibleAt: "2026-09-30T00:00:00.000Z", durationMs: 432,
+          backlog: { eligiblePendingEvents: 120, eligibleLanes: 4, ineligiblePendingEvents: 9, quarantinedEvents: 3, oldestEligibleAt: "2026-09-30T00:00:00.000Z" }
+        } }
+      }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" },
+      recovery: {
+        version: 2, lastPassOutcome: "failed", stageCounts: { observing_execution: 1 }, lastFailure: "execution unavailable",
+        historical: { runCount: 3, lastResult: { projected: 8, cardsReserved: 2, backlog: { eligiblePendingEvents: 120, quarantinedEvents: 3 } } }
+      }
+    });
+  });
+
   it("isolates reconciliation snapshot failures and degrades only status", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({
@@ -118,7 +169,6 @@ describe("health server", () => {
       host: "127.0.0.1", port: 0, store, projects, lark: { isReady: () => false } as never,
       herdr: { async assertWorkspace() { throw new Error("workspace unavailable"); } } as never,
       promptWorker: { snapshot: () => ({ state: "running", activeTurnWorkers: 0, lastScanAt: "2026-08-24T00:00:00.000Z", lastScanOutcome: "idle", lastDiscovered: { turns: 0, detached: 0, recoveredClaims: 0, cancelled: 0, failedDetached: 0 }, lastScanFailureAt: null, currentSafetyScanDelayMs: 10_000, nextSafetyScanAt: "2026-08-24T00:00:10.000Z" }) },
-      outboxDispatcher: { snapshot: () => ({ state: "idle", activeDeliveries: 0, scanPending: false, lastScanAt: null, lastScanOutcome: null, lastDeliveryAt: null, lastDeliveryFailureAt: null }) },
       herdrSocket: { status: () => ({ connected: true, eventsConnected: true, requests: 4, responses: 3, requestFailures: 1, transportFailures: 0, pendingRequests: 0 }) },
       lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
       buildIdentity
@@ -138,7 +188,8 @@ describe("health server", () => {
     const status = await fetch(`http://127.0.0.1:${port}/status`);
     expect(status.status).toBe(200);
     const body = await status.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, queueFeedback: { withEstimate: 0, withoutEstimate: 0 }, promptLatency: { windowSize: 100, sampleCount: 0, queue: { averageMs: null }, execution: { averageMs: null }, delivery: { averageMs: null } }, outboxLanes: { pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null, oldestHeadAt: null, oldestHeadAgeSeconds: null } }, outboxDispatcher: { state: "idle", activeDeliveries: 0 }, promptWorker: { state: "running", activeTurnWorkers: 0, lastScanOutcome: "idle", currentSafetyScanDelayMs: 10_000, nextSafetyScanAt: "2026-08-24T00:00:10.000Z" }, herdrSocket: { connected: true, eventsConnected: true, requests: 4, responses: 3, requestFailures: 1, transportFailures: 0, pendingRequests: 0 } });
+    expect(body).toMatchObject({ status: "degraded", identity: buildIdentity, readiness: { status: "not_ready" }, operational: { pendingOutbox: 0, deadLetters: 0, deliveryRings: { pending: 0, panePending: 0, globalPending: 0, ready: 0, activeClaims: 0, waitingBehindScope: 0 } }, promptWorker: { state: "running", activeTurnWorkers: 0, lastScanOutcome: "idle", currentSafetyScanDelayMs: 10_000, nextSafetyScanAt: "2026-08-24T00:00:10.000Z" }, herdrSocket: { connected: true, eventsConnected: true, requests: 4, responses: 3, requestFailures: 1, transportFailures: 0, pendingRequests: 0 } });
+    expect(body).not.toHaveProperty("outboxDispatcher");
     expect(body).toHaveProperty("uptimeSeconds");
     expect(body).toHaveProperty("timestamp");
     expect(body).toHaveProperty("lease.ownerSuffix", "owner123");
@@ -166,6 +217,26 @@ describe("health server", () => {
     });
   });
 
+  it("degrades status for overdue Prompt recovery without failing dependency readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), coreProjection: {
+      lanes: 1, laggingLanes: 1, pendingEvents: 1, quarantinedEvents: 0,
+      oldestPendingAt: "2026-10-01T00:00:00.000Z", oldestPendingAgeSeconds: 301
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready" }, operational: { coreProjection: { laggingLanes: 1, oldestPendingAgeSeconds: 301 } }
+    });
+  });
+
   it("reports Session operation dispatcher diagnostics without exposing operation arguments", async () => {
     store = new SqliteBindingStore(":memory:");
     const snapshot = { state: "running" as const, activeOperations: 1, drainRequested: true, lastCompletedAt: null, lastFailureAt: null, lastFailure: null };
@@ -178,6 +249,26 @@ describe("health server", () => {
     const body = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json();
     expect(body).toMatchObject({ status: "ok", sessionOperationDispatcher: snapshot, operational: { sessionOperations: { states: { accepted: 0, running: 0, uncertain: 0 } } } });
     expect(JSON.stringify(body)).not.toContain("argument");
+  });
+
+  it("keeps terminal legacy Session operation history readable without degrading health", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", traexSessionId: "terminal-1" });
+    store.createCardInteraction({ id: "legacy-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "creator", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2099-01-01T00:00:00.000Z" });
+    store.acceptSessionOperation({ id: "legacy-terminal", idempotencyKey: "legacy:terminal", interactionId: "legacy-interaction", actorOpenId: "creator", bindingId: "b1", bindingGeneration: 1, expectedPaneId: "w1:p1", expectedTerminalId: "terminal-1", kind: "rename", argument: "private legacy title", now: new Date().toISOString() });
+    store.claimNextSessionOperation();
+    store.finishSessionOperation("legacy-terminal", "succeeded");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      sessionOperationDispatcher: { snapshot: () => ({ state: "idle", activeOperations: 0, drainRequested: false, lastCompletedAt: null, lastFailureAt: null, lastFailure: null }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+
+    const body = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json();
+    expect(body).toMatchObject({ status: "ok", operational: { sessionOperations: { states: { succeeded: 1, accepted: 0, running: 0 } } } });
+    expect(JSON.stringify(body)).not.toContain("private legacy title");
   });
 
   it("reports and degrades active or uncertain instance work", async () => {
@@ -231,7 +322,7 @@ describe("health server", () => {
     expect(maximumActive).toBe(4);
   });
 
-  it("coalesces concurrent status collection and caches successful snapshots briefly", async () => {
+  it("coalesces concurrent status collection and reuses the last successful diagnostics snapshot", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);
     const getOperationalSummary = vi.fn(() => originalSummary());
@@ -241,7 +332,7 @@ describe("health server", () => {
     const assertWorkspace = vi.fn(() => probeGate);
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
-      lark: { isReady: () => true } as never, herdr: { assertWorkspace } as never, statusTtlMs: 25,
+      lark: { isReady: () => true } as never, herdr: { assertWorkspace } as never, diagnosticsTtlMs: 60_000,
       lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
     });
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/status`;
@@ -255,12 +346,9 @@ describe("health server", () => {
 
     await fetch(url);
     expect(getOperationalSummary).toHaveBeenCalledOnce();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    await fetch(url);
-    expect(getOperationalSummary).toHaveBeenCalledTimes(2);
   });
 
-  it("does not cache a status collection containing a diagnostic failure", async () => {
+  it("bounds diagnostics failures and retries them after backoff", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);
     const getOperationalSummary = vi.fn()
@@ -269,14 +357,58 @@ describe("health server", () => {
     store.getOperationalSummary = getOperationalSummary;
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
-      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never, statusTtlMs: 60_000,
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      diagnosticsTtlMs: 60_000, retryBackoffMinMs: 1, retryBackoffMaxMs: 1,
       lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
     });
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/status`;
 
-    expect(await (await fetch(url)).json()).toMatchObject({ status: "degraded", operational: { error: "summary unavailable" } });
+    const unavailable = await (await fetch(url)).json();
+    expect(unavailable).toMatchObject({
+      status: "degraded", operational: { error: "SQLite diagnostics unavailable" },
+      sqliteDiagnostics: { state: "unavailable", failureClass: "other", retryAt: expect.any(String) }
+    });
+    expect(JSON.stringify(unavailable)).not.toContain("summary unavailable");
+    await new Promise((resolve) => setTimeout(resolve, 2));
     expect(await (await fetch(url)).json()).toMatchObject({ status: "ok" });
     expect(getOperationalSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts and settles active diagnostics before the health resource stops", async () => {
+    store = new SqliteBindingStore(":memory:");
+    let inspectionSignal: AbortSignal | undefined;
+    let inspectionSettled = false;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store,
+      projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      diagnostics: { inspectDiagnostics(_input, signal) {
+        inspectionSignal = signal; markStarted();
+        return new Promise((_resolve, reject) => {
+          const fallback = setTimeout(() => {
+            inspectionSettled = true;
+            reject(Object.assign(new Error("test cleanup timeout"), { failureClass: "timeout" }));
+          }, 100);
+          signal?.addEventListener("abort", () => {
+            clearTimeout(fallback);
+            inspectionSettled = true; reject(signal.reason);
+          }, { once: true });
+        });
+      } },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) }, buildIdentity
+    });
+    const request = fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`);
+    await started;
+    const { context } = createShutdownContext(1_000);
+
+    await (server as typeof server & { stop(context: typeof context): Promise<void> }).stop(context);
+
+    expect(inspectionSignal?.aborted).toBe(true);
+    expect(inspectionSettled).toBe(true);
+    await expect(request).resolves.toMatchObject({ status: 200 });
+    server = undefined;
   });
 
   it("supports HEAD and rejects mutating methods on read endpoints", async () => {
@@ -322,7 +454,7 @@ describe("health server", () => {
     expect(assertWorkspace).toHaveBeenCalledOnce();
   });
 
-  it("degrades status for SQLite inconsistencies without failing readiness", async () => {
+  it("fails readiness for a confirmed SQLite integrity inconsistency", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
@@ -333,8 +465,12 @@ describe("health server", () => {
     });
     const port = (server.address() as AddressInfo).port;
 
-    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
-    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "degraded", readiness: { status: "ready" }, sqliteIntegrity: { state: "degraded", issues: [{ rule: "outbox_lane_missing_head", count: 1 }] } });
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(503);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded",
+      readiness: { status: "not_ready", components: { sqliteIntegrity: { ok: false, error: "SQLite integrity check reported 1 issue(s)" } } },
+      sqliteIntegrity: { state: "degraded", issues: [{ rule: "outbox_lane_missing_head", count: 1 }] }
+    });
   });
 
   it("keeps status degraded while rechecking a previously failed SQLite audit", async () => {
@@ -457,11 +593,40 @@ describe("health server", () => {
     expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "degraded", readiness: { status: "ready" }, operational: { eligibleDeadLetterRecoveries: 1, deadLettersByClass: { transient: 1 } } });
   });
 
+  it("reports projection delivery recovery backlog without failing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), projectionDeliveryRecovery: {
+      backlog: 2,
+      eligible: 1,
+      awaitingAck: 1,
+      recovered: 3,
+      exhausted: 0,
+      byProjection: { primaryAnswer: 1, workerTask: 1 },
+      oldestEligibleAt: "2026-10-02T00:00:00.000Z",
+      oldestEligibleAgeSeconds: 60
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded",
+      readiness: { status: "ready" },
+      operational: { projectionDeliveryRecovery: { backlog: 2, eligible: 1, awaitingAck: 1, byProjection: { primaryAnswer: 1, workerTask: 1 } } }
+    });
+  });
+
   it("degrades status for an active outbox quarantine without failing readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);
     store.getOperationalSummary = () => ({ ...originalSummary(), outboxQuarantines: {
-      ...originalSummary().outboxQuarantines, active: 1
+      ...originalSummary().outboxQuarantines, active: 1, current: 1
     } });
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
@@ -473,6 +638,69 @@ describe("health server", () => {
 
     expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
     expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "degraded", readiness: { status: "ready" }, operational: { outboxQuarantines: { active: 1 } } });
+  });
+
+  it("reports historical delivery debt without degrading current operations", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), outboxQuarantines: {
+      ...originalSummary().outboxQuarantines, active: 1, current: 0, historical: 1
+    }, projectionGaps: {
+      ...originalSummary().projectionGaps, open: 2, current: 0, historical: 2
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "ok", operational: {
+        outboxQuarantines: { active: 1, current: 0, historical: 1 },
+        projectionGaps: { open: 2, current: 0, historical: 2 }
+      }
+    });
+  });
+
+  it("degrades status for an open projection gap without failing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), projectionGaps: {
+      open: 1, compensated: 2, affectedOwners: 1, oldestOpenAt: "2026-09-30T00:00:00.000Z",
+      byStage: { core_projection: 1, answer_delivery: 0, main_delivery: 0, worker_delivery: 0, turn_recovery: 0 }
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "degraded", readiness: { status: "ready" }, operational: { projectionGaps: { open: 1, affectedOwners: 1 } } });
+  });
+
+  it("degrades status for durable turn recovery without failing readiness", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), turnRecovery: {
+      pending: 1, due: 0, oldestAttemptAt: "2026-09-30T00:00:00.000Z", oldestAgeSeconds: 60,
+      byState: { waiting: 0, indexing: 1, not_found: 0, ambiguous: 0, transient: 0 },
+      latestFailure: { failureCode: "recovery_indexing", attemptCount: 2, lastAttemptAt: "2026-09-30T00:00:00.000Z", nextAttemptAt: "2026-09-30T00:00:10.000Z" }
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "degraded", readiness: { status: "ready" }, operational: { turnRecovery: { pending: 1, byState: { indexing: 1 } } } });
   });
 
   it("degrades status for an active Lark cooldown without failing readiness", async () => {
@@ -502,9 +730,8 @@ describe("health server", () => {
   it("reports durable in-flight Lark work without degrading status or readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     const originalSummary = store.getOperationalSummary.bind(store);
-    store.getOperationalSummary = () => ({ ...originalSummary(), pendingOutbox: 1, outboxWork: {
-      ready: 0, inFlight: 1, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0,
-      oldestInFlightAt: "2026-09-12T00:00:00.000Z", oldestInFlightAgeSeconds: 2
+    store.getOperationalSummary = () => ({ ...originalSummary(), pendingOutbox: 1, deliveryRings: {
+      ...originalSummary().deliveryRings, pending: 1, activeClaims: 1
     } });
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
@@ -516,11 +743,112 @@ describe("health server", () => {
 
     expect((await fetch("http://127.0.0.1:" + port + "/ready")).status).toBe(200);
     expect(await (await fetch("http://127.0.0.1:" + port + "/status")).json()).toMatchObject({
-      status: "ok", readiness: { status: "ready" }, operational: { pendingOutbox: 1, outboxWork: {
-        ready: 0, inFlight: 1, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0,
-        oldestInFlightAt: "2026-09-12T00:00:00.000Z", oldestInFlightAgeSeconds: 2
+      status: "ok", readiness: { status: "ready" }, operational: { pendingOutbox: 1, deliveryRings: {
+        pending: 1, activeClaims: 1
       } }
     });
+  });
+
+  it("reports isolated Delivery conflicts and pending Human Review as degraded without exposing payload", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const originalSummary = store.getOperationalSummary.bind(store);
+    store.getOperationalSummary = () => ({ ...originalSummary(), deliveryRings: {
+      ...originalSummary().deliveryRings,
+      isolatedConflicts: 2,
+      isolatedUncertain: 1,
+      bypassedDeliveries: 3,
+      pendingHumanReviews: 1,
+      oldestHumanReviewAgeSeconds: 90,
+    } });
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+
+    const status = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json();
+    expect(status).toMatchObject({
+      status: "degraded",
+      readiness: { status: "ready" },
+      operational: { deliveryRings: {
+        isolatedConflicts: 2,
+        isolatedUncertain: 1,
+        bypassedDeliveries: 3,
+        pendingHumanReviews: 1,
+        oldestHumanReviewAgeSeconds: 90,
+      } }
+    });
+    expect(JSON.stringify(status)).not.toContain("payload");
+  });
+
+  it("reports the Delivery Engine snapshot alongside durable Pane and Global scope counts", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const deliveryEngine = {
+      state: "running" as const, ringCount: 2, runnableRings: 1, activeDeliveries: 0,
+      latency: { traces: 3, completed: 2, lastCompletedDurationMs: 48, stageDurationsMs: { ringToGatewayAck: 21 }, metrics: { input_to_settlement: { succeeded: 2 } } },
+      cachedItems: 3, cachedBytes: 384, processByteLimit: 1024,
+      overflowedScopes: 0, quarantinedScopes: 0,
+      oldestReadyAt: "2026-10-06T00:00:00.000Z", oldestLiveReadyAt: "2026-10-06T00:00:00.000Z", oldestHistoryReadyAt: null,
+      nextRetryAt: null, lastRefillAt: "2026-10-06T00:00:01.000Z",
+      safetyScanRuns: 3, safetyScanDiscoveries: 0, lastSafetyScanAt: "2026-10-06T00:00:01.000Z", lastSafetyScanDiscoveryAt: null,
+      lastDeliveryAt: null, lastFailureAt: null, recoveryReady: true
+    };
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      deliveryEngine: { snapshot: () => deliveryEngine }, buildIdentity
+    });
+
+    const status = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/status`)).json();
+    expect(status).toMatchObject({
+      deliveryEngine,
+      operational: { deliveryRings: { pending: 0, panePending: 0, globalPending: 0, activeClaims: 0 } }
+    });
+    expect(status.operational.deliveryRings).not.toHaveProperty("legacyDebt");
+    expect(status.deliveryEngine.latency).toEqual(deliveryEngine.latency);
+    expect(JSON.stringify(status.deliveryEngine.latency)).not.toMatch(/eventId|messageId|submissionId|coreEventId|segmentId|replyId|attemptId|receiptId/);
+  });
+
+  it.each([
+    ["degraded", { state: "degraded" as const, recoveryReady: true }],
+    ["not recovery ready", { state: "running" as const, recoveryReady: false }]
+  ])("fails readiness and status when the Delivery Engine is %s", async (_label, engineState) => {
+    store = new SqliteBindingStore(":memory:");
+    const deliveryEngine = {
+      ...engineState, ringCount: 0, runnableRings: 0, activeDeliveries: 0,
+      cachedItems: 0, cachedBytes: 0, processByteLimit: 1024,
+      overflowedScopes: 0, quarantinedScopes: 0,
+      oldestReadyAt: null, oldestLiveReadyAt: null, oldestHistoryReadyAt: null,
+      nextRetryAt: null, lastRefillAt: null, lastDeliveryAt: null, lastFailureAt: "2026-10-06T00:00:00.000Z"
+    };
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      deliveryEngine: { snapshot: () => deliveryEngine }, buildIdentity, readinessTtlMs: 0, statusTtlMs: 0
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(503);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "not_ready", components: { deliveryEngine: { ok: false } } }, deliveryEngine
+    });
+  });
+
+  it("keeps legacy-only readiness and status compatible without Delivery Engine diagnostics", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({ status: "ok", readiness: { status: "ready" } });
   });
 
   it("keeps status healthy when delivery failures are historical rather than current work", async () => {
@@ -597,7 +925,7 @@ describe("health server", () => {
     });
   });
 
-  it("degrades status while the Herdr transport circuit is open", async () => {
+  it("fails readiness after the Herdr Core transport failure threshold opens the circuit", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({
       host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
@@ -608,8 +936,54 @@ describe("health server", () => {
     });
     const port = (server.address() as AddressInfo).port;
 
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(503);
     expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
-      status: "degraded", herdrCircuitBreaker: { state: "open", rejectedCalls: 7, lastFailure: "connect ECONNREFUSED" }
+      status: "degraded", readiness: { status: "not_ready", components: { core: { ok: false, error: "connect ECONNREFUSED" } } },
+      herdrCircuitBreaker: { state: "open", rejectedCalls: 7, lastFailure: "connect ECONNREFUSED" }
+    });
+  });
+
+  it("fails new-input readiness explicitly when the required Core v2 capability is absent", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      agentInputCapability: { snapshot: () => ({
+        required: true, detected: true, supported: false, ready: false,
+        error: "Herdr Core does not advertise agent_input_submission_v3"
+      }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(503);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded",
+      readiness: { status: "not_ready", components: { agentInput: {
+        ok: false,
+        required: true,
+        supported: false,
+        error: "Herdr Core does not advertise agent_input_submission_v3"
+      } } }
+    });
+  });
+
+  it("keeps readiness while a below-threshold Core transport failure degrades status", async () => {
+    store = new SqliteBindingStore(":memory:");
+    server = await startHealthServer({
+      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
+      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
+      herdrCircuitBreaker: { status: () => ({ state: "closed", failureThreshold: 3, openMs: 15_000, consecutiveFailures: 2, totalTransportFailures: 2, rejectedCalls: 0, successfulProbes: 0, openedAt: null, nextProbeAt: null, lastFailureAt: "2026-08-26T00:00:00.000Z", lastFailure: "connect ECONNRESET" }) },
+      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
+      buildIdentity
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
+    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
+      status: "degraded", readiness: { status: "ready", components: { core: { ok: true } } },
+      herdrCircuitBreaker: { state: "closed", consecutiveFailures: 2 }
     });
   });
 
@@ -629,24 +1003,6 @@ describe("health server", () => {
     });
   });
 
-  it("isolates dispatcher diagnostic failure from readiness", async () => {
-    store = new SqliteBindingStore(":memory:");
-    server = await startHealthServer({
-      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
-      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
-      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner123", fencingToken: 4, expiresAt: "2099-01-01T00:00:00.000Z", lastRenewedAt: "2098-12-31T23:59:55.000Z", error: null }) },
-      outboxDispatcher: { snapshot() { throw new Error("diagnostic failed"); } }, buildIdentity
-    });
-    const port = (server.address() as AddressInfo).port;
-
-    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
-    const status = await fetch(`http://127.0.0.1:${port}/status`);
-    expect(await status.json()).toMatchObject({
-      status: "degraded", readiness: { status: "ready" },
-      outboxDispatcher: { error: "diagnostic failed" }
-    });
-  });
-
   it("isolates inbound dispatcher diagnostic failure from readiness", async () => {
     store = new SqliteBindingStore(":memory:");
     server = await startHealthServer({
@@ -660,23 +1016,6 @@ describe("health server", () => {
     expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
     expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
       status: "degraded", readiness: { status: "ready" }, inboundDispatcher: { error: "inbound diagnostics failed" }
-    });
-  });
-
-  it("degrades status while the latest outbox scan is failed without failing readiness", async () => {
-    store = new SqliteBindingStore(":memory:");
-    server = await startHealthServer({
-      host: "127.0.0.1", port: 0, store, projects: [{ id: "ok", displayName: "OK", description: "OK", workspaceId: "w1", cwd: process.cwd() }],
-      lark: { isReady: () => true } as never, herdr: { async assertWorkspace() {} } as never,
-      lease: { snapshot: () => ({ held: true, ownerSuffix: "owner", fencingToken: 1, expiresAt: null, lastRenewedAt: null, error: null }) },
-      outboxDispatcher: { snapshot: () => ({ state: "idle" as const, activeDeliveries: 0, scanPending: false, lastScanAt: "2026-08-29T00:00:00.000Z", lastScanOutcome: "failed" as const, lastDeliveryAt: null, lastDeliveryFailureAt: null, lastSuccessfulScanAt: null, lastScanFailureAt: "2026-08-29T00:00:00.000Z", consecutiveScanFailures: 1 }) },
-      buildIdentity
-    });
-    const port = (server.address() as AddressInfo).port;
-
-    expect((await fetch(`http://127.0.0.1:${port}/ready`)).status).toBe(200);
-    expect(await (await fetch(`http://127.0.0.1:${port}/status`)).json()).toMatchObject({
-      status: "degraded", readiness: { status: "ready" }, outboxDispatcher: { lastScanOutcome: "failed", consecutiveScanFailures: 1 }
     });
   });
 

@@ -3,6 +3,7 @@ import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheck
 import type { ControlActor } from "../commands.js";
 import type { InstanceEvent, InstanceEventKind, InstanceOperation, InstanceTurn, InstanceTurnCursor, InstanceTurnPage, InstanceTurnState, InstanceTurnSummary } from "../instance-turn.js";
 import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome } from "../types.js";
+import type { AnswerSegment, AnswerSegmentBoundary } from "../answer-segment.js";
 import type { AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint } from "../delivery.js";
 import type { AnswerTimelineItem } from "../answer-timeline.js";
 import type { AnswerTimelineCursor } from "../delivery.js";
@@ -14,17 +15,59 @@ import type { WorkerMainProjectionSource } from "../worker-main-selector.js";
 import type { TopicViewState } from "../topic-view.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { WorkerHumanReviewNotificationInput, WorkerHumanReviewReservation } from "../worker-human-review.js";
+import type { CompletionActionEligibilityReservation } from "../completion-action-eligibility.js";
+import type { ProjectionGapSummary } from "../projection-gap.js";
+import type { CompletionActionSetRenderState } from "../completion-action-set.js";
+import type { CompletionActionIgnoreResult, CompletionActionSelection } from "../completion-action-set.js";
+import type { ChoicePrompt } from "../completion-choice.js";
 
 export interface TransitionInstanceTurnWithProjectionInput {
-  turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object;
+  turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind; change: WorkerTurnCardChange; completionChoice?: ChoicePrompt; render(view: WorkerTurnCardView): object;
   renderHumanReviewNotification?(input: WorkerHumanReviewNotificationInput): object;
 }
-export interface TransitionInstanceTurnWithProjectionResult { turn: InstanceTurn; view: WorkerTurnCardView; projectionChanged: boolean; notification: WorkerHumanReviewReservation }
+export interface TransitionInstanceTurnWithProjectionResult { turn: InstanceTurn; view: WorkerTurnCardView; projectionChanged: boolean; notification: WorkerHumanReviewReservation; completionActionEligibility: CompletionActionEligibilityReservation }
 
 export interface AcceptInstanceTurnWithCardInput {
   id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number;
-  kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; render(view: WorkerTurnCardView): object;
+  kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; parentTurnId: string | null; sourceMessageId: string; view: WorkerTurnCardView; render(view: WorkerTurnCardView): object; unifiedSegment?: { segmentId: string; submissionId: string; producerKey: string; owner: { kind: "primary" | "worker"; id: string; generation: number }; agentKind: "traex" | "pi"; expectedSessionId: string | null; rootMessageId: string; occurredAt: string };
 }
+
+export interface WorkerCompletionActionAcceptanceInput {
+  actionSetId: string;
+  selection?: CompletionActionSelection;
+  optionId?: string;
+  ownerTurnId: string;
+  ownerGeneration: number;
+  cardMessageId: string;
+  chatId: string;
+  actorOpenId: string;
+  accepted: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number };
+}
+
+export interface WorkerCompletionActionAcceptanceResult {
+  turn: InstanceTurn;
+  view: WorkerTurnCardView;
+  inserted: boolean;
+  completionActionOwnerTurnIds: string[];
+}
+
+export interface InstanceTurnAcceptanceResult { turn: InstanceTurn; inserted: boolean; completionActionOwnerTurnIds?: string[] }
+export interface InstanceTurnWithCardAcceptanceResult extends InstanceTurnAcceptanceResult { view: WorkerTurnCardView }
+export interface UpdateAgentInstanceObservationInput {
+  instanceId: string;
+  expectedGeneration: number;
+  expectedRuntime: NonNullable<AgentInstance["runtimeRef"]>;
+  expectedParent: AgentInstance["parent"];
+  observedState: AgentInstance["observedState"];
+  paneToken?: string | null;
+  lastError?: string | null;
+}
+export type UpdateAgentInstanceObservationResult =
+  | { outcome: "updated" | "unchanged"; instance: AgentInstance }
+  | { outcome: "stale" };
+export type CompletionChoicePaneCandidate =
+  | { kind: "primary"; binding: Binding }
+  | { kind: "worker"; instance: AgentInstance };
 
 export interface InstanceStore {
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null;
@@ -33,14 +76,16 @@ export interface InstanceStore {
   createWorkerAgentInstance(input: CreateAgentInstanceInput & { role: "worker" }, maxWorkers: number): { outcome: "created"; instance: AgentInstance } | { outcome: "limit-reached" } | { outcome: "duplicate-name" };
   getAgentInstance(id: string): AgentInstance | null;
   findAgentInstanceByPane(paneId: string): AgentInstance | null;
+  findCompletionChoicePaneCandidates(paneId: string): CompletionChoicePaneCandidate[];
   listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[];
   listAgentInstances(projectId: string): AgentInstance[];
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance;
-  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null;
+  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; paneToken?: string | null; nativeSessionId: string | null }): AgentInstance | null;
   refreshAgentInstanceRuntimeSession(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string }): AgentInstance | null;
+  adoptAgentInstanceRuntimeMove(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceId: string; expectedPaneId: string; expectedNativeSessionId: string | null; paneId: string; paneToken?: string | null }): AgentInstance | null;
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null;
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null;
-  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null;
+  updateAgentInstanceObservation(input: UpdateAgentInstanceObservationInput): UpdateAgentInstanceObservationResult;
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
   reserveWorkerPaneClose(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" };
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null;
@@ -53,8 +98,12 @@ export interface InstanceStore {
   getInstanceRemovalPlan(id: string): InstanceRemovalPlan | null;
   consumeInstanceRemovalPlan(input: { id: string; instanceId: string; instanceGeneration: number; workspaceGeneration: number; worktreeFingerprint: string | null }): InstanceRemovalPlan | null;
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean;
-  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean };
-  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean };
+  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): InstanceTurnAcceptanceResult;
+  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): InstanceTurnWithCardAcceptanceResult;
+  acceptWorkerCompletionAction(input: WorkerCompletionActionAcceptanceInput): WorkerCompletionActionAcceptanceResult;
+  ignoreWorkerCompletionAction(input: { actionSetId: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; chatId: string; actorOpenId: string }): CompletionActionIgnoreResult;
+  resolveWorkerCompletionChoice(input: { actionSetId: string; optionId: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; actorOpenId: string }): { label: string; message: string };
+  resolveFreshWorkerCompletionReview(input: { actionSetId: string; optionId: string; messageId: string; actorOpenId: string; chatId: string }): { ownerTurnId: string; ownerGeneration: number; cardMessageId: string } | null;
   getInstanceTurn(id: string): InstanceTurn | null;
   claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null;
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
@@ -68,17 +117,33 @@ export interface InstanceStore {
   loadPrimaryWorkerSummaries(bindingId: string, bindingGeneration: number): PrimaryWorkerSummary[];
   loadPrimaryWorkerActivity(promptId: string, bindingGeneration: number): PrimaryWorkerActivitySummary[];
   findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null;
+  listAnswerSegments(aggregateKind: "primary-run" | "worker-turn", aggregateId: string): AnswerSegment[];
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
+  prepareWorkerCompletionActionSet(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card?: object | ((review: { actionSetId: string; mentionOpenId: string; choicePrompt: import("../completion-choice.js").ChoicePrompt; choiceSpecification: import("../completion-choice.js").ChoicePrompt }) => object) }): CompletionActionSetRenderState | null;
   listActionableWorkerTurnCardIds(): string[];
+  listRecoverableWorkerTurnIds(limit: number): string[];
+  listRecoverableWorkerTurnIdsForBinding(bindingId: string, limit: number): string[];
   getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts;
   getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
   listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number): AnswerTimelineFrozenItem[];
+  getWorkerProjectionGapSummary(turnId: string): ProjectionGapSummary;
+  reserveHumanMessageAnswerSegments(input: {
+    aggregateKind: "primary-run" | "worker-turn";
+    aggregateId: string;
+    expectedGeneration: number;
+    boundaries: readonly AnswerSegmentBoundary[];
+    previousFinalizedCard: object;
+    nextCards: readonly object[];
+    rootMessageId: string;
+    workClass?: import("../types.js").OutboundWorkClass;
+  }): { created: number; replyIds: string[] };
   reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
   reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome;
   reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome;
   reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome;
-  reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome;
+  reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string | null; messageId: string; card: object }): AnswerPageReservationOutcome;
   reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome;
+  reserveWorkerTurnRecovery(input: { turnId: string; previousPageIndex: number; nextPageIndex: number; pageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object }): AnswerPageReservationOutcome;
   applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null;
   transitionInstanceTurnWithProjection(input: TransitionInstanceTurnWithProjectionInput): TransitionInstanceTurnWithProjectionResult | null;
   listInstanceTurns(instanceId: string, options?: { limit?: number; after?: InstanceTurnCursor }): InstanceTurnPage;
@@ -109,7 +174,7 @@ export interface InstanceStore {
 export type InstanceLifecycleStore = Pick<InstanceStore,
   "createAgentInstance" | "createWorkerAgentInstance" | "getAgentInstance" | "findAgentInstanceByPane" |
   "listWorkerInstancesByParent" | "listAgentInstances" | "setPrimaryAgentInstance" |
-  "attachAgentInstanceRuntime" | "refreshAgentInstanceRuntimeSession" | "checkpointAgentInstance" | "updateAgentInstanceLifecycle" |
+  "attachAgentInstanceRuntime" | "refreshAgentInstanceRuntimeSession" | "adoptAgentInstanceRuntimeMove" | "checkpointAgentInstance" | "updateAgentInstanceLifecycle" |
   "updateAgentInstanceObservation" | "reserveAgentInstanceStop" | "reserveWorkerPaneClose" | "finishAgentInstanceStop" |
   "rollbackAgentInstanceStop" | "detachAgentInstanceRuntime" | "terminateWorkerSession" |
   "getWorkspaceLease" | "updateWorkspaceLease" | "createInstanceRemovalPlan" |
@@ -137,15 +202,15 @@ export type WorkerTurnDispatchStore = Pick<InstanceStore,
 >;
 
 export type WorkerTurnCardStore = Pick<InstanceStore,
-  "loadWorkerTurnCard" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "reserveWorkerAnswerTimelineCard" |
+  "getAgentInstance" | "loadWorkerTurnCard" | "listActionableWorkerTurnCardIds" | "listRecoverableWorkerTurnIds" | "listWorkerTurnCardPages" | "getWorkerTurnCardDeliveryFacts" | "getWorkerAnswerTimelinePage" | "listFrozenWorkerAnswerTimelineItems" | "getWorkerProjectionGapSummary" | "reserveWorkerAnswerTimelineCard" |
   "reserveWorkerTurnContent" | "reserveWorkerTurnProgress" | "reserveWorkerTurnFinish" |
-  "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation"
+  "reserveWorkerTurnCardHydration" | "reserveWorkerTurnContinuation" | "reserveWorkerTurnRecovery" | "prepareWorkerCompletionActionSet"
 >;
 
 export type InstanceMessagingStore = Pick<InstanceStore,
-  "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "getActiveInstanceTurn" |
+  "acceptInstanceTurn" | "acceptInstanceTurnWithCard" | "acceptWorkerCompletionAction" | "ignoreWorkerCompletionAction" | "resolveWorkerCompletionChoice" | "resolveFreshWorkerCompletionReview" | "getActiveInstanceTurn" |
   "getActiveOrdinaryPrompt" | "getAgentInstance" | "getBinding" |
-  "getInstanceTurn" | "listAgentInstances" | "listInstanceEvents" |
+  "getInstanceTurn" | "loadWorkerTurnCard" | "listAgentInstances" | "listInstanceEvents" |
   "listInstanceTurns" | "listWorkerInstancesByParent"
 >;
 

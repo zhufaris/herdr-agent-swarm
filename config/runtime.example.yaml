@@ -9,10 +9,16 @@ runtime:
     herdrSnapshotTtlMs: 2000
 
   cards:
-    updateDebounceMs: 500
+    updateDebounceMs: 250
     payloadLimitChars: 12000
     answerStreamLimitChars: 28000
-    answerPageLimitChars: 9000
+    answerPageLimitChars: 21000
+    # hidden | summary | visible. The default is visible and contains only
+    # redacted, bounded reasoning text already visible in the Herdr pane.
+    reasoningDisplay: visible
 
   paneClosure:
     confirmationTtlMs: 60000
+
+  recovery:
+    externalTurnNotFoundMaxAttempts: 3

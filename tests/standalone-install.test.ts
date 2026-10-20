@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,6 +82,8 @@ describe("standalone installer", () => {
     expect(productionBuildScript).toContain('npm --prefix "$CACHE_WORK" ci --omit=dev --include=optional --ignore-scripts=false --install-strategy=hoisted');
     expect(productionBuildScript).toContain('tar -xzf "$CACHE_ARCHIVE" -C "$STAGING"');
     expect(productionBuildScript).toContain('RELEASE_KEY="$BUILD_ID-$GIT_COMMIT"');
+    expect(productionBuildScript).toContain('plugins/herdr-choice-list');
+    expect(productionBuildScript).toContain('traecli plugin validate --path');
     expect(productionBuildScript).not.toContain('$STATE_DIR/current');
     expect(packagedInstallScript).toContain('SWARM_RELEASE_CANDIDATE="$RELEASE"');
     expect(packagedInstallScript).not.toContain('mv -Tf "$LINK" "$STATE_DIR/current"');
@@ -111,9 +113,27 @@ describe("standalone installer", () => {
 
     expect(result.status, result.stderr).toBe(0);
     const candidate = result.stdout.trim().split("\n").at(-1)!;
+    expect(existsSync(join(candidate, "plugins/herdr-choice-list/.codex-plugin/plugin.json"))).toBe(true);
+    expect(existsSync(join(candidate, "plugins/herdr-choice-list/hooks/hooks.json"))).toBe(true);
     expect(existsSync(join(state, "current"))).toBe(true);
     expect(readlinkSync(join(state, "current"))).toBe(join(releases, names[0]!));
     expect(readdirSync(releases).sort()).toEqual([...names, candidate.split("/").at(-1)!].sort());
+  });
+
+  it("does not publish a candidate when staged plugin validation fails", () => {
+    const fixture = createProductionStageFixture("standalone-plugin-validation-");
+    const calls = join(fixture.root, "npm.calls");
+    writeFakeNpm(fixture.bin, calls);
+    executable(join(fixture.bin, "traecli"), "#!/bin/sh\nexit 12\n");
+
+    const result = spawnSync("/bin/bash", [fixture.script, fixture.state], {
+      encoding: "utf8", env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}` }
+    });
+
+    expect(result.status).toBe(12);
+    const releases = join(fixture.state, "releases");
+    expect(readdirSync(releases).filter((name) => !name.startsWith("."))).toEqual([]);
+    expect(readdirSync(releases).filter((name) => name.startsWith(".staging"))).toEqual([]);
   });
 
   it("reuses an exact validated immutable release without copying or npm install", () => {
@@ -428,6 +448,7 @@ function createProductionStageFixture(prefix: string) {
   copyFileSync("package.json", join(project, "package.json"));
   copyFileSync("package-lock.json", join(project, "package-lock.json"));
   copyFileSync("dist/build-info.json", join(project, "dist/build-info.json"));
+  cpSync("plugins/herdr-choice-list", join(project, "plugins/herdr-choice-list"), { recursive: true });
   writeFileSync(join(project, "dist/main.js"), "export {};\n");
   return { root, project, bin, state, script: join(project, "scripts/stage-production-runtime.sh") };
 }

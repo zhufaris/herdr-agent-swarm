@@ -35,6 +35,17 @@ export class WorktreeNameResolver {
     finally { if (this.inFlight.get(cwd) === lookup) this.inFlight.delete(cwd); }
   }
 
+  async resolveBranch(cwd: string | null | undefined): Promise<string | null> {
+    if (!cwd) return null;
+    try {
+      const { stdout } = await this.runner.run("git", ["-C", cwd, "branch", "--show-current"], this.timeoutMs);
+      const branch = stdout.trim();
+      return branch || null;
+    } catch {
+      return null;
+    }
+  }
+
   private async lookup(cwd: string): Promise<string | null> {
     let value: string | null = null;
     try {

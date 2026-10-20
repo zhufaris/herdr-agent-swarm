@@ -6,6 +6,7 @@ import type { InstanceControlPort } from "../domain/ports/instance-workflows.js"
 import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { CommandIntentWorkflowStore } from "../domain/ports/swarm-command.js";
+import type { PrimaryCardRedelivery } from "../domain/ports/primary-card-redelivery.js";
 import { swarmCommandPolicy, swarmCommandSourceDecision, type SwarmCommandContext } from "../domain/swarm-command.js";
 import type { BridgeCommand, Binding, IncomingLarkCardAction, IncomingLarkMessage } from "../domain/types.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
@@ -14,7 +15,7 @@ import type { ModelSelectionWorkflowPort } from "./model-selection-workflow.js";
 import type { OperationsQueryWorkflowPort } from "./operations-query-workflow.js";
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
-import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
+import type { RecoverySupervisorPort } from "./recovery-supervisor.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import { CommandIntentObserver, type CommandIntentObservation } from "./command-intent-observer.js";
 import { SwarmCommandContextResolver, type SwarmCommandContextResolution } from "./swarm-command-context-resolver.js";
@@ -24,14 +25,18 @@ interface Options {
   resolver: SwarmCommandContextResolver; outbound: Pick<OutboundIntentPort, "enqueueCard">; logger: Logger;
   provisioning: BindingProvisioningWorkflowPort; modelSelection: ModelSelectionWorkflowPort; paneControl: PaneControlWorkflowPort;
   operationsQuery: OperationsQueryWorkflowPort; sessionAdministration: SessionAdministrationWorkflowPort; paneClosure: PaneClosureWorkflowPort;
-  promptRun: PromptRunWorkflowPort; instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">;
+  instanceControl: Pick<InstanceControlPort, "createWorker" | "inspect">;
+  orchestratorClear?: Pick<import("./orchestrator-clear-workflow.js").OrchestratorClearWorkflow, "request">;
+  recoverySupervisor: Pick<RecoverySupervisorPort, "recoverBinding">; primaryCardRedelivery: PrimaryCardRedelivery;
   wakeCardContext(): void;
   wakeOutbound?(): void;
   wakeCommand?(intentId: string): void;
-  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "skipStatus" | "requestRejected" | "commandResult" | "commandStatus">;
+  deferDispatchUntilRecovery?: boolean;
+  presentation: Pick<ApplicationPresentation, "help" | "awakeStatus" | "requestRejected" | "commandResult" | "commandStatus">;
 }
 
 type WorkerCreateCommand = Extract<BridgeCommand, { kind: "worker_create" }>;
+type CardSessionMutationCommand = Extract<BridgeCommand, { kind: "stop" | "reset" | "archive" | "resume" | "replace" | "pane_close_request" | "rename" | "reattach" }>;
 type PrimaryToolCommandRequest = {
   source: "primary-tool"; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string; idempotencyKey: string; command: WorkerCreateCommand;
 };
@@ -39,6 +44,7 @@ export type SwarmCommandRequest =
   | { source: "literal"; message: IncomingLarkMessage; command: BridgeCommand }
   | { source: "natural-language"; message: IncomingLarkMessage; command: BridgeCommand }
   | { source: "card"; action: IncomingLarkCardAction; bindingId: string; command: WorkerCreateCommand }
+  | { source: "card"; action: IncomingLarkCardAction; bindingId: string; bindingGeneration: number; interactionId: string; command: CardSessionMutationCommand }
   | PrimaryToolCommandRequest;
 export type SwarmCommandReceipt =
   | { outcome: "query-completed"; commandKind: BridgeCommand["kind"] }
@@ -82,13 +88,22 @@ export class SwarmCommandGateway implements SwarmCommandRuntime {
     }
     if (sourceDecision === "confirm") return { outcome: "confirmation-required", commandKind: command.kind, context: resolved.context };
     if (!this.accepting) return { outcome: "rejected", commandKind: command.kind, code: "shutting_down", message: "Swarm command admission is stopping" };
-    const accepted = this.options.store.acceptCommandIntent({ id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt: new Date().toISOString() }, request.source, this.options.presentation.commandStatus);
+    const acceptedAt = new Date().toISOString();
+    const intent = { id: randomUUID(), idempotencyKey, laneKey: resolved.laneKey, command, context: resolved.context, replayPolicy: policy.replay as Exclude<typeof policy.replay, "none">, acceptedAt };
+    const accepted = request.source === "card" && "interactionId" in request
+      ? this.options.store.acceptCardCommandIntent({ interactionId: request.interactionId, expectedBindingGeneration: request.bindingGeneration, intent, now: acceptedAt }, this.options.presentation.commandStatus)
+      : this.options.store.acceptCommandIntent(intent, request.source, this.options.presentation.commandStatus);
+    if (accepted.outcome === "missing" || accepted.outcome === "unauthorized" || accepted.outcome === "expired" || accepted.outcome === "stale") {
+      return { outcome: "rejected", commandKind: command.kind, code: `card_interaction_${accepted.outcome}`, message: "Card interaction is unavailable or stale" };
+    }
     if (accepted.outcome === "conflict") return { outcome: "conflict", commandKind: command.kind, intent: accepted.intent };
-    this.options.logger.info({ event: "swarm-command-admitted", intentId: accepted.intent.id, laneKey: accepted.intent.laneKey, commandKind: command.kind, source: request.source, outcome: accepted.outcome }, "Swarm command admitted");
+    const acceptedIntent = accepted.intent;
+    if (!acceptedIntent) return { outcome: "rejected", commandKind: command.kind, code: "card_interaction_stale", message: "Card interaction is unavailable or stale" };
+    this.options.logger.info({ event: "swarm-command-admitted", intentId: acceptedIntent.id, laneKey: acceptedIntent.laneKey, commandKind: command.kind, source: request.source, outcome: accepted.outcome }, "Swarm command admitted");
     this.options.wakeOutbound?.();
-    if (this.options.wakeCommand) this.options.wakeCommand(accepted.intent.id);
-    else this.dispatcher.wake(accepted.intent.id);
-    return { outcome: "accepted", commandKind: command.kind, intent: this.options.store.getCommandIntent(accepted.intent.id) ?? accepted.intent };
+    if (this.options.wakeCommand) this.options.wakeCommand(acceptedIntent.id);
+    else this.dispatcher.wake(acceptedIntent.id);
+    return { outcome: "accepted", commandKind: command.kind, intent: this.options.store.getCommandIntent(acceptedIntent.id) ?? acceptedIntent };
   }
 
   recover(): Promise<void> { return this.dispatcher.recover(); }
@@ -114,16 +129,19 @@ export class SwarmCommandGateway implements SwarmCommandRuntime {
     }
     if (request.source === "card") {
       const binding = this.options.store.getBinding(request.bindingId);
-      const message: IncomingLarkMessage = { eventId: `card:${request.action.messageId}`, messageId: request.action.messageId, parentMessageId: null, chatId: request.action.chatId, topicId: binding?.topicId ?? null, rootMessageId: binding?.rootMessageId ?? request.action.messageId, actorOpenId: request.action.operatorOpenId, text: "/swarm worker create", mentionsBot: true, isRootMessage: false };
+      const cardMutation = "interactionId" in request;
+      const messageId = cardMutation ? request.interactionId : request.action.messageId;
+      const message: IncomingLarkMessage = { eventId: `card:${request.action.messageId}`, messageId, parentMessageId: null, chatId: request.action.chatId, topicId: binding?.topicId ?? null, rootMessageId: binding?.rootMessageId ?? request.action.messageId, actorOpenId: request.action.operatorOpenId, text: cardMutation ? `CardKit ${request.command.kind}` : "/swarm worker create", mentionsBot: true, isRootMessage: false };
       const resolved = this.options.resolver.resolve(message, request.command, request.bindingId);
       if (resolved.outcome === "rejected") return resolved;
+      if (cardMutation) return { outcome: "resolved", message, command: request.command, resolved, idempotencyKey: `interaction:${request.interactionId}:${request.command.kind}` };
       const fingerprint = createHash("sha256").update(JSON.stringify(request.command)).digest("hex");
       return { outcome: "resolved", message, command: request.command, resolved, idempotencyKey: `lark-card:${request.action.messageId}:worker-create:${request.action.operatorOpenId}:${fingerprint}` };
     }
     const binding = this.options.store.getBinding(request.bindingId);
     if (!binding || binding.generation !== request.bindingGeneration || binding.rootMessageId !== request.rootMessageId) return { outcome: "rejected", code: "binding_required", message: "Primary tool context is stale" };
     const prompt = this.options.primaryPrompts.getActiveOrdinaryPrompt(request.bindingId, request.bindingGeneration);
-    if (!prompt || prompt.id !== request.parentPromptId || prompt.larkMessageId !== request.sourceMessageId) return { outcome: "rejected", code: "binding_required", message: "Primary tool active prompt changed" };
+    if (!prompt || !prompt.larkMessageId || prompt.id !== request.parentPromptId || prompt.larkMessageId !== request.sourceMessageId) return { outcome: "rejected", code: "binding_required", message: "Primary tool active prompt changed" };
     const message: IncomingLarkMessage = { eventId: `primary-tool:${request.parentPromptId}:${request.idempotencyKey}`, messageId: request.sourceMessageId, parentMessageId: null, chatId: binding.chatId, topicId: binding.topicId, rootMessageId: request.rootMessageId, actorOpenId: prompt.actorOpenId, text: "Primary tool worker create", mentionsBot: true, isRootMessage: false };
     const resolved = this.options.resolver.resolve(message, request.command, request.bindingId);
     if (resolved.outcome === "rejected") return resolved;

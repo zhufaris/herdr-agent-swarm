@@ -1,7 +1,7 @@
 import type { ProvisioningCheckpoint } from "../domain/pane-thread-lifecycle.js";
 
 export type SelectedCheckpointDecision = "create_pane" | "manual_attach" | "continue";
-export type PaneCreatedCheckpointDecision = "start_runtime" | "replace_pane" | "reject_missing_capability" | "continue";
+export type PaneCreatedCheckpointDecision = "start_runtime" | "replace_pane" | "pause_process_probe_unavailable" | "reject_missing_capability" | "continue";
 
 /**
  * Recovery must never guess whether a previously selected request created a
@@ -21,11 +21,13 @@ export function decideSelectedCheckpoint(checkpoint: ProvisioningCheckpoint, all
 export function decidePaneCreatedCheckpoint(input: {
   checkpoint: ProvisioningCheckpoint;
   hasPrimaryToolCapability: boolean;
+  processProbe?: "observed" | "unavailable";
   traexProcess: boolean;
   composerReady: boolean;
 }): PaneCreatedCheckpointDecision {
   if (input.checkpoint !== "pane_created") return "continue";
   if (!input.hasPrimaryToolCapability) return "reject_missing_capability";
+  if (input.processProbe === "unavailable") return "pause_process_probe_unavailable";
   if (input.traexProcess && !input.composerReady) return "replace_pane";
   return "start_runtime";
 }

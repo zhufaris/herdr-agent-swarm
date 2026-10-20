@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import pino from "pino";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,17 @@ let directory: string | undefined; let store: SqliteBindingStore | undefined; le
 afterEach(async () => { await gateway?.stop(); store?.close(); if (directory) await rm(directory, { recursive: true, force: true }); gateway = undefined; store = undefined; directory = undefined; });
 
 describe("Primary tool gateway", () => {
+  it("rolls back a failed start so a later start can retry", async () => {
+    directory = await mkdtemp(join(tmpdir(), "primary-tools-retry-"));
+    store = new SqliteBindingStore(join(directory, "bridge.db"));
+    createPrimary(store);
+    const missing = join(directory, "missing");
+    gateway = new PrimaryToolGateway(join(missing, "tools.sock"), process.execPath, [], store, {} as never, pino({ enabled: false }));
+
+    await expect(gateway.start()).rejects.toBeDefined();
+    await mkdir(missing);
+    await gateway.start();
+  });
   it("executes at most one request per connection and closes idle clients", async () => {
     directory = await mkdtemp(join(tmpdir(), "primary-tools-framing-"));
     store = new SqliteBindingStore(join(directory, "bridge.db"));
@@ -76,7 +87,7 @@ describe("Primary tool gateway", () => {
     directory = await mkdtemp(join(tmpdir(), "primary-tools-"));
     store = new SqliteBindingStore(join(directory, "bridge.db"));
     createPrimary(store, "parent-server-owned");
-    store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, parent: { bindingId: "binding", paneId: "p", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    store.createAgentInstance({ id: "worker", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, parent: { bindingId: "binding", bindingGeneration: 1, paneId: "p", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     store.createAgentInstance({ id: "other-worker", projectId: "p2", name: "other-worker", role: "worker", agentKind: "codex", model: null, parent: { bindingId: "other-binding", paneId: "other-primary-pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "other-worker-ws", kind: "shared-read-only", cwd: "/other", branch: null, baseCommit: "base" } });
     store.createAgentInstance({ id: "legacy-primary", projectId: "p1", name: "legacy-primary", role: "primary", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "legacy-primary-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     const driver = { kind: "codex", describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "terminal-input", interrupt: "terminal-signal", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }), start: async () => undefined, submit: async () => ({ status: "confirmed-delivered" as const }) } satisfies AgentRuntimeDriver;
@@ -98,12 +109,31 @@ describe("Primary tool gateway", () => {
     await expect(call(socketPath, { bindingId: "binding", generation: 2, capability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "inspectInstance", arguments: { instanceId: "other-worker" } })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/authorized current thread Primary/) });
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "inspectInstance", arguments: { instanceId: "legacy-primary" } })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/only Workers owned by this Primary pane/) });
+    await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "listPanes", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Orchestrator binding/) });
     await expect(call(socketPath, { bindingId: "binding", instanceId: "primary", generation: 1, capability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false });
 
     store.updatePrompt("parent-server-owned", "delivered");
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/active ordinary binding prompt/) });
     store.updateBinding("binding", { state: "archived", lifecycle: "archived" });
     await expect(call(socketPath, { bindingId: "binding", generation: 1, capability, tool: "listInstances", arguments: {} })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/invalid or stale/) });
+  });
+
+  it("selects the Orchestrator launch profile and keeps topology project scope server-owned", async () => {
+    directory = await mkdtemp(join(tmpdir(), "primary-tools-orchestrator-"));
+    store = new SqliteBindingStore(join(directory, "bridge.db"));
+    const reserved = store.createOrGetPendingOrchestratorBinding({ id: "orchestrator", gatewayId: "feishu", projectId: "p1", workspaceId: "w", chatId: "c", title: "Orchestrator", creatorOpenId: "u" });
+    store.updateBinding(reserved.binding.id, { state: "active", lifecycle: "active", attachment: "attached", paneId: "p", topicId: "t", rootMessageId: "root" });
+    const view = createQueuedRunCard({ promptId: "parent", bindingId: "orchestrator", title: "parent", workspaceId: "w", paneId: "p", requestText: "coordinate", queuePosition: 1, occurredAt: "2026-10-02T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "parent", bindingId: "orchestrator", larkMessageId: "message", actorOpenId: "u", body: "coordinate" }, view, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt("parent", "running");
+    const topology = { listSpaces: vi.fn(() => [{ projectId: "p1" }]), listPanes: vi.fn(async () => [{ paneId: "p" }]) };
+    const socketPath = join(directory, "tools.sock");
+    gateway = new PrimaryToolGateway(socketPath, process.execPath, ["primary-tools"], store, {} as never, pino({ enabled: false }), [], {}, undefined, topology as never);
+    const launch = gateway.issueBinding("orchestrator", 1);
+    expect(launch.args).toEqual(expect.arrayContaining(["--profile", "orchestrator"]));
+    await gateway.start();
+    await expect(call(socketPath, { bindingId: "orchestrator", generation: 1, capability: launch.environment.SWARM_PRIMARY_CAPABILITY, tool: "listPanes", arguments: { projectId: "forged", paneId: "forged" } })).resolves.toEqual({ ok: true, result: [{ paneId: "p" }] });
+    expect(topology.listPanes).toHaveBeenCalledWith("p1");
   });
 
   it("keeps a persisted capability valid across gateway restart", async () => {
@@ -130,6 +160,22 @@ describe("Primary tool gateway", () => {
 
     await expect(call(socketPath, { bindingId: "binding", generation: 2, capability: launch.environment.SWARM_PRIMARY_CAPABILITY, tool: "listInstances", arguments: {} })).resolves.toMatchObject({
       ok: false, error: expect.stringMatching(/active ordinary binding prompt/)
+    });
+  });
+
+  it("rejects a current Prompt without a real Lark source message", async () => {
+    directory = await mkdtemp(join(tmpdir(), "primary-tools-no-lark-message-"));
+    store = new SqliteBindingStore(join(directory, "bridge.db"));
+    createPrimary(store, "internal-parent");
+    store.database.prepare("UPDATE prompt_jobs SET lark_message_id = NULL, ingress_source = 'internal', source_message_key = 'internal:parent' WHERE id = 'internal-parent'").run();
+    const messaging = new InstanceMessagingWorkflow({ store, drivers: new AgentDriverRegistry([]), paneHost: {} as never, turnControl: { steer: async () => { throw new Error("not active"); } } as never, wake: () => undefined, idFactory: () => "unused", presentation: workerPresentation });
+    const socketPath = join(directory, "tools.sock");
+    gateway = new PrimaryToolGateway(socketPath, process.execPath, [], store, messaging, pino({ enabled: false }));
+    const launch = gateway.issueBinding("binding", 1);
+    await gateway.start();
+
+    await expect(call(socketPath, { bindingId: "binding", generation: 1, capability: launch.environment.SWARM_PRIMARY_CAPABILITY, tool: "listInstances", arguments: {} })).resolves.toMatchObject({
+      ok: false, error: expect.stringMatching(/Lark source message/)
     });
   });
 

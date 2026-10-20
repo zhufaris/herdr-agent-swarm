@@ -1,11 +1,11 @@
 import type { TurnOutputObservation } from "../domain/events.js";
-import type { TraexTranscriptObservation } from "../domain/ports/external.js";
+import type { AgentTranscriptObservation } from "../domain/ports/external.js";
 import { appendTurnOutput, type BoundedTurnOutput } from "../runtime/bounded-turn-output.js";
 
 export interface OwnedTranscriptOutputState {
   emitted: boolean;
   output: BoundedTurnOutput;
-  terminalLifecycle?: NonNullable<TraexTranscriptObservation["turnLifecycle"]>;
+  terminalLifecycle?: NonNullable<AgentTranscriptObservation["turnLifecycle"]>;
 }
 
 export interface OwnedTranscriptOutputProjection {
@@ -20,7 +20,7 @@ export interface OwnedTranscriptOutputProjection {
  */
 export function projectOwnedTranscriptOutput(input: {
   state: OwnedTranscriptOutputState;
-  observation: TraexTranscriptObservation;
+  observation: AgentTranscriptObservation;
   elapsedSeconds?: number;
 }): OwnedTranscriptOutputProjection {
   const lifecycle = input.observation.turnLifecycle;
@@ -40,10 +40,12 @@ export function projectOwnedTranscriptOutput(input: {
       ...(input.observation.mainStatus.tokenCount !== undefined ? { tokenCount: input.observation.mainStatus.tokenCount } : {})
     }
     : undefined;
-  const observation = answerChanged || input.observation.timelineDeltas?.length || input.observation.toolActivities?.length || mainStatus
+  const observation = answerChanged || input.observation.model || input.observation.timelineDeltas?.length || input.observation.toolActivities?.length || input.observation.goalChanges?.length || mainStatus || input.observation.coreEventSettlement
     ? {
+      ...(input.observation.coreEventSettlement ? { coreEventSettlement: input.observation.coreEventSettlement } : {}),
+      ...(input.observation.goalChanges?.length ? { goalChanges: input.observation.goalChanges } : {}),
       answer: { snapshot: answerSnapshot, update: answerUpdate, toolActivities: input.observation.toolActivities ?? [], ...(input.observation.timelineDeltas?.length ? { timelineDeltas: input.observation.timelineDeltas } : {}) },
-      main: { ...(mainStatus ? { status: mainStatus } : {}) }
+      main: { ...(mainStatus ? { status: mainStatus } : {}), ...(input.observation.model ? { model: input.observation.model } : {}) }
     }
     : undefined;
   return { state: { emitted, output, ...(terminalLifecycle ? { terminalLifecycle } : {}) }, ...(observation ? { observation } : {}) };

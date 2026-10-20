@@ -8,20 +8,33 @@ function harness() {
   const modelSelection = { selectModel: vi.fn(async () => {}), selectModelMode: vi.fn(async () => {}) };
   const deliveryRecovery = { openThread: vi.fn(async () => {}), decideDeadLetter: vi.fn(async () => {}), forwardPaneThread: vi.fn(async () => "sent" as "sent" | "stale") };
   const provisioning = { attach: vi.fn(async () => true), completeSelection: vi.fn(async () => null) };
+  const submitInitialAgentInput = vi.fn(async () => ({ outcome: "accepted" as const, submissionId: "initial-submission" }));
   const router = new CardActionRouter({
     chatId: "chat", allowedOpenIds: ["user"], adminOpenIds: ["user"],
     projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }],
     store: { getBinding: () => ({ chatId: "chat", creatorOpenId: "user" }) as never },
     provisioning: provisioning as never, cardInteractions, modelSelection: modelSelection as never, deliveryRecovery, instanceInteractions: instanceInteractions as never,
-    logger: { info: vi.fn(), error: vi.fn() }, enqueueInitialPrompt: vi.fn(async () => {}),
+    logger: { info: vi.fn(), error: vi.fn() }, submitInitialAgentInput,
   });
 
-  return { router, cardInteractions, instanceInteractions, modelSelection, deliveryRecovery, provisioning };
+  return { router, cardInteractions, instanceInteractions, modelSelection, deliveryRecovery, provisioning, submitInitialAgentInput };
 }
 
 const action = (value: unknown, option?: string) => ({ messageId: "card", chatId: "chat", operatorOpenId: "user", value, ...(option ? { option } : {}) });
 
 describe("card action router", () => {
+  it("submits completed project selection bootstrap through Agent Input", async () => {
+    const h = harness();
+    const binding = { id: "binding-1" };
+    const selection = { id: "selection-1", initialPromptText: "initial work" };
+    h.provisioning.completeSelection.mockResolvedValueOnce({ binding, selection } as never);
+
+    await expect(h.router.handle(action({ action: "select_project", selectionId: "selection-1", projectId: "p1" }))).resolves.toEqual({ toast: { type: "success", content: "项目创建已开始。" } });
+    await h.router.stop();
+
+    expect(h.submitInitialAgentInput).toHaveBeenCalledWith(binding, selection);
+  });
+
   it("waits for every admitted callback and rejects work after the shutdown gate", async () => {
     const h = harness();
     let release!: () => void;
@@ -46,6 +59,17 @@ describe("card action router", () => {
     await expect(h.router.handle(action({ action: "pane_worker_thread_forward", instanceId: "i1", generation: 4, workerSessionGeneration: 3, bindingId: "b1", bindingGeneration: 1, parentPaneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "success", content: "已将原始 Worker Thread 发送到群底部。" } });
     h.deliveryRecovery.forwardPaneThread.mockResolvedValueOnce("stale");
     await expect(h.router.handle(action({ action: "pane_primary_thread_forward", bindingId: "b1", bindingGeneration: 1, paneId: "pane-1", sourceMainMessageId: "om-main" }))).resolves.toEqual({ toast: { type: "warning", content: "该 Thread 尚未就绪或已失效，请刷新 `/swarm panes` 后重试。" } });
+  });
+
+  it("routes Worker completion actions to Worker interactions and Primary actions to Primary interactions", async () => {
+    const h = harness();
+    const base = { action: "completion_action", actionSetId: "actions-1", selection: "continue", ownerId: "owner-1", ownerGeneration: 2, cardMessageId: "card" };
+
+    await h.router.handle(action({ ...base, ownerKind: "worker-turn" }));
+    await h.router.handle(action({ ...base, ownerKind: "primary-prompt" }));
+
+    expect(h.instanceInteractions.handleCardAction).toHaveBeenCalledOnce();
+    expect(h.cardInteractions.handle).toHaveBeenCalledOnce();
   });
 
   it.each([

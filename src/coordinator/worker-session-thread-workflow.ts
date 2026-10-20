@@ -4,15 +4,18 @@ import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { WorkerSessionThreadApplicationStore, WorkerSessionThreadWorkflowPort, WorkerThreadPublicationTarget, WorkerThreadResolution } from "../domain/ports/worker-session-thread.js";
 import type { InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
+import type { AgentInputWorkflowPort } from "../domain/ports/agent-input.js";
+import type { HerdrPort } from "../domain/ports/external.js";
 
 export class WorkerSessionThreadWorkflow implements WorkerSessionThreadWorkflowPort {
   constructor(private readonly options: {
-    adminOpenIds: readonly string[]; store: WorkerSessionThreadApplicationStore; messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt">; outbound: OutboundIntentPort; wakeOutbound(): void;
+    gatewayId: string; adminOpenIds: readonly string[]; store: WorkerSessionThreadApplicationStore; messaging: Pick<InstanceMessagingPort, "steer" | "interrupt">;
+    agentInput: AgentInputWorkflowPort; herdr: Pick<HerdrPort, "getPane">; outbound: OutboundIntentPort; wakeOutbound(): void;
     gatewayEffects: Pick<GatewayEffectPort, "shareConversation">;
-    presentation: Pick<ApplicationPresentation, "requestRejected" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted">;
+    presentation: Pick<ApplicationPresentation, "requestRejected" | "workerStatusSnapshot" | "workerThreadEntry">;
   }) {}
 
-  async handleMessage(message: IncomingLarkMessage): Promise<{ handled: false } | { handled: true; disposition: "prompt_queued" | "command_completed" | "rejected" }> {
+  async handleMessage(message: IncomingLarkMessage): Promise<{ handled: false } | { handled: true; disposition: "agent_input_accepted" | "command_completed" | "rejected" }> {
     const resolution = this.options.store.resolveScope({ chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId });
     if (resolution.kind === "none") return { handled: false };
     if (!this.isOperator(message.actorOpenId)) { await this.reject(message, "你没有 Agent 管理权限。"); return handled("rejected"); }
@@ -34,7 +37,7 @@ export class WorkerSessionThreadWorkflow implements WorkerSessionThreadWorkflowP
     return warning("Worker 状态已变化，请刷新实例目录。");
   }
 
-  private async handleActiveMessage(message: IncomingLarkMessage, resolution: Extract<WorkerThreadResolution, { kind: "active" }>): Promise<{ handled: true; disposition: "prompt_queued" | "command_completed" | "rejected" }> {
+  private async handleActiveMessage(message: IncomingLarkMessage, resolution: Extract<WorkerThreadResolution, { kind: "active" }>): Promise<{ handled: true; disposition: "agent_input_accepted" | "command_completed" | "rejected" }> {
     const target = resolution.target; const text = message.text.trim(); const rootMessageId = target.rootMessageId;
     const actor = { kind: "human" as const, userId: message.actorOpenId, channel: "feishu" as const };
     if (/^\/status$/i.test(text)) {
@@ -54,16 +57,33 @@ export class WorkerSessionThreadWorkflow implements WorkerSessionThreadWorkflowP
       if (result.status !== "interrupted" && result.durableResult === false) { await this.reject(message, `停止当前任务：${result.status}`); return handled("rejected"); }
       return handled("command_completed");
     }
-    if (text.startsWith("/")) { await this.reject(message, "Worker 对话仅支持 `/status`、`/steer <文本>`、`/stop`；管理命令请回到 Primary Thread。"); return handled("rejected"); }
-    const submitted = await this.options.messaging.submit({ idempotencyKey: `lark:${message.messageId}`, actor, projectId: target.projectId, targetInstanceId: target.workerId, content: { kind: "turn", text: message.text }, source: { messageId: message.messageId, rootMessageId } });
-    await this.options.outbound.enqueueCard(rootMessageId, `worker-thread:accepted:${message.messageId}`, this.options.presentation.workerThreadAccepted({ workerName: target.workerName, queuePosition: submitted.card?.queuePosition ?? 1, duplicate: !submitted.inserted }));
-    return handled("prompt_queued");
+    if (target.agentKind !== "traex" && target.agentKind !== "pi") { await this.reject(message, `Worker Agent ${target.agentKind} 不支持可靠 Agent Input。`); return handled("rejected"); }
+    if (!target.paneId) { await this.reject(message, "Worker 尚未连接可提交输入的 Herdr Pane。"); return handled("rejected"); }
+    const pane = await this.options.herdr.getPane(target.paneId);
+    const observedSessionId = pane?.agentSession?.value ?? null;
+    if (!pane?.terminalId || pane.agentKind !== target.agentKind || observedSessionId !== target.nativeSessionId) {
+      await this.reject(message, "Worker 运行时身份已变化，请刷新后重试。");
+      return handled("rejected");
+    }
+    const submitted = await this.options.agentInput.submit({
+      ingressSource: this.options.gatewayId,
+      sourceMessageKey: message.messageId,
+      actor: { kind: "human", id: message.actorOpenId, gatewayId: this.options.gatewayId, chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId },
+      text: message.text,
+      owner: { kind: "worker", id: target.workerId, generation: target.runtimeGeneration },
+      paneId: target.paneId,
+      terminalId: pane.terminalId,
+      expectedAgentKind: target.agentKind,
+      expectedSessionId: target.nativeSessionId
+    });
+    if (submitted.outcome === "conflict") { await this.reject(message, "这条 Worker 消息与已受理内容冲突。"); return handled("rejected"); }
+    return handled("agent_input_accepted");
   }
 
   private isOperator(openId: string): boolean { return this.options.adminOpenIds.includes(openId); }
   private reject(message: IncomingLarkMessage, reason: string): Promise<void> { return this.options.outbound.enqueueCard(message.rootMessageId ?? message.messageId, `rejected:${message.messageId}`, this.options.presentation.requestRejected(reason)); }
 }
 
-function handled(disposition: "prompt_queued" | "command_completed" | "rejected") { return { handled: true as const, disposition }; }
+function handled(disposition: "agent_input_accepted" | "command_completed" | "rejected") { return { handled: true as const, disposition }; }
 function success(content: string): LarkCardActionResult { return { toast: { type: "success", content } }; }
 function warning(content: string, error = false): LarkCardActionResult { return { toast: { type: error ? "error" : "warning", content } }; }

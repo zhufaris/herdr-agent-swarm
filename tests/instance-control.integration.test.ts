@@ -13,7 +13,7 @@ afterEach(() => { store?.close(); store = undefined; });
 
 const project = { id: "project-a", displayName: "Project A", description: "A", workspaceId: "herdr-a", cwd: "/repo", maxInstances: 4 };
 const pane = { paneId: "herdr-a:p1", workspaceId: "herdr-a", cwd: "/repo", label: null, agentState: "idle" as const, foregroundExecutables: ["traex"], agentKind: "traex", terminalId: "term-1" };
-const primaryPane = { ...pane, paneId: "herdr-a:primary", label: "lark_ilcs" };
+const primaryPane = { ...pane, paneId: "herdr-a:primary", paneToken: "ilcs", tabId: "herdr-a:t1", label: "lark_ilcs" };
 
 function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreePort["prepare"]; primaryTools?: { issue: ReturnType<typeof vi.fn>; configuration: ReturnType<typeof vi.fn> }; agentKind?: AgentKind; observedAgentKind?: string } = {}) {
   store = new SqliteBindingStore(":memory:");
@@ -39,6 +39,14 @@ function setup(overrides: { start?: () => Promise<void>; prepare?: WorktreePort[
 }
 
 describe("InstanceControlWorkflow", () => {
+  it("keeps a newly started sessionless Worker eligible for first-session Agent Input", async () => {
+    const { workflow } = setup();
+
+    const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
+
+    expect(instance.runtimeRef).toMatchObject({ paneId: "herdr-a:p1", nativeSessionId: null });
+  });
+
   it("accepts Herdr's canonical claude kind for a Claude Code instance", async () => {
     const { workflow } = setup({ agentKind: "claude-code", observedAgentKind: "claude" });
     await expect(workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "claude-code", model: null, start: true, bindingId: "binding-1" })).resolves.toMatchObject({ status: "created", instance: { agentKind: "claude-code", observedState: "idle" } });
@@ -97,11 +105,28 @@ describe("InstanceControlWorkflow", () => {
 
   it.each(["ilcs", "lark_ilcs", "LARK_ILCS", "lark_task-ilcs", "task-ilcs"])("reuses the Primary token from %s in the Worker pane title", async (label) => {
     const { workflow, paneHost } = setup();
-    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? { ...primaryPane, label } : pane);
+    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? { ...primaryPane, paneToken: null, label } : pane);
 
     await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
 
-    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.stringMatching(/^\/repo\/.worktree\/lark-[a-f0-9]{10}-reviewer$/), expect.objectContaining({ title: "lark_ilcs-reviewer", titlePolicy: "complete" }));
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.stringMatching(/^\/repo\/.worktree\/lark-[a-f0-9]{10}-reviewer$/), expect.objectContaining({
+      placement: "split", anchorPaneId: primaryPane.paneId,
+      displayIdentity: { groupToken: "ilcs", role: { kind: "worker", name: "reviewer" } }
+    }));
+  });
+
+  it("prefers the live Primary pane token and anchors the Worker split to that exact pane", async () => {
+    const { workflow, paneHost } = setup();
+    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId
+      ? { ...primaryPane, paneToken: "vdfn", label: "lark_stale" }
+      : pane);
+
+    await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
+
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.any(String), expect.objectContaining({
+      placement: "split", anchorPaneId: primaryPane.paneId,
+      displayIdentity: { groupToken: "vdfn", role: { kind: "worker", name: "reviewer" } }
+    }));
   });
 
   it("reuses one Primary token across sibling Worker pane titles", async () => {
@@ -110,7 +135,10 @@ describe("InstanceControlWorkflow", () => {
     await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
     await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "tester", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
 
-    expect(vi.mocked(paneHost.allocatePane).mock.calls.map((call) => call[2]?.title)).toEqual(["lark_ilcs-reviewer", "lark_ilcs-tester"]);
+    expect(vi.mocked(paneHost.allocatePane).mock.calls.map((call) => call[2]?.displayIdentity)).toEqual([
+      { groupToken: "ilcs", role: { kind: "worker", name: "reviewer" } },
+      { groupToken: "ilcs", role: { kind: "worker", name: "tester" } }
+    ]);
   });
 
   it("scopes Herdr agent names to the parent Primary token", async () => {
@@ -126,17 +154,21 @@ describe("InstanceControlWorkflow", () => {
 
     await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name, agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
 
-    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.any(String), expect.objectContaining({ title: `lark_ilcs-${name}`, titlePolicy: "complete" }));
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.any(String), expect.objectContaining({
+      displayIdentity: { groupToken: "ilcs", role: { kind: "worker", name } }
+    }));
   });
 
   it.each([null, "primary-ilcs", "prefix-lark_ilcs", "lark_ilcs-extra"])("uses the parent pane ID when the Primary label is noncanonical: %s", async (label) => {
     const { workflow, paneHost } = setup();
-    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? { ...primaryPane, label } : pane);
+    vi.mocked(paneHost.inspectPane).mockImplementation(async (paneId: string) => paneId === primaryPane.paneId ? { ...primaryPane, paneToken: null, label } : pane);
 
     await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
 
     const token = primaryPaneToken(label, primaryPane.paneId);
-    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.any(String), expect.objectContaining({ title: `lark_${token}-reviewer`, titlePolicy: "complete" }));
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.any(String), expect.objectContaining({
+      displayIdentity: { groupToken: token, role: { kind: "worker", name: "reviewer" } }
+    }));
   });
 
   it("persists the source Primary pane label in the first Worker pane title", async () => {
@@ -147,7 +179,10 @@ describe("InstanceControlWorkflow", () => {
       : { ...pane, paneId, cwd: String(vi.mocked(paneHost.allocatePane).mock.calls.at(-1)?.[1]), label: null });
 
     const { instance } = await workflow.createWorker({ actor: { kind: "human", userId: "u1" }, projectId: "project-a", name: "reviewer", agentKind: "traex", model: null, start: true, bindingId: "binding-1" });
-    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.stringMatching(/^\/repo\/.worktree\/lark-[a-f0-9]{10}-reviewer$/), expect.objectContaining({ title: "lark_ilcs-reviewer", titlePolicy: "complete" }));
+    expect(paneHost.allocatePane).toHaveBeenLastCalledWith("herdr-a", expect.stringMatching(/^\/repo\/.worktree\/lark-[a-f0-9]{10}-reviewer$/), expect.objectContaining({
+      placement: "split", anchorPaneId: "primary-pane-id",
+      displayIdentity: { groupToken: "ilcs", role: { kind: "worker", name: "reviewer" } }
+    }));
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ sourcePrimaryPaneLabel: "lark_ilcs", parent: { bindingId: "binding-1", paneId: "primary-pane-id" } });
 
     await workflow.stop({ actor: { kind: "human", userId: "u1" }, instanceId: instance.id });

@@ -1,0 +1,29 @@
+{
+  "name": "herdr-choice-list",
+  "version": "1.0.0",
+  "description": "Adds bounded trace-end completion choices for eligible Herdr Agent Swarm TraeX sessions.",
+  "author": {
+    "name": "Herdr Agent Swarm"
+  },
+  "license": "MIT",
+  "keywords": [
+    "herdr",
+    "feishu",
+    "completion-choices"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Herdr Choice List",
+    "shortDescription": "Emit bounded Feishu completion choices",
+    "longDescription": "Lets an eligible Swarm-managed TraeX trace append a protocol-only completion choice list at its final Stop boundary.",
+    "developerName": "Herdr Agent Swarm",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use $herdr-choice-list:herdr-choice-list to append the protocol-only completion choices."
+    ]
+  }
+}

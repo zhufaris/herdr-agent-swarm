@@ -1,6 +1,7 @@
 import pino, { type DestinationStream, type Logger } from "pino";
 import { closeSync, constants, fchmodSync, fstatSync, openSync } from "node:fs";
 import { safeLogError } from "./safe-error.js";
+import type { DeliveryLatencyTrace } from "../domain/delivery-trace.js";
 
 export interface ServiceLogger { logger: Logger; close(): void }
 type ReopenableDestination = DestinationStream & { file: string | null; reopen(path?: string): void; end(): void };
@@ -25,4 +26,23 @@ export function createServiceLogger(level: string, logPath = process.env.BRIDGE_
   if (destination) process.on("SIGUSR2", reopen);
   let closed = false;
   return { logger, close() { if (destination && !closed) { closed = true; process.off("SIGUSR2", reopen); destination.end(); } } };
+}
+
+export function attachDeliveryLatencyLogging(trace: DeliveryLatencyTrace, logger: Logger): () => void {
+  return trace.subscribe({
+    onMetric(metric) {
+      logger.info({ event: "delivery-latency-metric", metric }, "recorded bounded delivery latency metric");
+    },
+    onObservation(observation) {
+      logger.debug({
+        event: "delivery-latency-stage",
+        stage: observation.stage,
+        outcome: observation.outcome,
+        correlation: observation.correlation
+      }, "observed payload-free delivery latency stage");
+    },
+    onDiagnostic(diagnostic) {
+      logger.debug({ event: "delivery-latency-diagnostic", diagnostic: diagnostic.kind, correlation: diagnostic.correlation }, "observed bounded delivery latency diagnostic");
+    }
+  });
 }

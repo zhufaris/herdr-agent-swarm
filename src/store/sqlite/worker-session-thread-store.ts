@@ -4,7 +4,8 @@ import type { WorkerSessionThreadApplicationStore, WorkerThreadPublicationDecisi
 import type { WorkerMainView } from "../../domain/worker-main-view.js";
 import { mapWorkerSessionThread, type WorkerSessionThreadRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
-import type { SqliteOutboxQueueStore } from "./outbox-queue-store.js";
+import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
+import type { PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
 
 export interface ReserveWorkerSessionThreadInput {
   publicationKey: string;
@@ -24,12 +25,47 @@ export interface ReserveWorkerSessionThreadInput {
 export type WorkerSessionThreadReservation = "reserved" | "duplicate" | "stale";
 
 export class SqliteWorkerSessionThreadStore {
-  private enqueueOutboundReply: ((input: Parameters<SqliteOutboxQueueStore["enqueue"]>[0]) => unknown) | null = null;
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext) {}
 
-  connectOutbox(enqueue: (input: Parameters<SqliteOutboxQueueStore["enqueue"]>[0]) => unknown): void {
-    if (this.enqueueOutboundReply) throw new Error("Worker Session Thread outbox is already connected");
-    this.enqueueOutboundReply = enqueue;
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void {
+    this.preparedDeliveryReservation = reservation;
+    this.preparedDeliveryConsumer = consumer;
+  }
+
+  getDeliveryTarget(threadId: string): {
+    threadId: string;
+    workerId: string;
+    workerSessionGeneration: number;
+    chatId: string;
+    topicId: string | null;
+    rootMessageId: string | null;
+    state: "reserving" | "active" | "stale";
+  } | null {
+    const row = this.context.database.prepare(`
+      SELECT id, worker_id, worker_session_generation, chat_id, topic_id, root_message_id, state
+      FROM worker_session_threads
+      WHERE id = ?
+    `).get(threadId) as {
+      id: string;
+      worker_id: string;
+      worker_session_generation: number;
+      chat_id: string;
+      topic_id: string | null;
+      root_message_id: string | null;
+      state: "reserving" | "active" | "stale";
+    } | undefined;
+    if (!row) return null;
+    return {
+      threadId: row.id,
+      workerId: row.worker_id,
+      workerSessionGeneration: Number(row.worker_session_generation),
+      chatId: row.chat_id,
+      topicId: row.topic_id,
+      rootMessageId: row.root_message_id,
+      state: row.state
+    };
   }
 
   resolveScope(scope: WorkerThreadScope): WorkerThreadResolution {
@@ -37,7 +73,7 @@ export class SqliteWorkerSessionThreadStore {
     if (!thread) return { kind: "none" };
     if (thread.state !== "active" || !thread.rootMessageId) return { kind: "stale", threadId: thread.id };
     const row = this.context.database.prepare(`
-      SELECT worker.name AS worker_name, worker.project_id, worker.generation AS runtime_generation, main.state_json, turn.id AS active_turn_id, turn.state AS active_turn_state
+      SELECT worker.name AS worker_name, worker.project_id, worker.generation AS runtime_generation, worker.pane_id, worker.agent_kind, worker.native_session_id, main.state_json, turn.id AS active_turn_id, turn.state AS active_turn_state
       FROM worker_session_threads thread
       JOIN agent_instances worker ON worker.id = thread.worker_id
       JOIN bindings binding ON binding.id = thread.parent_binding_id
@@ -49,17 +85,28 @@ export class SqliteWorkerSessionThreadStore {
         AND binding.chat_id = thread.chat_id AND binding.generation = thread.parent_binding_generation AND binding.pane_id = thread.parent_pane_id
         AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
       ORDER BY turn.created_at LIMIT 1
-    `).get(thread.id) as { worker_name: string; project_id: string; runtime_generation: number; state_json: string; active_turn_id: string | null; active_turn_state: string | null } | undefined;
+    `).get(thread.id) as { worker_name: string; project_id: string; runtime_generation: number; pane_id: string | null; agent_kind: "pi" | "claude-code" | "codex" | "traex"; native_session_id: string | null; state_json: string; active_turn_id: string | null; active_turn_state: string | null } | undefined;
     if (!row) return { kind: "stale", threadId: thread.id };
     return { kind: "active", target: {
-      threadId: thread.id, workerId: thread.workerId, workerName: row.worker_name, workerSessionGeneration: thread.workerSessionGeneration, projectId: row.project_id, runtimeGeneration: Number(row.runtime_generation),
+      threadId: thread.id, workerId: thread.workerId, workerName: row.worker_name, workerSessionGeneration: thread.workerSessionGeneration, projectId: row.project_id, runtimeGeneration: Number(row.runtime_generation), paneId: row.pane_id, agentKind: row.agent_kind, nativeSessionId: row.native_session_id,
       parentBindingId: thread.parentBindingId, parentBindingGeneration: thread.parentBindingGeneration, parentPaneId: thread.parentPaneId, rootMessageId: thread.rootMessageId, mode: thread.mode,
       view: JSON.parse(row.state_json) as WorkerMainView, activeTurn: row.active_turn_id ? { id: row.active_turn_id, state: row.active_turn_state! } : null
     } };
   }
 
   resolveCanonicalDirectoryTarget(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { conversationId: string; rootMessageId: string } | null {
-    const row = this.context.database.prepare(`
+    const row = this.findCanonicalDirectoryTarget(input);
+    const rootMessageId = row?.root_message_id ?? null;
+    const conversationId = row?.topic_id ?? rootMessageId;
+    return conversationId && rootMessageId ? { conversationId, rootMessageId } : null;
+  }
+
+  resolveCanonicalDirectoryThreadId(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): string | null {
+    return this.findCanonicalDirectoryTarget(input)?.topic_id ?? null;
+  }
+
+  private findCanonicalDirectoryTarget(input: { chatId: string; workerId: string; runtimeGeneration: number; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }): { topic_id: string | null; root_message_id: string | null } | undefined {
+    return this.context.database.prepare(`
       SELECT thread.topic_id, thread.root_message_id
       FROM worker_session_threads thread
       JOIN agent_instances worker ON worker.id = thread.worker_id
@@ -76,13 +123,10 @@ export class SqliteWorkerSessionThreadStore {
         AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
       LIMIT 1
     `).get(input.workerId, input.workerSessionGeneration, input.parentBindingId, input.parentBindingGeneration, input.parentPaneId, input.chatId, input.runtimeGeneration, input.sourceMainMessageId) as { topic_id: string | null; root_message_id: string | null } | undefined;
-    const rootMessageId = row?.root_message_id ?? null;
-    const conversationId = row?.topic_id ?? rootMessageId;
-    return conversationId && rootMessageId ? { conversationId, rootMessageId } : null;
   }
 
   reserveLegacyEntry(input: Parameters<WorkerSessionThreadApplicationStore["reserveLegacyEntry"]>[0]): WorkerThreadPublicationDecision {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.worker-session-thread-store.write", () => {
       const worker = this.context.database.prepare("SELECT generation, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id FROM agent_instances WHERE id = ? AND role = 'worker' AND worker_session_lifecycle = 'active'").get(input.target.instanceId) as { generation: number; worker_session_generation: number; parent_binding_id: string | null; parent_binding_generation: number | null; parent_pane_id: string | null } | undefined;
       if (!worker || Number(worker.generation) !== input.target.runtimeGeneration || Number(worker.worker_session_generation) !== input.target.workerSessionGeneration || worker.parent_binding_id !== input.target.bindingId || Number(worker.parent_binding_generation) !== input.target.bindingGeneration
         || (input.target.parentPaneId !== undefined && worker.parent_pane_id !== input.target.parentPaneId)) return { kind: "stale" };
@@ -101,7 +145,7 @@ export class SqliteWorkerSessionThreadStore {
   }
 
   private reserve(input: ReserveWorkerSessionThreadInput): WorkerSessionThreadReservation {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.worker-session-thread-store.write", () => {
       const existing = this.loadBySession(input.workerId, input.workerSessionGeneration);
       if (existing && existing.state !== "legacy-unpublished") return existing.state === "stale" ? "stale" : "duplicate";
       if (existing && input.mode !== "legacy-entry") return "stale";
@@ -129,17 +173,19 @@ export class SqliteWorkerSessionThreadStore {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserving', ?, ?)
         `).run(threadId, input.publicationKey, input.workerId, input.workerSessionGeneration, input.parentBindingId, input.parentBindingGeneration, input.parentPaneId, input.targetChatId, input.mode, sourceMainMessageId, input.actionMessageId ?? null, timestamp, timestamp);
       }
-      this.requireOutbox()({
+      this.enqueue({
         id: randomUUID(), idempotencyKey: input.publicationKey, bindingId: input.parentBindingId, workerId: input.workerId, workerSessionGeneration: input.workerSessionGeneration,
         workerThreadId: threadId, viewVersion: input.viewVersion ?? null, targetChatId: input.targetChatId, rootMessageId: null, kind: "group_card_create", payload: JSON.stringify(input.card),
-        laneKeyOverride: `worker-thread:${input.workerId}:${input.workerSessionGeneration}`
+        laneKeyOverride: `worker-thread:${input.workerId}:${input.workerSessionGeneration}`,
+        projectionKey: `worker-main:${input.workerId}:${input.workerSessionGeneration}`,
+        snapshotRevision: input.viewVersion ?? 1
       });
       return "reserved";
     });
   }
 
   settlePublication(input: { threadId: string; workerId: string; workerSessionGeneration: number; viewVersion: number | null; messageId: string; cardId: string | null; topicId: string; occurredAt: string }): { kind: "canonical" | "legacy" | "stale"; invalidations: Array<{ targetKind: "worker-session" | "primary-session"; targetId: string; targetGeneration: number; reason: string }> } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.worker-session-thread-store.write", () => {
       const thread = this.context.database.prepare("SELECT mode, parent_binding_id, parent_binding_generation FROM worker_session_threads WHERE id = ? AND worker_id = ? AND worker_session_generation = ? AND state = 'reserving'").get(input.threadId, input.workerId, input.workerSessionGeneration) as { mode: "canonical-main" | "legacy-entry"; parent_binding_id: string; parent_binding_generation: number } | undefined;
       if (!thread) throw new Error("Worker Session thread is stale");
       const valid = this.context.database.prepare(`SELECT 1 FROM worker_session_threads thread JOIN agent_instances worker ON worker.id = thread.worker_id JOIN bindings binding ON binding.id = thread.parent_binding_id WHERE thread.id = ? AND thread.state = 'reserving' AND worker.role = 'worker' AND worker.worker_session_lifecycle = 'active' AND worker.worker_session_generation = thread.worker_session_generation AND worker.parent_binding_id = thread.parent_binding_id AND worker.parent_binding_generation = thread.parent_binding_generation AND worker.parent_pane_id = thread.parent_pane_id AND binding.chat_id = thread.chat_id AND binding.generation = thread.parent_binding_generation AND binding.pane_id = thread.parent_pane_id AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'`).get(input.threadId);
@@ -161,10 +207,12 @@ export class SqliteWorkerSessionThreadStore {
   }
 
   reserveCanonicalMain(view: WorkerMainView, card: object): "reserved" | "waiting" | "current" | "stale" {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.worker-session-thread-store.write", () => {
       const binding = this.context.database.prepare("SELECT chat_id, root_message_id, generation, pane_id, state, lifecycle, attachment FROM bindings WHERE id = ?").get(view.parentBindingId) as { chat_id: string; root_message_id: string | null; generation: number; pane_id: string | null; state: string; lifecycle: string; attachment: string } | undefined;
-      const instance = this.context.database.prepare("SELECT role, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id FROM agent_instances WHERE id = ?").get(view.workerId) as { role: string; worker_session_generation: number; parent_binding_id: string | null; parent_binding_generation: number | null; parent_pane_id: string | null } | undefined;
-      if (!binding?.root_message_id || !instance || instance.role !== "worker" || Number(instance.worker_session_generation) !== view.workerSessionGeneration || instance.parent_binding_id !== view.parentBindingId || Number(instance.parent_binding_generation) !== view.parentBindingGeneration || instance.parent_pane_id !== view.parentPaneId || Number(binding.generation) !== view.parentBindingGeneration || binding.pane_id !== view.parentPaneId) return "stale";
+      const instance = this.context.database.prepare("SELECT role, worker_session_lifecycle, desired_state, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id, herdr_workspace_id, pane_id FROM agent_instances WHERE id = ?").get(view.workerId) as { role: string; worker_session_lifecycle: string | null; desired_state: string; worker_session_generation: number; parent_binding_id: string | null; parent_binding_generation: number | null; parent_pane_id: string | null; herdr_workspace_id: string | null; pane_id: string | null } | undefined;
+      if (!binding?.root_message_id || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached"
+        || !instance || instance.role !== "worker" || instance.worker_session_lifecycle !== "active" || instance.desired_state !== "running" || !instance.herdr_workspace_id || !instance.pane_id
+        || Number(instance.worker_session_generation) !== view.workerSessionGeneration || instance.parent_binding_id !== view.parentBindingId || Number(instance.parent_binding_generation) !== view.parentBindingGeneration || instance.parent_pane_id !== view.parentPaneId || Number(binding.generation) !== view.parentBindingGeneration || binding.pane_id !== view.parentPaneId) return "stale";
       const previous = this.loadMainView(view.workerId, view.workerSessionGeneration);
       const saved = this.saveMainView(view);
       if (!saved) return "stale";
@@ -209,7 +257,7 @@ export class SqliteWorkerSessionThreadStore {
     const creating = view.messageId === null;
     const key = `worker-main:create:${view.workerId}:${view.workerSessionGeneration}`;
     if (creating && this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ? AND (first_claimed_at IS NOT NULL OR attempt_count > 0 OR card_id_checkpoint IS NOT NULL)").get(key)) return;
-    this.requireOutbox()({ id: randomUUID(), idempotencyKey: creating ? key : `worker-main:update:${view.workerId}:${view.workerSessionGeneration}:${view.viewVersion}`, bindingId: view.parentBindingId, workerId: view.workerId, workerSessionGeneration: view.workerSessionGeneration, viewVersion: view.viewVersion, rootMessageId: creating ? fallbackRootMessageId : view.messageId!, kind: creating ? "card_reply" : "card_update", payload: JSON.stringify(card) });
+    this.enqueue({ id: randomUUID(), idempotencyKey: creating ? key : `worker-main:update:${view.workerId}:${view.workerSessionGeneration}:${view.viewVersion}`, bindingId: view.parentBindingId, workerId: view.workerId, workerSessionGeneration: view.workerSessionGeneration, viewVersion: view.viewVersion, rootMessageId: creating ? fallbackRootMessageId : view.messageId!, kind: creating ? "card_reply" : "card_update", payload: JSON.stringify(card), projectionKey: `worker-main:${view.workerId}:${view.workerSessionGeneration}`, snapshotRevision: view.viewVersion });
   }
 
   private loadBySession(workerId: string, workerSessionGeneration: number): WorkerSessionThread | null {
@@ -228,9 +276,15 @@ export class SqliteWorkerSessionThreadStore {
     return row ? mapWorkerSessionThread(row) : null;
   }
 
-  private requireOutbox(): (input: Parameters<SqliteOutboxQueueStore["enqueue"]>[0]) => unknown {
-    if (!this.enqueueOutboundReply) throw new Error("Worker Session Thread outbox is not connected");
-    return this.enqueueOutboundReply;
+  private enqueue(input: EnqueueOutboundReplyInput): void {
+    if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Worker Session Thread prepared delivery is not connected");
+    this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(input));
+  }
+
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void {
+    queueMicrotask(() => {
+      for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery);
+    });
   }
 }
 

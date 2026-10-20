@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { matchesHerdrAgentKind, type AgentInstance, type CreateWorkerResult, type InstanceRemovalPlan, type WorkspaceLease } from "../domain/agent-instance.js";
 import type { ControlActor, CreateWorkerCommand } from "../domain/commands.js";
-import { primaryPaneToken } from "../domain/pane-title.js";
+import { primaryGroupToken, primaryPaneToken } from "../domain/pane-title.js";
 import type { InstanceControlStore } from "../domain/ports/instance.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
@@ -58,7 +58,7 @@ export class InstanceControlWorkflow implements InstanceControlPort {
       instance = starting;
     }
     const project = this.requireProject(instance.projectId);
-    await this.requireLiveParent(project, parent);
+    const parentPane = await this.requireLiveParent(project, parent);
     const driver = this.options.drivers.get(instance.agentKind);
     if (!driver?.describe().available) throw new Error(`Agent adapter is unavailable: ${instance.agentKind}`);
     let workspace = this.requireWorkspace(instance.workspaceLeaseId);
@@ -75,20 +75,25 @@ export class InstanceControlWorkflow implements InstanceControlPort {
       }
       if (instance.provisioningCheckpoint === "workspace-ready") {
         await this.options.paneHost.ensureWorkspace(project.workspaceId);
-        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, { bindingId: instance.id, generation: instance.generation, projectId: project.id, placement: "dedicated-tab", title: workerPaneTitle(instance), titlePolicy: "complete" });
+        const groupToken = primaryGroupToken({ paneToken: parentPane.paneToken, label: parentPane.label, paneId: parentPane.paneId });
+        const pane = await this.options.paneHost.allocatePane(project.workspaceId, workspace.cwd, {
+          bindingId: instance.id, generation: instance.generation, projectId: project.id,
+          placement: "split", anchorPaneId: parentPane.paneId,
+          displayIdentity: { groupToken, role: { kind: "worker", name: instance.name } }
+        });
         instance = this.requireCheckpoint(instance, "pane-allocated", "starting", pane.paneId, project.workspaceId);
       }
       const pending = instance.pendingRuntimeRef;
       if (!pending) throw new Error("Provisioning pane checkpoint is missing");
       if (instance.provisioningCheckpoint === "pane-allocated") {
-        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, managedName: workerAgentName(instance), model: instance.model });
+        await driver.start({ ...pending, nativeSessionId: null }, { projectId: instance.projectId, name: instance.name, managedName: workerAgentName(instance), model: instance.model, transcriptOwnerId: instance.id });
         instance = this.requireCheckpoint(instance, "runtime-started", "starting");
       }
       if (instance.provisioningCheckpoint === "runtime-started") {
         const observed = await this.options.paneHost.inspectPane(pending.paneId);
         if (!observed || observed.workspaceId !== project.workspaceId || observed.cwd !== workspace.cwd) throw new Error("Started agent pane could not be verified");
         if (observed.agentKind && !matchesHerdrAgentKind(instance.agentKind, observed.agentKind)) throw new Error(`Started pane reported unexpected agent: ${observed.agentKind}`);
-        const attached = this.options.store.attachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: project.workspaceId, paneId: pending.paneId, nativeSessionId: observed.agentSession?.value ?? observed.terminalId ?? null });
+        const attached = this.options.store.attachAgentInstanceRuntime({ instanceId: instance.id, expectedGeneration: instance.generation, herdrWorkspaceId: project.workspaceId, paneId: pending.paneId, paneToken: observed.paneToken ?? null, nativeSessionId: observed.agentSession?.value ?? null });
         if (!attached) throw new Error("Instance generation changed during runtime attachment");
         return attached;
       }
@@ -178,9 +183,9 @@ export class InstanceControlWorkflow implements InstanceControlPort {
     let nativeSessionId: string | null;
     try { nativeSessionId = preferredRuntimeSessionId(binding, pane); }
     catch { throw new Error("Worker parent pane identity changed"); }
-    return { identity: { bindingId: binding.id, bindingGeneration: binding.generation, paneId: pane.paneId, nativeSessionId }, label: pane.label };
+    return { identity: { bindingId: binding.id, bindingGeneration: binding.generation, paneId: pane.paneId, nativeSessionId }, label: pane.paneToken ?? pane.label };
   }
-  private async requireLiveParent(project: ProjectConfig, parent: NonNullable<AgentInstance["parent"]>): Promise<void> {
+  private async requireLiveParent(project: ProjectConfig, parent: NonNullable<AgentInstance["parent"]>): Promise<import("../domain/types.js").HerdrPane> {
     const binding = this.options.store.getBinding(parent.bindingId);
     if (!binding || binding.projectId !== project.id || binding.workspaceId !== project.workspaceId || binding.lifecycle !== "active" || binding.state !== "active" || binding.attachment !== "attached" || binding.paneId !== parent.paneId || (parent.bindingGeneration !== undefined && binding.generation !== parent.bindingGeneration)) throw new Error("Worker parent binding is no longer active");
     const pane = await this.options.paneHost.inspectPane(parent.paneId);
@@ -189,18 +194,13 @@ export class InstanceControlWorkflow implements InstanceControlPort {
     catch { throw new Error("Worker parent pane identity changed"); }
     const nativeSessionId = pane.agentSession?.value ?? pane.terminalId ?? null;
     if (parent.nativeSessionId && parent.nativeSessionId !== nativeSessionId) throw new Error("Worker parent pane identity changed");
+    return pane;
   }
   private requireCheckpoint(instance: AgentInstance, checkpoint: AgentInstance["provisioningCheckpoint"], observedState: AgentInstance["observedState"], pendingPaneId?: string, pendingWorkspaceId?: string): AgentInstance {
     const value = this.options.store.checkpointAgentInstance({ instanceId: instance.id, expectedGeneration: instance.generation, checkpoint, observedState, ...(pendingPaneId ? { pendingPaneId } : {}), ...(pendingWorkspaceId ? { pendingWorkspaceId } : {}) });
     if (!value) throw new Error("Instance generation changed during provisioning");
     return value;
   }
-}
-
-function workerPaneTitle(instance: AgentInstance): string {
-  if (!instance.parent) throw new Error("Worker parent identity is missing");
-  const primary = primaryPaneToken(instance.sourcePrimaryPaneLabel, instance.parent.paneId);
-  return `lark_${primary}-${instance.name}`;
 }
 
 function workerAgentName(instance: AgentInstance): string {

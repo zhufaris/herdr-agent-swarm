@@ -3,6 +3,21 @@ import type { AcceptCommandIntentInput, AcceptCommandIntentResult } from "./comm
 import type { CommandStatusRenderer } from "./ports/swarm-command.js";
 import { z } from "zod";
 
+const nativeSession = z.object({ source: z.string().min(1), agent: z.string().min(1), kind: z.enum(["id", "path"]), value: z.string().min(1) });
+export const frozenCommandTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ version: z.literal(1), kind: z.literal("swarm"), bindingId: z.string().min(1).nullable(), bindingGeneration: z.number().int().positive().nullable(), paneId: z.string().min(1).nullable(), terminalId: z.string().min(1).nullable(), nativeSession: nativeSession.nullable(), activePromptId: z.string().min(1).nullable() }),
+  z.object({ version: z.literal(1), kind: z.literal("worker"), instanceId: z.string().min(1), instanceGeneration: z.number().int().positive(), workerSessionGeneration: z.number().int().positive(), parentBindingId: z.string().min(1), parentBindingGeneration: z.number().int().positive(), parentPaneId: z.string().min(1) })
+]).superRefine((target, context) => {
+  if (target.kind !== "swarm") return;
+  if ((target.bindingId === null) !== (target.bindingGeneration === null)) context.addIssue({ code: "custom", message: "Swarm binding identity must be complete" });
+  if (target.bindingId === null && (target.paneId !== null || target.terminalId !== null || target.nativeSession !== null || target.activePromptId !== null)) context.addIssue({ code: "custom", message: "Unbound Swarm targets cannot carry runtime identity" });
+});
+export type FrozenCommandTarget = z.infer<typeof frozenCommandTargetSchema>;
+export type ResolvedCommandTarget = FrozenCommandTarget;
+export function commandTargetsEqual(left: FrozenCommandTarget, right: ResolvedCommandTarget): boolean {
+  return JSON.stringify(frozenCommandTargetSchema.parse(left)) === JSON.stringify(frozenCommandTargetSchema.parse(right));
+}
+
 export type NaturalLanguageCommandConfirmationState = "pending" | "consumed" | "expired" | "cancelled";
 
 export type NaturalLanguageCommandEnvelope =
@@ -12,14 +27,14 @@ export type NaturalLanguageCommandEnvelope =
 const agentKind = z.enum(["pi", "claude-code", "codex", "traex"]);
 const bridgeCommand = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("stop") }), z.object({ kind: z.literal("steer"), text: z.string().min(1) }),
-  z.object({ kind: z.literal("model"), name: z.string().min(1).nullable() }), z.object({ kind: z.literal("reset"), title: z.string().min(1).nullable() }),
+  z.object({ kind: z.literal("model"), name: z.string().min(1).nullable() }), z.object({ kind: z.literal("reset"), title: z.string().min(1).nullable() }), z.object({ kind: z.literal("clear") }),
   z.object({ kind: z.literal("new"), title: z.string().min(1).nullable(), agentKind }), z.object({ kind: z.literal("projects") }),
   z.object({ kind: z.literal("spaces") }), z.object({ kind: z.literal("panes") }), z.object({ kind: z.literal("sessions"), cursor: z.string().min(1).nullable() }),
   z.object({ kind: z.literal("failures") }), z.object({ kind: z.literal("status") }),
   z.object({ kind: z.literal("attach"), spaceName: z.string().min(1), paneId: z.string().min(1) }), z.object({ kind: z.literal("rename"), title: z.string().min(1) }),
   z.object({ kind: z.literal("close") }), z.object({ kind: z.literal("pane_close_request") }), z.object({ kind: z.literal("pane_close_confirm"), code: z.string().min(1) }),
   z.object({ kind: z.literal("reattach"), paneId: z.string().min(1) }), z.object({ kind: z.literal("replace") }), z.object({ kind: z.literal("resume") }),
-  z.object({ kind: z.literal("awake") }), z.object({ kind: z.literal("skip") }),
+  z.object({ kind: z.literal("awake") }),
   z.object({ kind: z.literal("worker_create"), name: z.string().min(1), agentKind, model: z.string().min(1).nullable(), start: z.boolean() }), z.object({ kind: z.literal("help") })
 ]);
 const instanceCommand = z.discriminatedUnion("kind", [
@@ -40,10 +55,7 @@ export interface NaturalLanguageCommandConfirmation {
   topicId: string | null;
   rootMessageId: string;
   envelope: NaturalLanguageCommandEnvelope;
-  expectedBindingId: string | null;
-  expectedBindingGeneration: number | null;
-  expectedInstanceId: string | null;
-  expectedInstanceGeneration: number | null;
+  frozenTarget: FrozenCommandTarget | null;
   state: NaturalLanguageCommandConfirmationState;
   expiresAt: string;
   resultDetail: string | null;
@@ -53,7 +65,7 @@ export interface NaturalLanguageCommandConfirmation {
 }
 
 export interface StageNaturalLanguageCommandConfirmationInput {
-  confirmation: Omit<NaturalLanguageCommandConfirmation, "state" | "resultDetail" | "updatedAt" | "resolvedAt">;
+  confirmation: Omit<NaturalLanguageCommandConfirmation, "state" | "resultDetail" | "updatedAt" | "resolvedAt" | "frozenTarget"> & { frozenTarget: FrozenCommandTarget };
   outbox: { id: string; idempotencyKey: string; card: object };
 }
 
@@ -62,7 +74,8 @@ export type StageNaturalLanguageCommandConfirmationResult =
   | { outcome: "conflict"; confirmation: NaturalLanguageCommandConfirmation };
 
 export type DecideNaturalLanguageCommandConfirmationResult =
-  | { outcome: "consumed" | "cancelled"; confirmation: NaturalLanguageCommandConfirmation }
+  | { outcome: "consumed"; confirmation: NaturalLanguageCommandConfirmation }
+  | { outcome: "cancelled"; confirmation: NaturalLanguageCommandConfirmation | null }
   | { outcome: "unauthorized" | "expired" | "stale" | "already-resolved" | "missing"; confirmation: NaturalLanguageCommandConfirmation | null };
 
 export type ConfirmNaturalLanguageSwarmCommandResult =
@@ -70,5 +83,5 @@ export type ConfirmNaturalLanguageSwarmCommandResult =
   | Exclude<DecideNaturalLanguageCommandConfirmationResult, { outcome: "consumed" | "cancelled" }>;
 
 export interface ConfirmNaturalLanguageSwarmCommandInput {
-  id: string; actorOpenId: string; chatId: string; decidedAt: string; commandIntent: AcceptCommandIntentInput; renderStatus?: CommandStatusRenderer;
+  id: string; actorOpenId: string; chatId: string; decidedAt: string; resolvedTarget: ResolvedCommandTarget; commandIntent: AcceptCommandIntentInput; renderStatus?: CommandStatusRenderer;
 }

@@ -23,3 +23,15 @@ _Avoid_: Card reply, child prompt
 **Worker Ownership**:
 The exact Primary binding generation and pane identity allowed to operate a Worker and its tasks.
 _Avoid_: Parent link
+
+**Worker Pane Identity**:
+The canonical `<group-token>-<worker-name>` label on the Worker's actual Pane.
+Workers share the Primary's Group Token and tab, but each keeps its own runtime
+Pane reference and Delivery Ring.
+_Avoid_: Parent Pane identity, Worker Thread title
+
+**Idle Topology Convergence**:
+The Pane Topology Intent policy that may move or relabel an existing Worker only
+after its runtime is settled and no active Worker Turn is durable. Ambiguous or
+possible-effect evidence remains observable and is never replayed blindly.
+_Avoid_: Live layout repair, terminal input, pane recreation

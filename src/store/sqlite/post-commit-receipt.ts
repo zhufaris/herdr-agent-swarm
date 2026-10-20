@@ -3,6 +3,7 @@ export type CommitState = "pending" | "committed" | "rolled_back";
 export class PostCommitReceipt<TResult, TEffect> {
   private state: CommitState = "pending";
   private consumed = false;
+  private readonly committedListeners = new Set<() => void>();
 
   constructor(readonly result: TResult, private readonly pendingEffects: readonly TEffect[]) {}
 
@@ -15,6 +16,26 @@ export class PostCommitReceipt<TResult, TEffect> {
     return this.pendingEffects;
   }
 
-  markCommitted(): void { if (this.state === "pending") this.state = "committed"; }
-  markRolledBack(): void { if (this.state === "pending") this.state = "rolled_back"; }
+  afterCommit(listener: () => void): void {
+    if (this.state === "committed") {
+      try { listener(); } catch {}
+      return;
+    }
+    if (this.state === "pending") this.committedListeners.add(listener);
+  }
+
+  markCommitted(): void {
+    if (this.state !== "pending") return;
+    this.state = "committed";
+    for (const listener of this.committedListeners) {
+      try { listener(); } catch {}
+    }
+    this.committedListeners.clear();
+  }
+
+  markRolledBack(): void {
+    if (this.state !== "pending") return;
+    this.state = "rolled_back";
+    this.committedListeners.clear();
+  }
 }

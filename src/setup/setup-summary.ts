@@ -41,6 +41,7 @@ function renderProject(project: ProjectConfig): string[] {
   return [
     `Project ${project.id}: ${project.displayName} (${project.workspaceId} -> ${project.cwd})`,
     `  Space: ${project.spaceName ?? project.displayName}`,
-    `  Worker limit: ${project.maxInstances ?? 8}`
+    `  Worker limit: ${project.maxInstances ?? 8}`,
+    ...(project.orchestrator ? [`  Orchestrator: ${project.orchestrator.enabled ? `enabled -> ${project.orchestrator.cwd}` : "disabled"}`] : [])
   ];
 }

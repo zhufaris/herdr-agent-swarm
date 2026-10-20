@@ -1,577 +1,319 @@
-# 飞书群使用指南
+# Feishu Group Usage
 
-Herdr Agent Swarm 通过 Herdr headless runtime 管理多个项目；Herdr UI 不是必需组件。
-每个已绑定的飞书 Thread 都以其 Herdr pane 中运行的一个 Agent 作为该 Thread 唯一的 Primary。
-创建时可选择 TraeX、Pi、Codex 或 Claude Code；不指定时默认 TraeX。
-项目中的持久化 Agent 实例仅包含由用户显式创建的 Worker，Worker 可以使用 TraeX、
-Codex、Claude Code 或 Pi。兼容的一话题一 TraeX 工作流仍以 Herdr Lark Bridge 模式提供；
-该名称不代表当前多 Agent 产品或项目。用户可以在
-飞书中创建任务、查看状态、修改名称和发送后续要求；开发者仍可在 Herdr 中
-观察或接管同一个终端会话。
+This guide describes the current standalone Herdr Agent Swarm behavior in one configured Feishu/Lark group.
 
-## 开始使用
+## Mental model
 
-管理员完成 `npm run swarm:setup`、配置 `LARK_ALLOWED_OPEN_IDS` 与
-`LARK_ADMIN_OPEN_IDS`、启动服务，并确认 `npm run swarm:status` 正常后，
-允许名单内的群成员即可开始操作。实例创建、删除、停止、steer 及会话拓扑操作仅
-允许管理员名单成员。Primary 流程最直接的入口是在目标群发送顶层自然语言任务并
-`@Bot`：
+A Primary Thread is attached to one exact Herdr Pane generation. Ordinary human text is submitted independently through Herdr Core Agent Input. Swarm does not own an ordinary message FIFO and does not decide final conversation order.
+
+The final order shown in conversation projection comes only from the exact Agent session's Core JSONL. Feishu arrival, local timestamps, SQLite insertion order, message IDs, hashes, and submission receipts are not ordering evidence.
+
+An older input that is running, detached, recovering, or uncertain does not block a newer input.
+
+## Start a Primary session
+
+Mention the bot in the configured group and describe the task. If no route is bound, select a project and optionally an Agent kind:
 
 ```text
-@Bot 请排查登录超时并修复
+/swarm new [title] [--agent traex|pi|codex|claude-code]
 ```
 
-Bridge 会直接使用 `projects.json.defaultProjectId` 创建 Primary Pane 和飞书 Thread，
-并将这条消息恰好提交一次。默认项目未显式配置 `spaceName` 时，卡片和命令中的
-Space 名为 `herdr`；真实 Herdr 路由仍使用项目的 `workspaceId`。未 `@Bot` 的普通群聊
-不会创建任务。安装、密钥和服务恢复属于管理员操作，不在飞书群内完成。
+Omitting `--agent` selects TraeX. Provisioning creates or discovers the Herdr Pane, proves its terminal and Agent session identity, then sends initial text through the same Agent Input path as later messages.
 
-多 Agent 模式先选择项目，再打开实例目录：
+If Core does not advertise the required versioned submission capability, the service fails closed before accepting new-path input. It never falls back to untracked terminal text.
 
-```text
-/projects
-/project my-project
-/instances
-```
+## Send Agent input
 
-项目配置中的 `maxInstances` 只限制可持久化的 Worker 数量；`projects.json` 不再配置
-Primary 或 Worker 模板。当前飞书 Thread 本身就是该 Thread 的 Primary。每个 Worker
-从这个 Primary 的确切 Herdr pane/session 派生，拥有专属 pane 和 worktree；它不是可跨
-pane 复活的项目级 Agent。
+In a bound conversation context, only the documented `/swarm ...` commands and
+authenticated card actions use control grammar. Ordinary text, bot mentions,
+Agent-native slash text such as `/model` or `/compact`, and unknown slash text
+are not `/swarm` commands. Their treatment is determined only by durable
+admission and receipt records; a message-routing acknowledgement is not an
+interaction surface or a statement of conversation authority.
 
-在实例目录点击“创建 Worker”，填写名称、Agent 和是否立即启动。创建操作必须在
-active 的项目 Thread 中完成，以便验证父 Primary pane。可写 Worker 默认获得独立
-branch/worktree；Primary 由当前 Thread 的 binding 提供，不作为实例创建或提升。
-创建后可用以下命令查看和发任务：
+Each source message has independent durable admission and effect certainty. A duplicate Feishu delivery converges on the existing Submission Intent. A timeout after the Core attempt becomes uncertain and is queried later; it is not automatically sent again.
 
-```text
-/instance reviewer
-/to reviewer Review the SQLite transaction boundaries
-/steer reviewer Focus on generation fencing
-/stop reviewer
-```
+Before canonical evidence, the original Feishu message is the only visible
+receipt; Swarm does not create a speculative `pending` card. The first unified
+Turn Card is created in `working` state only after Swarm ingests the matching
+canonical Core JSONL `human_message.submission_id`. It is page zero of that
+canonical Human Message's Conversation Segment, and all later content belongs
+to the same Core-ordered segment. Direct-Herdr Human Messages use the same rule.
 
-`/to` 始终创建一条新的 Worker 任务，并按该 Worker 的 FIFO 排队；即使这条命令是回复
-另一张任务卡发送的，也不会变成 steer 或 follow-up。`/steer` 只作用于该 Worker 当前唯一的
-active turn；没有 active turn、目标已经换代或 Agent 不支持 steering 时会明确拒绝，不会退化成
-一条新的 `/to` 任务。
-`/stop reviewer` 只中断该 Worker 当前唯一的 exact active turn，不停止 Worker 实例，也不取消
-其 FIFO backlog。旧命令 `/interrupt reviewer` 暂时作为同一操作的兼容别名。
+Primary, Worker, and exact-turn steering inputs use the same lifecycle and
+status fields. `working` means canonical Human evidence was observed;
+`completed`, `failed`, and `cancelled` are terminal; `needs_human` is retained
+for historical recovery rows whose ownership or delivery could not be proven.
+Content beyond the 9,000-character CardKit limit continues in a new page of the
+same segment. Frozen pages are never patched.
 
-每个 Worker session generation 只有一张持久 Worker Main Card。每次 `/to` 创建独立的
-Worker turn，但不会新增飞书卡片；同一张 Worker Main Card 会持续展示当前请求、状态、
-结构化进度、受限长度的输出、排队数量和最近五条终态任务。完整输出和历史仍保存在 SQLite，
-不会因为卡片合并而丢失。
+## Explicit Swarm commands
 
-新创建的 Worker session 会把这张唯一的 Worker Main Card 直接发送到群中，作为该
-Worker 的独立 Thread 根。可以在 `/instances` 目录或 Worker 详情中点击“发送 Worker
-卡片到群”：新 session 已有 Thread 时只返回已有状态，不会重复创建；升级前已经在
-Primary Thread 中投递 Main Card 的旧 session 会按需创建一张只读入口快照，原 Main Card
-继续留在原处并保持唯一实时投影。升级本身不会批量向群里发卡。
-
-在有效的 Worker Thread 中：
-
-- 普通消息创建一条发给该 Worker 的独立 FIFO 任务；
-- `/status` 返回该 Worker 的最新持久状态快照；
-- `/steer <文本>` 只补充当前精确 active turn，不会在空闲时变成新任务；
-- `/stop` 只中断当前精确 active turn，不停止 Worker，也不取消排队任务。
-
-Worker Thread 固定到 `workerId + workerSessionGeneration` 以及所属 Primary
-generation/pane，不读取“当前目标”。Worker 或 Primary 换代后旧 Thread 会明确拒绝消息，
-不会把内容转给同名 Worker、替代 Primary 或其他已选择实例。项目、实例和 pane 拓扑管理
-命令仍需回到所属 Primary Thread 执行。
-
-Primary 工具 `show_worker_cards` 用于把某个 Worker 的当前状态重新展示到话题中。每次调用
-只发送一张合并后的只读快照，卡片会标注生成时间和“不会自动更新”；它不是新的 Worker
-Main Card，也不会订阅后续状态。需要持续状态或执行卡片操作时，应点击快照中的入口打开
-canonical Worker Main Card。重复使用相同幂等键不会再次发送快照。
-
-runtime 重启、reattach 或 pane replacement 会继续更新同一张 Worker Main；终止后该卡冻结，
-同名重建会创建新的 Worker session 和新卡。Primary Main 只展示当前 Primary pane 拥有的
-Worker 摘要；Primary Answer 只展示由该 Primary prompt 直接发起的 Worker activity。Answer
-完成后摘要随页面冻结，较晚的 Worker 更新只进入 Worker Main 和 Primary Main。
-
-Worker prompt 分为三种明确语义，推荐直接围绕卡片操作：
-
-- `补充当前任务`：点击 Worker Main Card 当前任务区域的同名按钮并提交表单；
-  内容只会 steer 这一个精确 active turn。
-- `继续这个任务`：点击 Worker Main Card 中 completed、failed 或 cancelled 当前任务的同名按钮并
-  提交表单；系统创建一条带父任务关系的新 follow-up，并按 FIFO 排队。
-- `发起新任务`：点击 Worker Main Card 上的同名按钮，或使用 `/to`；系统创建一条
-  与历史任务无父子关系的独立 FIFO 任务。
-
-要持续给同一个任务补充要求，必须使用 Worker Main Card 上的按钮。飞书话题会把“回复卡片”
-产生的文本消息关联到话题根消息，而不是被回复的 Worker Task Card；因此直接回复卡片、
-即使 `@Bot`，也会作为 Primary prompt 处理。系统不会根据 Thread、最近卡片、当前选中的
-Worker 或视觉上的回复位置猜测 Worker 目标。也可使用 `/to <worker> <任务>` 发起独立任务。
-
-Worker Main Card 仅显示当前状态允许的操作。运行中的任务提供“补充当前任务”和
-“停止当前任务”；blocked 卡片允许补充要求，但审批仍必须在 Herdr Pane 本地完成；
-终态卡片提供“继续这个任务”；queued、preparing 和 `dispatch-uncertain` 不提供追加按钮。
-若用户打开表单后任务状态发生变化，提交会被拒绝，系统不会把原本的 steer 自动改成
-follow-up，也不会把 follow-up 改成 steer。Worker Main 的“发起新任务”会明确显示任务是
-立即执行还是进入 FIFO。
-
-Worker 从非 blocked 状态进入 blocked 时，Bridge 还会在所属 Primary 群 Thread 中发送一张
-独立的橙色“需要处理”通知卡。每个连续 blocked episode 只发送一次；Worker 离开 blocked
-后再次进入 blocked 才会产生新通知。通知会在身份安全时 `@` Primary Thread 创建者；创建者
-身份缺失或不符合安全格式时仍发送普通群通知。按钮只用于打开 canonical Worker Main Card，
-不提供远程批准、拒绝或终端输入。通知 intent 与 Worker 状态、事件及 Main Card invalidation
-在同一个 SQLite transaction 中提交，并通过 durable outbox 重试；飞书投递失败不会回滚
-Worker 状态，也不会重放 Worker 任务。若 Primary generation、pane、binding 生命周期或 root
-identity 已过期，系统只跳过通知，避免发到错误会话，Worker 的 blocked 状态仍会正常提交。
-
-Worker Main Card 上的任务结果只来自与该 Worker generation、runtime turn ID 和开始时间完全匹配的
-TraeX transcript。终端 scrollback、另一轮任务的输出和仅表示“已投递”的回执都不会被当成结果。
-
-在旧式未绑定会话中，实例详情卡的“设为当前目标”仍可保留兼容行为；若目标为 symbolic
-Primary，则消息继续进入当前 Thread 的 prompt FIFO。实例 generation 变化时旧卡片和固定
-目标会失效，必须刷新后重新选择。日常交互优先使用固定 Worker Session Thread，避免
-依赖可变目标。Primary 可直接调用同项目中已存在的 Worker，不需要
-逐次确认，但不能创建、删除、提升、跨项目调用或自动选择 Worker。Worker 完成不会自动
-触发 Primary turn。Primary 通过内置 Worker 工具发起的新任务和 follow-up 也会在当前飞书
-话题更新稳定的 Worker Main Card；卡片目标由服务端保存的 binding 与 Primary prompt 确定，
-不能由工具调用参数伪造。调用 `follow_up_instance` 时必须显式传入 `inspect_instance` 返回的
-已终结 `parentTurnId`；服务端拒绝跨 Worker、跨 generation 或尚未结束的父任务。
-
-实例停止不删除 worktree。删除前系统会重新检查 dirty、conflict、ahead、generation 和
-fingerprint；任何不安全或不确定状态都会保留实例/worktree，不提供危险确认按钮。
-
-以下 `/swarm` 流程用于单话题 Primary binding。
-
-在已经配置 Bridge Bot 的飞书群中发送顶层消息，并 `@Bot`：
-
-```text
-@Bot /swarm new 修复登录问题 --agent codex
-```
-
-Bridge 会先显示项目选择卡片。点击项目后才会创建 Herdr pane、启动所选 Agent，
-并将当前飞书话题永久绑定到该项目和 pane。后续
-操作应在这个话题内发送。
-
-也可以直接用自然语言创建任务：
-
-```text
-@Bot 请定位登录超时问题并修复
-```
-
-Bridge 会直接使用 `projects.json.defaultProjectId` 创建 Herdr pane 和新的飞书话题，
-然后将这条原始消息作为首个请求恰好提交一次。同一飞书消息的重复事件不会重复创建
-Pane、Binding、话题或 Prompt。已有话题固定使用创建时保存的项目和 workspace；以后修改
-`defaultProjectId` 只影响新建话题。
-
-## 更自然的卡片操作
-
-项目主卡会根据当前状态显示精简操作。当前版本不提供“立即补充”或“改为立即补充”
-入口；任务执行期间发送的普通回复仍按 FIFO 排队。旧卡片上的相关回调会被拒绝，
-不会向 terminal 写入文本，已排队的 prompt 也会保持原位置和内容。
-
-“更多操作”按实时状态生成。允许名单成员可刷新状态；停止、重置、重命名、归档、恢复、
-替换和 Pane 关闭等管理操作还要求管理员身份及会话创建者身份，服务端也会再次校验
-generation，不支持接管。成功操作以 Toast 和原卡刷新反馈；确认、失败或恢复场景才创建专用卡。
-
-## 卡片如何更新
-
-- 项目主卡和 Worker Main Card 展示状态、最新可读消息，以及最多一条 `当前活动`：优先显示仍在执行的工具，否则显示最近一条非计划活动。完整 Agent/Tool 顺序只在 Answer/Worker Task Card 展示；Main Card 不是终端输出的事实来源。
-- 每条普通请求拥有一个 Answer 卡片。原始飞书消息就是请求记录，Bridge 不再创建独立 Request 卡。
-- 新的结构化 Answer 卡按 Herdr transcript 的顺序交错展示 Agent 文本和 Tool 调用。Tool 默认折叠；展开后只显示经过脱敏和长度限制的 command/result。旧任务没有结构化时间线时继续使用原有安全 Markdown 展示。
-- 内容接近 CardKit 限制时，Agent Markdown 可在安全边界分页，Tool 面板不会跨页。当前 Answer 卡被冻结后，后续内容会在新的“继续回复”卡片中显示；早期卡片不会被改写或删除。冻结页中的 Tool 若较晚返回结果，当前页会新增一条带原页引用的完成项。
-- Bridge 不显示模型 reasoning、内部控制标记、prompt 回显、终端装饰或敏感值。高风险审批仍只能在 Herdr 中完成。
-- Human Review 继续以橙色“需要处理”和单独飞书通知呈现；Command Status Card 继续只表示 Swarm 指令的受理与执行，不会混入 Agent Answer 时间线。
-
-## 群内自然语言 Swarm 指令
-
-在已配置的飞书群中，只有显式 `@Bot` 的消息会进入自然语言 Swarm 控制。常见且
-精确的表达走 deterministic fast path；更复杂的引用和参数提取由隔离的 Swarm
-Controller Agent 解释。未显式提及 Bot 的普通群消息不会被当作命令。
-
-例如：
-
-- `@Bot 查看项目`、`@Bot 查看状态`、`@Bot 列出所有 pane`
-- `@Bot 在 datasage 创建新任务：修复登录`
-- `@Bot 创建 reviewer worker 并启动`
-- `@Bot 发送给 worker reviewer: run tests`
-
-只读查询和可恢复的状态变更会直接进入统一 Swarm Command Runtime；mutation 在 SQLite
-完成 durable admission 后立即返回，随后由后台 dispatcher 按 scope lane FIFO 执行。只有
-`stop`、`skip` 和最终的 `close confirm` 这三类 destructive mutation 在自然语言入口生成
-durable confirmation 卡片；只有同一群中的原始发起者能在过期前确认。显式 `/swarm ...`
-仍保持原有直接语义。高风险 TraeX 审批仍只能在 Herdr 本地完成。
-
-每个 mutation 都有稳定的 Command Status Card，依次显示 accepted、executing 和终态。
-服务重启后状态从 SQLite 恢复；中断的 `executing` 命令会标记为 `uncertain`，不会自动重放。
-CardKit 投递失败只进入 durable outbox 重试，不会再次执行命令。
-
-自然语言不能创建或删除已配置项目或 Herdr Workspace；`projects.json` 仍是路由和
-安全边界。需要直接、确定的命令入口时使用 `/swarm ...`。Controller 不可用时，
-精确 fast-path 命令仍可工作；有歧义的请求会被拒绝，不会退化为项目 Agent 任务。
-
-## 当前可用指令
-
-### `/swarm reset [说明]`
-
-在当前已绑定话题中使用原 Binding 的 Agent 类型创建并确认新会话可用，再原子切换
-同一个飞书话题。如果新 pane 创建或 Agent 启动失败，旧会话仍然连接并可继续使用。切换成功后，Bridge
-只会自动关闭经过 fresh observation 确认身份匹配且处于 idle/done 的旧 pane；working、
-blocked、身份不匹配或状态无法确认时会保留旧 pane，供你在 Herdr 本地检查。
-如果主卡提示 TraeX 仍在运行但未注册为 Herdr Agent，会话创建者也可以使用
-`/swarm reset` 创建一个已验证的新 Agent 并切换话题；Bridge 不会向未注册的旧 pane
-写入 prompt、按键或自动重放请求，也不会自动关闭状态无法确认的旧 pane。
-
-```text
-/swarm reset 重新排查登录问题
-```
-
-`/swarm reset` 与 `/swarm new` 不同：后者会选择项目并创建一个新的飞书话题。
-新 Pane 使用 `lark_<4 位 token>` 随机名称，当前话题的主卡标题可保留可选说明；
-说明只用于飞书展示，不会替代 Herdr pane 的会话身份。
-
-### `/swarm stop`
-
-当当前话题有活动 TraeX turn 时，字面量 `/swarm stop` 会锁定当前 binding generation、
-Primary pane、Agent session 和 runtime turn，再通过 Herdr native Agent control 发送 `Ctrl+C`。
-它绕过普通 FIFO且不创建 prompt，但必须拥有完整的 exact-turn identity。
-
-只有不带参数的 `/swarm stop`（大小写不敏感）具有这个含义。`/swarm stop now` 等带参数形式
-不会作为停止命令。若没有 active binding 或当前没有受 bridge 监督的活动 turn，Bridge
-会拒绝 `/swarm stop`，不会加入普通队列。
-
-“中断已发送”只表示 native control 可能已送达，不代表 turn 已经终止。Bridge 继续通过
-authoritative Herdr observation 结算原 turn；已经可能开始的 turn 永不自动重放。Stop 不停止
-TraeX 进程或关闭 pane，也不能批准、拒绝或绕过高风险操作。Agent 处于 `blocked`、idle、
-unknown，或 exact identity 已变化时会拒绝远程 stop。
-
-### `/swarm steer <文本>`
-
-向当前话题的 Primary 发送一条优先指令：
-
-```text
-/swarm steer 先不要修改代码，只定位根因
-```
-
-Primary 为 `idle` 时，Bridge 持久化一个 priority turn 并立即唤醒调度，它会先于普通 FIFO
-执行，但不会取消或重排普通队列。Primary 正在 `working` 时，当前 Herdr/TraeX runtime
-不提供安全的 native steering，命令会直接失败，不会注入 terminal，也不会偷偷变成普通任务。
-所有路径都会校验 binding generation、pane 和 Agent session；`blocked`、unknown、session 缺失
-或身份变化时会明确拒绝。
-
-可先用 `/swarm awake` 观察恢复已完成的 transcript；若当前任务已经 detached 且无法恢复，
-由话题创建者明确使用 `/swarm skip` 释放 blocker。
-
-该命令只作用于当前话题的 Primary。Worker 的 `/steer <worker> <文本>` 使用相同语义：
-working 时明确拒绝，idle 时创建 priority turn。普通排队任务仍使用 `/to <worker> <任务>`。
-`blocked` 通常表示本地审批或提问界面，Bridge 会拒绝远程 steering，必须回到 Herdr 处理。
-
-### `/swarm new [说明] [--agent traex|pi|codex|claude-code]`
-
-发送后直接展示项目选择卡片；选择后创建新的 Herdr pane、启动所选 Agent，并建立飞书话题绑定。
-选择卡先写入 durable outbox，再立即尝试投递；短暂的飞书投递失败不会丢失选择请求，
-Bridge 会继续重试。
-
-```text
-/swarm new 修复登录超时
-/swarm new 分析 CI 失败 --agent pi
-/swarm new 审查事务边界 --agent codex
-/swarm new 更新文档 --agent claude-code
-```
-
-省略 `--agent` 时使用 `traex`。参数必须放在可选说明之后；未知 Agent、重复参数、缺失值
-或额外参数都会显示帮助且不会创建选择记录。Agent 类型会持久化到项目选择与 Binding；
-`/swarm reset` 和 `/swarm replace` 继承它，不会在启动失败时回退到 TraeX。
-
-TraeX Primary 支持结构化 Answer 流、`/swarm model` 和 Primary Worker 工具。Pi、Codex 与
-Claude Code 当前支持有围栏的普通任务投递，但不捕获结构化 Answer；完成卡会提示前往对应
-Herdr pane 查看本地结果。各 Agent 不支持的 model、steer、stop、transcript recovery 或
-Primary-tool 操作会明确拒绝，不会模拟终端输入。主卡 Runtime 区会显示实际 Agent 类型。
-
-如果当前话题已经绑定到 active pane，Bridge 会拒绝重复创建。
-`/swarm new` 始终在选择项目后使用短随机 Pane 名，例如 `lark_7kq2`；
-话题主卡标题展示为 `space / pane_name`，例如
-`herdr-agent-swarm / lark_7kq2`。自然语言首条请求和可选说明不会作为话题名。
-服务启动后的 Herdr 对账也会让已有受管话题按其真实 Pane 名收敛到该格式。
-如需人工命名，使用 `/swarm rename <名称>`，标题将变为 `space / 名称`。
-
-### `/swarm projects`
-
-直接展示同一个项目选择卡片。只有发起命令的人可以点击，选择结果在当前话题绑定后不可切换。
-
-### `/swarm spaces`
-
-只读列出仓库配置中的全部 Space 和当前 Pane，包括空 Space、不同 Agent 类型的 Pane
-以及配置目录之外的“未注册” Pane。某个 workspace 查询失败时，其余 Space
-仍会正常显示。已绑定到当前群的 Pane 提供“打开话题”；符合条件且未绑定的
-受支持 Agent Pane 提供“认领 Pane”，点击后会重新读取 workspace 并执行与 `attach` 相同的
-校验。卡片不会提供关闭或删除动作。
-
-### `/swarm panes`
-
-在已绑定话题中，只列出当前 Space 内已连接且仍为 active 的 Primary Pane；未绑定的
-群入口仍列出当前群全部符合条件的 Pane。每一项显示
-任务标题、Space、Pane ID 和观测到的 Agent 状态；点击“发送卡片到群”会把该 Pane
-**当前** Primary Main Card 快照作为一条新的群根消息发送。回复这张卡片形成的新话题，
-普通消息会进入该 Pane 原有 Primary 的同一个 FIFO，Answer Card 也留在这个新话题中。
-
-目录不会显示其他群、已归档、orphaned、detached、未绑定的 Pane，也不会转发原话题、
-修改原主卡或向 TraeX 发送输入。入口卡片不会持续同步主卡，也不提供 reset、close、
-attach、replace、Worker 目标切换等会话/拓扑操作；这些操作必须回到原始主卡话题执行。
-点击时 Bridge 会再次校验群、binding generation、Pane
-和主卡身份；任一项变化时会提示刷新目录后重试。卡片投递由 durable outbox 处理，
-重试不会重放 TraeX 任务。
-
-### `/swarm sessions`
-
-列出当前群的会话，包括 Space、Pane ID、Agent 类型、lifecycle、attachment、Agent 状态、
-generation、队列长度和最近活动时间。不会显示其他群的话题链接、prompt 正文或终端输出。
-
-### `/swarm failures`
-
-列出当前群需要处理的发送失败、失败任务和异常会话。只有 Lark outbox dead letter
-提供“重试发送”和“忽略”；重试复用原幂等键且只发送卡片或文本，绝不会重放 TraeX
-prompt。失败任务只用于诊断。
-
-### `/swarm attach <space> <pane>`
-
-把已经运行受支持 Agent 的 Herdr pane 连接到当前飞书群，并创建正常的项目主卡和话题。
-这个命令不会创建、重命名或重启 pane，也不会向 pane 发送文字。
-
-```text
-/swarm attach datasage_semantic_knowledge w5:p3G
-/swarm attach datasage_semantic_knowledge cum7
-```
-
-`space` 必须精确匹配项目解析后的 Space 名；未显式声明 `spaceName` 时使用 `herdr`。
-`pane` 可以是精确 Pane ID、
-该 Space 中唯一的精确 Pane 名称，或 Pane 名称中可见的 4 字 token（例如 `task-cum7`
-可输入 `cum7`）；名称或 token 重名时会返回候选 ID。Bridge 只会在该项目的
-Herdr workspace 中查找指定 pane，并从 Herdr 结构化身份发现 TraeX、Pi、Codex 或 Claude Code。重复执行同一命令
-不会创建第二个绑定，而会返回已有连接信息。首次连接成功和重复连接的结果卡都会提供
-“打开话题”按钮；点击后 Bridge 会在当前群发送飞书原生的话题转发卡片，再点击该卡片
-即可进入项目话题。飞书公开 AppLink 不支持通过 Open API 的消息 ID 直达消息，因此 Bridge
-不会再生成无效的 `openMessageId` 链接。如果绑定来自其他飞书群，则继续拒绝且不会暴露对应话题。
-未知或重复的 space、其他 workspace
-中的 pane、不存在的 pane、无受支持 Agent 身份的 pane，以及已经绑定到其他会话的 pane 都会被拒绝。
-如果 pane 属于当前群、当前项目中因观测失败变为 `orphaned` 的原会话，`attach` 会在
-重新验证 workspace、项目目录、TraeX 和 terminal identity 后恢复原绑定。恢复过程不会
-创建新绑定或重放任务；请通过返回的话题入口进入原话题，再发送 `/swarm resume`。
-
-### `/swarm status`
-
-刷新当前话题的绑定状态，包括 workspace、pane、TraeX 状态和队列深度。
-该命令必须在已绑定话题中使用。
-
-```text
-/swarm status
-```
-
-### `/swarm model [name]`
-
-查看当前 Primary TraeX session 的结构化模型目录，或为下一条普通消息选择模型。
-非 TraeX Primary 会明确返回“不支持远程切换模型”，且不会读取 TraeX catalog。
-
-```text
-/swarm model
-/swarm model GPT-5.5
-```
-
-不带名称时只查询目录；带名称时，Bridge 会严格按当前 session 返回的 catalog 校验，
-并持久化到当前 binding generation。选择不会中断正在运行的任务，也不会创建空 turn；
-它会原子绑定到下一条普通 FIFO 消息，并与该消息一起通过单次 `turn/start` 生效。
-
-在切换处于 `applying` 或结果为 `uncertain` 时，新的选择会被拒绝。任何可能已到达
-TraeX 的请求都不会自动重放。Bridge 不打开 `/model` 菜单、不读取 terminal，也不模拟
-键盘选择；模型命令本身不创建 Request/Answer 卡片，也不进入普通任务队列。
-
-### 命令边界
-
-全部 `/swarm ...` 命令共享同一个 command context boundary：先解析权限与 chat、project、
-Primary binding、generation、pane/terminal/native session，再交给所属 workflow。查询命令
-不创建 CommandIntent；修改命令先持久化并按 context lane 串行执行。服务重启只恢复尚未
-开始的命令；已经开始但结果不确定的命令标记为 `uncertain`，不会盲目重放。
-
-未被多 Agent 命令层识别的 `/herdr`、`/model`、`/new` 以及其它 slash 命令，
-会作为普通任务原样提交给绑定 pane 中的 TraeX，使其可使用自身命令与已安装 skills。
-顶层 `/steer <worker> <要求>` 和 `/stop <worker>` 属于多 Agent Worker 控制命令，不会进入
-Primary FIFO。`/interrupt <worker>` 是 `/stop <worker>` 的临时兼容别名。
-
-### `/swarm worker create <name> [options]`
-
-在当前 Primary 话题下创建一个 Worker pane。它与 `/instances` 卡片中的“创建实例”
-使用同一个 durable handler，并固定记录当前 Primary binding、generation 和运行时身份。
-
-```text
-/swarm worker create reviewer
-/swarm worker create reviewer --agent codex --model GPT-5.5 --start
-```
-
-`--agent` 可选 `traex`、`codex`、`claude-code` 或 `pi`，默认 `traex`；`--model` 可选。
-默认只创建不启动，传入 `--start` 才启动 Worker。Worker 始终归属于当前 Primary pane，
-不会退化成 project 级创建；Primary generation、terminal 或 native session 已变化时请求
-会失败关闭。重复的飞书事件复用同一个 CommandIntent，不会创建第二个 Worker。
-
-### `/swarm rename <标题>`
-
-修改当前任务和 Herdr pane 的显示名称。该命令不会重启 TraeX，也不会创建
-新 pane。
-
-```text
-/swarm rename 登录超时根因排查
-```
-
-### `/swarm close`
-
-请求关闭当前 Primary 拓扑。第一条命令只生成 60 秒内有效、绑定当前用户的确认码，
-不会立即关闭任何 Pane：
-
-```text
-/swarm close
-/swarm close confirm <code>
-```
-
-确认时 Bridge 会重新检查 Primary identity、队列与状态。Primary 必须为 `idle` 或
-`done`；随后 best-effort 关闭属于该 Primary exact binding generation 的安全 Worker，
-最后关闭 Primary 并归档话题。working、blocked、unknown、busy、缺失或 identity 不匹配的
-Worker 会被保留，不阻止其他安全 Worker 和 Primary 关闭。飞书历史、Worker 记录和 worktree
-不会删除。`/swarm pane close` 与 `/swarm pane close confirm <code>` 仍作为兼容别名接受。
-
-### Pane 恢复命令
-
-当状态显示 `orphaned` 时，可以使用：
-
-```text
-/swarm reattach wA:p3
-/swarm replace
-```
-
-`reattach` 只接受同一 Space、同一项目目录且 terminal identity 匹配、TraeX
-仍在运行的原 Pane。`replace` 会新建一个 generation。两者都不会自动重放
-结果不确定的任务；验证或替换后会保持归档，确认后再发送：
-
-```text
-/swarm resume
-```
-
-自动默认项目选择若在 Binding 和 Pane 创建前中断，可以从已冻结的项目选择安全恢复。
-如果项目创建在 Binding 已落库但 Pane ID 尚未确认时中断，Bridge 不会在重启后自动新建第二个
-Pane。请先检查对应 Space；已有 Pane 时发送
-`/swarm attach <space> <pane>`，确认不存在时再发送 `/swarm new`。
-
-### `/swarm awake`
-
-当一次已投递任务处于 `detached`，且之后已经直接在 Herdr 中提交并完成了
-新的 turn，可以在原飞书话题发送：
-
-```text
-/swarm awake
-```
-
-Bridge 会从 detached turn 的精确 transcript 边界（完成记录或 interrupt 后
-下一个 turn 的开始）开始，按时间顺序把遗漏的
-Herdr turn 投影为新的 Answer Card，然后继续原有飞书 FIFO。该命令不会向
-TraeX 重发旧任务，不会写入 terminal；重复执行不会重复创建已接管的 turn。
-如果找不到完整且带用户请求的后续 turn，原 detached 状态保持不变。
-`/swarm awake` 只负责观察和恢复，绝不会把无法确认的 detached prompt 标记为完成或失败。
-
-### `/swarm skip`
-
-当当前话题被一个无法安全恢复的 detached Primary prompt 阻塞时，话题创建者可以发送：
-
-```text
-/swarm skip
-```
-
-每次只处理当前话题最早的 `running/detached` 普通 prompt，将它标记为人工跳过并唤醒原有
-FIFO 调度。此前 TraeX 执行结果仍然不确定，Bridge 不会重放该请求，也不会发送 terminal
-输入或中断 TraeX。命令不接受 prompt ID；没有 detached blocker 或 binding generation 已变化时
-不会改动任何任务。重复投递同一条飞书命令也不会继续跳过下一条 prompt。
-
-### `/swarm help`
-
-显示 Bridge 帮助卡片。
+These commands are reserved for Swarm control:
 
 ```text
 /swarm help
-```
-
-## 在话题中发送普通消息
-
-已绑定话题中的普通回复全部进入 FIFO，按顺序作为下一个 turn 执行。Bridge 不会根据
-`继续`、`可以` 等短语自动向正在运行的 turn 注入文本。
-
-| TraeX 状态 | 普通消息的 Bridge 行为 |
-| --- | --- |
-| `working` 或 `blocked` | 加入 FIFO，等待当前 turn 结束后执行 |
-| `idle` 或 `done` | 加入 FIFO，作为下一个 turn 执行 |
-| `unknown` | 加入 FIFO，不尝试 steering |
-
-每条普通消息都有独立状态卡。重复的飞书事件不会导致同一条消息重复排队。
-排队卡会立即显示准确的 FIFO 前方条数；当前任务的运行时间按 30 秒档更新。有至少三个
-有效历史 turn 样本时，卡片还显示基于最近最多十个样本中位数计算的粗略等待区间。该区间
-用于解释队列进展，不是截止时间或倒计时。
-
-旧版本留下的 queued legacy steering 记录在升级时会标记为 rejected；可能已发送的 running
-记录会标记为 uncertain。迁移完成后旧 prompt-steering 字段会被删除，两者都不会自动重放。
-当前 active-turn steering 会持久化为 unsupported 结果且不触发外部发送。`/swarm stop` 仍使用
-durable exact-turn effect fence。
-
-## 权限与审批
-
-Herdr Agent Swarm 使用固定三档策略：配置 workspace 内读写、项目测试和 Primary 调用同项目既有
-Worker 属于 routine；只有显式配置且可审计的外部效果可通过飞书一次性确认；push、部署、
-删除、凭据访问、权限绕过、敏感主机路径、破坏性命令和 Agent 原生非结构化审批均为
-local-only。远程 grant 绑定操作者、项目、实例 generation、action fingerprint、资源范围、
-策略版本与过期时间，只能消费一次；动作内容变化后旧授权立即失效。
-
-TraeX 需要高风险操作审批时，飞书卡片会显示橙色的“等待终端审批”状态。此时
-必须回到对应 Herdr pane 批准或拒绝操作。
-
-飞书端不能：
-
-- 批准或绕过 TraeX 高风险操作审批（批准/拒绝仍必须回到 Herdr 完成）；
-- 将任意 pane 强行连接到项目；`attach` 只接受已配置 space 对应 workspace 中正在运行 TraeX 的 pane；
-- 通过 `/swarm stop` 强制终止 TraeX 进程或 Herdr pane。
-
-`blocked` 时 `/swarm steer`、`/swarm stop`、`/steer <worker>` 和 `/stop <worker>` 都不会
-发送远程控制；是否放行高风险操作仍由 Herdr 终端决定。
-
-## 从飞书关闭 Pane
-
-关闭当前 Primary 拓扑使用两步确认：
-
-```text
+/swarm projects
+/swarm spaces
+/swarm panes
+/swarm sessions [cursor]
+/swarm failures
+/swarm status
+/swarm new [title] [--agent traex|pi|codex|claude-code]
+/swarm reset [description]
+/swarm attach <pane-token>
+/swarm attach <space> <pane>
+/swarm rename <title>
+/swarm model [name]
+/swarm steer <instruction>
+/swarm stop
+/swarm reattach <pane>
+/swarm replace
+/swarm resume
+/swarm awake
+/swarm worker create <name> [--agent <kind>] [--model <name>] [--start]
 /swarm close
 /swarm close confirm <code>
 ```
 
-第一条命令生成 60 秒一次性确认码，第二条必须由同一飞书用户在同一话题中
-发送。Bridge 会在确认时重新检查父 Primary 的 Pane identity、队列和运行状态，仅允许关闭
-Herdr 明确报告为 `idle` 或 `done` 的 Primary；`working`、`blocked` 和 `unknown`
-都会被拒绝。确认后只对 exact binding generation 的 Worker 做 fresh observation。身份匹配、
-没有任何 pending turn 且状态为 `idle` 或 `done` 的 Worker 会先关闭并终态化；working、
-blocked、unknown、busy、缺失或 identity 不匹配的 Worker 会保留。单个 Worker 被保留或关闭
-结果不确定都不会阻止其他安全 Worker和父 Primary 继续关闭。其他 Thread、其他 generation
-或其他父 pane 的 Worker 不会受影响。
+`/swarm skip` is retired. Sending it returns help and does not modify historical evidence or release later work.
 
-Worker pane 若被单独关闭或在 Herdr 中消失，也会终态化；原 worktree 可以保留并按
-安全删除流程处理，但不能在新 pane 中恢复为同一个 Worker session。关闭成功后，Bridge
-会验证父 pane 已从 Herdr 消失，再归档话题。确认码只可使用一次；服务重启只观察未决
-Worker/pane 关闭步骤，绝不会自动重放关闭命令或 Agent 任务。
+### `/swarm status`
 
-## 常见问题
+Refreshes the current Primary Main Card from Binding and Core-derived projection state. Operator service status reports Submission Intent receipt states, Core projection lag/gaps, outbox work, recovery stages, and bounded Delivery checkpoint evidence (scope count, oldest blocker, uncertain/quarantine blocker counts). `/status` also reports grace-blocked scopes, isolated conflicts and uncertainty, completed bypasses, pending Delivery Human Review, and oldest review age. These counters contain no card payload. It does not report an ordinary Prompt FIFO as current execution state.
 
-### 消息没有立即执行
+### `/swarm steer <instruction>`
 
-先发送 `/swarm status`。普通消息进入 FIFO；排队卡上的前方条数是准确顺序，等待区间
-只是基于历史样本的粗略估算。若要调整正在执行的 Primary turn，使用 `/swarm steer`；
-若任务已经结束，则发送普通消息创建新的 FIFO 任务。如果 TraeX 是 `blocked`，请到
-Herdr 处理审批。
+If Herdr proves an exact active Turn, the instruction is injected as exact-turn steering. If there is no exact active Turn, the instruction becomes an independent Agent Input. A local legacy busy/detached state does not block it.
 
-### `/swarm close` 后 Worker pane 还在
+The visible success means the control was accepted under current identity fences. It does not impose a local order on future Core JSONL events.
 
-先确认是否已发送卡片给出的 `/swarm close confirm <code>`。确认完成后若仍有 Worker pane，
-通常表示它在 fresh observation 时处于 working、blocked、unknown、busy、缺失或 identity
-不匹配状态，因此按 best-effort 安全策略被保留；结果卡会分别显示已关闭、已保留和不确定
-数量。请在 Herdr 中检查这些 Worker，不会自动重放关闭命令。
+### `/swarm stop`
 
-### 可以从飞书批准权限吗
+Re-observes Herdr and interrupts only the exact active Turn. It does not stop or kill the Pane and does not cancel unrelated Agent Input. If identity changes before the effect, the operation fails closed.
 
-不可以。所有高风险审批都必须在 Herdr 终端完成。
+High-risk approval or denial remains local to the Herdr Pane.
+
+### `/swarm awake`
+
+Runs Core projection catch-up, checks recovery gaps, and schedules durable Main/Answer Card redelivery. It never wakes a Prompt dispatcher and never submits Agent Input.
+
+Use it when Core has progressed but Feishu cards appear stale. A successful response means recovery/redelivery was durably scheduled or converged; CardKit acknowledgement can still arrive later.
+
+### `/swarm resume`
+
+Reactivates an archived Binding only when its retained Pane identity can still be proven. It has no Prompt-queue or detached-blocker meaning.
+
+### `/swarm reset`, `reattach`, and `replace`
+
+- `reset` creates a fresh managed Pane/session for the current Thread.
+- `reattach` binds an orphaned session to a proven existing Pane.
+- `replace` creates a replacement Pane for an orphaned session.
+
+All three use Binding generation and runtime identity fences. They do not infer state from old cards.
+
+### `/swarm close`
+
+Returns a short-lived confirmation code. Confirmation rechecks the Primary and owned Worker Panes before closing any safe target. Busy, missing, or identity-uncertain Panes are retained and reported. Lark history and Worker worktrees remain.
+
+## CardKit actions
+
+Card actions carry immutable Binding/Worker generation context. A stale card cannot operate a replacement session.
+
+Historical Primary completion or continuation actions no longer create a Prompt. The card tells the user to send a current Thread message so the text follows the Agent Input path. Ignore/dismiss actions that affect only local presentation remain local.
+
+Frozen Answer pages are never patched. If exact recovery finds late terminal output, Swarm creates a continuation delivery and advances the replaceable Main Card.
+
+Subagent activity stays inside the owning Answer or Turn Card. When Core can
+provide a plaintext lifecycle result, the activity row shows its latest
+redacted, bounded content beneath the Subagent status and model. A later
+status-only update retains that content. Activity arriving after a page freezes
+is rendered through the active continuation page; Swarm does not create one
+standalone card per Subagent update. Encrypted inter-agent transcript content is
+not decoded by this feature.
+
+### Trace-end Completion Review
+
+For an eligible Swarm-managed TraeX trace, the installed `herdr-choice-list`
+`UserPromptSubmit` Hook asks the Agent to include any Human Review choice in
+its original final answer. The legacy Stop Hook validates only the explicit
+terminal protocol, not prose intent. On the first Stop for an eligible turn,
+missing or invalid metadata may block once and request a protocol-only repair
+for that same turn; a repeated Stop with `stop_hook_active` fails open. If the
+final protocol says review is not useful, or repair still leaves it missing or
+invalid, the Answer closes without extra controls. If review is useful, Swarm
+creates one new Completion Review card. Its initial card includes the responsible
+user's native mention, the Agent-declared question, one to four ordered action
+buttons, and **Ignore**.
+The frozen Answer or Worker Task Card is not changed, and Swarm sends no
+separate reminder or mention message. Core removes the internal protocol block
+before emitting canonical `completion_choice`. Independently, before Feishu
+presentation, Swarm removes every reserved `herdr-choice-list` region from the
+visible answer whether the region is valid, malformed, duplicated, incomplete,
+oversized, or nonterminal, and whether or not controls activate. Surrounding
+answer prose remains visible.
+
+Clicking a business choice uses the persisted server-side choice to submit an
+ordinary next Agent Input; clicking Ignore only dismisses the local suggestion
+and does not start a Prompt or Worker Turn. Repeated, stale, wrong-user, or
+wrong-generation callbacks cannot create duplicate work. Delivery is recorded
+before Lark is called. After a restart, only an exact linked delivered receipt
+with a message identity activates the same review; pending and uncertain
+presentations remain `presenting` for delivery or operator recovery and are
+never automatically replaced. Status reports bounded review lifecycle counts,
+not review content.
+
+There is no planned native completion-envelope cutover. The supported path is
+the existing `UserPromptSubmit` writer Hook plus bounded one-repair Stop Hook;
+Core strips the terminal fence, emits canonical `completion_choice`, and
+Swarm/Feishu consume that projection. The writer Hook is not scheduled for
+removal.
+
+A review for a canonical Worker Thread segment names the Worker and submits a
+business choice to that Worker Thread; it remains fenced by the active Worker
+session and its parent Binding/Pane. It is delivered through the Worker's own
+Pane Ring, which does not make the Worker Thread a child conversation.
+
+This feature is named `herdr-choice-list`; `herdr-button-list` was an early TODO
+name and is not a separate installed Skill. High-risk native approval and
+denial still remain local to the Herdr Pane.
+
+## Workers
+
+Create a Worker from a Primary Thread:
+
+```text
+/swarm worker create reviewer --start
+/swarm worker create reviewer --agent codex --start
+```
+
+Worker identity is fenced by Worker generation, Worker-session generation,
+owning Primary generation, and parent Pane. A Worker Pane has its own named
+Worker Thread and the same Completion Review lifecycle as a Primary Thread. Its
+parent Primary contributes binding and generation fences plus the parent Primary
+Pane fence; it does not own the Worker Thread/name or delivery order. Each
+actual Worker Pane has a separate Worker Delivery Ring. Historical deliveries
+already frozen on a parent Pane keep that legacy Ring until they settle.
+
+The group-level convenience commands remain:
+
+```text
+/projects
+/project <id>
+/instances
+/instance <worker-name>
+/to <worker-name> <task>
+/steer <worker-name> <instruction>
+/stop <worker-name>
+```
+
+`/to` creates independent Worker Agent Input. `/steer` and `/stop` are exact Worker controls and fail closed on stale ownership.
+
+## Model selection
+
+`/swarm model` lists or selects a model for the current supported Agent route. Model control remains separately fenced from ordinary input. A model result marked uncertain is never automatically replayed.
+
+Unsupported model, transcript, steering, or stop capabilities fail closed instead of falling back to TraeX or arbitrary terminal input.
+
+## Fixed Orchestrator Thread
+
+An optional configured project can keep one managed TraeX Pane labeled `herdr`, native token `orch`, and one 固定 Orchestrator Thread. It is intended for long-lived group coordination.
+
+`/swarm clear` is available only there. After confirmation it rotates the native Agent session, increments the durable epoch, withdraws earlier Answer cards, and preserves the fixed identity surface: Pane ID、token、名称、位置、Binding、Thread 和 Workers. If cleanup is incomplete, the result is reported as `partial`; the service does not claim a full clear.
+
+The fixed Orchestrator Thread does not weaken Agent Input ordering or identity rules.
+
+## What cards mean
+
+- Main Card: current Binding/runtime and latest Core-derived projection.
+- Answer Card/Page: delivery projection of one Core Turn timeline.
+- Worker Main/Task Card: Worker identity and Core-derived task view.
+- Command Status Card: durable control admission/execution result.
+
+Cards are not execution authority. A stale or missing card does not mean Core stopped, and a visible card cannot repair SQLite.
+
+## Delivery and recovery
+
+Projection changes reserve delivery intent in SQLite. The outbox sends CardKit work by delivery lane with idempotency and retry. A failed delivery retries only the card effect.
+
+Useful operator distinctions:
+
+| Signal | Meaning |
+| --- | --- |
+| Submission Intent `recorded` | Eligible for its own Core submission. |
+| `attempting` or `uncertain` | May have crossed the effect boundary; query receipt, do not resend. |
+| Core projection pending/quarantined | Canonical events are not fully projected yet. |
+| Projection gap `not_found` or `ambiguous` | Exact recovery needs more Core evidence or human review. |
+| Projection gap `cursor_epoch_changed` | An identity-stable Core ring/session/Agent lane moved to a new epoch; SQLite atomically recorded the boundary and restarted that lane at the live epoch `start`. |
+| Outbox `pending` | Delivery is actionable. |
+| `waitingBehindLane` | A prior CardKit effect in the same lane must finish first. |
+| Dead letter | Delivery exhausted retry and needs operator action. |
+| Grace blocked | The unresolved Delivery still blocks its whole Pane or Global Ring within its bounded recovery budget. |
+| Conflict isolated | Independent conflict keys may bypass the failed Delivery; same-key work and explicit dependents still wait. The original quarantine is not released. |
+| Pending Delivery Human Review | A durable independent review card exists or awaits delivery. It mentions the responsible actor when known and never exposes the Delivery payload. |
+| Completion Review `presenting` | A fresh review card has a durable outbox link but has not yet been activated by an exact delivered receipt. |
+| Completion Review `active` | The exact delivered receipt and message identity activated the existing review; its frozen payload and live outbox link are retained. |
+
+Conflict isolation is bounded degradation, not data loss. The original failed
+Delivery and certainty evidence remain queryable, and the durable Ring
+checkpoint stays before the unresolved order. Only confirmed `not-started` or
+`rejected` work with stable identity and safe reconstruction may create one
+replacement; this can yield at most one visible duplicate. An `uncertain`
+effect, frozen page, or message deletion is not replayed, replaced,
+dismissed, or directly retried. Prepared Conversation Page deliveries are the
+bounded exception: they reuse the same durable delivery and idempotency
+identity across the approved three-attempt policy, so a later attempt may
+duplicate or overwrite an already-applied uncertain Lark effect. After attempt
+3, the delivery is terminally dismissed and its local page link is released so
+a newer snapshot can reserve normally. The review card offers Retry only when
+the persisted effect kind and evidence satisfy that narrower direct-retry
+policy for other paths; otherwise it offers audit-preserving dismissal only.
+
+For v2 Core session ingestion, do not treat every cursor failure alike. A
+same-epoch retained-window expiry rebases only from typed `cursor_expired`
+evidence carrying Core's `resume_cursor`. An identity-stable epoch transition
+requires the same ring/source, session, and Agent identity with a different
+epoch proven by ring-open before the read; it atomically records
+`cursor_epoch_changed` and installs the live epoch `start` checkpoint before
+reading. An identity mismatch or untyped same-epoch `invalid_cursor` fails
+closed. One attempt permits at most that one epoch transition plus one typed
+same-epoch expiry; it never replays Agent Input or treats a card as Core truth.
+
+## Troubleshooting stale cards
+
+1. Run `/swarm status` in the Thread.
+2. Run `/swarm awake` to request projection catch-up and card redelivery.
+3. On the host, run `npm run swarm:status` and inspect Submission Intent, Core
+   projection, gap, outbox, and recovery sections. In `/status`,
+   `coreSessionIngestion` shows the scan count, active and lagging sessions,
+   oldest observed lag, retry deadline/attempt, last successful ingest, and
+   last typed failure. A required failure while recovering a historical
+   Pending-first Input Card makes the Agent Input readiness component
+   `not_ready`; current admissions do not create such cards.
+   Delivery checkpoint fields identify the scope-local blocker without exposing
+   the card payload. Bounded-degradation fields distinguish grace blocking from
+   conflict isolation and show pending review age. A nonterminal blocker is not
+   released merely because independent work bypassed it or because it is old.
+4. Correlate by Binding, submission, session, Turn, or reply ID in `npm run swarm:logs`.
+5. Check the actual Herdr Pane before concluding that the Agent is idle or stopped.
+
+For a later authorized epoch-transition rollout, use read-only evidence in
+this order: service readiness and `agentInput` readiness are healthy; the
+affected session's lag and retry state converge; the exact durable lane
+checkpoint moves to the live epoch and cursor; then the Core final projection
+advances and the matching card/outbox work progresses. Do not resend text to
+force this sequence. Production mutation, installation, restart, and deployment
+are separate operations and are not automatic recovery commands.
+
+Do not resend uncertain text merely to unstick the UI. A new human message is a new independent Agent Input; it does not resolve the older receipt or projection gap.
+
+## Authorization and safety
+
+- Only configured-chat, user-originated messages and configured-chat CardKit actions are accepted.
+- Allowed-user, creator, and administrator checks still apply per command.
+- Project registry routes are a security boundary.
+- The bridge cannot remotely approve high-risk Agent requests.
+- The bridge cannot send arbitrary terminal input, kill a process, or kill a Pane.
+- Source text is redacted from command errors/logs and bounded before persistence/delivery.
+
+For host installation, restart gates, and logs, use the root [README](../README.md). For implementation details, use [Architecture](architecture.md).

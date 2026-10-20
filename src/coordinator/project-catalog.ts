@@ -1,7 +1,8 @@
 import { projectSpaceName } from "../config.js";
+import { createRunProjectionContext, type RunProjectionContext } from "../domain/run-projection-context.js";
 import type { Binding, ProjectConfig } from "../domain/types.js";
 
-type BindingProjectRoute = Pick<Binding, "projectId" | "workspaceId">;
+type BindingProjectRoute = Pick<Binding, "projectId" | "workspaceId"> & Partial<Pick<Binding, "kind">>;
 
 export class ProjectCatalog {
   private readonly byId: ReadonlyMap<string, ProjectConfig>;
@@ -39,13 +40,21 @@ export class ProjectCatalog {
   }
 
   projectForBinding(binding: BindingProjectRoute): ProjectConfig | undefined {
-    if (binding.projectId) return this.projectById(binding.projectId);
+    if (binding.projectId) {
+      const project = this.projectById(binding.projectId);
+      if (project && binding.kind === "orchestrator" && project.orchestrator?.enabled) return { ...project, cwd: project.orchestrator.cwd };
+      return project;
+    }
     return unique(this.byWorkspace.get(binding.workspaceId));
   }
 
   spaceNameForBinding(binding: BindingProjectRoute): string {
     const project = this.projectForBinding(binding);
     return project ? projectSpaceName(project) : "legacy/unresolved";
+  }
+
+  runProjectionContextForBinding(binding: Binding): RunProjectionContext {
+    return createRunProjectionContext(binding, this.spaceNameForBinding(binding));
   }
 }
 

@@ -8,11 +8,14 @@ export class PeriodicWorkflowRunner {
   private interval: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
 
-  constructor(private readonly options: { run(): Promise<void>; onError(error: unknown): void }) {}
+  constructor(private readonly options: { run(): Promise<void>; onError(error: unknown): void; onInterval?(): void }) {}
 
   start(intervalMs: number): void {
     if (this.stopping || this.interval) return;
-    this.interval = setInterval(() => { void this.request().catch((error) => this.options.onError(error)); }, intervalMs);
+    this.interval = setInterval(() => {
+      this.options.onInterval?.();
+      void this.request().catch((error) => this.options.onError(error));
+    }, intervalMs);
     this.interval.unref?.();
   }
 
@@ -33,7 +36,7 @@ export class PeriodicWorkflowRunner {
     this.stopping = true;
     if (this.interval) clearInterval(this.interval);
     this.interval = null;
-    if (this.active) await this.active;
+    if (this.active) await this.active.catch(() => undefined);
   }
 
   get isStopping(): boolean { return this.stopping; }

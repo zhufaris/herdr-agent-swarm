@@ -111,6 +111,42 @@ describe("HerdrCircuitBreaker", () => {
     expect(breaker.status().rejectedCalls).toBe(0);
   });
 
+  it("forwards native prompt queue capability and fenced submission through circuit admission", async () => {
+    const supportsPromptQueue = vi.fn(async () => true);
+    const queuePrompt = vi.fn(async () => ({ submissionId: "prompt-1" }));
+    const breaker = new HerdrCircuitBreaker(adapter({ supportsPromptQueue, queuePrompt }), { failureThreshold: 1, openMs: 500 });
+
+    await expect(breaker.supportsPromptQueue()).resolves.toBe(true);
+    await expect(breaker.queuePrompt("w1:p1", "next", { submissionId: "prompt-1", expectedSessionId: "session-1" })).resolves.toEqual({ submissionId: "prompt-1" });
+    expect(queuePrompt).toHaveBeenCalledWith("w1:p1", "next", { submissionId: "prompt-1", expectedSessionId: "session-1" }, undefined);
+  });
+
+  it("forwards fresh Workspace directory reads through circuit admission", async () => {
+    const listWorkspaces = vi.fn(async () => [{ workspaceId: "w4", label: "herdr" }]);
+    const breaker = new HerdrCircuitBreaker(adapter({ listWorkspaces }), { failureThreshold: 1, openMs: 500 });
+
+    await expect(breaker.listWorkspaces()).resolves.toEqual([{ workspaceId: "w4", label: "herdr" }]);
+    expect(listWorkspaces).toHaveBeenCalledOnce();
+  });
+
+  it("forwards native model prompt capability and fenced submission through circuit admission", async () => {
+    const supportsModelPrompt = vi.fn(async () => true);
+    const queueModelPrompt = vi.fn(async () => ({ submissionId: "prompt-1" }));
+    const breaker = new HerdrCircuitBreaker(adapter({ supportsModelPrompt, queueModelPrompt }), { failureThreshold: 1, openMs: 500 });
+
+    await expect(breaker.supportsModelPrompt()).resolves.toBe(true);
+    await expect(breaker.queueModelPrompt("w1:p1", "next", {
+      model: "openai/gpt-5.4",
+      submissionId: "prompt-1",
+      expectedSessionId: "session-1"
+    })).resolves.toEqual({ submissionId: "prompt-1" });
+    expect(queueModelPrompt).toHaveBeenCalledWith("w1:p1", "next", {
+      model: "openai/gpt-5.4",
+      submissionId: "prompt-1",
+      expectedSessionId: "session-1"
+    }, undefined);
+  });
+
   it("recognizes wrapped CLI absence and native socket timeouts as transport failures", () => {
     expect(isHerdrTransportFailure(new CommandError("herdr", ["api", "snapshot"], "spawn herdr ENOENT", false))).toBe(true);
     expect(isHerdrTransportFailure(new Error("socket_request_timeout"))).toBe(true);

@@ -7,6 +7,7 @@ import { controllerInterpretationResultSchema } from "../domain/controller-inter
 import type { ControllerInterpretationStore } from "../domain/ports/controller-interpretation.js";
 import type { ProjectConfig } from "../domain/types.js";
 import { safeLogError } from "./safe-error.js";
+import { ActiveWorkTracker } from "./active-work-tracker.js";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
@@ -19,10 +20,33 @@ export interface ControllerToolContext {
 }
 export class ControllerToolGateway {
   private server: Server | null = null; private readonly sockets = new Set<Socket>();
+  private readonly handlers = new ActiveWorkTracker();
+  private startPromise: Promise<void> | null = null;
   private accepting = false;
   constructor(private readonly socketPath: string, private readonly store: ControllerInterpretationStore, private readonly projects: readonly ProjectConfig[], private readonly logger: Pick<Logger, "warn">, private readonly context?: ControllerToolContext, private readonly options: ControllerToolGatewayOptions = {}) {}
-  async start(): Promise<void> { if (this.server) return; await rm(this.socketPath, { force: true }); const server = createServer((socket) => this.accept(socket)); this.server = server; await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.off("error", reject); resolve(); }); }); await chmod(this.socketPath, 0o600); this.accepting = true; }
-  async stop(): Promise<void> { this.accepting = false; const server = this.server; this.server = null; for (const socket of this.sockets) socket.destroy(); if (server) await new Promise<void>((resolve) => server.close(() => resolve())); await rm(this.socketPath, { force: true }); }
+  async start(): Promise<void> {
+    if (this.server && this.accepting) return;
+    if (this.startPromise) return this.startPromise;
+    const starting = this.startInternal();
+    this.startPromise = starting;
+    try { await starting; } finally { if (this.startPromise === starting) this.startPromise = null; }
+  }
+  private async startInternal(): Promise<void> {
+    await rm(this.socketPath, { force: true });
+    const server = createServer((socket) => this.accept(socket));
+    this.server = server;
+    try {
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(this.socketPath, () => { server.off("error", reject); resolve(); }); });
+      await chmod(this.socketPath, 0o600);
+      this.accepting = true;
+    } catch (error) {
+      this.accepting = false;
+      if (this.server === server) this.server = null;
+      if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw error;
+    }
+  }
+  async stop(): Promise<void> { await this.startPromise?.catch(() => undefined); this.accepting = false; const server = this.server; this.server = null; for (const socket of this.sockets) socket.destroy(); if (server) await new Promise<void>((resolve) => server.close(() => resolve())); await this.handlers.settle(); await rm(this.socketPath, { force: true }); }
   private accept(socket: Socket): void {
     if (!this.accepting || this.sockets.size >= Math.max(1, this.options.maxConnections ?? DEFAULT_MAX_CONNECTIONS)) { socket.destroy(); return; }
     this.sockets.add(socket);
@@ -39,7 +63,8 @@ export class ControllerToolGateway {
       const newline = input.indexOf("\n");
       if (newline < 0) return;
       handled = true; clearTimeout(idleTimer); socket.removeListener("data", onData); socket.pause();
-      void this.handle(input.slice(0, newline)).then((result) => { if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: true, result })}\n`); }, (error) => { this.logger.warn({ event: "controller-tool-call-rejected", err: safeLogError(error), outcome: "rejected" }, "Controller tool call rejected"); if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`); });
+      const handling = this.handlers.track(this.handle(input.slice(0, newline)));
+      void handling.then((result) => { if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: true, result })}\n`); }, (error) => { this.logger.warn({ event: "controller-tool-call-rejected", err: safeLogError(error), outcome: "rejected" }, "Controller tool call rejected"); if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`); });
     };
     socket.on("data", onData);
   }

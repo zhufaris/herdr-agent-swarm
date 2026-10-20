@@ -43,6 +43,7 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
   private runtime: AgentRuntimeRef | null = null;
   private recovered = false;
   private activeAbort: AbortController | null = null;
+  private startPromise: Promise<void> | null = null;
   private readonly drain: CoalescingDrain;
   private readonly waiters = new Map<string, Set<() => void>>();
 
@@ -51,6 +52,13 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
   }
 
   async start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    const starting = this.startInternal();
+    this.startPromise = starting;
+    try { await starting; } finally { if (this.startPromise === starting) this.startPromise = null; }
+  }
+
+  private async startInternal(): Promise<void> {
     this.prepareRecovery();
     await this.startRuntimeOwner();
     this.drain.start(this.options.pollIntervalMs ?? 1_000);
@@ -68,7 +76,7 @@ export class ControllerAgentManager implements NaturalLanguageCommandInterpreter
     catch (error) { this.options.logger.warn({ event: "controller-runtime-unavailable", err: safeLogError(error), outcome: "degraded" }, "Controller Agent is unavailable; deterministic commands remain active"); }
   }
 
-  async stop(): Promise<void> { this.activeAbort?.abort(new Error("Controller manager stopping")); await this.drain.stop(); this.runtime = null; }
+  async stop(): Promise<void> { this.activeAbort?.abort(new Error("Controller manager stopping")); await this.startPromise?.catch(() => undefined); await this.drain.stop(); this.runtime = null; }
 
   async interpret(_rawText: string, message?: IncomingLarkMessage): Promise<NaturalLanguageCommandResult> {
     if (!message || !this.runtime) return { outcome: "unresolved" };

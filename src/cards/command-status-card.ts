@@ -8,7 +8,7 @@ export function renderCommandStatusCard(view: CommandStatusView): object {
   const guidance = view.state === "uncertain"
     ? "外部操作可能已经开始，系统不会自动重试。请先检查 Herdr 当前状态。"
     : view.state === "failed" ? "外部操作未确认开始，可检查状态后重新发起命令。"
-      : view.state === "rejected" ? "请求未执行；请检查权限或当前会话状态。"
+      : view.state === "rejected" ? (detail ? "请求未执行；具体原因如下。" : "请求未执行；请检查权限或当前会话状态。")
         : view.state === "accepted" ? "命令已持久化，正在等待执行。"
           : view.state === "executing" ? "命令正在后台执行，请勿重复提交。" : "命令已执行完成。";
   const lines = [

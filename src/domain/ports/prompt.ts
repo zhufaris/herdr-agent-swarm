@@ -1,3 +1,3 @@
 /** Compatibility barrel. New consumers should import the capability they use. */
-export type { AcceptPromptInput, ClaimedPrompt, DetachedPromptSkipResult, PromptAcceptanceStore } from "./prompt-acceptance.js";
-export type { PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "./prompt-run.js";
+export type { AcceptPromptInput, BindingPromptWorkflowPort, ClaimedPrompt, DetachedPromptSkipResult, InterruptedContinuationAcceptanceInput, ManagedContinuationInput, ManagedPromptInput, PromptAcceptanceStore } from "./prompt-acceptance.js";
+export type { AdvanceDetachedPromptRecoveryInput, DetachedPromptNeedsHumanInput, DetachedPromptNeedsHumanResult, DetachedPromptRecoveryResult, ProjectedBridgeTurnRecoveryInput, ProjectedBridgeTurnRecoveryResult, PromptDispatchStore, PromptRecoveryStore, PromptSessionStore } from "./prompt-run.js";

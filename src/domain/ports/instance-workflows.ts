@@ -3,6 +3,7 @@ import type { InterruptReceipt, SteerReceipt } from "../agent-runtime.js";
 import type { ControlActor, CreateWorkerCommand } from "../commands.js";
 import type { InstanceEvent, InstanceTurn } from "../instance-turn.js";
 import type { WorkerTurnCardView } from "../worker-turn-card-view.js";
+import type { CompletionActionIgnoreResult, CompletionActionSelection } from "../completion-action-set.js";
 
 export interface InstanceControlPort {
   createWorker(command: CreateWorkerCommand): Promise<CreateWorkerResult>;
@@ -27,6 +28,18 @@ export interface InstanceMessagingPort {
     content: { kind: "turn" | "followup"; text: string };
     source?: { messageId: string; rootMessageId: string; parentTurnId?: string | null };
   }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView | null; inserted: boolean }>;
+  acceptWorkerCompletionAction(input: {
+    actionSetId: string; selection?: CompletionActionSelection; optionId?: string; ownerTurnId: string; ownerGeneration: number;
+    cardMessageId: string; chatId: string; actor: Extract<ControlActor, { kind: "human" }>;
+  }): Promise<{ accepted: true; turn: InstanceTurn; card: WorkerTurnCardView; inserted: boolean }>;
+  ignoreWorkerCompletionAction(input: {
+    actionSetId: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; chatId: string;
+    actor: Extract<ControlActor, { kind: "human" }>;
+  }): Promise<CompletionActionIgnoreResult>;
+  decideFreshWorkerCompletionReview(input: {
+    actionSetId: string; optionId: string; messageId: string; chatId: string;
+    actor: Extract<ControlActor, { kind: "human" }>;
+  }): Promise<{ kind: "ignored"; changed: boolean } | { kind: "followup"; turn: InstanceTurn; card: WorkerTurnCardView; inserted: boolean }>;
   steer(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; text: string; resultTargetMessageId?: string }): Promise<SteerReceipt & { durableResult?: boolean }>;
   interrupt(input: { idempotencyKey: string; actor: ControlActor; targetInstanceId: string; targetTurnId?: string; resultTargetMessageId?: string }): Promise<InterruptReceipt & { durableResult?: boolean }>;
   inspect(actor: ControlActor, instanceId: string): InstanceConversationView;

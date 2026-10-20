@@ -64,8 +64,10 @@ export class LarkSetupProbe {
     if (auth.response.status === 401 || auth.response.status === 403 || (authCode !== undefined && authCode !== 0)) {
       return [fail("lark.auth", safeFailureSummary("Lark authentication failed", auth.response.status, authCode), "Verify the Lark App ID and App Secret for the installed application.")];
     }
+    // Feishu's tenant-access-token v3 response places the token at the
+    // top-level. Retain the nested form for compatible gateways/proxies.
     const authData = record(authBody?.data);
-    const token = string(authData?.tenant_access_token);
+    const token = string(authBody?.tenant_access_token) ?? string(authData?.tenant_access_token);
     if (auth.response.status < 200 || auth.response.status >= 300 || authCode !== 0 || !token) {
       return [fail("lark.auth", "Lark authentication returned malformed data", "Verify the application credentials and retry the connectivity check.")];
     }

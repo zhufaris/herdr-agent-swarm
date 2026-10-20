@@ -3,6 +3,50 @@ import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.
 import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 
 describe("request run-card view", () => {
+  it("accepts a read-only Goal snapshot without changing turn activity", () => {
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start" });
+    const currentGoal = {
+      goalId: "goal-1", objective: "Complete native Goal support", status: "active" as const, blockKind: null,
+      sourceUpdatedAt: 1, occurredAt: "observed", sourceId: "source-1", sourceSequence: 1, sourceEventId: "event-1", nativeSessionId: "session-1"
+    };
+    const projected = reduceRunCard(queued, { type: "goal-snapshot", occurredAt: "observed", currentGoal });
+
+    expect(projected).toMatchObject({ currentGoal, activityAt: "start", updatedAt: "observed", viewVersion: queued.viewVersion + 1 });
+    expect(reduceRunCard(projected, { type: "goal-snapshot", occurredAt: "later", currentGoal })).toBe(projected);
+  });
+  it("refreshes only Binding-owned display context without changing Run ownership or activity", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", bindingGeneration: 2, title: "Task", sessionTitle: "Old session", agentKind: "traex",
+      workspaceId: "w1", spaceName: "old-space", paneId: "w1:p1", paneToken: "old1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const refreshed = reduceRunCard(queued, {
+      type: "display-context-refreshed", occurredAt: "refresh",
+      context: { sessionTitle: "Current session", agentKind: "codex", spaceName: "current-space", paneToken: "yx0c" }
+    });
+
+    expect(refreshed).toMatchObject({
+      bindingId: "b1", bindingGeneration: 2, workspaceId: "w1", paneId: "w1:p1",
+      sessionTitle: "Current session", agentKind: "codex", spaceName: "current-space", paneToken: "yx0c",
+      activityAt: "start", updatedAt: "refresh", viewVersion: queued.viewVersion + 1
+    });
+    expect(reduceRunCard(refreshed, {
+      type: "display-context-refreshed", occurredAt: "later",
+      context: { sessionTitle: "Current session", agentKind: "codex", spaceName: "current-space", paneToken: "yx0c" }
+    })).toBe(refreshed);
+  });
+
+  it("refreshes a visible Pane token without treating it as Run activity", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", paneToken: null,
+      requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const refreshed = reduceRunCard(queued, { type: "pane-token-refreshed", occurredAt: "observed", paneToken: "yx0c" });
+
+    expect(refreshed).toMatchObject({ paneToken: "yx0c", activityAt: "start", updatedAt: "observed", viewVersion: queued.viewVersion + 1 });
+    expect(reduceRunCard(refreshed, { type: "pane-token-refreshed", occurredAt: "later", paneToken: "yx0c" })).toBe(refreshed);
+  });
+
+
   it("keeps a bounded current-turn progress window with cumulative counts", () => {
     const initial = { ...initialTopicView("b1"), activePromptId: "p1", phase: "running" as const };
     const events = Array.from({ length: 10 }, (_, index) => ({ key: `step:${index}`, kind: "step" as const, label: `step ${index}`, state: "done" as const }));
@@ -113,6 +157,43 @@ describe("request run-card view", () => {
     const duplicate = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [{ key: "step:test", kind: "step", label: "Run tests", state: "active", occurredAt: "two" }] });
 
     expect(duplicate).toBe(first);
+  });
+
+  it("projects a native Task List change even when answer and tool activity are unchanged", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", bindingGeneration: 1, title: "Task", sessionTitle: "Session", agentKind: "codex", workspaceId: "w1", spaceName: "project", paneId: "w1:p1", paneToken: "yx0c", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const first = reduceRunCard(queued, {
+      type: "output", occurredAt: "one", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [],
+      taskList: [{ key: "plan:1", kind: "step", label: "Inspect", state: "active", occurredAt: "one" }]
+    });
+    const updated = reduceRunCard(first, {
+      type: "output", occurredAt: "two", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [],
+      taskList: [{ key: "plan:1", kind: "step", label: "Inspect", state: "done", occurredAt: "two" }]
+    });
+
+    expect(updated).not.toBe(first);
+    expect(updated.taskList).toEqual([expect.objectContaining({ key: "plan:1", state: "done" })]);
+    expect(updated.viewVersion).toBe(first.viewVersion + 1);
+  });
+
+  it("updates the structured Task List title independently and ignores an identical refresh", () => {
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "run", queuePosition: 1, occurredAt: "start"
+    });
+    const titled = reduceRunCard(queued, {
+      type: "output", occurredAt: "one", answerSnapshot: "", progressEvents: [], taskListTitle: "Running focused verification"
+    });
+    const planOnly = reduceRunCard(titled, {
+      type: "output", occurredAt: "two", answerSnapshot: "", progressEvents: [],
+      taskList: [{ key: "plan:1", kind: "step", label: "Run tests", state: "active", occurredAt: "two" }]
+    });
+
+    expect(titled).toMatchObject({ taskListTitle: "Running focused verification", taskList: [], viewVersion: queued.viewVersion + 1 });
+    expect(planOnly).toMatchObject({ taskListTitle: "Running focused verification", taskList: [expect.objectContaining({ key: "plan:1" })] });
+    expect(reduceRunCard(planOnly, {
+      type: "output", occurredAt: "three", answerSnapshot: "", progressEvents: [], taskListTitle: "Running focused verification"
+    })).toBe(planOnly);
   });
 
   it("keeps the current answer when an observation only refreshes progress", () => {

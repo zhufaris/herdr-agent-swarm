@@ -5,12 +5,12 @@ import type { BridgeCommand } from "../src/domain/types.js";
 
 const project = { id: "project", displayName: "Project", spaceName: "space", description: "project", workspaceId: "w1", cwd: "/repo", maxInstances: 4 };
 const message = { eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "", mentionsBot: true, isRootMessage: false };
-const binding = { id: "binding", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native", generation: 3 } as never;
+const binding = { id: "binding", kind: "orchestrator", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native", generation: 3 } as never;
 const commandByKind = {
   help: { kind: "help" }, projects: { kind: "projects" }, spaces: { kind: "spaces" }, panes: { kind: "panes" }, sessions: { kind: "sessions", cursor: null }, failures: { kind: "failures" }, status: { kind: "status" },
-  new: { kind: "new", title: null }, reset: { kind: "reset", title: null }, attach: { kind: "attach", spaceName: "space", paneId: "w1:p2" }, rename: { kind: "rename", title: "name" },
+  new: { kind: "new", title: null }, reset: { kind: "reset", title: null }, clear: { kind: "clear" }, attach: { kind: "attach", spaceName: "space", paneId: "w1:p2" }, rename: { kind: "rename", title: "name" },
   close: { kind: "close" }, pane_close_request: { kind: "pane_close_request" }, pane_close_confirm: { kind: "pane_close_confirm", code: "ABC" }, reattach: { kind: "reattach", paneId: "w1:p2" },
-  replace: { kind: "replace" }, resume: { kind: "resume" }, awake: { kind: "awake" }, skip: { kind: "skip" }, stop: { kind: "stop" }, steer: { kind: "steer", text: "focus" },
+  replace: { kind: "replace" }, resume: { kind: "resume" }, awake: { kind: "awake" }, stop: { kind: "stop" }, steer: { kind: "steer", text: "focus" },
   model: { kind: "model", name: "gpt" }, worker_create: { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false }
 } as const satisfies Record<keyof typeof SWARM_COMMAND_POLICIES, BridgeCommand>;
 
@@ -21,7 +21,9 @@ function resolver(current: typeof binding | null = binding) {
 describe("SwarmCommandContextResolver", () => {
   it("freezes Primary generation and both runtime identity dimensions", () => {
     expect(resolver().resolve(message, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false })).toEqual({
-      outcome: "resolved", laneKey: "binding:binding", binding, context: expect.objectContaining({ projectId: "project", workspaceId: "w1", primary: { bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native" }, activePromptId: null } })
+      outcome: "resolved", laneKey: "binding:binding", binding,
+      target: { version: 1, kind: "swarm", bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native" }, activePromptId: null },
+      context: expect.objectContaining({ projectId: "project", workspaceId: "w1", primary: { bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", terminalId: "terminal", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "native" }, activePromptId: null } })
     });
   });
 
@@ -40,6 +42,7 @@ describe("SwarmCommandContextResolver", () => {
     [{ kind: "status" }, "primary-session", "binding:binding"],
     [{ kind: "new", title: null }, "global", "chat:chat"],
     [{ kind: "reset", title: null }, "primary-session", "binding:binding"],
+    [{ kind: "clear" }, "primary-session", "binding:binding"],
     [{ kind: "attach", spaceName: "space", paneId: "w1:p2" }, "project", "project:project"],
     [{ kind: "rename", title: "name" }, "primary-session", "binding:binding"],
     [{ kind: "close" }, "primary-session", "binding:binding"],
@@ -48,8 +51,7 @@ describe("SwarmCommandContextResolver", () => {
     [{ kind: "reattach", paneId: "w1:p2" }, "primary-session", "binding:binding"],
     [{ kind: "replace" }, "primary-session", "binding:binding"],
     [{ kind: "resume" }, "primary-session", "binding:binding"],
-    [{ kind: "awake" }, "active-turn", "binding:binding"],
-    [{ kind: "skip" }, "active-turn", "binding:binding"],
+    [{ kind: "awake" }, "primary-session", "binding:binding"],
     [{ kind: "stop" }, "active-turn", "binding:binding"],
     [{ kind: "steer", text: "focus" }, "primary-session", "binding:binding"],
     [{ kind: "model", name: null }, "primary-session", "binding:binding"],
@@ -61,6 +63,14 @@ describe("SwarmCommandContextResolver", () => {
     if (result.outcome !== "resolved") return;
     expect(result.context.primary === null).toBe(scope === "global" || scope === "project");
     expect(result.context.projectId === null).toBe(scope === "global");
+  });
+
+  it("resolves the internal CardKit-only archive command through the Primary binding lane", () => {
+    const result = resolver().resolve(message, { kind: "archive" });
+    expect(result).toMatchObject({ outcome: "resolved", laneKey: "binding:binding" });
+    if (result.outcome !== "resolved") return;
+    expect(result.context.primary).toMatchObject({ bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", activePromptId: null });
+    expect(result.target).toMatchObject({ kind: "swarm", bindingId: "binding", bindingGeneration: 3, paneId: "w1:p1", activePromptId: null });
   });
 
   it("enforces administrator and creator policy before dispatch", () => {
@@ -84,14 +94,18 @@ describe("SwarmCommandContextResolver", () => {
     expect(resolver(null).resolve(message, { kind: "status" })).toMatchObject({ outcome: "rejected", code: "binding_required" });
   });
 
+  it("rejects clear outside the fixed Orchestrator binding", () => {
+    expect(resolver({ ...binding, kind: "task" } as never).resolve(message, { kind: "clear" })).toMatchObject({ outcome: "rejected", code: "binding_required" });
+  });
+
   it("uses the explicit CardKit binding instead of an unrelated scope lookup", () => {
     const unrelated = { ...binding, id: "other", paneId: "w1:other" };
     const explicit = resolver(unrelated as never).resolve(message, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false }, binding.id);
     expect(explicit).toMatchObject({ outcome: "resolved", laneKey: "binding:binding", context: { primary: { bindingId: "binding", paneId: "w1:p1" } } });
   });
 
-  it("freezes the active prompt only for active-turn commands", () => {
-    expect(resolver().resolve(message, { kind: "stop" })).toMatchObject({ outcome: "resolved", context: { primary: { activePromptId: "prompt" } } });
+  it("does not freeze legacy Prompt identity for active-turn commands", () => {
+    expect(resolver().resolve(message, { kind: "stop" })).toMatchObject({ outcome: "resolved", context: { primary: { activePromptId: null } } });
     expect(resolver().resolve(message, { kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false })).toMatchObject({ outcome: "resolved", context: { primary: { activePromptId: null } } });
   });
 });

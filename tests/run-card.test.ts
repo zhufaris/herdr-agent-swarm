@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderModelResultCard, renderModelSelectionCard } from "../src/cards/model-card.js";
+import { runtimeModelPreference } from "../src/domain/model-selection.js";
 import { renderMoreActionsCard } from "../src/cards/interaction-card.js";
-import { renderAttachStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRequestRunCard, renderRunCard } from "../src/cards/run-card.js";
+import { renderAttachStatusCard, renderAwakeStatusCard, renderFinalAnswerCard, renderHelpCard, renderProjectEntryCard, renderProjectSelectorCard, renderRequestAnswerCard, renderRunCard } from "../src/cards/run-card.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
 import { stripNativeTaskFrame } from "../src/runtime/native-task-frame.js";
@@ -30,8 +31,9 @@ describe("run card", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/swarm new [标题] [--agent traex|pi|codex|claude-code]");
     expect(help).toContain("默认 traex");
+    expect(help).toContain("/swarm attach <pane-token>");
     expect(help).toContain("/swarm attach <space> <pane>");
-    expect(help).toContain("ID 或唯一名称");
+    expect(help).toContain("Pane Token");
     expect(help).toContain("/swarm spaces");
     expect(help).toContain("/swarm panes");
   });
@@ -42,6 +44,40 @@ describe("run card", () => {
     expect(card).toContain("agent");
     expect(card).toContain("Pi");
     expect(card).not.toContain("TraeX · datasage");
+  });
+
+  it("renders only Subagents and Compaction from Session Activity on the Primary Main Card", () => {
+    const card = JSON.stringify(renderProjectEntryCard(
+      { ...initialTopicView("b1"), spaceName: "datasage", paneId: "w1:p1", phase: "running" },
+      { sessionActivity: {
+        snapshot: {
+          scopeKey: "pane:w1:w1:p1", workspaceId: "w1", paneId: "w1:p1", bindingId: "b1",
+          bindingGeneration: 1, sessionEpoch: 1, nativeSessionId: "session-1", revision: 7,
+          currentModel: "GPT-5.6-Sol [admin](https://evil)", currentGoal: { goalId: "goal-1", objective: "Ship Session Activity", status: "active", sourceUpdatedAt: 1 },
+          lastTurnId: "turn-1", lastTurnState: "active", compactionCount: 2, tokenUsage: null, contextUsage: null,
+          updatedAt: "2026-10-08T00:00:00.000Z"
+        },
+        items: [
+          { scopeKey: "pane:w1:w1:p1", producerKind: "primary", producerId: "b1", kind: "task", itemId: "task-1", ordinal: 0, label: "Verify restart", state: "active", terminal: false, sourceEventId: "e1", sourceLaneSequence: 1, updatedAt: "now" },
+          { scopeKey: "pane:w1:w1:p1", producerKind: "worker", producerId: "worker-1", kind: "agent", itemId: "reviewer", ordinal: 0, label: "Reviewer", state: "returned to main", terminal: true, sourceEventId: "e2", sourceLaneSequence: 2, updatedAt: "now" },
+          { scopeKey: "pane:w1:w1:p1", producerKind: "worker", producerId: "worker-2", kind: "agent", itemId: "legacy", ordinal: 0, label: "Legacy", state: "completed", terminal: true, sourceEventId: "e2-legacy", sourceLaneSequence: 2, updatedAt: "now" },
+          { scopeKey: "pane:w1:w1:p1", producerKind: "primary", producerId: "b1", kind: "tool", itemId: "call-1", ordinal: 0, label: "exec_command", state: "running", terminal: false, sourceEventId: "e3", sourceLaneSequence: 3, updatedAt: "now" }
+        ]
+      } }
+    ));
+
+    expect(card).not.toContain("Session Activity");
+    expect(card).not.toContain("Model GPT");
+    expect(card).not.toContain("Turn active");
+    expect(card).toContain("Compacted 2");
+    expect(card).not.toContain("Ship Session Activity");
+    expect(card).not.toContain("Verify restart");
+    expect(card).not.toContain("Subagents");
+    expect(card).not.toContain("Reviewer");
+    expect(card).not.toContain("returned to main");
+    expect(card).not.toContain("Legacy");
+    expect(card).not.toContain("completed");
+    expect(card).not.toContain("exec\\\\_command");
   });
 
   it("opens only a checkpointed current Answer page from Primary Main", () => {
@@ -66,7 +102,7 @@ describe("run card", () => {
     const card = renderModelSelectionCard({
       bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G",
       models: [{ id: "seed", name: "Seed-Evolving", displayName: "Seed Evolving" }, { id: "sol", name: "GPT-5.6-Sol", displayName: "GPT 5.6 Sol" }],
-      preference: { bindingId: "binding-1", bindingGeneration: 1, desiredModel: "GPT-5.6-Sol", desiredRevision: 2, effectiveModel: "Seed-Evolving", effectiveRevision: 1, state: "pending", dispatchPromptId: null, preparedOperationId: null, updatedAt: "now" }
+      snapshot: runtimeModelPreference.snapshot({ bindingId: "binding-1", bindingGeneration: 1, desiredModel: "GPT-5.6-Sol", desiredRevision: 2, effectiveModel: "Seed-Evolving", effectiveRevision: 1, state: "pending", dispatchPromptId: null, preparedOperationId: null, updatedAt: "now" })
     });
     expect(card).toMatchObject({ header: { title: { content: "TraeX · datasage / w5:p3G" }, subtitle: { content: "HERDR MODEL" }, template: "green" } });
     expect(card).toMatchObject({ body: { elements: expect.arrayContaining([expect.objectContaining({
@@ -75,29 +111,48 @@ describe("run card", () => {
     })]) } });
     expect(JSON.stringify(card)).toContain("**Current**  Seed-Evolving");
     expect(JSON.stringify(card)).toContain("**Next turn**  GPT-5.6-Sol");
+    expect(JSON.stringify(card)).toContain("revision `2`");
     expect(JSON.stringify(card)).toContain("将在下一条普通消息生效");
 
     const uncertain = renderModelSelectionCard({
       bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G",
       models: [{ id: "seed", name: "Seed-Evolving", displayName: "Seed Evolving" }],
-      preference: { bindingId: "binding-1", bindingGeneration: 1, desiredModel: "removed-model", desiredRevision: 3, effectiveModel: "Seed-Evolving", effectiveRevision: 1, state: "uncertain", dispatchPromptId: "p1", preparedOperationId: "op1", updatedAt: "now" }
+      snapshot: runtimeModelPreference.snapshot({ bindingId: "binding-1", bindingGeneration: 1, desiredModel: "removed-model", desiredRevision: 3, effectiveModel: "Seed-Evolving", effectiveRevision: 1, state: "uncertain", dispatchPromptId: "p1", preparedOperationId: "op1", updatedAt: "now" })
     });
     expect(uncertain).toMatchObject({ header: { template: "orange" }, body: { elements: [expect.objectContaining({ content: expect.stringContaining("不会自动重放") }), expect.not.objectContaining({ initial_option: "removed-model" })] } });
 
     expect(JSON.stringify(renderModelResultCard({ bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G", switched: false, output: "模型目录读取失败" }))).not.toContain("select_static");
   });
 
+  it.each([
+    [{ state: "none", effective: null, desired: null, promptPinned: false }, "当前没有待应用的模型选择", "blue"],
+    [{ state: "pending", effective: { model: "GPT-5.4", revision: 1 }, desired: { model: "GPT-5.6-Sol", revision: 2 }, promptPinned: false }, "**Next turn**  GPT-5.6-Sol · revision `2`", "green"],
+    [{ state: "applying", effective: { model: "GPT-5.4", revision: 1 }, desired: { model: "GPT-5.6-Sol", revision: 2 }, promptPinned: true }, "**Applying**  GPT-5.6-Sol · revision `2`", "blue"],
+    [{ state: "effective", effective: { model: "GPT-5.6-Sol", revision: 2 }, desired: null, promptPinned: false }, "**Effective**  GPT-5.6-Sol · revision `2`", "blue"],
+    [{ state: "uncertain", effective: { model: "GPT-5.4", revision: 1 }, desired: { model: "GPT-5.6-Sol", revision: 2 }, promptPinned: true }, "不会自动重放", "orange"]
+  ] as const)("renders the %s model preference snapshot", (snapshot, expected, template) => {
+    const serialized = JSON.stringify(renderModelSelectionCard({
+      bindingId: "binding-1", spaceName: "datasage", paneId: "w5:p3G",
+      models: [{ id: "current", name: "GPT-5.4", displayName: "GPT 5.4" }, { id: "next", name: "GPT-5.6-Sol", displayName: "GPT 5.6 Sol" }],
+      snapshot
+    }));
+    expect(serialized).toContain(expected);
+    expect(JSON.parse(serialized)).toMatchObject({ header: { template } });
+    expect(serialized).not.toContain("prompt-id");
+    expect(serialized).not.toContain("operation-id");
+  });
+
   it("documents priority stop steering and its safety boundary", () => {
     const help = JSON.stringify(renderHelpCard());
     expect(help).toContain("/swarm stop");
     expect(help).toContain("exact active turn");
-    expect(help).toContain("不取消 FIFO");
+    expect(help).toContain("不停止 Pane");
     expect(help).toContain("/swarm steer <文本>");
-    expect(help).toContain("idle 时优先于普通队列执行");
+    expect(help).toContain("否则提交独立 Agent Input");
     expect(help).toContain("/swarm awake");
-    expect(help).toContain("/swarm skip");
-    expect(help).toContain("此前结果仍不确定");
-    expect(help).toContain("其它 slash 命令会原样提交给 TraeX");
+    expect(help).not.toContain("/swarm skip");
+    expect(help).toContain("最终会话顺序只由 Core JSONL 决定");
+    expect(help).toContain("其它 slash 命令会原样作为 Agent Input 提交");
   });
 
   it("renders every typed Swarm command and keeps remote approval unavailable", () => {
@@ -143,6 +198,20 @@ describe("run card", () => {
     expect(serialized).toContain("context `31.1K tokens`");
   });
 
+  it("distinguishes unbatched Feishu input, pending batches, and the exact active turn", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"),
+      phase: "running",
+      activePromptId: "active-prompt",
+      nativeInputBacklog: { unbatchedInputCount: 2, pendingBatchCount: 3 }
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("待成批消息 `2`");
+    expect(serialized).toContain("待执行批次 `3`");
+    expect(serialized).toContain("活跃 turn `1`");
+  });
+
   it("renders CardKit 2.0 callback buttons without legacy action containers", () => {
     const main = renderProjectEntryCard({ ...initialTopicView("b1"), phase: "running", activePromptId: "p1", queueDepth: 1 });
     const more = renderMoreActionsCard({ bindingId: "b1", bindingGeneration: 1, creator: true, lifecycle: "active", attachment: "attached" });
@@ -164,17 +233,19 @@ describe("run card", () => {
 
 
   it("renders compact identity and runtime rows plus the Git worktree directory name", () => {
-    const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
-    const runCard = renderRunCard(input) as { body: { elements: Array<{ tag: string; content?: string }> } };
-    const projectCard = renderProjectEntryCard(input) as { body: { elements: Array<{ tag: string; content?: string }> } };
+    const input = { ...initialTopicView("b1"), spaceName: "datasage", tabId: "w5:t1", paneId: "w5:p3G", paneToken: "yx0c", paneName: "nxmz", worktreeName: "feat-main-card", model: "GPT-5.6-Sol", context: "31.1K tokens", queueDepth: 2 };
+    const runCard = renderRunCard(input) as { header: { title: { content: string } }; body: { elements: Array<{ tag: string; content?: string }> } };
+    const projectCard = renderProjectEntryCard(input) as { header: { title: { content: string } }; body: { elements: Array<{ tag: string; content?: string }> } };
 
+    expect(runCard.header.title.content).toBe("TraeX · datasage / nxmz · yx0c");
+    expect(projectCard.header.title.content).toBe("TraeX · datasage / nxmz · yx0c");
     expect(runCard.body.elements[0]).toMatchObject({
       tag: "markdown",
-      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `w5:p3G`\n**AGENT**  `TraeX`   **MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
+      content: "**SPACE**  `datasage`   **TAB**  `w5:t1`   **PANE**  `nxmz · yx0c`\n**AGENT**  `TraeX`   **MODEL**  `GPT-5.6-Sol`   **CONTEXT**  `31.1K tokens`   **QUEUE**  `2`\n**WORKTREE**  `feat-main-card`"
     });
     expect(projectCard.body.elements.at(-1)).toMatchObject({
       tag: "markdown",
-      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `w5:p3G`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\nworktree `feat-main-card`"
+      content: "**🖥️ Runtime**\n`datasage` · `w5:t1` · `yx0c`\nagent `TraeX` · `GPT-5.6-Sol` · context `31.1K tokens` · queue `2`\n待成批消息 `0` · 待执行批次 `0` · 活跃 turn `0`\nworktree `feat-main-card`"
     });
     expect([...runCard.body.elements, ...projectCard.body.elements].some((element) => element.tag === "column_set")).toBe(false);
   });
@@ -294,6 +365,96 @@ describe("run card", () => {
     });
   });
 
+  it("renders one Primary completion action set at the end of the final Answer Card", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "start" }),
+      phase: "completed" as const,
+      answerMessageId: "answer-message-1"
+    };
+    const card = renderFinalAnswerCard(view, {
+      initialContent: "finished",
+      completionActions: {
+        id: "completion-action-primary-p1",
+        state: "available",
+        mentionOpenId: "ou_requester",
+        ownerKind: "primary-prompt",
+        ownerId: "p1",
+        ownerGeneration: 3,
+        cardMessageId: "answer-message-1"
+      }
+    } as never) as { body: { elements: object[] } };
+    const buttons = findTaggedNodes(card, "button");
+
+    expect(findTaggedNodes(card, "markdown").at(-1)?.content).toBe("<at id=ou_requester></at> 已完成，等待你的下一条消息。");
+    expect(buttons.map((button) => (button.text as { content: string }).content)).toEqual(["default", "批准", "继续", "拒绝"]);
+    expect(buttons.map(callbackValue)).toEqual([
+      expect.objectContaining({ action: "completion_action", actionSetId: "completion-action-primary-p1", selection: "default", ownerKind: "primary-prompt", ownerId: "p1", ownerGeneration: 3, cardMessageId: "answer-message-1" }),
+      expect.objectContaining({ action: "completion_action", actionSetId: "completion-action-primary-p1", selection: "approve", ownerKind: "primary-prompt", ownerId: "p1", ownerGeneration: 3, cardMessageId: "answer-message-1" }),
+      expect.objectContaining({ action: "completion_action", actionSetId: "completion-action-primary-p1", selection: "continue", ownerKind: "primary-prompt", ownerId: "p1", ownerGeneration: 3, cardMessageId: "answer-message-1" }),
+      expect.objectContaining({ action: "completion_action", actionSetId: "completion-action-primary-p1", selection: "reject", ownerKind: "primary-prompt", ownerId: "p1", ownerGeneration: 3, cardMessageId: "answer-message-1" })
+    ]);
+    expect(card.body.elements.at(-1)).toMatchObject({ tag: "column_set" });
+  });
+
+  it("removes completion buttons and records the consumed selection", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "start" }),
+      phase: "completed" as const,
+      answerMessageId: "answer-message-1"
+    };
+    const card = renderFinalAnswerCard(view, {
+      initialContent: "finished",
+      completionActions: {
+        id: "completion-action-primary-p1",
+        state: "consumed",
+        selectedAction: "approve",
+        ownerKind: "primary-prompt",
+        ownerId: "p1",
+        ownerGeneration: 3,
+        cardMessageId: "answer-message-1"
+      }
+    } as never) as { body: { elements: object[] } };
+
+    expect(findTaggedNodes(card, "button")).toHaveLength(0);
+    expect(findTaggedNodes(card, "markdown").at(-1)?.content).toBe("已选择：批准");
+  });
+
+  it("renders ordered dynamic choices with only the declared default primary", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "start" }),
+      phase: "completed" as const,
+      answerMessageId: "answer-message-1"
+    };
+    const card = renderFinalAnswerCard(view, { initialContent: "Choose one.", completionActions: {
+      id: "choice-actions", state: "available", mentionOpenId: "ou_actor", ownerKind: "primary-prompt", ownerId: "p1", ownerGeneration: 3, cardMessageId: "answer-message-1",
+      choicePrompt: { question: "选择部署方式", defaultOption: { id: "one", label: "方案一", submitText: "default" }, alternatives: [
+        { id: "two", label: "方案二", submitText: "2" }
+      ] }
+    } } as never) as { body: { elements: object[] } };
+    const buttons = findTaggedNodes(card, "button");
+    expect(findTaggedNodes(card, "markdown").at(-1)?.content).toBe("选择部署方式");
+    expect(buttons.map((button) => (button.text as { content: string }).content)).toEqual(["方案一", "方案二", "忽略"]);
+    expect(buttons.map(callbackValue)).toEqual([
+      expect.objectContaining({ optionId: "one" }), expect.objectContaining({ optionId: "two" }), expect.objectContaining({ optionId: "ignore" })
+    ]);
+    expect(JSON.stringify(card)).not.toContain('"message":"default"');
+    expect(buttons.map((button) => button.type)).toEqual(["primary", "default", "default"]);
+    expect(JSON.stringify(card)).not.toContain("<at id=");
+  });
+
+  it("renders an ignored completion action without buttons", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "start" }),
+      phase: "completed" as const,
+      answerMessageId: "answer-message-1"
+    };
+    const card = renderFinalAnswerCard(view, { initialContent: "finished", completionActions: {
+      id: "choice-actions", state: "consumed", ignored: true, ownerKind: "primary-prompt", ownerId: "p1", ownerGeneration: 3, cardMessageId: "answer-message-1"
+    } } as never) as { body: { elements: object[] } };
+    expect(findTaggedNodes(card, "button")).toHaveLength(0);
+    expect(findTaggedNodes(card, "markdown").at(-1)?.content).toBe("已忽略");
+  });
+
   it("shows the newest compact answer preview and current activity on the group project entry card", () => {
     const answer = `old answer ${"x".repeat(2_700)} newest conclusion`;
     const card = renderProjectEntryCard({
@@ -304,7 +465,7 @@ describe("run card", () => {
 
     expect(card).toMatchObject({
       config: { summary: { content: "datasage / Fix login" } },
-      header: { title: { content: "🧭 datasage / Fix login" } }
+      header: { title: { content: "TraeX · datasage_semantic_knowledge / wD:p9" } }
     });
     expect(serialized).toContain("datasage_semantic_knowledge");
     expect(serialized).toContain("wD:p9");
@@ -385,6 +546,27 @@ describe("run card", () => {
     expect(serialized).not.toContain("**项目任务**");
   });
 
+  it("renders the most recent canonical Agent messages and Tool activity on the project card", () => {
+    const card = renderProjectEntryCard({
+      ...initialTopicView("b1"), phase: "running", answer: "legacy tail that must not be used when a timeline exists",
+      timelineItems: [
+        { kind: "agent_message", id: "message:1", sequence: 1, markdown: "Earlier Agent update" },
+        { kind: "tool", id: "tool:read", sequence: 2, category: "read", label: "src/config.ts", state: "succeeded" },
+        { kind: "tool", id: "tool:test", sequence: 3, category: "test", label: "npm run typecheck", command: "npm run typecheck", state: "running" },
+        { kind: "agent_message", id: "message:2", sequence: 4, markdown: "Latest Agent update" }
+      ]
+    });
+    const serialized = JSON.stringify(card);
+
+    expect(serialized).toContain("**💬 最新消息**");
+    expect(serialized).toContain("Earlier Agent update");
+    expect(serialized).toContain("Latest Agent update");
+    expect(serialized).toContain("📖 Read src/config.ts");
+    expect(serialized).toContain("🧪 Running npm run typecheck…");
+    expect(serialized).not.toContain("legacy tail that must not be used");
+    expect(serialized).not.toContain("⚙️ 当前活动");
+  });
+
   it("keeps only the newest activity summary on the project card", () => {
     const card = renderProjectEntryCard({
       ...initialTopicView("b1"), phase: "running",
@@ -434,10 +616,10 @@ describe("run card", () => {
     expect(serialized).not.toContain("stale answer");
   });
 
-  it("renders blocked requests as warnings and preserves the supplied action notice", () => {
+  it("renders blocked answers as warnings and preserves the supplied action notice", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Need input", workspaceId: "w1", paneId: "w1:p1", requestText: "Continue", queuePosition: 1, occurredAt: "now" });
     const blocked = reduceRunCard(queued, { type: "blocked", occurredAt: "later", notice: "请选择目标环境。" });
-    const card = renderRequestRunCard(blocked);
+    const card = renderRequestAnswerCard(blocked);
     const serialized = JSON.stringify(card);
 
     expect(card).toMatchObject({ header: { template: "orange" } });
@@ -522,37 +704,26 @@ describe("run card", () => {
     }
   });
 
-  it("keeps failed topic and request cards red", () => {
+  it("keeps failed topic and answer cards red", () => {
     const topicCard = renderRunCard({ ...initialTopicView("b1"), phase: "error", notice: "command failed" });
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Failed", workspaceId: "w1", paneId: "w1:p1", requestText: "Run", queuePosition: 1, occurredAt: "now" });
-    const requestCard = renderRequestRunCard(reduceRunCard(queued, { type: "failed", occurredAt: "later", notice: "command failed" }));
+    const answerCard = renderRequestAnswerCard(reduceRunCard(queued, { type: "failed", occurredAt: "later", notice: "command failed" }));
 
     expect(topicCard).toMatchObject({ header: { template: "red" } });
-    expect(requestCard).toMatchObject({ header: { template: "red" } });
+    expect(answerCard).toMatchObject({ header: { template: "red" } });
   });
 
-  it("renders lifecycle only on the task card and gives the answer a stable stream element", () => {
-    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", sessionTitle: "datasage_semantic_knowledge / task-7kq2", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
+  it("keeps the request out of the Answer body and gives the answer a stable stream element", () => {
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", sessionTitle: "datasage_semantic_knowledge / task-7kq2", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", paneToken: "yx0c", requestText: "## Request\nFix **login** <script>bad()</script>", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const output = reduceRunCard(queued, { type: "output", occurredAt: "2026-08-22T10:00:01Z", answerSnapshot: "partial", hasProgressSnapshot: true, progressEvents: [{ key: "implement", kind: "step", label: "实现双卡更新", state: "done", occurredAt: "2026-08-22T10:00:01Z" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "2026-08-22T10:00:02Z", answer: "Fixed." });
-    const taskCard = renderRequestRunCard(completed);
     const answerCard = renderRequestAnswerCard(completed);
-    const task = JSON.stringify(taskCard);
     const answer = JSON.stringify(answerCard);
-    expect(taskCard).toMatchObject({ schema: "2.0", header: { template: "green" } });
-    expect(taskCard).toMatchObject({ header: { title: { content: "💬 你的请求" }, subtitle: { content: "Fix login" } } });
-    expect(task).toContain("## Request\\nFix **login**");
-    expect(task).not.toContain("bad()");
-    expect(task).toContain("✅ 任务完成");
-    expect(task).not.toContain("实现双卡更新");
-    expect(task).not.toContain("执行计划");
-    expect(task).not.toContain("Fixed.");
+    const answerBody = JSON.stringify((answerCard as { body: object }).body);
     expect(answer).toContain("Fixed.");
     expect(answer).not.toContain("实现双卡更新");
-    expect(answer).not.toContain("Fix **login**");
-    const panels = (taskCard as { body: { elements: Array<{ tag?: string }> } }).body.elements.filter((element) => element.tag === "collapsible_panel");
-    expect(panels).toEqual([]);
-    expect(answerCard).toMatchObject({ header: { title: { content: "✅ TraeX 回复已完成" }, subtitle: { content: "datasage_semantic_knowledge / task-7kq2 · Fix login" }, template: "green" } });
+    expect(answerBody).not.toContain("Fix **login**");
+    expect(answerCard).toMatchObject({ header: { title: { content: "datasage_semantic_knowledge / yx0c" }, subtitle: { content: "Reply to 👤 ## Request Fix **login** <script>bad()</script>" }, template: "green" } });
     expect(answerCard).toMatchObject({ config: { streaming_mode: false, summary: { content: "完成 · Fix login" } } });
     const answerElements = (answerCard as { body: { elements: Array<{ tag?: string; element_id?: string }> } }).body.elements;
     expect(answerElements).toContainEqual(expect.objectContaining({ tag: "markdown", element_id: "answer_content_p1_0" }));
@@ -560,6 +731,34 @@ describe("run card", () => {
     expect(elementId).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
     expect(elementId.length).toBeLessThanOrEqual(20);
     expect(createQueuedRunCard({ promptId: "3f0cea75-c8cd-41f0-8fca-87d402b2a2a1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" }).answerElementId).toBe("element_cbb6cb5f9c09");
+  });
+
+  it("renders one aggregate projection-gap warning on mutable and final Answer cards", () => {
+    const view = createQueuedRunCard({ promptId: "p-gap", bindingId: "b1", title: "Recover display", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const warning = "⚠ 有 2 条过程更新未能展示；后续消息仍在同步。";
+    const mutable = JSON.stringify(renderRequestAnswerCard(view, { initialContent: "current", gapWarning: warning }));
+    const final = JSON.stringify(renderFinalAnswerCard({ ...view, phase: "completed" }, { initialContent: "done", gapWarning: warning }));
+
+    expect(mutable.match(/过程更新未能展示/g)).toHaveLength(1);
+    expect(final.match(/过程更新未能展示/g)).toHaveLength(1);
+    expect(mutable).toContain('"color":"orange"');
+    expect(final).toContain('"color":"orange"');
+  });
+
+  it("keeps a historical uncertain-Prompt warning separate from the projection-gap warning", () => {
+    const warning = "⚠ 有 2 条过程更新未能展示；后续消息仍在同步。";
+    const uncertainPromptWarning = "⚠ 已跳过 1 条无法确认结果的历史请求；后续消息仍在同步。";
+    const queued = createQueuedRunCard({ promptId: "p-uncertain-gap", bindingId: "b1", title: "Recover history", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const failed = reduceRunCard(queued, { type: "failed", occurredAt: "later", notice: uncertainPromptWarning });
+    const card = renderRequestAnswerCard(failed, { initialContent: "current", gapWarning: warning });
+    const callouts = findTaggedNodes(card, "collapsible_panel");
+
+    expect(callouts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ border: expect.objectContaining({ color: "orange" }), elements: [expect.objectContaining({ content: warning })] }),
+      expect.objectContaining({ border: expect.objectContaining({ color: "red" }), elements: [expect.objectContaining({ content: uncertainPromptWarning })] })
+    ]));
+    expect(callouts.filter((node) => JSON.stringify(node).includes("过程更新未能展示"))).toHaveLength(1);
+    expect(callouts.filter((node) => JSON.stringify(node).includes("无法确认结果的历史请求"))).toHaveLength(1);
   });
 
   it("uses the shared canonical timeline in a Primary Answer Card", () => {
@@ -573,9 +772,147 @@ describe("run card", () => {
 
     expect(answer.map((element) => element.tag)).toEqual(["hr", "markdown", "collapsible_panel", "markdown"]);
     expect(JSON.stringify(answer)).toContain("Before tool");
-    expect(JSON.stringify(answer)).toContain("🔍 Search · timeline store · ✓ 完成");
+    expect(JSON.stringify(answer)).toContain("🔍 Searched for timeline store");
     expect(JSON.stringify(answer)).toContain("After tool");
     expect(JSON.stringify(answer)).not.toContain("legacy duplicate");
+  });
+
+  it("renders complete thinking text in a collapsed panel while retaining its title", () => {
+    const view = createQueuedRunCard({ promptId: "thinking", bindingId: "b1", title: "Thinking", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const card = renderRequestAnswerCard({ ...view, phase: "completed", timelineItems: [
+      { kind: "thinking", id: "thinking:1", sequence: 1, label: "Inspecting delivery", markdown: "full reasoning line one\nfull reasoning line two" }
+    ] });
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain("Inspecting delivery");
+    expect(serialized).toContain("full reasoning line one");
+    expect(serialized).toContain("full reasoning line two");
+    expect(card).toMatchObject({ body: { elements: expect.arrayContaining([expect.objectContaining({ tag: "collapsible_panel", expanded: false })]) } });
+  });
+
+  it("renders waiting-for-command status text in the Answer Card timeline", () => {
+    const view = createQueuedRunCard({ promptId: "waiting", bindingId: "b1", title: "Waiting", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" });
+    const card = renderRequestAnswerCard({ ...view, phase: "completed", timelineItems: [
+      { kind: "status", id: "status:1", sequence: 1, label: "waiting for command", state: "running" }
+    ] });
+    expect(JSON.stringify(card)).toContain("waiting for command");
+  });
+
+  it("renders Edit diff detail through the Primary Answer Card", () => {
+    const view = createQueuedRunCard({ promptId: "p-edit", bindingId: "b1", title: "Edit", workspaceId: "w1", paneId: "w1:p1", requestText: "change it", queuePosition: 0, occurredAt: "now" });
+    const card = renderRequestAnswerCard({ ...view, phase: "completed", timelineItems: [{
+      kind: "tool", id: "tool:edit", sequence: 1, category: "edit", label: "src/main.ts (+1 -1)",
+      diff: "*** Update File: src/main.ts\n@@\n-old\n+new", state: "succeeded"
+    }] });
+
+    expect(JSON.stringify(card)).toContain("**Diff**\\n\\n```diff\\n*** Update File: src/main.ts\\n@@\\n-old\\n+new\\n```");
+  });
+
+  it("replaces the Answer process trace with the current Task List at the bottom", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p-task-list", bindingId: "b1", title: "Task List", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" }),
+      phase: "running" as const,
+      progressEvents: [{ key: "tool:test", kind: "test" as const, label: "npm test", state: "active" as const, occurredAt: "now" }],
+      taskList: [
+        { key: "plan:one", kind: "step" as const, label: "Inspect durable state", state: "done" as const, occurredAt: "now" },
+        { key: "plan:two", kind: "step" as const, label: "Render the card", state: "active" as const, occurredAt: "now" }
+      ],
+      timelineItems: [{ kind: "agent_message" as const, id: "message:one", sequence: 1, markdown: "Working through the task." }]
+    };
+    const card = renderRequestAnswerCard(view) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } } }> } };
+    const elements = card.body.elements;
+    const taskListIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("📋 Task List"));
+    const messageIndex = elements.findIndex((element) => element.content === "Working through the task.");
+    const serialized = JSON.stringify(elements);
+
+    expect(serialized).not.toContain("过程轨迹");
+    expect(serialized).not.toContain("npm test");
+    expect(taskListIndex).toBeGreaterThan(messageIndex);
+    expect(elements.at(-1)?.header?.title?.content).toMatch(/^📋 Task List/);
+    expect(serialized).toContain("Inspect durable state");
+    expect(serialized).toContain("Render the card");
+  });
+
+  it("renders the Current Goal immediately before the final Task List", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p-goal", bindingId: "b1", title: "Goal", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" }),
+      phase: "running" as const,
+      currentGoal: {
+        goalId: "goal-1", objective: "Ship **native Goal** support", status: "active" as const, blockKind: null,
+        sourceUpdatedAt: 1, occurredAt: "now", sourceId: "source-1", sourceSequence: 1, sourceEventId: "event-1", nativeSessionId: "session-1"
+      },
+      taskList: [{ key: "plan:one", kind: "step" as const, label: "Run verification", state: "active" as const, occurredAt: "now" }]
+    };
+    const card = renderRequestAnswerCard(view) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } } }> } };
+    const elements = card.body.elements;
+    const goalIndex = elements.findIndex((element) => element.content?.includes("🎯 Goal · In progress"));
+    const taskListIndex = elements.findIndex((element) => element.header?.title?.content?.startsWith("📋 Task List"));
+
+    expect(goalIndex).toBeGreaterThan(-1);
+    expect(taskListIndex).toBe(goalIndex + 1);
+    expect(elements.at(-1)?.header?.title?.content).toMatch(/^📋 Task List/);
+    expect(JSON.stringify(elements[goalIndex])).toContain("Ship **native Goal** support");
+  });
+
+  it("keeps the current Task List at the bottom of an Answer continuation page", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p-task-list-page-2", bindingId: "b1", title: "Continue", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" }),
+      phase: "running" as const,
+      taskList: [
+        { key: "plan:one", kind: "step" as const, label: "Inspect durable state", state: "done" as const, occurredAt: "now" },
+        { key: "plan:two", kind: "step" as const, label: "Render the continuation", state: "active" as const, occurredAt: "now" }
+      ]
+    };
+    const card = renderRequestAnswerCard(view, { pageNumber: 2, initialContent: "continued answer" }) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } } }> } };
+    const elements = card.body.elements;
+
+    expect(elements.at(-1)?.header?.title?.content).toMatch(/^📋 Task List/);
+    expect(JSON.stringify(elements.at(-1))).toContain("Render the continuation");
+  });
+
+  it("uses the structured Herdr status line as the Answer Task List title", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p-status", bindingId: "b1", title: "Status", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" }),
+      phase: "running" as const,
+      taskListTitle: "Running focused verification",
+      taskList: [{ key: "plan:verify", kind: "step" as const, label: "Run tests", state: "active" as const, occurredAt: "now" }]
+    };
+
+    const serialized = JSON.stringify(renderRequestAnswerCard(view as never));
+    expect(serialized).toContain("📋 Task List · Running focused verification · 1 项");
+    expect(serialized).toContain("Run tests");
+  });
+
+  it("normalizes and bounds the structured Task List title", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p-status-bounded", bindingId: "b1", title: "Status", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 0, occurredAt: "now" }),
+      phase: "running" as const,
+      taskListTitle: `  Running\nfocused   ${"verification ".repeat(20)}  `,
+      taskList: [{ key: "plan:verify", kind: "step" as const, label: "Run tests", state: "active" as const, occurredAt: "now" }]
+    };
+
+    const card = renderRequestAnswerCard(view as never) as { body: { elements: Array<{ header?: { title?: { content?: string } } }> } };
+    const title = card.body.elements.find((element) => element.header?.title?.content?.startsWith("📋 Task List"))?.header?.title?.content ?? "";
+    const statusTitle = title.replace(/^📋 Task List · /, "").replace(/ · 1 项$/, "");
+    expect(statusTitle).not.toContain("\n");
+    expect(statusTitle).not.toContain("  ");
+    expect(statusTitle).toHaveLength(96);
+    expect(statusTitle.endsWith("…")).toBe(true);
+  });
+
+  it("keeps the final Task List at the bottom of a frozen Answer page", () => {
+    const view = {
+      ...createQueuedRunCard({ promptId: "p-final-task-list", bindingId: "b1", title: "Finish", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" }),
+      phase: "completed" as const,
+      taskList: [
+        { key: "plan:one", kind: "step" as const, label: "Inspect durable state", state: "done" as const, occurredAt: "now" },
+        { key: "plan:two", kind: "step" as const, label: "Render the final card", state: "done" as const, occurredAt: "now" }
+      ]
+    };
+    const card = renderFinalAnswerCard(view, { pageNumber: 2, initialContent: "final answer" }) as { body: { elements: Array<{ content?: string; header?: { title?: { content?: string } } }> } };
+    const elements = card.body.elements;
+
+    expect(elements.at(-1)?.header?.title?.content).toMatch(/^📋 Task List/);
+    expect(JSON.stringify(elements.at(-1))).toContain("Render the final card");
   });
 
   it("keeps the shared Primary timeline when the first Answer Card is frozen", () => {
@@ -588,22 +925,55 @@ describe("run card", () => {
     const serialized = JSON.stringify(card);
 
     expect(serialized).toContain("Before command");
-    expect(serialized).toContain("⚙️ Command · npm test · ✓ 完成");
+    expect(serialized).toContain("⚙️ Ran npm test");
     expect(serialized).toContain("After command");
     expect(serialized).not.toContain("legacy page");
     expect(card.body.elements.some((element) => element.element_id === "answer_element")).toBe(true);
   });
 
-  it("shows relative freshness and live or final output state on request cards", () => {
+  it("shows live or final output state on Answer cards", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-27T12:03:00Z"));
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Freshness", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-27T12:00:00Z" });
     const running = { ...queued, phase: "running" as const, updatedAt: "2026-08-27T12:00:00Z" };
     const completed = { ...running, phase: "completed" as const, updatedAt: "2026-08-27T12:02:00Z" };
 
-    expect(JSON.stringify(renderRequestRunCard(running))).toContain("最后更新 3 分钟前");
     expect(JSON.stringify(renderRequestAnswerCard(running))).toContain("实时更新中");
     expect(JSON.stringify(renderRequestAnswerCard(completed))).toContain("最终结果");
+  });
+
+  it("distinguishes submitted, recovering, uncertain, proven failure, and late repaired history", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Recovery", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    const submitted = reduceRunCard(view, { type: "submitted", occurredAt: "2026-10-01T00:00:01.000Z" });
+    const recovering = reduceRunCard(submitted, { type: "recovering", occurredAt: "2026-10-01T00:00:02.000Z", notice: "不会重复发送请求" });
+    const uncertain = reduceRunCard(recovering, { type: "uncertain", occurredAt: "2026-10-01T00:05:00.000Z", notice: "结果无法确认" });
+    const failed = reduceRunCard(submitted, { type: "failed", occurredAt: "2026-10-01T00:00:03.000Z", notice: "exact abort" });
+    const repaired = reduceRunCard(uncertain, { type: "completed", occurredAt: "2026-10-01T00:06:00.000Z", answer: "recovered answer", replaceAnswer: true });
+
+    expect(JSON.stringify(renderRequestAnswerCard(submitted))).toContain("📨 已提交，等待 Agent 接收");
+    expect(JSON.stringify(renderRequestAnswerCard(recovering))).toContain("🔄 正在恢复执行观察");
+    expect(JSON.stringify(renderRequestAnswerCard(recovering))).not.toContain("正在恢复观察");
+    expect(JSON.stringify(renderRequestAnswerCard(uncertain))).toContain("❔ 结果待确认");
+    expect(JSON.stringify(renderRequestAnswerCard(failed))).toContain("❌ 执行失败");
+    expect(JSON.stringify(renderRequestAnswerCard({ ...repaired, notice: "已通过精确 turn identity 补回历史结果；原冻结页面未修改。" }))).toContain("历史结果已补回");
+  });
+
+  it("renders unified awake stages without claiming Feishu acknowledgement", () => {
+    const delivery = JSON.stringify(renderAwakeStatusCard({
+      outcome: "requested", selectedStage: "rebuilding_projection", stage: "rebuilding_projection",
+      recoveredTurns: 0, promptCount: 1, workerTurnCount: 2
+    }));
+    expect(delivery).toContain("重建投递投影");
+    expect(delivery).toContain("1 个 Primary Answer");
+    expect(delivery).toContain("2 个 Worker Task");
+    expect(delivery).toContain("尚未确认 Feishu 已接收");
+
+    const execution = JSON.stringify(renderAwakeStatusCard({
+      outcome: "recovered", selectedStage: "observing_execution", stage: "recovered",
+      recoveredTurns: 2, promptCount: 0, workerTurnCount: 0
+    }));
+    expect(execution).toContain("恢复执行观察");
+    expect(execution).toContain("不会重发任务");
   });
 
   it("folds only oversized complete code blocks in a final Answer Card", () => {
@@ -658,33 +1028,16 @@ describe("run card", () => {
   });
 
   it("renders a conversational answer with compact metadata and arbitrary continuation pages", () => {
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", sessionTitle: "datasage / task-7kq2", workspaceId: "w1", paneId: "w1:p9", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Explain rollout", sessionTitle: "datasage / task-7kq2", workspaceId: "w1", spaceName: "datasage", paneId: "w1:p9", paneToken: "p4e0", requestText: "Explain", queuePosition: 1, occurredAt: "start" });
     const completed = { ...view, phase: "completed" as const, startedAt: "2026-08-22T10:00:00Z", finishedAt: "2026-08-22T10:01:05Z", answer: "older page" };
     const card = renderRequestAnswerCard(completed, { pageNumber: 7, initialContent: "Only page seven" }) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string; element_id?: string }> } };
 
-    expect(card.header).toMatchObject({ title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, subtitle: { content: "datasage / task-7kq2 · Explain rollout" } });
-    expect(card).toMatchObject({ config: { streaming_mode: false }, header: { title: { content: "✅ TraeX 回复已完成 · 第 7 页" }, template: "green" } });
-    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "最终结果  ·  ✅ 任务完成  ·  Pane `w1:p9`  ·  用时 1m 5s  ·  第 7 页" });
+    expect(card.header).toMatchObject({ title: { content: "datasage / p4e0 · 第 7 页" }, subtitle: { content: "Reply to 👤 Explain" } });
+    expect(card).toMatchObject({ config: { streaming_mode: false }, header: { title: { content: "datasage / p4e0 · 第 7 页" }, template: "green" } });
+    expect(card.body.elements[0]).toMatchObject({ tag: "markdown", content: "最终结果  ·  ✅ 任务完成  ·  Pane `p4e0`  ·  用时 1m 5s  ·  第 7 页" });
     expect(card.body.elements[1]).toEqual({ tag: "hr" });
     expect(card.body.elements[2]).toMatchObject({ tag: "markdown", element_id: "answer_content_p1_0", content: "Only page seven" });
     expect(JSON.stringify(card)).not.toContain("older page");
-  });
-
-  it("keeps a command expandable on a payload-constrained continuation page", () => {
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Continue command", workspaceId: "w1", paneId: "w1:p9", requestText: "Run", queuePosition: 0, occurredAt: "now" });
-    const content = [
-      "p".repeat(900),
-      "", "◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text",
-      "output line\n".repeat(400).trimEnd(),
-      "```"
-    ].join("\n");
-
-    const card = renderFinalAnswerCard({ ...view, phase: "completed" }, { pageNumber: 2, initialContent: content }, 2_400) as { config: { streaming_mode: boolean }; body: { elements: Array<{ tag: string; elements?: Array<{ content: string }> }> } };
-    const panel = card.body.elements.find((element) => element.tag === "collapsible_panel");
-
-    expect(card.config.streaming_mode).toBe(false);
-    expect(panel?.elements?.[0]!.content).toContain("…（命令输出已截断）");
-    expect(JSON.stringify(card).length).toBeLessThanOrEqual(2_400);
   });
 
   it("keeps Answer continuation pages focused on metadata and page content", () => {
@@ -709,12 +1062,51 @@ describe("run card", () => {
     expect(JSON.stringify(renderRequestAnswerCard({ ...view, phase: "completed" }))).not.toContain("streaming_config");
   });
 
-  it("falls back to space and pane id for legacy Answer Card views", () => {
+  it("uses only a native pane token in the Answer title and never exposes the pane id there", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stream", workspaceId: "w1", spaceName: "datasage", paneId: "w5:p3G", requestText: "go", queuePosition: 0, occurredAt: "start" });
 
     expect(renderRequestAnswerCard({ ...view, phase: "running" })).toMatchObject({
-      header: { title: { content: "✨ TraeX 回复" }, subtitle: { content: "datasage / w5:p3G · Stream" } }
+      header: { title: { content: "datasage / —" }, subtitle: { content: "Reply to 👤 go" } }
     });
+    expect(renderRequestAnswerCard({ ...view, paneToken: "yx0c", phase: "running" })).toMatchObject({
+      header: { title: { content: "datasage / yx0c" }, subtitle: { content: "Reply to 👤 go" } }
+    });
+  });
+
+  it("redacts, flattens, and bounds the Answer reply summary", () => {
+    const view = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", title: "Progress", workspaceId: "w1", spaceName: "herdr-agent-swarm",
+      paneId: "wN:p4E", paneToken: "yx0c", requestText: `continue\nauthorization: Bearer ${"secret".repeat(30)}`,
+      queuePosition: 0, occurredAt: "start"
+    });
+    const card = renderRequestAnswerCard({ ...view, phase: "running" }) as { header: { title: { content: string }; subtitle: { content: string } } };
+
+    expect(card.header.title.content).toBe("herdr-agent-swarm / yx0c");
+    expect(card.header.title.content).not.toContain("wN:p4E");
+    expect(card.header.subtitle.content).toContain("Reply to 👤 continue authorization: Bearer [REDACTED]");
+    expect(card.header.subtitle.content.length).toBeLessThanOrEqual(96);
+    expect(card.header.subtitle.content).not.toContain("secret");
+  });
+
+  it("renders a concise processing placeholder until the first displayable Answer item arrives", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Stream", workspaceId: "w1", spaceName: "datasage", paneId: "w5:p3G", requestText: "go", queuePosition: 0, occurredAt: "start" });
+    const processing = JSON.stringify(renderRequestAnswerCard({ ...view, phase: "running" }));
+    const withOutput = JSON.stringify(renderRequestAnswerCard({ ...view, phase: "running", answer: "已开始检查。" }));
+
+    expect(processing).toContain("🧠 TraeX 正在处理");
+    expect(processing).toContain("🧠 已接收，正在等待 Herdr 返回首个可展示结果。");
+    expect(processing).not.toContain("✨ TraeX 回复");
+    expect(withOutput).toContain("已开始检查。");
+    expect(withOutput).not.toContain("正在等待 Herdr 返回首个可展示结果");
+  });
+
+  it("keeps queued Answer cards visibly queued rather than presenting them as processing", () => {
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Queued", workspaceId: "w1", spaceName: "datasage", paneId: "w5:p3G", requestText: "go", queuePosition: 3, occurredAt: "start" });
+    const card = JSON.stringify(renderRequestAnswerCard(view));
+
+    expect(card).toContain("⏳ 已排队，等待前序请求完成。");
+    expect(card).not.toContain("正在等待 Herdr 返回首个可展示结果");
+    expect(card).not.toContain("🧠 正在处理");
   });
 
   it("keeps native TraeX task status out of the answer card", () => {
@@ -760,37 +1152,14 @@ describe("run card", () => {
     expect(stripNativeTaskFrame(answer)).toBe(answer);
   }, 1_000);
 
-  it("shows phase-aware status and elapsed duration instead of a queue dash", () => {
+  it("shows phase-aware status and elapsed duration in the Answer", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "Run", queuePosition: 1, occurredAt: "2026-08-22T10:00:00Z" });
     const completed = { ...view, phase: "completed" as const, queuePosition: 0, startedAt: "2026-08-22T10:00:10Z", finishedAt: "2026-08-22T10:02:15Z" };
-    const serialized = JSON.stringify(renderRequestRunCard(completed));
+    const serialized = JSON.stringify(renderRequestAnswerCard(completed));
 
     expect(serialized).toContain("✅ 任务完成  ·  Pane `w1:p1`  ·  用时 2m 5s");
     expect(serialized).not.toContain("STATUS");
     expect(serialized).not.toContain("QUEUE");
-  });
-
-  it("renders an expanded conversational request with one compact metadata line", () => {
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Fix login", workspaceId: "w1", spaceName: "datasage_semantic_knowledge", paneId: "w1:p2", requestText: "Fix login", queuePosition: 1, occurredAt: "now" });
-    const card = renderRequestRunCard(view) as { header: { title: { content: string }; subtitle: { content: string } }; body: { elements: Array<{ tag: string; content?: string }> } };
-
-    expect(card.header).toMatchObject({ title: { content: "💬 你的请求" }, subtitle: { content: "Fix login" } });
-    expect(card.body.elements.filter((element) => element.tag === "collapsible_panel")).toEqual([]);
-    expect(card.body.elements.filter((element) => element.content?.includes("Fix login"))).toHaveLength(1);
-    expect(card.body.elements.filter((element) => element.content?.includes("已排队  ·  Pane `w1:p2`  ·  队列第 1 位"))).toHaveLength(1);
-  });
-
-  it("ignores all legacy progress activity on the lifecycle-only request card", () => {
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Large", workspaceId: "w1", paneId: "p1", requestText: "Inspect files", queuePosition: 1, occurredAt: "now" });
-    const card = renderRequestRunCard({ ...view, progressEvents: [
-      { key: "legacy", kind: "read" as const, label: "已读取 secret.ts", state: "done" as const, occurredAt: "now" },
-      ...Array.from({ length: 20 }, (_, index) => ({ key: "step:" + index, kind: "step" as const, label: "任务步骤 " + index, state: "pending" as const, occurredAt: "now" }))
-    ] });
-    const serialized = JSON.stringify(card);
-    expect(serialized).not.toContain("secret.ts");
-    expect(serialized).not.toContain("任务步骤 0");
-    expect(serialized).not.toContain("任务步骤 19");
-    expect(serialized).not.toContain("执行计划");
   });
 
   it("keeps the newest answer window in request cards", () => {
@@ -798,7 +1167,8 @@ describe("run card", () => {
     const answer = `old answer ${"x".repeat(13_000)} newest conclusion`;
     const card = renderRequestAnswerCard({ ...view, phase: "completed", answer });
     const serialized = JSON.stringify(card);
-    expect(serialized).not.toContain("Keep this request beginning");
+    expect(serialized).toContain("Reply to 👤 Keep this request beginning");
+    expect(JSON.stringify((card as { body: object }).body)).not.toContain("Keep this request beginning");
     expect(serialized).toContain("newest conclusion");
     expect(serialized).toContain("old answer");
     expect(serialized).toContain("已省略中间");
@@ -844,13 +1214,13 @@ describe("run card", () => {
     expect(serialized).not.toContain("stale aggregate");
   });
 
-  it("shows request and lifecycle without an execution-plan panel", () => {
+  it("shows Answer lifecycle without duplicating the request or an execution-plan panel", () => {
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "p1", requestText: "Do the work", queuePosition: 3, occurredAt: "now" });
-    const queued = JSON.stringify(renderRequestRunCard(view));
-    expect(queued).toContain("Do the work");
+    const queued = JSON.stringify(renderRequestAnswerCard(view));
+    expect(queued).toContain("Reply to 👤 Do the work");
     expect(queued).toContain("⏳ 已排队  ·  Pane `p1`  ·  队列第 3 位");
 
-    const card = renderRequestRunCard({ ...view, phase: "running" });
+    const card = renderRequestAnswerCard({ ...view, phase: "running" });
     const serialized = JSON.stringify(card);
     expect(serialized).toContain("🧠 TraeX 正在处理  ·  Pane `p1`");
     expect(serialized).not.toContain("执行计划");

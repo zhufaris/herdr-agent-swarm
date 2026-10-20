@@ -3,14 +3,16 @@ import { WorkerSessionThreadWorkflow } from "../src/coordinator/worker-session-t
 import { applicationPresentation } from "./helpers/presentation.js";
 
 const message = (text = "work") => ({ eventId: "event", messageId: "message", parentMessageId: null, chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root", actorOpenId: "operator", text, mentionsBot: true, isRootMessage: false });
-const active = (patch: Record<string, unknown> = {}) => ({ kind: "active" as const, target: { threadId: "thread", workerId: "worker", workerName: "reviewer", workerSessionGeneration: 1, projectId: "project", runtimeGeneration: 2, parentBindingId: "binding", parentBindingGeneration: 1, parentPaneId: "primary-pane", rootMessageId: "worker-root", mode: "canonical-main" as const, view: { workerName: "reviewer" }, activeTurn: null, ...patch } });
+const active = (patch: Record<string, unknown> = {}) => ({ kind: "active" as const, target: { threadId: "thread", workerId: "worker", workerName: "reviewer", workerSessionGeneration: 1, projectId: "project", runtimeGeneration: 2, paneId: "worker-pane", agentKind: "traex" as const, nativeSessionId: null, parentBindingId: "binding", parentBindingGeneration: 1, parentPaneId: "primary-pane", rootMessageId: "worker-root", mode: "canonical-main" as const, view: { workerName: "reviewer" }, activeTurn: null, ...patch } });
 
 function setup(resolution: object = { kind: "none" }) {
   const store = { resolveScope: vi.fn(() => resolution), reserveLegacyEntry: vi.fn(() => ({ kind: "reserved" as const })) };
   const messaging = { submit: vi.fn(async () => ({ inserted: true, card: { queuePosition: 2 } })), steer: vi.fn(async () => ({ status: "delivered", durableResult: true })), interrupt: vi.fn(async () => ({ status: "interrupted", durableResult: true })) };
+  const agentInput = { submit: vi.fn(async () => ({ outcome: "accepted" as const, submissionId: "submission-1", state: "prepared" as const })) };
+  const herdr = { getPane: vi.fn(async () => ({ paneId: "worker-pane", terminalId: "worker-terminal", agentKind: "traex", agentSession: null })) };
   const outbound = { enqueueCard: vi.fn(async () => undefined) }; const wakeOutbound = vi.fn(); const gatewayEffects = { shareConversation: vi.fn(async () => ({ messageId: "shared" })) };
-  const workflow = new WorkerSessionThreadWorkflow({ adminOpenIds: ["operator"], store: store as never, messaging: messaging as never, outbound: outbound as never, wakeOutbound, gatewayEffects, presentation: applicationPresentation });
-  return { workflow, store, messaging, outbound, wakeOutbound, gatewayEffects };
+  const workflow = new WorkerSessionThreadWorkflow({ gatewayId: "feishu:primary", adminOpenIds: ["operator"], store: store as never, messaging: messaging as never, agentInput, herdr, outbound: outbound as never, wakeOutbound, gatewayEffects, presentation: applicationPresentation });
+  return { workflow, store, messaging, agentInput, herdr, outbound, wakeOutbound, gatewayEffects };
 }
 
 describe("WorkerSessionThreadWorkflow", () => {
@@ -27,19 +29,78 @@ describe("WorkerSessionThreadWorkflow", () => {
     expect(messaging.submit).not.toHaveBeenCalled();
   });
 
-  it("submits ordinary text to the validated fixed Worker target", async () => {
-    const { workflow, messaging, outbound } = setup(active());
-    await expect(workflow.handleMessage(message("new task"))).resolves.toEqual({ handled: true, disposition: "prompt_queued" });
-    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "worker", projectId: "project", content: { kind: "turn", text: "new task" }, source: { messageId: "message", rootMessageId: "worker-root" } }));
-    expect(outbound.enqueueCard).toHaveBeenCalledWith("worker-root", "worker-thread:accepted:message", expect.any(Object));
+  it("submits first-session Worker text as one independently fenced Agent Input", async () => {
+    const { workflow, messaging, agentInput, herdr, outbound } = setup(active());
+    await expect(workflow.handleMessage(message("new task"))).resolves.toEqual({ handled: true, disposition: "agent_input_accepted" });
+    expect(herdr.getPane).toHaveBeenCalledWith("worker-pane");
+    expect(agentInput.submit).toHaveBeenCalledWith({
+      ingressSource: "feishu:primary",
+      sourceMessageKey: "message",
+      actor: { kind: "human", id: "operator", gatewayId: "feishu:primary", chatId: "chat", topicId: "worker-topic", rootMessageId: "worker-root" },
+      text: "new task",
+      owner: { kind: "worker", id: "worker", generation: 2 },
+      paneId: "worker-pane",
+      terminalId: "worker-terminal",
+      expectedAgentKind: "traex",
+      expectedSessionId: null
+    });
+    expect(messaging.submit).not.toHaveBeenCalled();
+    expect(outbound.enqueueCard).not.toHaveBeenCalled();
+  });
+
+  it("preserves the exact existing Worker session fence", async () => {
+    const { workflow, agentInput, herdr } = setup(active({ nativeSessionId: "session-1" }));
+    herdr.getPane.mockResolvedValue({ paneId: "worker-pane", terminalId: "worker-terminal", agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } });
+
+    await expect(workflow.handleMessage(message("continue"))).resolves.toEqual({ handled: true, disposition: "agent_input_accepted" });
+
+    expect(agentInput.submit).toHaveBeenCalledWith(expect.objectContaining({ expectedSessionId: "session-1" }));
+  });
+
+  it("converges duplicate Worker source delivery through Agent Input", async () => {
+    const { workflow, agentInput, outbound } = setup(active());
+    agentInput.submit.mockResolvedValue({ outcome: "duplicate", submissionId: "submission-1", state: "prepared" });
+
+    await expect(workflow.handleMessage(message("same task"))).resolves.toEqual({ handled: true, disposition: "agent_input_accepted" });
+
+    expect(agentInput.submit).toHaveBeenCalledOnce();
+    expect(outbound.enqueueCard).not.toHaveBeenCalled();
+  });
+
+  it("routes non-reserved slash text to the Worker Agent", async () => {
+    const { workflow, agentInput } = setup(active());
+
+    await expect(workflow.handleMessage(message("/compact"))).resolves.toEqual({ handled: true, disposition: "agent_input_accepted" });
+
+    expect(agentInput.submit).toHaveBeenCalledWith(expect.objectContaining({ text: "/compact" }));
+  });
+
+  it("rejects unsupported Worker Agent kinds before Pane observation or admission", async () => {
+    const { workflow, agentInput, herdr } = setup(active({ agentKind: "codex" }));
+
+    await expect(workflow.handleMessage(message("work"))).resolves.toEqual({ handled: true, disposition: "rejected" });
+
+    expect(herdr.getPane).not.toHaveBeenCalled();
+    expect(agentInput.submit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a changed Worker runtime fence before Agent Input admission", async () => {
+    const { workflow, agentInput, herdr } = setup(active({ nativeSessionId: "session-1" }));
+    herdr.getPane.mockResolvedValue({ paneId: "worker-pane", terminalId: "worker-terminal", agentKind: "traex", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-2" } });
+
+    await expect(workflow.handleMessage(message("work"))).resolves.toEqual({ handled: true, disposition: "rejected" });
+
+    expect(agentInput.submit).not.toHaveBeenCalled();
   });
 
   it("uses the exact active turn for steer and stop", async () => {
-    const { workflow, messaging } = setup(active({ activeTurn: { id: "turn", state: "running" } }));
+    const { workflow, messaging, agentInput, herdr } = setup(active({ activeTurn: { id: "turn", state: "running" } }));
     await workflow.handleMessage(message("/steer focus"));
     await workflow.handleMessage({ ...message("/stop"), messageId: "stop" });
     expect(messaging.steer).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "worker", targetTurnId: "turn", text: "focus" }));
     expect(messaging.interrupt).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: "worker", targetTurnId: "turn" }));
+    expect(herdr.getPane).not.toHaveBeenCalled();
+    expect(agentInput.submit).not.toHaveBeenCalled();
   });
 
   it.each([

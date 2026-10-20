@@ -42,13 +42,20 @@ function callbackValue(card: unknown, action: string): Record<string, unknown> {
 }
 const defaultBindingCard = { conversationKey: "binding:binding-default", bindingId: "binding-default", bindingGeneration: 1 };
 
-function setup(adminOpenIds: readonly string[] = ["u1"], wakeOutboundOverride?: () => void) {
+function setup(adminOpenIds: readonly string[] = ["u1"], wakeOutboundOverride?: () => void, provisionCreatedWorker = false) {
   store = new SqliteBindingStore(":memory:");
+  const lease = store.acquireInstanceLease("instance-routing-test", "2026-10-06T00:00:00.000Z", "2099-01-01T00:00:00.000Z")!;
+  store.activateWriteFence(lease.ownerId, lease.fencingToken);
   store.createPendingBinding({ id: "binding-default", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic-default", rootMessageId: "root", title: "default" });
   store.updateBinding("binding-default", { paneId: "w1:primary-default", state: "active", lifecycle: "active", attachment: "attached" });
   const create = (id: string, role: "primary" | "worker", projectId = "p1", bindingId = "binding-default", paneId = `w1:primary-${bindingId}`) => store!.createAgentInstance({ id, projectId, name: id, role, agentKind: "traex", model: null, ...(role === "worker" ? { parent: { bindingId, bindingGeneration: 1, paneId: bindingId === "binding-default" ? "w1:primary-default" : paneId, nativeSessionId: null }, workerSessionLifecycle: "active" as const } : {}), desiredState: "stopped", workspace: { id: `ws-${id}`, kind: role === "primary" ? "main-checkout" : "shared-read-only", cwd: projectId === "p1" ? "/repo" : "/repo-two", branch: null, baseCommit: "base" } });
   const outbound = { enqueueCard: vi.fn(async () => undefined) };
-  const messaging = { submit: vi.fn(async () => ({ accepted: true })), steer: vi.fn(), interrupt: vi.fn(), inspect: vi.fn() };
+  const messaging = { submit: vi.fn(async () => ({ accepted: true })), acceptWorkerCompletionAction: vi.fn(async () => ({ accepted: true, inserted: true, card: { queuePosition: 2 } })), steer: vi.fn(), interrupt: vi.fn(), inspect: vi.fn() };
+  const agentInput = { submit: vi.fn(async () => ({ outcome: "accepted" as const, submissionId: "worker-submission", state: "prepared" as const })) };
+  const herdr = { getPane: vi.fn(async (paneId: string) => {
+    const instance = store!.findAgentInstanceByPane(paneId);
+    return { paneId, terminalId: "worker-terminal", agentKind: instance?.agentKind ?? "traex", agentSession: instance?.runtimeRef?.nativeSessionId ? { source: "herdr:traex", agent: "traex", kind: "id" as const, value: instance.runtimeRef.nativeSessionId } : null };
+  }) };
   const control = {
     listWorkers: (projectId: string) => store!.listAgentInstances(projectId).filter(({ role }) => role === "worker"),
     listWorkersForParent: (parent: { bindingId: string; paneId: string }) => store!.listWorkerInstancesByParent(parent),
@@ -61,6 +68,7 @@ function setup(adminOpenIds: readonly string[] = ["u1"], wakeOutboundOverride?: 
         workspace: { id: `ws-${input.name}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
       }, 4);
       if (created.outcome !== "created") throw new Error(created.outcome);
+      if (provisionCreatedWorker) attachWorkerRuntimeFixture(created.instance.id, `w1:worker-${created.instance.id}`);
       return { status: "created" as const, instance: created.instance };
     }), start: vi.fn(), stop: vi.fn(),
     planRemoval: vi.fn(async ({ instanceId }) => { const instance = store!.getAgentInstance(instanceId)!; const workspace = store!.getWorkspaceLease(instance.workspaceLeaseId)!; return store!.createInstanceRemovalPlan({ id: "plan-1", instanceId, instanceGeneration: instance.generation, workspaceGeneration: workspace.generation, worktreeFingerprint: "clean-fp", safe: true, reason: "clean", state: "pending", createdAt: "now" }); }),
@@ -68,13 +76,26 @@ function setup(adminOpenIds: readonly string[] = ["u1"], wakeOutboundOverride?: 
   };
   let interaction = 0;
   const wakeOutbound = wakeOutboundOverride ? vi.fn(wakeOutboundOverride) : vi.fn();
-  const workerSessionThreads = new WorkerSessionThreadWorkflow({ adminOpenIds, store: store.workerSessionThreads, messaging: messaging as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation });
+  const workerSessionThreads = new WorkerSessionThreadWorkflow({ gatewayId: "feishu:primary", adminOpenIds, store: store.workerSessionThreads, messaging: messaging as never, agentInput, herdr: herdr as never, outbound: outbound as never, wakeOutbound, gatewayEffects: { shareConversation: vi.fn(async () => ({ messageId: "shared" })) }, presentation: applicationPresentation });
   const workflow = new InstanceInteractionWorkflow({ projects: [project, secondProject], adminOpenIds, store, control: control as never, messaging: messaging as never, drivers: { describe: () => ({ available: true, structuredEvents: true, nativeResume: true, primaryTools: true, steering: "unsupported", interrupt: "native", approvals: "terminal", modelSelection: "startup-only", usageReporting: true }) } as never, outbound: outbound as never, wakeOutbound, presentation: applicationPresentation, idFactory: () => `interaction-${++interaction}`, workerSessionThreads });
-  return { create, workflow, workerSessionThreads, outbound, messaging, control, wakeOutbound };
+  return { create, workflow, workerSessionThreads, outbound, messaging, agentInput, herdr, control, wakeOutbound };
+}
+
+function attachWorkerRuntimeFixture(instanceId: string, paneId = `w1:worker-${instanceId}`): void {
+  store!.database.prepare(`UPDATE agent_instances
+    SET desired_state='running', herdr_workspace_id='w1', pane_id=?, native_session_id=?, observed_state='idle', provisioning_checkpoint='verified'
+    WHERE id=?`).run(paneId, `session-${instanceId}`, instanceId);
+}
+
+function activateWorkerThreadFixture(workerThreadId: string, rootMessageId: string, topicId: string): void {
+  const timestamp = "2026-10-06T00:00:01.000Z";
+  store!.database.prepare(`UPDATE worker_session_threads
+    SET state='active', root_message_id=?, topic_id=?, activated_at=?, updated_at=? WHERE id=?`).run(rootMessageId, topicId, timestamp, timestamp, workerThreadId);
 }
 
 function taskCard(instanceId: string, state: "queued" | "running" | "completed" | "failed" | "cancelled" | "dispatch-uncertain", turnId = `turn-${state}`) {
-  const worker = store!.getAgentInstance(instanceId)!;
+  let worker = store!.getAgentInstance(instanceId)!;
+  if (!worker.runtimeRef) { attachWorkerRuntimeFixture(instanceId); worker = store!.getAgentInstance(instanceId)!; }
   const workerSessionGeneration = worker.workerSessionGeneration ?? 1;
   const view = createQueuedWorkerTurnCard({ turnId, instanceId, instanceGeneration: worker.generation, workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
   store!.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: worker.projectId, instanceId, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: `source-${turnId}`, view, render: renderWorkerTurnCard });
@@ -108,8 +129,34 @@ function renderedTaskCard(turnId: string): object {
 }
 
 describe("instance routing", () => {
+  it("submits a Worker completion action for the mentioned allowed Human without requiring admin authority", async () => {
+    const { workflow, messaging } = setup([]);
+    const command = parseCardActionCommand({ action: "completion_action", actionSetId: "actions-1", selection: "approve", ownerKind: "worker-turn", ownerId: "turn-1", ownerGeneration: 3, cardMessageId: "worker-card" });
+    if (command.kind !== "completion-action") throw new Error("expected completion action");
+
+    await expect(workflow.handleCardAction({ messageId: "worker-card", chatId: "chat", operatorOpenId: "u1", value: {} }, command)).resolves.toEqual({ toast: { type: "success", content: "快捷消息已提交，当前队列第 2 位。" } });
+
+    expect(messaging.acceptWorkerCompletionAction).toHaveBeenCalledWith({
+      actionSetId: "actions-1", selection: "approve", ownerTurnId: "turn-1", ownerGeneration: 3,
+      cardMessageId: "worker-card", chatId: "chat", actor: { kind: "human", userId: "u1", channel: "feishu" }
+    });
+  });
+
+  it("routes only a dynamic Worker option identity from the card callback", async () => {
+    const { workflow, messaging } = setup([]);
+    const command = parseCardActionCommand({ action: "completion_action", actionSetId: "actions-1", optionId: "two", message: "forged", ownerKind: "worker-turn", ownerId: "turn-1", ownerGeneration: 3, cardMessageId: "worker-card" });
+    if (command.kind !== "completion-action") throw new Error("expected completion action");
+
+    await workflow.handleCardAction({ messageId: "worker-card", chatId: "chat", operatorOpenId: "u1", value: {} }, command);
+
+    expect(messaging.acceptWorkerCompletionAction).toHaveBeenCalledWith({
+      actionSetId: "actions-1", optionId: "two", ownerTurnId: "turn-1", ownerGeneration: 3,
+      cardMessageId: "worker-card", chatId: "chat", actor: { kind: "human", userId: "u1", channel: "feishu" }
+    });
+  });
+
   it("routes ordinary Worker-thread text to the fixed session instead of a selected target", async () => {
-    const { create, workerSessionThreads, messaging } = setup();
+    const { create, workerSessionThreads, messaging, agentInput } = setup();
     let worker = create("reviewer", "worker");
     worker = store!.updateAgentInstanceLifecycle({ instanceId: worker.id, expectedGeneration: worker.generation, desiredState: "running", observedState: "idle" })!;
     worker = store!.attachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker-thread", nativeSessionId: "worker-session" })!;
@@ -119,11 +166,10 @@ describe("instance routing", () => {
     const createReply = store!.listPendingOutboundReplies().find(({ workerThreadId }) => workerThreadId !== null)!;
     store!.markOutboundReplyDelivered(store!.claimOutboundReply(createReply.id, null)!, "worker-root", "worker-card", "worker-topic");
     store!.setConversationTarget({ chatId: "binding:binding-default", projectId: "p1", target: { kind: "primary" } });
-    vi.mocked(messaging.submit).mockResolvedValue({ accepted: true, inserted: true } as never);
-
     await workerSessionThreads.handleMessage({ ...message("new review", "worker-message"), topicId: "worker-topic", rootMessageId: "worker-root" });
 
-    expect(messaging.submit).toHaveBeenCalledWith(expect.objectContaining({ targetInstanceId: worker.id, content: { kind: "turn", text: "new review" }, source: { messageId: "worker-message", rootMessageId: "worker-root" } }));
+    expect(agentInput.submit).toHaveBeenCalledWith(expect.objectContaining({ owner: { kind: "worker", id: worker.id, generation: worker.generation }, text: "new review", expectedSessionId: "worker-session" }));
+    expect(messaging.submit).not.toHaveBeenCalled();
   });
 
   it("uses exact active-turn identity for Worker-thread steer and stop", async () => {
@@ -132,7 +178,8 @@ describe("instance routing", () => {
     const task = taskCard(worker.id, "running", "thread-active-turn");
     store!.workerSessionThreads.reserve({ publicationKey: "worker-entry:reviewer:1", workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-default", parentBindingGeneration: 1, parentPaneId: "w1:primary-default", targetChatId: "chat", mode: "legacy-entry", sourceMainMessageId: task.mainCardMessageId, actionMessageId: "instances", card: {} });
     const createReply = store!.listPendingOutboundReplies().find(({ workerThreadId }) => workerThreadId !== null)!;
-    store!.markOutboundReplyDelivered(store!.claimOutboundReply(createReply.id, null)!, "worker-root", undefined, "worker-topic");
+    expect(createReply).toMatchObject({ deliveryScope: { kind: "pane", workspaceId: "w1", paneId: `w1:worker-${worker.id}` }, deliveryOwnerFence: { kind: "worker", id: worker.id, parent: { id: "binding-default" } }, gatewayPlanHash: expect.any(String) });
+    activateWorkerThreadFixture(createReply.workerThreadId!, "worker-root", "worker-topic");
     vi.mocked(messaging.steer).mockResolvedValue({ status: "delivered", durableResult: true });
     vi.mocked(messaging.interrupt).mockResolvedValue({ status: "interrupted" });
 
@@ -155,6 +202,7 @@ describe("instance routing", () => {
 
     const creates = store!.listPendingOutboundReplies().filter(({ workerThreadId }) => workerThreadId !== null);
     expect(creates).toHaveLength(1);
+    expect(creates[0]).toMatchObject({ deliveryScope: { kind: "pane", workspaceId: "w1", paneId: `w1:worker-${worker.id}` }, deliveryOwnerFence: { kind: "worker", id: worker.id, parent: { id: "binding-default" } }, gatewayPlanHash: expect.any(String) });
     expect(JSON.parse(creates[0]!.payload)).toMatchObject({ header: { subtitle: { content: expect.stringContaining("LEGACY SESSION ENTRY") } } });
     expect(store!.loadWorkerMainView(worker.id, 1)?.messageId).toBe(task.mainCardMessageId);
     expect(wakeOutbound).toHaveBeenCalledOnce();
@@ -545,7 +593,7 @@ describe("instance routing", () => {
     store!.saveWorkerMainView({ ...main, messageId: "worker-main-message", cardId: "worker-main-card" });
     taskCard(worker.id, "completed", "owned-task");
 
-    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🧭 Worker · reviewer" }, subtitle: { content: "HERDR WORKER · PRIMARY w1:primary-default · ⚠️ 未配置" } } } });
+    await expect(handleCardAction(workflow, { messageId: "source", chatId: "chat", operatorOpenId: "u1", value: { action: "card_target_open", aggregateKind: "worker-session", aggregateId: worker.id, generation: worker.workerSessionGeneration, messageId: "worker-main-message" } })).resolves.toMatchObject({ card: { header: { title: { content: "🧭 Worker · reviewer" }, subtitle: { content: "HERDR WORKER · PRIMARY w1:primary-default · ✅ 空闲" } } } });
   });
 
   it("rejects stale and cross-Primary Worker card targets", async () => {
@@ -601,7 +649,7 @@ describe("instance routing", () => {
   });
   it("wakes durable card context after create so one canonical Worker Main thread is reserved", async () => {
     const work = new InProcessOutboundWorkNotifier();
-    const { workflow } = setup(["u1"], () => work.wake());
+    const { workflow } = setup(["u1"], () => work.wake(), true);
     const rebuilder = new CardContextRebuilder(store!, () => {}, { debug() {}, error() {} } as never, applicationPresentation, work);
     rebuilder.start(60_000);
     await new Promise((resolve) => setImmediate(resolve));
@@ -610,7 +658,7 @@ describe("instance routing", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(store!.listPendingOutboundReplies().filter((reply) => reply.kind === "group_card_create" && reply.workerId !== null)).toEqual([
-      expect.objectContaining({ idempotencyKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1 })
+      expect.objectContaining({ idempotencyKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, deliveryScope: { kind: "pane", workspaceId: "w1", paneId: "w1:worker-reviewer" }, gatewayPlanHash: expect.any(String) })
     ]);
     await rebuilder.stop();
   });

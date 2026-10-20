@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { paneControlOutcomeSources, type PaneControlOutcome } from "../../domain/pane-control-lifecycle.js";
-import type { OutboxStore } from "../../domain/ports/outbox.js";
+import type { OutboxStore, PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
 import type { OutboundTargetRole, PaneCloseOperation, PaneControlOperation, PaneControlOperationKind } from "../../domain/types.js";
 import { mapPaneControlOperation, type PaneControlOperationRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
@@ -10,11 +10,14 @@ export interface SqlitePaneOperationStoreDependencies {
 }
 
 export class SqlitePaneOperationStore {
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext, private readonly dependencies: SqlitePaneOperationStoreDependencies) {}
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void { this.preparedDeliveryReservation = reservation; this.preparedDeliveryConsumer = consumer; }
   private get database() { return this.context.database; }
 
   createPaneCloseRequest(input: { id: string; bindingId: string; paneId: string; actorOpenId: string; codeHash: string; expiresAt: string }): void {
-    this.context.transaction(() => {
+    this.context.transaction("sqlite.pane-operation-store.write", () => {
       const timestamp = now();
       this.database.prepare("UPDATE pane_close_requests SET state = 'cancelled', updated_at = ? WHERE binding_id = ? AND state = 'pending'").run(timestamp, input.bindingId);
       this.database.prepare(`INSERT INTO pane_close_requests(id, binding_id, pane_id, actor_open_id, code_hash, state, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(input.id, input.bindingId, input.paneId, input.actorOpenId, input.codeHash, input.expiresAt, timestamp, timestamp);
@@ -26,7 +29,7 @@ export class SqlitePaneOperationStore {
   }
 
   consumePaneCloseRequest(input: { bindingId: string; paneId: string; actorOpenId: string; codeHash: string; now: string }): { outcome: "consumed"; operationId: string; paneId: string } | { outcome: "invalid" | "unauthorized" | "expired" | "stale" } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.pane-operation-store.write", () => {
       const row = this.database.prepare("SELECT id, pane_id, actor_open_id, code_hash, expires_at FROM pane_close_requests WHERE binding_id = ? AND state = 'pending' ORDER BY created_at DESC, id DESC LIMIT 1").get(input.bindingId) as { id: string; pane_id: string; actor_open_id: string; code_hash: string; expires_at: string } | undefined;
       if (!row) return { outcome: "stale" };
       if (row.actor_open_id !== input.actorOpenId) return { outcome: "unauthorized" };
@@ -44,7 +47,7 @@ export class SqlitePaneOperationStore {
   }
 
   beginWorkerPaneCloseCascade(input: { operationId: string; bindingId: string; bindingGeneration: number; paneId: string }): Array<{ workerId: string; paneId: string; instanceGeneration: number }> {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.pane-operation-store.write", () => {
       const workers = this.database.prepare("SELECT id, generation, pane_id FROM agent_instances WHERE role = 'worker' AND parent_binding_id = ? AND parent_binding_generation = ? AND parent_pane_id = ? AND worker_session_lifecycle = 'active' AND pane_id IS NOT NULL ORDER BY created_at, id").all(input.bindingId, input.bindingGeneration, input.paneId) as Array<{ id: string; generation: number; pane_id: string }>;
       const timestamp = now();
       for (const worker of workers) {
@@ -61,7 +64,7 @@ export class SqlitePaneOperationStore {
   listUnresolvedPaneCloseOperations(): PaneCloseOperation[] { return (this.database.prepare("SELECT id, binding_id, pane_id, state FROM pane_close_requests WHERE state IN ('executing','uncertain') ORDER BY created_at, id").all() as Array<{ id: string; binding_id: string; pane_id: string; state: PaneCloseOperation["state"] }>).map((row) => ({ id: row.id, bindingId: row.binding_id, paneId: row.pane_id, state: row.state })); }
 
   acceptPaneControlOperation(input: { id: string; idempotencyKey: string; bindingId: string; paneId: string; terminalId: string | null; bindingGeneration: number; kind: PaneControlOperationKind; payload?: string | null; parentPromptId?: string | null; actorOpenId: string; sourceMessageId: string }): { operation: PaneControlOperation; inserted: boolean } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.pane-operation-store.write", () => {
       const timestamp = now();
       const result = this.database.prepare(`INSERT INTO pane_control_operations(id, idempotency_key, binding_id, pane_id, terminal_id, binding_generation, kind, payload, parent_prompt_id, state, attempt_count, actor_open_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`).run(input.id, input.idempotencyKey, input.bindingId, input.paneId, input.terminalId, input.bindingGeneration, input.kind, input.payload ?? null, input.parentPromptId ?? null, input.actorOpenId, input.sourceMessageId, timestamp, timestamp);
       const operation = this.getPaneControlOperationByKey(input.idempotencyKey);
@@ -71,7 +74,7 @@ export class SqlitePaneOperationStore {
   }
 
   claimNextPaneControlOperation(bindingId?: string): PaneControlOperation | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.pane-operation-store.write", () => {
       const scope = bindingId ? "AND operation.binding_id = ?" : "";
       const row = this.database.prepare(`SELECT operation.* FROM pane_control_operations AS operation JOIN bindings AS binding ON binding.id = operation.binding_id WHERE operation.state = 'accepted' ${scope} AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached' AND binding.pane_id = operation.pane_id AND binding.generation = operation.binding_generation AND (operation.kind != 'model' OR NOT EXISTS (SELECT 1 FROM prompt_jobs active_prompt WHERE active_prompt.binding_id = operation.binding_id AND active_prompt.state = 'running')) AND (operation.kind = 'stop' OR NOT EXISTS (SELECT 1 FROM pane_control_operations active WHERE active.binding_id = operation.binding_id AND active.kind != 'stop' AND active.state = 'running')) ORDER BY CASE operation.kind WHEN 'stop' THEN 0 WHEN 'steer' THEN 1 ELSE 2 END, operation.created_at, operation.rowid LIMIT 1`).get(...(bindingId ? [bindingId] : [])) as PaneControlOperationRow | undefined;
       if (!row) return null;
@@ -94,17 +97,20 @@ export class SqlitePaneOperationStore {
   }
 
   finishPaneControlWithResult(input: { operationId: string; state: PaneControlOutcome; detail?: string | null; result: { kind: "card_reply" | "card_update"; targetMessageId: string; idempotencyKey: string; targetRole?: OutboundTargetRole | null; card: object } }): boolean {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.pane-operation-store.write", () => {
       const operation = this.getPaneControlOperation(input.operationId);
       if (!operation) throw new Error(`Pane control operation not found: ${input.operationId}`);
       if (operation.state !== input.state && !this.finishPaneControlOperation(input.operationId, input.state, input.detail ?? null)) return false;
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: input.result.idempotencyKey, bindingId: operation.bindingId, targetRole: input.result.targetRole ?? null, rootMessageId: input.result.targetMessageId, kind: input.result.kind, payload: JSON.stringify(input.result.card) });
+      const outbound = { id: randomUUID(), idempotencyKey: input.result.idempotencyKey, bindingId: operation.bindingId, bindingGeneration: operation.bindingGeneration, targetRole: input.result.targetRole ?? null, rootMessageId: input.result.targetMessageId, kind: input.result.kind, payload: JSON.stringify(input.result.card) };
+      if (!this.hasExactActiveBinding(operation.bindingId, operation.bindingGeneration)) return true;
+      if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Pane Operation prepared delivery is not connected");
+      this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(outbound));
       return true;
     });
   }
 
   private claimState(id: string, state: "accepted" | "applied"): PaneControlOperation | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.pane-operation-store.write", () => {
       const row = this.database.prepare("SELECT id FROM pane_control_operations WHERE id = ? AND state = ?").get(id, state) as { id: string } | undefined;
       if (!row) return null;
       const result = this.database.prepare("UPDATE pane_control_operations SET state = 'running', attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND state = ?").run(now(), id, state);
@@ -112,6 +118,8 @@ export class SqlitePaneOperationStore {
     });
   }
   private getPaneControlOperationByKey(key: string): PaneControlOperation | null { const row = this.database.prepare("SELECT * FROM pane_control_operations WHERE idempotency_key = ?").get(key) as PaneControlOperationRow | undefined; return row ? mapPaneControlOperation(row) : null; }
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void { queueMicrotask(() => { for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery); }); }
+  private hasExactActiveBinding(id: string, generation: number): boolean { return this.database.prepare("SELECT 1 FROM bindings WHERE id=? AND generation=? AND state='active' AND lifecycle='active' AND attachment='attached'").get(id, generation) !== undefined; }
 }
 
 function now(): string { return new Date().toISOString(); }

@@ -1,33 +1,42 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
+import type { BindingPromptWorkflowPort } from "../domain/ports/prompt-acceptance.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { CardInteractionStore } from "../domain/ports/workflow.js";
-import { createQueuedRunCard } from "../domain/run-card-view.js";
 import type { IncomingLarkCardAction, LarkCardActionResult } from "../domain/types.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
-import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
-import type { SessionCardActionCommand } from "./card-action-command.js";
-import { isPromptInputTooLarge, MAX_PROMPT_INPUT_CHARS } from "../domain/prompt-input-policy.js";
+import type { SwarmCommandRuntime } from "./swarm-command-gateway.js";
+import type { CardActionCommand, SessionCardActionCommand } from "./card-action-command.js";
+import type { ProjectConfig } from "../domain/types.js";
+import { ProjectCatalog } from "./project-catalog.js";
+import type { AgentInputWorkflowPort } from "../domain/ports/agent-input.js";
+import type { InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
 export type { SessionCardActionCommand } from "./card-action-command.js";
 
 interface Options {
   store: CardInteractionStore;
+  projects: readonly ProjectConfig[];
   adminOpenIds: readonly string[];
   sessionAdministration: Pick<SessionAdministrationWorkflowPort, "emitStatus">;
-  sessionOperations: Pick<SessionOperationWorkflowPort, "accept">;
-  wakePrompt(bindingId: string): void;
+  commands: Pick<SwarmCommandRuntime, "submit">;
+  bindingPrompts: Pick<BindingPromptWorkflowPort, "ignorePrimaryCompletionAction">;
+  agentInput: Pick<AgentInputWorkflowPort, "resume">;
+  workerMessaging?: Pick<InstanceMessagingPort, "decideFreshWorkerCompletionReview">;
+  convergeTurnCard(segmentId: string): Promise<void>;
   logger: Pick<Logger, "info" | "warn">;
-  presentation: Pick<ApplicationPresentation, "answerCard" | "interactionToast" | "interactionGuidance" | "moreActions" | "queueSummary" | "reattachInput" | "renameInput" | "primaryContinuationInput">;
+  presentation: Pick<ApplicationPresentation, "interactionToast" | "interactionGuidance" | "moreActions" | "reattachInput" | "renameInput" | "primaryContinuationInput">;
 }
 
 export interface CardInteractionWorkflowPort {
-  handle(action: IncomingLarkCardAction, command: SessionCardActionCommand): Promise<LarkCardActionResult>;
+  handle(action: IncomingLarkCardAction, command: SessionCardActionCommand | Extract<CardActionCommand, { kind: "completion-action" }>): Promise<LarkCardActionResult>;
 }
 
 export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
-  constructor(private readonly options: Options) {}
+  private readonly projects: ProjectCatalog;
+  constructor(private readonly options: Options) { this.projects = new ProjectCatalog(options.projects ?? []); }
 
-  async handle(action: IncomingLarkCardAction, command: SessionCardActionCommand): Promise<LarkCardActionResult> {
+  async handle(action: IncomingLarkCardAction, command: SessionCardActionCommand | Extract<CardActionCommand, { kind: "completion-action" }>): Promise<LarkCardActionResult> {
+    if (command.kind === "completion-action") return this.submitCompletionAction(action, command);
     switch (command.action) {
       case "open_more_actions": return this.openMoreActions(action, command);
       case "view_queue": return this.viewQueue(action, command);
@@ -38,6 +47,111 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
       case "primary_continue_form": return this.openPrimaryContinuation(action, command);
       case "primary_continue_submit": return this.submitPrimaryContinuation(action, command);
       default: return this.sessionControl(action, command);
+    }
+  }
+
+  private async submitCompletionAction(action: IncomingLarkCardAction, command: Extract<CardActionCommand, { kind: "completion-action" }>): Promise<LarkCardActionResult> {
+    if (command.ownerKind === undefined) {
+      const occurredAt = new Date().toISOString();
+      let decision: { kind: "ignored"; changed: boolean; segmentId?: string } | { kind: "submission"; submissionId: string; inserted: boolean; segmentId?: string };
+      try {
+        const ownerKind = this.options.store.getCompletionReviewOwnerKind(command.actionSetId);
+        if (ownerKind === "primary-segment" || ownerKind === "primary-prompt") {
+          const primary = this.options.store.decidePrimaryCompletionReview({
+            actionSetId: command.actionSetId, optionId: command.optionId,
+            messageId: action.messageId, actorOpenId: action.operatorOpenId, chatId: action.chatId, occurredAt
+          });
+          decision = primary.kind === "ignored"
+            ? { kind: "ignored", changed: primary.changed, ...(primary.ownerKind === "primary-segment" ? { segmentId: primary.segmentId } : {}) }
+            : { kind: "submission", submissionId: primary.submissionId, inserted: primary.inserted, ...(primary.ownerKind === "primary-segment" ? { segmentId: primary.segmentId } : {}) };
+        } else if (ownerKind === "worker-turn") {
+          if (!this.options.workerMessaging) return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+          const worker = await this.options.workerMessaging.decideFreshWorkerCompletionReview({
+            actionSetId: command.actionSetId, optionId: command.optionId,
+            messageId: action.messageId, chatId: action.chatId,
+            actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }
+          });
+          if (worker.kind === "ignored") return this.options.presentation.interactionToast("success", "已忽略。");
+          return this.options.presentation.interactionToast("success", worker.inserted ? `快捷消息已提交，当前队列第 ${worker.card.queuePosition} 位。` : "这条快捷消息已提交。");
+        } else {
+          return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+        }
+      } catch {
+        return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+      }
+      if (decision.kind === "ignored") {
+        if (decision.changed && decision.segmentId) {
+          try { await this.options.convergeTurnCard(decision.segmentId); }
+          catch (error) { this.options.logger.warn({ error, actionSetId: command.actionSetId }, "Completion Review convergence failed after Ignore"); }
+        }
+        return this.options.presentation.interactionToast("success", "已忽略。");
+      }
+      let admission;
+      try { admission = await this.options.agentInput.resume(decision.submissionId); }
+      catch (error) {
+        this.options.logger.warn({ error, actionSetId: command.actionSetId }, "Completion Review input resume failed after durable decision");
+        return this.options.presentation.interactionToast("warning", "选择已记录，正在确认中，请勿重复提交。");
+      }
+      if (decision.inserted && decision.segmentId) {
+        try { await this.options.convergeTurnCard(decision.segmentId); }
+        catch (error) { this.options.logger.warn({ error, actionSetId: command.actionSetId }, "Completion Review convergence failed after durable decision"); }
+      }
+      switch (admission.state) {
+        case "prepared": case "observed": case "terminal":
+          return this.options.presentation.interactionToast("success", "已提交选择。");
+        case "recorded": case "attempting": case "uncertain":
+          return this.options.presentation.interactionToast("warning", "选择正在确认中，请勿重复提交。");
+        case "cancelled":
+          return this.options.presentation.interactionToast("warning", "选择未提交，请发送新的消息。");
+      }
+    }
+    if (action.messageId !== command.cardMessageId) return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+    if (command.ownerKind === "primary-segment") {
+      try {
+        const occurredAt = new Date().toISOString();
+        if ("ignore" in command) {
+          const result = this.options.store.ignorePrimarySegmentCompletionChoice({
+            actionSetId: command.actionSetId, ownerSegmentId: command.ownerId, ownerGeneration: command.ownerGeneration,
+            cardMessageId: command.cardMessageId, actorOpenId: action.operatorOpenId, chatId: action.chatId, occurredAt
+          });
+          if (result.changed) await this.options.convergeTurnCard(result.ownerId);
+          return this.options.presentation.interactionToast("success", "已忽略。");
+        }
+        if (!("optionId" in command)) throw new Error("Segment completion actions require a declared choice");
+        const result = this.options.store.acceptPrimarySegmentCompletionChoice({
+          actionSetId: command.actionSetId, optionId: command.optionId, ownerSegmentId: command.ownerId,
+          ownerGeneration: command.ownerGeneration, cardMessageId: command.cardMessageId,
+          actorOpenId: action.operatorOpenId, chatId: action.chatId, occurredAt
+        });
+        const admission = await this.options.agentInput.resume(result.submissionId);
+        if (result.inserted) await this.options.convergeTurnCard(result.segmentId);
+        switch (admission.state) {
+          case "prepared": case "observed": case "terminal":
+            return this.options.presentation.interactionToast("success", "已提交选择。");
+          case "recorded": case "attempting": case "uncertain":
+            return this.options.presentation.interactionToast("warning", "选择正在确认中，请勿重复提交。");
+          case "cancelled":
+            return this.options.presentation.interactionToast("warning", "选择未提交，请发送新的消息。");
+        }
+      } catch {
+        return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+      }
+    }
+    if (command.ownerKind !== "primary-prompt") return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+    const parent = this.options.store.getPrompt(command.ownerId);
+    const binding = parent ? this.options.store.getBinding(parent.bindingId) : null;
+    if (!parent || !binding || binding.chatId !== action.chatId || binding.generation !== command.ownerGeneration) return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
+    try {
+      if ("ignore" in command) {
+        await this.options.bindingPrompts.ignorePrimaryCompletionAction({
+          binding, actionSetId: command.actionSetId, ownerPromptId: command.ownerId, ownerGeneration: command.ownerGeneration,
+          cardMessageId: command.cardMessageId, actor: { openId: action.operatorOpenId }
+        });
+        return this.options.presentation.interactionToast("success", "已忽略。");
+      }
+      return this.options.presentation.interactionToast("warning", "该历史快捷输入已停用。请在当前会话直接发送消息，系统会通过 Agent Input 提交。");
+    } catch {
+      return this.options.presentation.interactionToast("warning", "该快捷操作已失效，请发送新的消息。");
     }
   }
 
@@ -57,7 +171,7 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
   private viewQueue(action: IncomingLarkCardAction, command: Extract<SessionCardActionCommand, { action: "view_queue" }>): LarkCardActionResult {
     const binding = this.freshBinding(action, command, false);
     if (!binding) return this.options.presentation.interactionToast("warning", "会话状态已变化，请刷新后重试。");
-    return { card: this.options.presentation.queueSummary({ queued: this.options.store.countPendingPrompts(binding.id) }) };
+    return this.options.presentation.interactionToast("warning", "Prompt 队列已停用；请使用 `/swarm status` 查看 Submission Intent、Core 投影与投递状态。");
   }
 
   private viewRecovery(action: IncomingLarkCardAction, command: Extract<SessionCardActionCommand, { action: "view_recovery" }>): LarkCardActionResult {
@@ -80,20 +194,13 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     return { card: this.options.presentation.primaryContinuationInput({ interactionId: interaction.id, bindingId: binding.id, bindingGeneration: binding.generation, parentPromptId: parent.id, sourceAnswerMessageId: command.sourceAnswerMessageId, requestedBy: action.operatorOpenId }) };
   }
 
-  private submitPrimaryContinuation(action: IncomingLarkCardAction, command: Extract<SessionCardActionCommand, { action: "primary_continue_submit" }>): LarkCardActionResult {
+  private async submitPrimaryContinuation(action: IncomingLarkCardAction, command: Extract<SessionCardActionCommand, { action: "primary_continue_submit" }>): Promise<LarkCardActionResult> {
     if (command.requestedBy !== action.operatorOpenId) return this.options.presentation.interactionToast("error", "只有发起此操作的用户可以提交。");
     const text = action.formValues?.continuation_text?.trim() ?? "";
     if (!text) return this.options.presentation.interactionToast("warning", "请说明从哪里继续，以及不要重复哪些内容。");
-    if (isPromptInputTooLarge(text)) return this.options.presentation.interactionToast("warning", `续做说明过长，请控制在 ${MAX_PROMPT_INPUT_CHARS} 个字符和 32 KiB 以内。`);
     const binding = this.freshBinding(action, command, true);
     if (!binding) return this.options.presentation.interactionToast("warning", "会话状态已变化，未创建续做任务。");
-    const id = randomUUID();
-    const view = createQueuedRunCard({ promptId: id, bindingId: binding.id, bindingGeneration: binding.generation, conversionParentPromptId: command.parentPromptId, title: binding.title, agentKind: binding.agentKind, workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: text, queuePosition: this.options.store.countPendingPrompts(binding.id) + 1, occurredAt: new Date().toISOString() });
-    try {
-      const result = this.options.store.acceptInterruptedContinuation({ interactionId: command.interactionId, parentPromptId: command.parentPromptId, sourceAnswerMessageId: command.sourceAnswerMessageId, expectedBindingGeneration: binding.generation, actorOpenId: action.operatorOpenId, accepted: { prompt: { id, bindingId: binding.id, larkMessageId: `card:${command.interactionId}`, actorOpenId: action.operatorOpenId, body: text, parentPromptId: command.parentPromptId }, view, rootMessageId: binding.rootMessageId ?? action.messageId, answerCard: this.options.presentation.answerCard(view), expectedBindingGeneration: binding.generation } });
-      if (result.inserted) this.options.wakePrompt(binding.id);
-      return this.options.presentation.interactionToast("success", result.inserted ? `续做任务已创建，当前队列第 ${result.view.queuePosition} 位。` : "这条续做任务已创建。");
-    } catch { return this.options.presentation.interactionToast("warning", "该中断任务已不可继续，未创建新任务。"); }
+    return this.options.presentation.interactionToast("warning", "历史续做表单已停用，且不会创建 Prompt。请复制续做说明并在当前会话直接发送，以通过 Agent Input 提交。");
   }
 
   private async sessionControl(action: IncomingLarkCardAction, command: Exclude<SessionCardActionCommand, { action: "open_more_actions" | "view_queue" | "view_recovery" | "create_new_task" | "open_rename" | "open_reattach" | "primary_continue_form" | "primary_continue_submit" }>): Promise<LarkCardActionResult> {
@@ -107,9 +214,9 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
     if (command.action === "session_model") return this.options.presentation.interactionToast("warning", "运行中的 Agent 不支持远程切换模型。请在创建或替换 Agent 时选择模型。");
     if (command.action !== "session_status") {
       const argument = command.operation === "rename" ? action.formValues!.title!.trim() : command.operation === "reattach" ? action.formValues!.pane_id!.trim() : null;
-      const outcome = this.options.sessionOperations.accept(action, binding, command.interactionId, command.operation, argument);
-      if (outcome === "accepted" || outcome === "duplicate") return this.options.presentation.interactionToast("success", outcome === "accepted" ? "操作已受理。" : "这项操作已处理。");
-      return this.options.presentation.interactionToast(outcome === "unauthorized" ? "error" : "warning", outcome === "unauthorized" ? "操作无权限。" : "操作入口已失效或会话状态已变化。");
+      const receipt = await this.options.commands.submit({ source: "card", action, bindingId: binding.id, bindingGeneration: command.bindingGeneration!, interactionId: command.interactionId, command: cardCommand(command.operation, argument) });
+      if (receipt.outcome === "accepted") return this.options.presentation.interactionToast("success", "操作已受理。");
+      return this.options.presentation.interactionToast(receipt.outcome === "rejected" && receipt.code.includes("unauthorized") ? "error" : "warning", receipt.outcome === "rejected" && receipt.code.includes("unauthorized") ? "操作无权限。" : "操作入口已失效或会话状态已变化。");
     }
     await this.options.sessionAdministration.emitStatus(binding);
     return this.options.presentation.interactionToast("success", "操作已受理。");
@@ -124,3 +231,16 @@ export class CardInteractionWorkflow implements CardInteractionWorkflowPort {
 }
 
 const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";
+
+function cardCommand(kind: "stop" | "reset" | "archive" | "resume" | "replace" | "pane_close" | "rename" | "reattach", argument: string | null) {
+  switch (kind) {
+    case "stop": return { kind: "stop" } as const;
+    case "reset": return { kind: "reset", title: null } as const;
+    case "archive": return { kind: "archive" } as const;
+    case "resume": return { kind: "resume" } as const;
+    case "replace": return { kind: "replace" } as const;
+    case "pane_close": return { kind: "pane_close_request" } as const;
+    case "rename": return { kind: "rename", title: argument! } as const;
+    case "reattach": return { kind: "reattach", paneId: argument! } as const;
+  }
+}

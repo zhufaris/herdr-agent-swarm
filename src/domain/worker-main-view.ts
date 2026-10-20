@@ -5,7 +5,46 @@ import type { WorkerTurnResultCapture } from "./worker-turn-card-view.js";
 import type { RunProgressEvent } from "./run-card-view.js";
 
 export const WORKER_MAIN_RECENT_TASK_LIMIT = 5;
+export interface ModelUsageSnapshot { model: string | null; contextRemainingPercent: number | null; inputTokens: number | null; outputTokens: number | null; queuedAt: string | null; firstVisibleAt: string | null; completedAt: string | null; waitMs: number | null; firstVisibleMs: number | null; }
 export type WorkerMainRuntimeState = ObservedInstanceState | "terminated";
+
+/**
+ * Provider-neutral identity for the pane/session rendered by a card.
+ *
+ * `workspace` is the authoritative checkout path (not the Herdr workspace
+ * id).  Git identity may be unavailable for a main checkout, so both
+ * `worktreeName` and `branch` deliberately remain nullable.
+ */
+export interface PaneIdentitySnapshot {
+  readonly workspace: string | null;
+  readonly worktreeName: string | null;
+  readonly branch: string | null;
+  readonly paneId: string | null;
+  readonly paneToken: string | null;
+}
+
+export type PaneIdentityInput = {
+  workspace?: string | null | undefined;
+  worktreeName?: string | null | undefined;
+  branch?: string | null | undefined;
+  paneId?: string | null | undefined;
+  paneToken?: string | null | undefined;
+};
+
+export function createPaneIdentitySnapshot(input: PaneIdentityInput = {}): PaneIdentitySnapshot {
+  return {
+    workspace: input.workspace ?? null,
+    worktreeName: input.worktreeName ?? null,
+    branch: input.branch ?? null,
+    paneId: input.paneId ?? null,
+    paneToken: input.paneToken ?? null
+  };
+}
+
+export function samePaneIdentity(left: PaneIdentitySnapshot | null | undefined, right: PaneIdentitySnapshot | null | undefined): boolean {
+  return left?.workspace === right?.workspace && left?.worktreeName === right?.worktreeName && left?.branch === right?.branch
+    && left?.paneId === right?.paneId && left?.paneToken === right?.paneToken;
+}
 
 export interface WorkerMainTaskSummary {
   turnId: string;
@@ -29,6 +68,7 @@ export interface WorkerMainView {
   parentBindingId: string;
   parentBindingGeneration: number;
   parentPaneId: string;
+  parentPaneToken: string | null;
   primaryPaneName?: string;
   projectId?: string;
   workerName: string;
@@ -39,9 +79,14 @@ export interface WorkerMainView {
   desiredState: "running" | "stopped";
   parentActive: boolean;
   paneId: string | null;
+  paneToken: string | null;
+  /** Canonical identity; flat fields above are retained for persisted-card compatibility. */
+  paneIdentity?: PaneIdentitySnapshot;
+  worktreeName?: string | null;
   workspace: string;
   branch: string | null;
   model: string | null;
+  modelUsage: ModelUsageSnapshot;
   currentTask: WorkerMainTaskSummary | null;
   queueCount: number;
   nextTaskTitle: string | null;
@@ -62,30 +107,55 @@ export function canSubmitWorkerMainTask(view: Pick<WorkerMainView, "frozenAt" | 
 }
 
 export type WorkerMainChange =
-  | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId: string | null; occurredAt: string }
+  | { type: "usage"; usage: ModelUsageSnapshot; occurredAt: string }
+  | { type: "runtime"; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null; paneToken?: string | null; workspace?: string | null; worktreeName?: string | null; branch?: string | null; paneIdentity?: PaneIdentitySnapshot; occurredAt: string }
   | { type: "tasks"; currentTask: WorkerMainTaskSummary | null; queueCount: number; nextTaskTitle: string | null; recentTasks: readonly WorkerMainTaskSummary[]; occurredAt: string; dependencyRevision?: number }
   | { type: "terminated"; occurredAt: string };
 
 export function createWorkerMainView(input: {
-  workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string;
-    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null; primaryPaneName?: string; projectId?: string;
-  workspace: string; branch: string | null; model: string | null; occurredAt: string;
+  workerId: string; workerSessionGeneration: number; parentBindingId: string; parentBindingGeneration: number; parentPaneId: string; parentPaneToken?: string | null;
+    workerName: string; ownerName: string; runtimeGeneration: number; runtimeState: ObservedInstanceState; runtimeAttached: boolean; desiredState: "running" | "stopped"; parentActive: boolean; paneId?: string | null; paneToken?: string | null; primaryPaneName?: string; projectId?: string;
+  workspace: string; branch: string | null; worktreeName?: string | null | undefined; paneIdentity?: PaneIdentitySnapshot | undefined; model: string | null; modelUsage?: ModelUsageSnapshot | undefined; occurredAt: string;
 }): WorkerMainView {
+  const paneIdentity = createPaneIdentitySnapshot({
+    ...input.paneIdentity,
+    workspace: input.paneIdentity?.workspace ?? input.workspace,
+    worktreeName: input.paneIdentity?.worktreeName ?? input.worktreeName,
+    branch: input.paneIdentity?.branch ?? input.branch,
+    paneId: input.paneIdentity?.paneId ?? input.paneId,
+    paneToken: input.paneIdentity?.paneToken ?? input.paneToken
+  });
   return {
-    ...input, paneId: input.paneId ?? null, currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [],
+    ...input, parentPaneToken: input.parentPaneToken ?? null, paneId: paneIdentity.paneId, paneToken: paneIdentity.paneToken, paneIdentity, workspace: paneIdentity.workspace ?? input.workspace, branch: paneIdentity.branch, worktreeName: paneIdentity.worktreeName, modelUsage: normalizeModelUsage(input.modelUsage ?? emptyModelUsage(input.model)), currentTask: null, queueCount: 0, nextTaskTitle: null, recentTasks: [],
     messageId: null, cardId: null, frozenAt: null, dependencyRevision: 0, viewVersion: 1, deliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
 
 export function reduceWorkerMainView(state: WorkerMainView, change: WorkerMainChange): WorkerMainView {
+  if (!state.modelUsage) state = { ...state, modelUsage: emptyModelUsage() };
   if (state.frozenAt !== null) return state;
   let patch: Partial<WorkerMainView>;
-  if (change.type === "runtime") {
+  if (change.type === "usage") {
+    if (JSON.stringify(state.modelUsage) === JSON.stringify(change.usage)) return state;
+    return { ...state, modelUsage: change.usage, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
+  } else if (change.type === "runtime") {
+    const priorIdentity = state.paneIdentity ?? createPaneIdentitySnapshot({ workspace: state.workspace, branch: state.branch, worktreeName: state.worktreeName, paneId: state.paneId, paneToken: state.paneToken });
+    const identity = createPaneIdentitySnapshot({
+      ...priorIdentity,
+      ...change.paneIdentity,
+      workspace: change.workspace === undefined ? change.paneIdentity?.workspace ?? priorIdentity.workspace : change.workspace,
+      worktreeName: change.worktreeName === undefined ? change.paneIdentity?.worktreeName ?? priorIdentity.worktreeName : change.worktreeName,
+      branch: change.branch === undefined ? change.paneIdentity?.branch ?? priorIdentity.branch : change.branch,
+      paneId: change.paneId === undefined ? change.paneIdentity?.paneId ?? priorIdentity.paneId : change.paneId,
+      paneToken: change.paneToken === undefined ? change.paneIdentity?.paneToken ?? priorIdentity.paneToken : change.paneToken
+    });
     if (state.runtimeGeneration === change.runtimeGeneration && state.runtimeState === change.runtimeState && state.runtimeAttached === change.runtimeAttached
-      && state.desiredState === change.desiredState && state.parentActive === change.parentActive && state.paneId === change.paneId) return state;
-    patch = { runtimeGeneration: change.runtimeGeneration, runtimeState: change.runtimeState, runtimeAttached: change.runtimeAttached, desiredState: change.desiredState, parentActive: change.parentActive, paneId: change.paneId };
+      && state.desiredState === change.desiredState && state.parentActive === change.parentActive && samePaneIdentity(state.paneIdentity ?? priorIdentity, identity)) return state;
+    patch = { runtimeGeneration: change.runtimeGeneration, runtimeState: change.runtimeState, runtimeAttached: change.runtimeAttached, desiredState: change.desiredState, parentActive: change.parentActive,
+      paneId: identity.paneId, paneToken: identity.paneToken, paneIdentity: identity, workspace: identity.workspace ?? state.workspace, worktreeName: identity.worktreeName, branch: identity.branch };
   } else if (change.type === "terminated") {
-    patch = { runtimeState: "terminated", paneId: null, frozenAt: change.occurredAt };
+    const paneIdentity = createPaneIdentitySnapshot({ ...(state.paneIdentity ?? {}), paneId: null, paneToken: null });
+    patch = { runtimeState: "terminated", paneId: null, paneToken: null, paneIdentity, frozenAt: change.occurredAt };
   } else {
     const recentTasks = boundedTerminalTasks(change.recentTasks);
     const revision = change.dependencyRevision ?? state.dependencyRevision;
@@ -126,3 +196,5 @@ function sameProgress(left: readonly RunProgressEvent[] | undefined, right: read
     return other !== undefined && event.key === other.key && event.kind === other.kind && event.label === other.label && event.state === other.state && event.occurredAt === other.occurredAt;
   });
 }
+export function emptyModelUsage(model: string | null = null): ModelUsageSnapshot { return { model, contextRemainingPercent: null, inputTokens: null, outputTokens: null, queuedAt: null, firstVisibleAt: null, completedAt: null, waitMs: null, firstVisibleMs: null }; }
+export function normalizeModelUsage(value: ModelUsageSnapshot | null | undefined): ModelUsageSnapshot { return value ?? emptyModelUsage(); }

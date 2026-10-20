@@ -3,6 +3,192 @@ import type { HerdrPort } from "../src/domain/ports.js";
 import { WorkspaceSnapshotCache } from "../src/runtime/workspace-snapshot-cache.js";
 
 describe("workspace snapshot cache", () => {
+  it("publishes one cold semantic generation and keeps idle reads current without TTL scans", async () => {
+    const panes = [pane("w1", 1)];
+    const listAllPanes = vi.fn(async () => panes);
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }), 1);
+
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    expect(cold).toMatchObject({ kind: "rebuild-required", cursor: { epoch: 0, generation: 1 }, panes });
+    expect(await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] })).toEqual({ kind: "current", cursor: cold.cursor });
+    expect(listAllPanes).toHaveBeenCalledOnce();
+  });
+
+  it("publishes one immutable Pane delta to independent consumers", async () => {
+    let panes = [pane("w1", 1)];
+    const listAllPanes = vi.fn(async () => panes);
+    const listPanes = vi.fn(async (workspaceId: string) => panes.filter((candidate) => candidate.workspaceId === workspaceId));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }));
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    if (cold.kind !== "rebuild-required") throw new Error("expected cold rebuild");
+    panes = [{ ...pane("w1", 2), agentState: "working" as const }];
+    cache.invalidatePanes(["w1:p1"]);
+
+    const bindingRead = await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] });
+    const workerRead = await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] });
+
+    expect(bindingRead).toMatchObject({ kind: "delta", cursor: { epoch: 0, generation: 2 }, added: [], changed: panes, removed: [] });
+    expect(workerRead).toEqual(bindingRead);
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(cache.canAcknowledgeSemanticGeneration(bindingRead.cursor)).toBe(true);
+  });
+
+  it("refreshes only invalidated workspaces and excludes unrelated simultaneous changes", async () => {
+    let panes = [pane("w1", 1), pane("w2", 1)];
+    const listAllPanes = vi.fn(async () => panes);
+    const listPanes = vi.fn(async (workspaceId: string) => panes.filter((candidate) => candidate.workspaceId === workspaceId));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }));
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1", "w2"] });
+    if (cold.kind !== "rebuild-required") throw new Error("expected cold rebuild");
+    panes = [{ ...pane("w1", 2), paneId: "w1:p2" }, { ...pane("w2", 2), agentState: "working" }];
+    cache.invalidate("w1");
+
+    expect(await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1", "w2"] })).toMatchObject({
+      kind: "delta",
+      added: [{ paneId: "w1:p2", workspaceId: "w1" }],
+      changed: [],
+      removed: [{ paneId: "w1:p1", workspaceId: "w1" }]
+    });
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledWith("w1", { forceRefresh: true, skipAllWorkspaceSnapshot: true });
+  });
+
+  it("uses a bounded authoritative watchdog refresh when an invalidation hint is lost", async () => {
+    let now = 0;
+    let panes = [pane("w1", 1)];
+    const listAllPanes = vi.fn(async () => panes);
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }), 2_000, undefined, () => now);
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    if (cold.kind !== "rebuild-required") throw new Error("expected cold rebuild");
+
+    panes = [{ ...pane("w1", 2), agentState: "working" }];
+    now = 60_000;
+
+    expect(await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] })).toMatchObject({
+      kind: "delta", changed: [{ paneId: "w1:p1", agentState: "working" }]
+    });
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let targeted refreshes postpone the lost-hint watchdog", async () => {
+    let now = 0;
+    let panes = [pane("w1", 1), pane("w2", 1)];
+    const listAllPanes = vi.fn(async () => panes);
+    const listPanes = vi.fn(async (workspaceId: string) => panes.filter((candidate) => candidate.workspaceId === workspaceId));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }), 2_000, undefined, () => now);
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1", "w2"] });
+    if (cold.kind !== "rebuild-required") throw new Error("expected cold rebuild");
+
+    now = 59_000;
+    panes = [pane("w1", 2), pane("w2", 1)];
+    cache.invalidate("w1");
+    const targeted = await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1", "w2"] });
+    expect(targeted).toMatchObject({ kind: "delta", changed: [{ paneId: "w1:p1", label: "v2" }] });
+
+    now = 60_000;
+    panes = [pane("w1", 2), { ...pane("w2", 2), agentState: "working" }];
+    expect(await cache.readSemanticSnapshot({ cursor: targeted.cursor, workspaceIds: ["w1", "w2"] })).toMatchObject({
+      kind: "delta", changed: [{ paneId: "w2:p1", agentState: "working" }]
+    });
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+    expect(listPanes).toHaveBeenCalledOnce();
+  });
+
+  it("keeps semantic generation stable when invalidated evidence is equal", async () => {
+    const panes = [pane("w1", 1)];
+    const listAllPanes = vi.fn(async () => panes);
+    const listPanes = vi.fn(async (workspaceId: string) => panes.filter((candidate) => candidate.workspaceId === workspaceId));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }));
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    cache.invalidate("w1");
+
+    expect(await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] })).toEqual({ kind: "current", cursor: cold.cursor });
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledOnce();
+  });
+
+  it("forces an explicit rebuild after authoritative invalidation and fences stale acknowledgements", async () => {
+    const panes = [pane("w1", 1)];
+    const cache = new WorkspaceSnapshotCache(adapter({ async listAllPanes() { return panes; } }));
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    cache.invalidateAll();
+
+    expect(cache.canAcknowledgeSemanticGeneration(cold.cursor)).toBe(false);
+    const rebuilt = await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] });
+    expect(rebuilt).toMatchObject({ kind: "rebuild-required", cursor: { epoch: 1, generation: 1 }, panes });
+    expect(cache.canAcknowledgeSemanticGeneration(rebuilt.cursor)).toBe(true);
+  });
+
+  it("invalidates semantic evidence after successful and uncertain topology mutations", async () => {
+    let panes = [pane("w1", 1)];
+    const movePane = vi.fn(async () => {
+      panes = [{ ...pane("w1", 2), paneId: "w1:p2" }];
+      return { previousPaneId: "w1:p1", paneId: "w1:p2", paneToken: null, tabId: "w1:t2", workspaceId: "w1" };
+    });
+    const labelPane = vi.fn(async () => {
+      panes = [{ ...panes[0]!, label: "renamed" }];
+      throw new Error("label receipt unavailable");
+    });
+    const cache = new WorkspaceSnapshotCache(adapter({
+      async listAllPanes() { return panes; },
+      async listPanes(workspaceId) { return panes.filter((candidate) => candidate.workspaceId === workspaceId); },
+      movePane, labelPane
+    }));
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+
+    await cache.movePane({ paneId: "w1:p1", targetTabId: "w1:t2", targetAnchorPaneId: "w1:p2", paneLabel: "worker", tabLabel: "group" });
+
+    expect(cache.canAcknowledgeSemanticGeneration(cold.cursor)).toBe(false);
+    const moved = await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] });
+    expect(moved).toMatchObject({
+      kind: "delta", added: [{ paneId: "w1:p2" }], removed: [{ paneId: "w1:p1", workspaceId: "w1" }]
+    });
+
+    await expect(cache.labelPane({ workspaceId: "w1", paneId: "w1:p2", tabId: "w1:t2", paneLabel: "renamed", tabLabel: "group" }))
+      .rejects.toThrow("label receipt unavailable");
+
+    expect(cache.canAcknowledgeSemanticGeneration(moved.cursor)).toBe(false);
+    await expect(cache.readSemanticSnapshot({ cursor: moved.cursor, workspaceIds: ["w1"] }))
+      .resolves.toMatchObject({ kind: "delta", changed: [{ paneId: "w1:p2", label: "renamed" }] });
+  });
+
+  it("coalesces semantic readers through an invalidation that arrives during refresh", async () => {
+    const releases: Array<(panes: ReturnType<typeof pane>[]) => void> = [];
+    const listAllPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { releases.push(resolve); }));
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes }));
+    const first = cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    cache.invalidateAll();
+    const second = cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+
+    releases[0]!([pane("w1", 1)]);
+    await vi.waitFor(() => expect(listAllPanes).toHaveBeenCalledTimes(2));
+    releases[1]!([pane("w1", 2)]);
+
+    await expect(first).resolves.toMatchObject({ kind: "rebuild-required", panes: [{ label: "v2" }] });
+    await expect(second).resolves.toMatchObject({ kind: "rebuild-required", panes: [{ label: "v2" }] });
+  });
+
+  it("returns rebuild-required when a consumer falls behind bounded delta history", async () => {
+    let version = 1;
+    const cache = new WorkspaceSnapshotCache(adapter({
+      async listAllPanes() { return [pane("w1", version)]; },
+      async listPanes(workspaceId) { return [pane(workspaceId, version)]; }
+    }));
+    const cold = await cache.readSemanticSnapshot({ cursor: null, workspaceIds: ["w1"] });
+    let cursor = cold.cursor;
+    for (let index = 0; index < 33; index += 1) {
+      version += 1;
+      cache.invalidate("w1");
+      cursor = (await cache.readSemanticSnapshot({ cursor, workspaceIds: ["w1"] })).cursor;
+    }
+
+    expect(await cache.readSemanticSnapshot({ cursor: cold.cursor, workspaceIds: ["w1"] })).toMatchObject({
+      kind: "rebuild-required", cursor: { generation: 34 }, panes: [{ label: "v34" }]
+    });
+  });
+
   it("reuses snapshots for two seconds and force-refreshes mutations", async () => {
     let now = 0;
     let version = 0;
@@ -273,6 +459,30 @@ describe("workspace snapshot cache", () => {
     expect(listAllPanes).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a newer direct workspace snapshot when an older all-workspace refresh completes later", async () => {
+    let releaseAll!: (panes: ReturnType<typeof pane>[]) => void;
+    let releaseCurrentAll!: (panes: ReturnType<typeof pane>[]) => void;
+    const listAllPanes = vi.fn()
+      .mockImplementationOnce(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { releaseAll = resolve; }))
+      .mockImplementationOnce(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { releaseCurrentAll = resolve; }));
+    const listPanes = vi.fn(async () => [pane("w1", 2)]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listAllPanes, listPanes }));
+
+    const staleAll = cache.listAllPanes();
+    expect((await cache.listPanes("w1", { forceRefresh: true, skipAllWorkspaceSnapshot: true }))[0]?.label).toBe("v2");
+    const currentAll = cache.listAllPanes();
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+    releaseAll([pane("w1", 1), pane("w2", 1)]);
+    expect((await staleAll).map(({ label }) => label)).toEqual(["v1", "v1"]);
+
+    expect((await cache.listPanes("w1"))[0]?.label).toBe("v2");
+    releaseCurrentAll([pane("w1", 3), pane("w2", 4)]);
+    expect((await currentAll).map(({ label }) => label)).toEqual(["v3", "v4"]);
+    expect((await cache.listAllPanes()).map(({ label }) => label)).toEqual(["v3", "v4"]);
+    expect(listAllPanes).toHaveBeenCalledTimes(2);
+    expect(listPanes).toHaveBeenCalledOnce();
+  });
+
   it("invalidates every cached and in-flight snapshot after full-scope uncertainty", async () => {
     const releases: Array<(panes: ReturnType<typeof pane>[]) => void> = [];
     const listAllPanes = vi.fn(() => new Promise<ReturnType<typeof pane>[]>((resolve) => { releases.push(resolve); }));
@@ -355,6 +565,43 @@ describe("workspace snapshot cache", () => {
     expect(assertWorkspace).toHaveBeenCalledWith("w1");
     expect(closePane).toHaveBeenCalledWith("w1:p1");
     expect(cache.status().entries).toBe(0);
+  });
+
+  it("forwards native prompt queue capability and fenced submission without snapshot caching", async () => {
+    const supportsPromptQueue = vi.fn(async () => true);
+    const queuePrompt = vi.fn(async () => ({ submissionId: "prompt-1" }));
+    const cache = new WorkspaceSnapshotCache(adapter({ supportsPromptQueue, queuePrompt }));
+
+    await expect(cache.supportsPromptQueue()).resolves.toBe(true);
+    await expect(cache.queuePrompt("w1:p1", "next", { submissionId: "prompt-1", expectedSessionId: "session-1" })).resolves.toEqual({ submissionId: "prompt-1" });
+    expect(queuePrompt).toHaveBeenCalledWith("w1:p1", "next", { submissionId: "prompt-1", expectedSessionId: "session-1" }, undefined);
+  });
+
+  it("forwards every Workspace directory read without caching it", async () => {
+    const listWorkspaces = vi.fn(async () => [{ workspaceId: "w4", label: "herdr" }]);
+    const cache = new WorkspaceSnapshotCache(adapter({ listWorkspaces }));
+
+    await expect(cache.listWorkspaces()).resolves.toEqual([{ workspaceId: "w4", label: "herdr" }]);
+    await expect(cache.listWorkspaces()).resolves.toEqual([{ workspaceId: "w4", label: "herdr" }]);
+    expect(listWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("forwards native model prompt capability and fenced submission without snapshot caching", async () => {
+    const supportsModelPrompt = vi.fn(async () => true);
+    const queueModelPrompt = vi.fn(async () => ({ submissionId: "prompt-1" }));
+    const cache = new WorkspaceSnapshotCache(adapter({ supportsModelPrompt, queueModelPrompt }));
+
+    await expect(cache.supportsModelPrompt()).resolves.toBe(true);
+    await expect(cache.queueModelPrompt("w1:p1", "next", {
+      model: "openai/gpt-5.4",
+      submissionId: "prompt-1",
+      expectedSessionId: "session-1"
+    })).resolves.toEqual({ submissionId: "prompt-1" });
+    expect(queueModelPrompt).toHaveBeenCalledWith("w1:p1", "next", {
+      model: "openai/gpt-5.4",
+      submissionId: "prompt-1",
+      expectedSessionId: "session-1"
+    }, undefined);
   });
 });
 

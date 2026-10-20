@@ -10,7 +10,7 @@ type RuntimeRow = { generation: number; pane_id: string; terminal_id: string; na
 export class SqliteControllerInterpretationStore implements ControllerInterpretationStore {
   constructor(private readonly context: SqliteContext) {}
   acceptControllerInterpretation(input: Parameters<ControllerInterpretationStore["acceptControllerInterpretation"]>[0]) {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.controller-interpretation-store.write", () => {
       const existing = this.bySource(input.message.messageId);
       if (existing) return { job: existing, inserted: false };
       this.context.database.prepare("INSERT INTO controller_interpretation_jobs(id, source_message_id, message_json, controller_generation, capability_hash, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?)").run(input.id, input.message.messageId, JSON.stringify(input.message), input.controllerGeneration, input.capabilityHash, input.acceptedAt, input.acceptedAt);
@@ -18,7 +18,7 @@ export class SqliteControllerInterpretationStore implements ControllerInterpreta
     });
   }
   claimNextControllerInterpretation(controllerGeneration: number, capabilityHash: string, claimedAt: string): ControllerInterpretationJob | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.controller-interpretation-store.write", () => {
       const row = this.context.database.prepare("SELECT id FROM controller_interpretation_jobs WHERE state = 'accepted' ORDER BY created_at, rowid LIMIT 1").get() as { id: string } | undefined;
       if (!row) return null;
       const changed = this.context.database.prepare("UPDATE controller_interpretation_jobs SET state = 'dispatching', controller_generation = ?, capability_hash = ?, updated_at = ? WHERE id = ? AND state = 'accepted'").run(controllerGeneration, capabilityHash, claimedAt, row.id);

@@ -1,6 +1,7 @@
-import { stat } from "node:fs/promises";
+import { access, realpath, stat, statfs } from "node:fs/promises";
+import { constants } from "node:fs";
 import { createServer } from "node:net";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { ExecFileCommandRunner, type CommandRunner } from "../infra/command-runner.js";
 import { discoverExecutable } from "../runtime/agents/agent-availability.js";
 import type { SetupCheck, SetupCheckPolicy, SetupContext, SetupDraft } from "./setup-types.js";
@@ -25,7 +26,16 @@ interface LocalSetupCheckDependencies {
   resolveExecutable?: (executable: string, pathValue?: string) => string | null;
   inspectDirectoryMode?: (path: string) => Promise<number | null>;
   inspectPort?: (host: string, port: number, serviceName: string) => Promise<PortState>;
+  inspectStorage?: (databasePath: string) => Promise<StorageCapacity>;
 }
+
+interface StorageCapacity {
+  availableBytes: bigint;
+  totalBytes: bigint;
+  writable: boolean;
+}
+
+const ONE_GIBIBYTE = 1024n ** 3n;
 
 export async function runLocalSetupChecks(draft: SetupDraft, context: SetupContext, dependencies: LocalSetupCheckDependencies = {}): Promise<SetupCheck[]> {
   const runner = dependencies.runner ?? new ExecFileCommandRunner(5_000);
@@ -49,6 +59,26 @@ export async function runLocalSetupChecks(draft: SetupDraft, context: SetupConte
   checks.push(mode === null || (mode & 0o077) === 0
     ? { id: "local.config-directory", status: "pass", summary: mode === null ? "The configuration directory can be created privately" : "The configuration directory is private" }
     : { id: "local.config-directory", status: "fail", summary: "The configuration directory is accessible to other users", remediation: `Run chmod 700 ${context.configDirectory} before saving configuration.` });
+
+  const databasePath = resolve(draft.environment.BRIDGE_DATABASE_PATH || `${context.stateDirectory}/bridge.db`);
+  try {
+    const storage = await (dependencies.inspectStorage ?? inspectDatabaseStorage)(databasePath);
+    const percentAvailable = storage.totalBytes > 0n ? Number(storage.availableBytes * 1000n / storage.totalBytes) / 10 : 0;
+    const summary = `Database filesystem has ${formatGibibytes(storage.availableBytes)} GiB available (${percentAvailable.toFixed(1)}%) at ${databasePath}`;
+    if (storage.totalBytes <= 0n) {
+      checks.push({ id: "local.database-storage", status: "fail", summary: `Database filesystem capacity is unavailable: ${databasePath}`, remediation: "Verify the configured filesystem is mounted and reports usable capacity, then rerun swarm:doctor." });
+    } else if (!storage.writable) {
+      checks.push({ id: "local.database-storage", status: "fail", summary: `Database path is not writable: ${databasePath}`, remediation: "Move SWARM_STATE_DIR or BRIDGE_DATABASE_PATH to a writable filesystem with durable free capacity." });
+    } else if (storage.availableBytes < ONE_GIBIBYTE) {
+      checks.push({ id: "local.database-storage", status: "fail", summary, remediation: "Free at least 1 GiB or move SWARM_STATE_DIR or BRIDGE_DATABASE_PATH to a filesystem with more capacity." });
+    } else if (storage.availableBytes * 10n < storage.totalBytes) {
+      checks.push({ id: "local.database-storage", status: "warning", summary, remediation: "Free disk space or move SWARM_STATE_DIR or BRIDGE_DATABASE_PATH before SQLite writes exhaust the filesystem." });
+    } else {
+      checks.push({ id: "local.database-storage", status: "pass", summary });
+    }
+  } catch {
+    checks.push({ id: "local.database-storage", status: "fail", summary: `Database filesystem is unavailable: ${databasePath}`, remediation: "Create and mount the configured state path, then rerun swarm:doctor." });
+  }
 
   const host = draft.environment.BRIDGE_HTTP_HOST ?? "127.0.0.1";
   const port = Number(draft.environment.BRIDGE_HTTP_PORT ?? "8787");
@@ -90,6 +120,51 @@ async function directoryMode(path: string): Promise<number | null> {
   try { return (await stat(path)).mode & 0o777; } catch {
     try { await stat(dirname(path)); return null; } catch { return 0o777; }
   }
+}
+
+async function inspectDatabaseStorage(databasePath: string): Promise<StorageCapacity> {
+  const databaseExists = await pathExists(databasePath);
+  const directory = databaseExists
+    ? dirname(await realpath(databasePath))
+    : await nearestExistingDirectory(dirname(databasePath));
+  const writable = await access(directory, constants.W_OK).then(() => true, () => false)
+    && (!databaseExists || await access(databasePath, constants.W_OK).then(() => true, () => false));
+  const filesystem = await statfs(directory, { bigint: true });
+  return {
+    availableBytes: filesystem.bavail * filesystem.bsize,
+    totalBytes: filesystem.blocks * filesystem.bsize,
+    writable
+  };
+}
+
+async function nearestExistingDirectory(path: string): Promise<string> {
+  let candidate = resolve(path);
+  while (true) {
+    try {
+      if ((await stat(candidate)).isDirectory()) return candidate;
+    } catch (error) {
+      if (!isMissingPath(error)) throw error;
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate) throw new Error(`No accessible parent directory for ${path}`);
+    candidate = parent;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try { await stat(path); return true; } catch (error) {
+    if (isMissingPath(error)) return false;
+    throw error;
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function formatGibibytes(bytes: bigint): string {
+  return (Number(bytes / (ONE_GIBIBYTE / 10n)) / 10).toFixed(1);
 }
 
 async function inspectPortOwner(host: string, port: number, serviceName: string, runner: CommandRunner): Promise<PortState> {

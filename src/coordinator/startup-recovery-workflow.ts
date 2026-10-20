@@ -9,13 +9,13 @@ import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-wor
 import type { CardActionRouterPort } from "./card-action-router.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
 import type { DurableInboundPipelinePort } from "./durable-inbound-pipeline.js";
-import type { PromptAdmissionWorkflowPort } from "./prompt-admission-workflow.js";
+import type { InitialAgentInputWorkflowPort } from "./initial-agent-input-workflow.js";
 import type { PaneClosureWorkflowPort } from "./pane-closure-workflow.js";
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
-import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupViewConvergerPort } from "./startup-view-converger.js";
+import type { LegacyInputCardRetirementStore } from "../domain/ports/legacy-input-card-retirement.js";
 import type { SwarmCommandRuntime } from "./swarm-command-gateway.js";
 import { StartupViewRecovery } from "./startup-view-recovery.js";
 
@@ -29,7 +29,8 @@ export interface StartupRecoveryWorkflowPort {
 
 export interface StartupRecoveryWorkflowOptions {
   config: BridgeConfig; store: StartupRecoveryStore; herdr: { assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> }; gatewayIngress: GatewayIngressPort; gatewaySink: GatewayIngressSink; logger: Logger; scheduler: PromptWorkScheduler;
-  promptRun: PromptRunWorkflowPort; provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandRuntime, "recover" | "start">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; promptAdmission: Pick<PromptAdmissionWorkflowPort, "acceptInitial">;
+  provisioning: BindingProvisioningWorkflowPort; paneControl: PaneControlWorkflowPort; paneClosure: PaneClosureWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; startupViews: StartupViewConvergerPort; sessionOperations: SessionOperationWorkflowPort; orchestratorClear?: { recover(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> }; orchestratorIdentity?: { reconcile(): Promise<void>; start(intervalMs: number): void; stop(): Promise<void> }; swarmCommands: Pick<SwarmCommandRuntime, "recover" | "start">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; initialAgentInput: InitialAgentInputWorkflowPort; shortcutPanel?: { ensure(): "reserved" | "current" | "pending" }; wakeOutbound?(): void;
+  legacyInputCards?: Pick<LegacyInputCardRetirementStore, "scan">;
 }
 
 /** Coordinates the ordered, degradable recovery sequence before accepting Lark work. */
@@ -44,6 +45,7 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   constructor(private readonly options: StartupRecoveryWorkflowOptions) {
     this.startupViewRecovery = new StartupViewRecovery({
       convergeAll: () => options.startupViews.converge(),
+      continueRetainedActivity: () => options.startupViews.continueRetainedActivity(),
       convergeBindings: (bindingIds) => options.startupViews.convergeBindings(bindingIds)
     });
   }
@@ -62,14 +64,15 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   }
 
   async start(): Promise<void> {
-    const { config, gatewayIngress, gatewaySink, promptRun, reconciler, provisioning, retiredPaneCleanup, inboundPipeline } = this.options;
+    const { config, gatewayIngress, gatewaySink, reconciler, provisioning, retiredPaneCleanup, inboundPipeline } = this.options;
     await this.prepareDelivery();
     if (this.runtimeRecoveryPrepared) this.runtimeRecoveryPrepared = false;
     else { this.runtimeRecoveryPromise = null; await this.recoverRuntime(); this.runtimeRecoveryPrepared = false; }
-    promptRun.start(); this.options.swarmCommands.start(config.reconcileIntervalMs); this.options.sessionOperations.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);
+    this.options.swarmCommands.start(config.reconcileIntervalMs); this.options.orchestratorClear?.start(config.reconcileIntervalMs); this.options.orchestratorIdentity?.start(config.reconcileIntervalMs); reconciler.start(config.reconcileIntervalMs); retiredPaneCleanup.start(config.reconcileIntervalMs);
     await gatewayIngress.start(gatewaySink);
+    await this.runStage("shortcut-panel", async () => { this.options.shortcutPanel?.ensure(); this.options.wakeOutbound?.(); });
     await this.runStage("provisioning", () => provisioning.recover());
-    await this.runStage("initial-project-prompts", () => this.recoverInitialProjectPrompts());
+    await this.runStage("initial-agent-inputs", () => this.recoverInitialAgentInputs());
     inboundPipeline.start();
     this.diagnostics = { ...this.diagnostics, state: this.diagnostics.stages.some((stage) => stage.state === "failed") ? "degraded" : "completed", completedAt: new Date().toISOString() };
   }
@@ -86,12 +89,14 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
       if (!existing || !existing.explicitSpaceName && Boolean(project.spaceName)) workspaceAssertions.set(project.workspaceId, { workspaceId: project.workspaceId, spaceName, explicitSpaceName: Boolean(project.spaceName) });
     }
     await Promise.all([...workspaceAssertions.values()].map(({ workspaceId, spaceName }) => herdr.assertWorkspace(workspaceId, spaceName)));
+    if (this.options.orchestratorIdentity) await this.runStage("orchestrator-identity", () => this.options.orchestratorIdentity!.reconcile(), true);
     await this.runStage("runtime-baselines", () => reconciler.captureBaselines());
     this.stopControlSubscription = this.options.scheduler.subscribe((event) => {
       if (event.kind === "control-ready") void paneControl.drainPaneControls(event.bindingId).catch((error) => logger.error({ event: "pane-control-drain-failed", err: safeLogError(error), bindingId: event.bindingId, outcome: "deferred" }, "pane control drain failed"));
     });
     await this.runStage("pane-controls", () => Promise.all([paneControl.recover(), this.options.paneClosure.recover()]).then(() => undefined));
-    await this.runStage("session-operations", () => this.options.sessionOperations.recover());
+    await this.runStage("session-operations", () => this.options.sessionOperations.recover(), true);
+    if (this.options.orchestratorClear) await this.runStage("orchestrator-clear", () => this.options.orchestratorClear!.recover(), true);
     await this.runStage("swarm-commands", () => this.options.swarmCommands.recover());
     await this.runStage("retired-pane-cleanup", () => retiredPaneCleanup.recover());
     await this.runStage("runtime-reconciliation", () => reconciler.reconcile());
@@ -100,11 +105,13 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   async stop(): Promise<void> {
     this.stopControlSubscription?.(); this.stopControlSubscription = null;
     await this.startupViewRecovery.stop();
+    await this.options.orchestratorClear?.stop();
+    await this.options.orchestratorIdentity?.stop();
   }
 
   snapshot(): StartupRecoveryDiagnostics {
     const startupViews = this.startupViewRecovery.snapshot();
-    const viewRecoveryPending = startupViews.pendingCount > 0 || startupViews.fullRescanPending;
+    const viewRecoveryPending = startupViews.pendingCount > 0 || startupViews.fullRescanPending || startupViews.continuationPending;
     const viewRecovered = startupViews.retryCount > 0 && !viewRecoveryPending && startupViews.lastFailure === null;
     const stages = this.diagnostics.stages.map((stage) => viewRecovered && stage.name === "view-convergence"
       ? { name: stage.name, state: "completed" as const, durationMs: stage.durationMs }
@@ -114,26 +121,32 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
   }
 
   private async performPrepareDelivery(): Promise<void> {
-    const { store, logger, promptRun, startupViews } = this.options;
+    const { store, logger, startupViews } = this.options;
     this.diagnostics = { state: "running", startedAt: new Date().toISOString(), completedAt: null, stages: [] };
-    promptRun.prepareRecovery();
     const recoveredLegacyCards = store.recoverLegacyElementIdDeadLetters();
     if (recoveredLegacyCards > 0) logger.warn({ event: "startup-legacy-answer-cards-recovered", recovered: recoveredLegacyCards, outcome: "requeued" }, "requeued answer cards rejected for the legacy element id format");
-    let failedBindingIds: readonly string[] = [];
-    const converged = await this.runStage("view-convergence", async () => { failedBindingIds = await startupViews.converge(); });
-    if (converged) this.startupViewRecovery.add(failedBindingIds);
+    await this.runStage("legacy-input-card-retirement", async () => {
+      const reserved = this.options.legacyInputCards?.scan(100) ?? 0;
+      if (reserved > 0) this.options.wakeOutbound?.();
+    });
+    let convergence = { failedBindingIds: [] as readonly string[], fullRescanRequired: false };
+    const converged = await this.runStage("view-convergence", async () => { convergence = await startupViews.converge(); });
+    if (converged) {
+      this.startupViewRecovery.add(convergence.failedBindingIds);
+      if (convergence.fullRescanRequired) this.startupViewRecovery.requestRetainedContinuation();
+    }
     else this.startupViewRecovery.requestFullRescan();
   }
 
-  private async recoverInitialProjectPrompts(): Promise<void> {
+  private async recoverInitialAgentInputs(): Promise<void> {
     for (const selection of this.options.store.listCompletedProjectSelectionsWithInitialPrompt()) {
       if (!selection.bindingId) continue;
       const binding = this.options.store.getBinding(selection.bindingId);
-      if (binding) await this.options.promptAdmission.acceptInitial(binding, selection);
+      if (binding) await this.options.initialAgentInput.submit(binding, selection);
     }
   }
 
-  private async runStage(stage: string, operation: () => Promise<void>): Promise<boolean> {
+  private async runStage(stage: string, operation: () => Promise<void>, required = false): Promise<boolean> {
     const startedAt = Date.now();
     try {
       await operation(); this.diagnostics.stages.push({ name: stage, state: "completed", durationMs: Date.now() - startedAt });
@@ -141,7 +154,8 @@ export class StartupRecoveryWorkflow implements StartupRecoveryWorkflowPort {
       return true;
     } catch (error) {
       this.diagnostics.stages.push({ name: stage, state: "failed", durationMs: Date.now() - startedAt, error: errorMessage(error).slice(0, 500) });
-      this.options.logger.warn({ event: "startup-recovery-stage-failed", stage, durationMs: Date.now() - startedAt, err: safeLogError(error), outcome: "deferred" }, "startup recovery stage failed; periodic convergence will retry durable work");
+      this.options.logger.warn({ event: "startup-recovery-stage-failed", stage, durationMs: Date.now() - startedAt, err: safeLogError(error), outcome: required ? "blocked" : "deferred" }, required ? "required startup recovery stage failed" : "startup recovery stage failed; periodic convergence will retry durable work");
+      if (required) throw error;
       return false;
     }
   }

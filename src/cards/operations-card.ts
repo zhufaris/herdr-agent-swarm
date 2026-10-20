@@ -1,6 +1,7 @@
-import type { AgentState, Binding, FailureSummary, SessionSummary } from "../domain/types.js";
+import type { AgentState, Binding, FailureSummary, SemanticDeliveryRolloutSummary, SessionSummary } from "../domain/types.js";
 import { appendWithinCardLimit } from "./card-payload.js";
 import { callbackButton } from "./cardkit-button.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 const LIFECYCLE_LABEL: Record<Binding["lifecycle"], string> = {
   provisioning: "创建中", active: "活跃", draining: "归档中", archived: "已归档", closed: "已关闭", failed: "失败"
@@ -15,7 +16,7 @@ export function renderSessionCards(sessions: SessionSummary[], payloadLimit = 12
     const scope = spaceName ?? binding.projectId ?? binding.workspaceId;
     const content = [
       `**${escape(binding.title)}**`,
-      `Space: \`${escape(scope)}\` · Pane: \`${escape(binding.paneId ?? "-")}\``,
+      `Space: \`${escape(scope)}\` · Pane: \`${escape(displayPaneIdentity(binding, "-"))}\``,
       `${LIFECYCLE_LABEL[binding.lifecycle]} · ${ATTACHMENT_LABEL[binding.attachment]} · ${AGENT_LABEL[binding.lastAgentState]} · 第 ${binding.generation} 代 · 队列 ${queueDepth} · ${relativeTime(binding.lastActivityAt)}`
     ].join("\n");
     return [{ tag: "markdown", content }, ...(binding.rootMessageId ? [button("发送话题入口", { action: "open_project_thread", bindingId: binding.id })] : [])];
@@ -28,7 +29,7 @@ export function renderFailureCards(failures: FailureSummary[], notice?: string, 
   const rows = failures.map((failure) => {
     const heading = failure.kind === "outbound" ? "消息发送失败" : failure.kind === "prompt" ? "任务未完成（不可自动重试）" : "会话需要处理";
     const stage = failure.kind === "outbound" ? "发送阶段" : failure.kind === "prompt" ? "任务阶段" : "会话阶段";
-    const context = [failure.spaceName ? `Space: \`${escape(failure.spaceName)}\`` : null, failure.paneId ? `Pane: \`${escape(failure.paneId)}\`` : null].filter(Boolean).join(" · " );
+    const context = [failure.spaceName ? `Space: \`${escape(failure.spaceName)}\`` : null, failure.paneId ? `Pane: \`${escape(displayPaneIdentity(failure))}\`` : null].filter(Boolean).join(" · " );
     const content = [
       `**${heading}** · ${stage} · \`${escape(shortId(failure.id))}\``,
       failure.title ? escape(failure.title) : null,
@@ -38,12 +39,40 @@ export function renderFailureCards(failures: FailureSummary[], notice?: string, 
     ].filter(Boolean).join("\n");
     if (failure.kind !== "outbound") return [{ tag: "markdown", content }];
     return [{ tag: "markdown", content }, { tag: "column_set", columns: [
-      { tag: "column", width: "auto", elements: [button("重试发送", { action: "retry_dead_letter", replyId: failure.id })] },
+      ...(failure.retryAllowed ? [{ tag: "column", width: "auto", elements: [button("重试发送", { action: "retry_dead_letter", replyId: failure.id })] }] : []),
       { tag: "column", width: "auto", elements: [button("忽略", { action: "dismiss_dead_letter", replyId: failure.id }, "default")] }
     ] }];
   });
   if (notice) rows.unshift([{ tag: "markdown", content: escape(notice) }]);
   return paginate("Herdr Failures", "当前群没有需要处理的失败。", rows, failures.length ? "orange" : "green", payloadLimit);
+}
+
+export function renderSemanticDeliveryRolloutCard(rollout: SemanticDeliveryRolloutSummary): object {
+  const blockers = rollout.blockers.slice(0, 8).map((blocker) => `\`${escape(blocker)}\``).join(" · ") || "无";
+  const versions = rollout.versions.slice(0, 6).map((version) =>
+    `snapshot=${version.snapshotSchemaVersion??"-"}/planner=${version.plannerPolicyVersion??"-"}/renderer=${version.rendererPolicyVersion??"-"}/profile=${version.gatewayProfileVersion??"-"}: ${version.rows}${version.supported?" ✓":" ✗"}`
+  ).join("\n") || "暂无 semantic rows";
+  const content = [
+    `**阶段**: \`${escape(rollout.phase)}\` · cohort ${rollout.cohortEnabled?"on":"off"} · cutover ${rollout.cutoverAllowed?"允许":"拒绝"} · contraction ${rollout.contractionAllowed?"允许":"拒绝"}`,
+    `**行数**: legacy ${rollout.legacyRows} · semantic ${rollout.semanticRows} · shadow ${rollout.shadowMatches}/${rollout.shadowMatches+rollout.shadowMismatches}`,
+    `**阻断**: ${blockers}`,
+    `**阻断计数**: ambiguous ${rollout.ambiguousActionableRows} · settlement gaps ${rollout.unresolvedSettlementGaps} · retention ${rollout.retentionBlockers}`,
+    `**当前 shadow**: epoch ${rollout.shadowEpoch} · start ${rollout.shadowStartedAt?escape(rollout.shadowStartedAt):"未开始"}`,
+    `**准备诊断**: oldest ${diagnosticAge(rollout.oldestUnpreparedSemanticAgeSeconds)} · CAS failures ${rollout.preparationCasFailures}`,
+    `**前置条件**: lag ${rollout.unmetPrerequisiteCount} · oldest ${diagnosticAge(rollout.oldestUnmetPrerequisiteAgeSeconds)}`,
+    `**Delivery Ring**: backward rebases ${rollout.checkpointBackwardRebases}`,
+    `**版本**\n${versions}`,
+    `**备份恢复演练**: ${rollout.backupRestoreRehearsedAt?escape(rollout.backupRestoreRehearsedAt):"未完成"}`
+  ].join("\n");
+  return { schema:"2.0",config:{ update_multi:true,summary:{ content:"Semantic Turn Card Rollout" }},header:{ title:{ tag:"plain_text",content:"Semantic Turn Card Rollout" },template:rollout.cutoverAllowed?"blue":"orange" },body:{ elements:[{ tag:"markdown",content }] } };
+}
+
+function diagnosticAge(seconds: number | null): string {
+  if (seconds === null) return "无";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) return `${Math.floor(seconds/60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds/3_600)}h`;
+  return `${Math.floor(seconds/86_400)}d`;
 }
 
 function paginate(title: string, empty: string, rows: object[][], template: string, payloadLimit: number): object[] {

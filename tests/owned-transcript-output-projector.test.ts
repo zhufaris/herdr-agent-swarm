@@ -37,6 +37,29 @@ describe("owned transcript output projector", () => {
     expect(result.observation?.answer.timelineDeltas).toEqual(timelineDeltas);
   });
 
+  it("projects a canonical model change into the mutable Main view", () => {
+    const result = projectOwnedTranscriptOutput({
+      state: { emitted: false, output: { text: "", truncated: false } },
+      observation: { answerDelta: "", model: "GPT-5.6-Sol" }
+    });
+
+    expect(result.observation).toEqual({
+      answer: { snapshot: "", update: "append", toolActivities: [] },
+      main: { model: "GPT-5.6-Sol" }
+    });
+  });
+
+  it("carries Core settlement identity without rendering it into answer state", () => {
+    const coreEventSettlement = { laneId: "lane-1", eventIds: ["event-1"], occurredAt: "2026-09-30T00:00:00.000Z", owner: { kind: "binding" as const, id: "binding-1" } };
+    const result = projectOwnedTranscriptOutput({
+      state: { emitted: false, output: { text: "", truncated: false } },
+      observation: { answerDelta: "", coreEventSettlement }
+    });
+
+    expect(result.observation).toEqual({ coreEventSettlement, answer: { snapshot: "", update: "append", toolActivities: [] }, main: {} });
+    expect(result.state).toEqual({ emitted: false, output: { text: "", truncated: false } });
+  });
+
   it("keeps previous output and emits no event for an empty nonterminal observation", () => {
     expect(projectOwnedTranscriptOutput({ state: { emitted: true, output: { text: "prior", truncated: false } }, observation: { answerDelta: "" } }))
       .toEqual({ state: { emitted: true, output: { text: "prior", truncated: false } } });

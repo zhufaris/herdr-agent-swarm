@@ -5,7 +5,7 @@ export type AgentInstanceRow = Record<string, SqlValue> & {
   id: string; project_id: string; name: string; role: string; agent_kind: string; model: string | null; source_primary_pane_label: string | null;
   parent_binding_id: string | null; parent_binding_generation: number | null; parent_pane_id: string | null; parent_native_session_id: string | null; worker_session_lifecycle: string | null;
   worker_session_generation: number; desired_state: string; observed_state: string; workspace_lease_id: string; generation: number;
-  herdr_workspace_id: string | null; pane_id: string | null; native_session_id: string | null;
+  herdr_workspace_id: string | null; pane_id: string | null; pane_token: string | null; native_session_id: string | null;
   provisioning_checkpoint: string; last_error: string | null; pending_herdr_workspace_id: string | null; pending_pane_id: string | null;
 };
 
@@ -17,7 +17,7 @@ export type WorkspaceLeaseRow = Record<string, SqlValue> & {
 export function mapAgentInstance(row: AgentInstanceRow): AgentInstance {
   const generation = Number(row.generation);
   const runtimeRef: AgentRuntimeRef | null = row.pane_id && row.herdr_workspace_id
-    ? { herdrWorkspaceId: row.herdr_workspace_id, paneId: row.pane_id, nativeSessionId: row.native_session_id, generation }
+    ? { herdrWorkspaceId: row.herdr_workspace_id, paneId: row.pane_id, paneToken: row.pane_token ?? null, nativeSessionId: row.native_session_id, generation }
     : null;
   const pendingRuntimeRef = row.pending_pane_id && row.pending_herdr_workspace_id
     ? { herdrWorkspaceId: row.pending_herdr_workspace_id, paneId: row.pending_pane_id, generation } : null;

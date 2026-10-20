@@ -6,6 +6,10 @@ const LEGACY_PROFILE_ID = "feishu-cardkit-v1";
 export class GatewayMigrations {
   constructor(private readonly context: SqliteContext) {}
 
+  private migrationTransaction<T>(operation: () => T): T {
+    return this.context.migrationTransaction("sqlite.migrations.gateway", operation);
+  }
+
   ensureGatewayIdentityAndPlans(): void {
     const add = (table: string, column: string, definition: string) => {
       const names = new Set((this.context.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name));
@@ -26,17 +30,8 @@ export class GatewayMigrations {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 40").get();
     const unscoped = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE lane_key NOT LIKE 'gateway:%' LIMIT 1").get();
     if (!migrated || unscoped) {
-      this.context.database.exec("BEGIN IMMEDIATE");
-      try {
-        this.context.database.exec(`
-          DROP TRIGGER IF EXISTS outbound_replies_immutable_claim;
-          UPDATE outbox_lane_quarantines
-          SET lane_key = 'gateway:' || (SELECT gateway_id FROM outbound_replies WHERE id = failed_reply_id) || ':' || lane_key,
-              updated_at = datetime('now')
-          WHERE lane_key NOT LIKE 'gateway:%';
-          UPDATE outbound_replies
-          SET lane_key = 'gateway:' || gateway_id || ':' || lane_key
-          WHERE lane_key NOT LIKE 'gateway:%';
+      const contracted = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 109").get() !== undefined;
+      const rebuildLaneHeads = contracted ? "" : `
           DELETE FROM outbox_lane_heads;
           INSERT INTO outbox_lane_heads(lane_key, reply_id, delivery_order, next_attempt_at, created_at)
             SELECT pending.lane_key, pending.id, pending.delivery_order, pending.next_attempt_at, pending.created_at
@@ -46,18 +41,28 @@ export class GatewayMigrations {
               AND pending.delivery_order = (
                 SELECT MIN(candidate.delivery_order) FROM outbound_replies candidate
                 WHERE candidate.state = 'pending' AND candidate.lane_key = pending.lane_key
-              );
+              );`;
+      this.migrationTransaction(() => {
+        this.context.database.exec(`
+          DROP TRIGGER IF EXISTS outbound_replies_immutable_claim;
+          UPDATE outbox_lane_quarantines
+          SET lane_key = 'gateway:' || (SELECT gateway_id FROM outbound_replies WHERE id = failed_reply_id) || ':' || lane_key,
+              updated_at = datetime('now')
+          WHERE lane_key NOT LIKE 'gateway:%';
+          UPDATE outbound_replies
+          SET lane_key = 'gateway:' || gateway_id || ':' || lane_key
+          WHERE lane_key NOT LIKE 'gateway:%';
+          ${rebuildLaneHeads}
           INSERT OR IGNORE INTO schema_migrations(version) VALUES (40);
         `);
-        this.context.database.exec("COMMIT");
-      } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+      });
     }
     this.context.database.exec("DROP TRIGGER IF EXISTS outbound_replies_gateway_lane_insert; DROP TRIGGER IF EXISTS outbound_replies_gateway_lane_update");
   }
 
   convergeLegacyExpiredAnswerTargets(): void {
     if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 41").get()) return;
-    this.context.transaction(() => {
+    this.context.transaction("sqlite.gateway-migrations.write", () => {
       const timestamp = new Date().toISOString();
       this.context.database.prepare(`
         UPDATE outbound_replies

@@ -3,13 +3,23 @@ import type { ProjectConfig } from "../src/domain/types.js";
 import { ProjectCatalog } from "../src/coordinator/project-catalog.js";
 
 const projects: ProjectConfig[] = [
-  { id: "alpha", displayName: "Alpha", spaceName: "alpha-space", description: "Alpha project", workspaceId: "shared", cwd: "/repos/alpha" },
+  { id: "alpha", displayName: "Alpha", spaceName: "alpha-space", description: "Alpha project", workspaceId: "shared", cwd: "/repos/alpha", orchestrator: { enabled: true, cwd: "/repos" } },
   { id: "beta", displayName: "Beta", description: "Beta project", workspaceId: "shared", cwd: "/repos/beta" },
   { id: "gamma", displayName: "Gamma", description: "Gamma project", workspaceId: "unique", cwd: "/repos/gamma" }
 ];
 
 describe("ProjectCatalog", () => {
   const routes = new ProjectCatalog(projects);
+
+  it("derives one complete Run Projection Context from a binding", () => {
+    expect(routes.runProjectionContextForBinding({
+      id: "binding", projectId: "alpha", workspaceId: "shared", paneId: "shared:p1", paneToken: "yx0c",
+      title: "Primary", agentKind: "traex", generation: 3
+    } as never)).toEqual({
+      bindingId: "binding", bindingGeneration: 3, sessionTitle: "Primary", agentKind: "traex",
+      workspaceId: "shared", spaceName: "alpha-space", paneId: "shared:p1", paneToken: "yx0c"
+    });
+  });
 
   it("looks up configured projects by ID", () => {
     expect(routes.projectById("alpha")).toBe(projects[0]);
@@ -19,6 +29,11 @@ describe("ProjectCatalog", () => {
   it("gives a valid project ID precedence over the binding workspace", () => {
     expect(routes.projectForBinding({ projectId: "alpha", workspaceId: "unique" })).toBe(projects[0]);
     expect(routes.spaceNameForBinding({ projectId: "alpha", workspaceId: "unique" })).toBe("alpha-space");
+  });
+
+  it("uses the configured Orchestrator directory only for Orchestrator bindings", () => {
+    expect(routes.projectForBinding({ kind: "orchestrator", projectId: "alpha", workspaceId: "shared" })).toMatchObject({ id: "alpha", cwd: "/repos" });
+    expect(routes.projectForBinding({ kind: "task", projectId: "alpha", workspaceId: "shared" })).toBe(projects[0]);
   });
 
   it("falls back to a uniquely configured workspace", () => {

@@ -10,6 +10,117 @@ export class BindingSessionMigrations {
     if (!columns.has("retired_root_message_id")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN retired_root_message_id TEXT");
   }
 
+  ensureBindingKindColumn(): void {
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("kind")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN kind TEXT NOT NULL DEFAULT 'task' CHECK(kind IN ('task','orchestrator'))");
+  }
+
+  ensureSessionEpochColumns(): void {
+    const bindingColumns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!bindingColumns.has("session_epoch")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 1 CHECK(session_epoch >= 1)");
+    const promptColumns = new Set((this.context.database.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!promptColumns.has("session_epoch")) this.context.database.exec("ALTER TABLE prompt_jobs ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 1 CHECK(session_epoch >= 1)");
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (80)").run();
+  }
+
+  ensureOrchestratorClearOperations(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS orchestrator_clear_operations(
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        actor_open_id TEXT NOT NULL,
+        source_message_id TEXT NOT NULL,
+        confirmation_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE RESTRICT,
+        binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+        old_session_epoch INTEGER NOT NULL CHECK(old_session_epoch >= 1),
+        expected_workspace_id TEXT NOT NULL,
+        expected_pane_id TEXT NOT NULL,
+        expected_terminal_id TEXT NOT NULL,
+        expected_session_source TEXT NOT NULL,
+        expected_session_agent TEXT NOT NULL,
+        expected_session_kind TEXT NOT NULL CHECK(expected_session_kind IN ('id','path')),
+        expected_session_value TEXT NOT NULL,
+        expected_state_change_seq INTEGER NOT NULL CHECK(expected_state_change_seq >= 0),
+        state TEXT NOT NULL CHECK(state IN ('accepted','rotating','rotation-uncertain','context-cleared','withdrawing','succeeded','partial','rejected','failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)),
+        answer_target_snapshot_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(answer_target_snapshot_json)),
+        answer_target_count INTEGER NOT NULL DEFAULT 0 CHECK(answer_target_count >= 0),
+        withdrawn_count INTEGER NOT NULL DEFAULT 0 CHECK(withdrawn_count >= 0),
+        already_absent_count INTEGER NOT NULL DEFAULT 0 CHECK(already_absent_count >= 0),
+        failed_count INTEGER NOT NULL DEFAULT 0 CHECK(failed_count >= 0),
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS orchestrator_clear_operations_claim
+        ON orchestrator_clear_operations(state, binding_id, created_at, id);
+      CREATE INDEX IF NOT EXISTS orchestrator_clear_operations_recovery
+        ON orchestrator_clear_operations(state, updated_at, id);
+      CREATE UNIQUE INDEX IF NOT EXISTS orchestrator_clear_operations_binding_active
+        ON orchestrator_clear_operations(binding_id)
+        WHERE state IN ('accepted','rotating','rotation-uncertain','context-cleared','withdrawing');
+      CREATE TABLE IF NOT EXISTS orchestrator_clear_answer_targets(
+        operation_id TEXT NOT NULL REFERENCES orchestrator_clear_operations(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL,
+        outbound_reply_id TEXT NOT NULL UNIQUE REFERENCES outbound_replies(id) ON DELETE RESTRICT,
+        outcome TEXT NOT NULL CHECK(outcome IN ('pending','deleted','already_absent','failed')),
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(operation_id, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS orchestrator_clear_answer_targets_pending
+        ON orchestrator_clear_answer_targets(outcome, operation_id, message_id);
+      CREATE TABLE IF NOT EXISTS orchestrator_clear_result_publications(
+        operation_id TEXT PRIMARY KEY REFERENCES orchestrator_clear_operations(id) ON DELETE CASCADE,
+        outbound_reply_id TEXT NOT NULL UNIQUE REFERENCES outbound_replies(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL
+      );
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (81);
+    `);
+  }
+
+  ensureOrchestratorIdentityMigrations(): void {
+    this.context.database.exec(`
+      CREATE TABLE IF NOT EXISTS orchestrator_identity_migrations(
+        id TEXT PRIMARY KEY,
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE RESTRICT,
+        binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+        expected_workspace_id TEXT NOT NULL,
+        expected_pane_id TEXT NOT NULL,
+        expected_terminal_id TEXT NOT NULL,
+        expected_token TEXT NOT NULL,
+        target_workspace_id TEXT NOT NULL,
+        expected_workspace_label TEXT NOT NULL,
+        target_token TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('accepted','applying','uncertain','succeeded','rejected','failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)),
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS orchestrator_identity_migrations_recovery
+        ON orchestrator_identity_migrations(state, updated_at, id);
+      CREATE UNIQUE INDEX IF NOT EXISTS orchestrator_identity_migrations_binding_active
+        ON orchestrator_identity_migrations(binding_id)
+        WHERE state IN ('accepted','applying','uncertain');
+      INSERT OR IGNORE INTO schema_migrations(version) VALUES (82);
+    `);
+  }
+
+  ensureOrchestratorBindingIndex(): void {
+    this.context.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS bindings_active_orchestrator ON bindings(gateway_id, chat_id) WHERE kind = 'orchestrator' AND state <> 'archived'");
+    this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (78)").run();
+  }
+
+  ensureBindingPaneTokenColumn(): void {
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("pane_token")) this.context.database.exec("ALTER TABLE bindings ADD COLUMN pane_token TEXT");
+  }
+
   ensureInboundMessageIdempotency(): void {
     this.context.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS inbound_messages_message_id ON inbound_messages(message_id)");
   }
@@ -151,6 +262,15 @@ export class BindingSessionMigrations {
     if (!selectionColumns.some((column) => column.name === "initial_prompt_text")) this.context.database.exec("ALTER TABLE project_selections ADD COLUMN initial_prompt_text TEXT");
     const outboundColumns = this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>;
     if (!outboundColumns.some((column) => column.name === "selection_id")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN selection_id TEXT");
+  }
+
+  ensureCompletedProjectSelectionPageIndex(): void {
+    if (!this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_selections'").get()) return;
+    this.context.database.exec(`
+      CREATE INDEX IF NOT EXISTS project_selections_completed_initial_page
+        ON project_selections(created_at, id)
+        WHERE state = 'completed' AND initial_prompt_text IS NOT NULL;
+    `);
   }
 
   ensurePrimaryAgentKindColumns(): void {

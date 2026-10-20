@@ -1,7 +1,7 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { createTestRouter } from "./helpers/create-test-router.js";
+import { createTestRouter, queueLegacyCollectedBatchForTest, queueLegacyPromptForTest } from "./helpers/create-test-router.js";
 import type { HerdrPort, LarkPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { TestConversationViewProjector as ConversationViewProjector } from "./helpers/create-test-conversation-view-projector.js";
@@ -103,7 +103,7 @@ describe("Herdr discovery", () => {
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "event-dedup", messageId: "message-dedup", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "event-dedup", messageId: "message-dedup", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed" }));
 
     expect(events.filter((event) => event === "AgentStateChanged:working")).toHaveLength(1);
@@ -160,7 +160,7 @@ describe("Herdr discovery", () => {
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
-    await coordinator.handleMessage({ eventId: "event-unknown", messageId: "message-unknown", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "event-unknown", messageId: "message-unknown", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run", mentionsBot: false, isRootMessage: false });
     const bindingId = store.findBindingByPane("w1:p1")!.id;
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "completed" }));
 
@@ -248,14 +248,13 @@ describe("Herdr discovery", () => {
     expect(selection).toBeTruthy();
     await coordinator.handleCardAction({ messageId: "card-1", chatId: "chat", operatorOpenId: "user", value: { action: "select_project", selectionId: selection, projectId: "my-project" } });
     await vi.waitFor(() => expect(store.getProjectSelection(selection)?.state).toBe("completed"));
-    expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: expect.stringMatching(/^[a-z0-9]{4}$/), environment: { SWARM_PRIMARY_CAPABILITY: expect.stringMatching(/^test-.+-1$/) } }]);
+    expect(created).toEqual([{ bindingId: expect.any(String), generation: 1, projectId: "my-project", placement: "dedicated-tab", title: expect.stringMatching(/^[a-z0-9]{4}$/), displayIdentity: { role: { kind: "managed-primary" } }, environment: { SWARM_PRIMARY_CAPABILITY: expect.stringMatching(/^test-.+-1$/) } }]);
     const paneTitle = (created[0] as { title: string }).title;
     expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: `my-space / ${paneTitle}` });
 
     await coordinator.handleMessage({ eventId: "rename", messageId: "message-2", chatId: "chat", topicId: "unused", rootMessageId: "unused", actorOpenId: "user", text: "/swarm rename Better pane", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(renamed).toHaveLength(1));
-    expect(renamed).toEqual([["w1:p2", "Better pane", { tabTitle: "Better pane" }]]);
-    expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Better pane" });
+    await vi.waitFor(() => expect(store.findBindingByPane("w1:p2")).toMatchObject({ title: "my-space / Better pane" }));
+    expect(renamed).toEqual([]);
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();
   });
@@ -340,8 +339,7 @@ describe("Herdr discovery", () => {
     await coordinator.stop(); stopChannelPublisher(); store.close();
   });
 
-  it("creates one request card and updates it without text replies", async () => {
-    let output = "initial terminal";
+  it("records bound text as Agent Input without creating Prompt or Human Message cards", async () => {
     const replies: string[] = [];
     const cards: object[] = [];
     const updates: Array<{ messageId: string; card: object }> = [];
@@ -350,13 +348,18 @@ describe("Herdr discovery", () => {
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
       async replyText(_rootMessageId, text) { replies.push(text); return { messageId: "text-1" }; },
       async replyCard(_root, card) { cards.push(card); return { messageId: "request-card-1" }; },
-      async updateCard(messageId, card) { updates.push({ messageId, card }); }
+      async updateCard(messageId, card) { updates.push({ messageId, card }); },
+      async createStreamingCard(card) { cards.push(card); return { cardId: "answer-card-1" }; },
+      async replyStreamingCardReference() { return { messageId: "request-card-1" }; },
+      async streamCardContent() {},
+      async finishStreamingCard() {},
+      async updateCardKit(messageId, card) { updates.push({ messageId, card }); }
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async listPanes() { return [{ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt() { output = `${output}\n◆ thread reply\n────────`; return "done"; }, async renamePane() {}
+      async runPrompt() { throw new Error("legacy Prompt executor must not run"); }, async renamePane() {}
     };
     const config = {
       lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] },
@@ -378,10 +381,14 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards(store.listBindings()[0]!.id)[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE, larkMessageId: "request-card-1", answerMessageId: "request-card-1" }));
-    await vi.waitFor(() => expect(updates.some((update) => update.messageId === "request-card-1" && JSON.stringify(update.card).includes(STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE))).toBe(true));
-    expect(JSON.stringify(updates)).not.toContain("thread reply");
-    expect(cards).toHaveLength(1);
+    const binding = store.findBindingByPane("w1:p1")!;
+    await vi.waitFor(() => expect(store.database.prepare("SELECT text, owner_id, pane_id, terminal_id, expected_session_id, state FROM submission_intents WHERE source_message_key = ?").get("message-1")).toEqual({
+      text: "run it", owner_id: binding.id, pane_id: "w1:p1", terminal_id: "term-1", expected_session_id: "session-1", state: "prepared"
+    }));
+    expect(store.listRunCards(binding.id)).toEqual([]);
+    expect(store.getPromptInputBySource("feishu", "message-1")).toBeNull();
+    expect(cards).toHaveLength(0);
+    expect(JSON.stringify(cards)).not.toContain("HERDR REQUEST");
     expect(updates.some((update) => JSON.stringify(update.card).includes("HERDR REQUEST"))).toBe(false);
     expect(replies).toEqual([]);
     expect(inboundEvents).toEqual(["InboundMessageReceived"]);
@@ -396,11 +403,12 @@ describe("Herdr discovery", () => {
     const prompts: string[] = [];
     const updates: object[] = [];
     const replies: string[] = [];
+    const replyCards: object[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
       async replyText(_rootMessageId, text) { replies.push(text); return { messageId: `text-${replies.length}` }; },
-      async replyCard() { return { messageId: "reply-1" }; },
+      async replyCard(_rootMessageId, card) { replyCards.push(card); return { messageId: `reply-${replyCards.length}` }; },
       async updateCard(_messageId, card) { updates.push(card); }
     };
     const herdr: HerdrPort = {
@@ -435,18 +443,27 @@ describe("Herdr discovery", () => {
     const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
+    store.database.prepare("UPDATE bindings SET creator_open_id = 'user' WHERE id = ?").run(bindingId);
 
-    await coordinator.handleMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "first", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "first", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(updates.some((card) => JSON.stringify(card).includes("等待用户处理"))).toBe(true));
     expect(updates.some((card) => JSON.stringify(card).includes("TraeX 需要人工审批"))).toBe(true);
-    await coordinator.handleMessage({ eventId: "event-2", messageId: "message-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false });
+    await vi.waitFor(() => expect(replyCards.some((card) => JSON.stringify(card).includes("Primary 需要处理"))).toBe(true));
+    expect(JSON.stringify(replyCards)).toContain("<at id=user></at>");
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM primary_human_review_episodes GROUP BY state").all()).toEqual([{ state: "open", count: 1 }]);
+    queueLegacyCollectedBatchForTest(store, [{ eventId: "event-2", messageId: "message-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false }]);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toBe("first");
     expect(store.countPendingPrompts(bindingId)).toBe(2);
+    expect(store.getPromptInputBySource("feishu", "message-2")).toMatchObject({ state: "batched", batchId: expect.any(String) });
 
     releaseApproval();
-    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    await vi.waitFor(() => expect(prompts).toHaveLength(2), { timeout: 4_000 });
+    await vi.waitFor(() => expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM primary_human_review_episodes GROUP BY state").all()).toEqual([{ state: "resolved", count: 1 }]));
+    await publisher.drain();
+    expect(store.database.prepare("SELECT view_version, delivered_version FROM primary_human_review_episodes").get()).toEqual({ view_version: 2, delivered_version: 1 });
+    expect(replyCards.filter((card) => JSON.stringify(card).includes("Primary 需要处理"))).toHaveLength(1);
     expect(prompts[1]).toBe("second");
     await vi.waitFor(() => expect(store.listRunCards(bindingId).at(-1)).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
     expect(JSON.stringify(store.listRunCards(bindingId))).not.toContain("◆ answer");
@@ -495,9 +512,9 @@ describe("Herdr discovery", () => {
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
 
-    await coordinator.handleMessage({ eventId: "event-timeout-1", messageId: "message-timeout-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "first", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "event-timeout-1", messageId: "message-timeout-1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "first", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
-    await coordinator.handleMessage({ eventId: "event-timeout-2", messageId: "message-timeout-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false });
+    queueLegacyCollectedBatchForTest(store, [{ eventId: "event-timeout-2", messageId: "message-timeout-2", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "second", mentionsBot: false, isRootMessage: false }]);
     rejectBlockedTurn();
     await vi.waitFor(() => expect(store.countPendingPrompts(bindingId)).toBe(1));
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -505,23 +522,23 @@ describe("Herdr discovery", () => {
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toBe("first");
     expect(store.countPendingPrompts(bindingId)).toBe(1);
+    expect(store.getPromptInputBySource("feishu", "message-timeout-2")).toMatchObject({ state: "batched", batchId: expect.any(String) });
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();
   });
 
-  it("keeps a message retryable when a card projection fails during prompt acceptance", async () => {
+  it("admits Agent Input without depending on Prompt card projection", async () => {
     const replies: string[] = [];
-    let failCard = true;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
       async replyText(_rootMessageId, text) { replies.push(text); return { messageId: `text-${replies.length}` }; },
       async replyCard() { return { messageId: "reply-1" }; },
-      async updateCard() { if (failCard) throw new Error("temporary card failure"); }
+      async updateCard() { throw new Error("temporary card failure"); }
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async listPanes() { return [{ paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt() { return "done"; }, async renamePane() {}
     };
@@ -533,9 +550,11 @@ describe("Herdr discovery", () => {
       commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500
     } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:");
-    const atomicClaim = vi.spyOn(store, "claimNextDispatchablePrompt");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "status-1" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", statusMessageId: "status-1", traexSessionId: "term-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
     const stopPublisher = publisher.start();
@@ -544,10 +563,9 @@ describe("Herdr discovery", () => {
     await coordinator.start();
 
     await coordinator.handleMessage({ eventId: "event-retry", messageId: "message-retry", chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text: "run it", mentionsBot: false, isRootMessage: false });
-    await vi.waitFor(() => expect(store.listRunCards("b1")).toHaveLength(1));
-    await vi.waitFor(() => expect(store.countPendingPrompts("b1")).toBe(0));
-    expect(atomicClaim).toHaveBeenCalledWith("b1");
-    failCard = false;
+    await vi.waitFor(() => expect(store.database.prepare("SELECT text, owner_id, state FROM submission_intents WHERE source_message_key = ?").get("message-retry")).toEqual({ text: "run it", owner_id: "b1", state: "prepared" }));
+    expect(store.listRunCards("b1")).toEqual([]);
+    expect(store.getPromptInputBySource("feishu", "message-retry")).toBeNull();
     expect(replies).toEqual([]);
 
     await coordinator.stop(); stopProjector(); stopPublisher(); store.close();

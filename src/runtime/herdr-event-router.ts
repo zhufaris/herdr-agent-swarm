@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import { mergeHerdrRuntimeHints, type HerdrRuntimeHint } from "./herdr-event-hint.js";
+import { mergeHerdrRuntimeHints, type HerdrNativeEventHint, type HerdrRuntimeHint } from "./herdr-event-hint.js";
 import { safeLogError } from "./safe-error.js";
 
 export interface HerdrEventRouterOptions {
@@ -11,6 +11,7 @@ export interface HerdrEventRouterOptions {
   observePrimaryTurns(paneIds?: readonly string[]): Promise<void>;
   observeInstanceTurns(paneIds?: readonly string[]): Promise<void>;
   retryRetiredPanes(paneIds?: readonly string[]): Promise<void>;
+  notifyCoreSources(sources: readonly { sourceId: string; latestCursor: string }[]): Promise<void>;
   logger: Pick<Logger, "warn" | "debug">;
 }
 
@@ -36,8 +37,15 @@ export class HerdrEventRouter {
 
   constructor(private readonly options: HerdrEventRouterOptions) {}
 
-  async handle(hint: HerdrRuntimeHint, signal?: AbortSignal): Promise<void> {
+  async handle(hint: HerdrNativeEventHint, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return;
+    if (hint.kind === "session-events-available") {
+      void this.options.notifyCoreSources(hint.sources).catch((error) => {
+        this.handlerFailures += 1;
+        this.options.logger.warn({ event: "herdr-core-source-notification-failed", err: safeLogError(error), sourceEvent: hint.kind, outcome: "periodic_reconciliation_fallback" }, "Core source notification failed; periodic ingestion remains available");
+      });
+      return;
+    }
     this.pendingHint = mergeHerdrRuntimeHints(this.pendingHint, hint);
     if (this.running) {
       this.coalescedHints += 1;

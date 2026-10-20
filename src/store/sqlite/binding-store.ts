@@ -1,13 +1,15 @@
 import { transitionSession, type SessionTransition } from "../../domain/pane-thread-lifecycle.js";
 import { isNativeTraexSession, sameNativeTraexSession } from "../../domain/traex-session-identity.js";
 import { matchesAgentKind } from "../../domain/agent-instance.js";
-import type { Binding, BindingMetadataPatch, BindingState, FailureSummary, HerdrPane, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionPage, SessionSummary } from "../../domain/types.js";
+import type { Binding, BindingMetadataPatch, BindingState, FailureSummary, HerdrPane, OutboundReply, RetiredPaneCleanupOperation, RetiredPaneCleanupState, RuntimeObservationApplication, SessionPage, SessionSummary } from "../../domain/types.js";
 import { mapBinding, mapRetiredPaneCleanup, type BindingRow, type RetiredPaneCleanupRow, type SqlValue } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 import type { AgentKind } from "../../domain/agent-instance.js";
+import { isDirectDeliveryRetryAllowed } from "../../domain/delivery-replay-safety.js";
+import type { CurrentRuntimeIdentityClaim } from "../../domain/runtime-identity-claim.js";
 
 const BINDING_COLUMNS: Record<keyof Binding, string> = {
-  id: "id", gatewayId: "gateway_id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id", rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", traexSessionId: "traex_session_id", agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value", title: "title", agentKind: "agent_kind", state: "state", statusMessageId: "status_message_id", statusCardSequence: "status_card_sequence", lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint", lifecycle: "lifecycle", attachment: "attachment", generation: "generation", provisioningCheckpoint: "provisioning_checkpoint", degradationCount: "degradation_count", hasCompletedTurn: "has_completed_turn", lastObservedAt: "last_observed_at", archivedAt: "archived_at", lastActivityAt: "last_activity_at", createdAt: "created_at", updatedAt: "updated_at"
+  id: "id", kind: "kind", gatewayId: "gateway_id", creatorOpenId: "creator_open_id", projectId: "project_id", workspaceId: "workspace_id", chatId: "chat_id", topicId: "topic_id", rootMessageId: "root_message_id", retiredTopicId: "retired_topic_id", retiredRootMessageId: "retired_root_message_id", replacesBindingId: "replaces_binding_id", reservedTopicId: "reserved_topic_id", reservedRootMessageId: "reserved_root_message_id", resetMessageId: "reset_message_id", paneId: "pane_id", paneToken: "pane_token", traexSessionId: "traex_session_id", agentSessionSource: "agent_session_source", agentSessionAgent: "agent_session_agent", agentSessionKind: "agent_session_kind", agentSessionValue: "agent_session_value", title: "title", agentKind: "agent_kind", state: "state", statusMessageId: "status_message_id", statusCardSequence: "status_card_sequence", lastAgentState: "last_agent_state", lastOutputFingerprint: "last_output_fingerprint", lifecycle: "lifecycle", attachment: "attachment", generation: "generation", sessionEpoch: "session_epoch", provisioningCheckpoint: "provisioning_checkpoint", degradationCount: "degradation_count", hasCompletedTurn: "has_completed_turn", lastObservedAt: "last_observed_at", archivedAt: "archived_at", lastActivityAt: "last_activity_at", createdAt: "created_at", updatedAt: "updated_at"
 };
 const SESSION_PAGE_SIZE = 20;
 interface SessionCursor { attachment: number; lifecycle: number; activity: string; id: string; }
@@ -17,7 +19,7 @@ function sessionPageSql(hasCursor: boolean): string {
   const lifecycle = "CASE b.lifecycle WHEN 'active' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'draining' THEN 2 WHEN 'archived' THEN 3 WHEN 'closed' THEN 4 ELSE 5 END";
   const cursor = hasCursor ? `AND ((${attachment}) > ? OR ((${attachment}) = ? AND ((${lifecycle}) > ? OR ((${lifecycle}) = ? AND (b.last_activity_at < ? OR (b.last_activity_at = ? AND b.id > ?))))))` : "";
   return `SELECT b.*, ${attachment} AS attachment_rank, ${lifecycle} AS lifecycle_rank,
-    (SELECT COUNT(*) FROM prompt_jobs p WHERE p.binding_id = b.id AND p.state IN ('queued','running')) AS queue_depth,
+    (SELECT COUNT(*) FROM prompt_jobs p WHERE p.binding_id = b.id AND p.state IN ('queued','submitted','running')) AS queue_depth,
     COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name
     FROM bindings b INDEXED BY bindings_chat_session_rank_order WHERE b.chat_id = ? ${cursor}
     ORDER BY attachment_rank, lifecycle_rank, b.last_activity_at DESC, b.id`;
@@ -36,14 +38,52 @@ export class SqliteBindingLifecycleStore {
   constructor(private readonly context: SqliteContext, private readonly invalidateWorkerContexts?: (bindingId: string, reason: string) => void) {}
   private get database() { return this.context.database; }
 
-  createPendingBinding(input: { id: string; gatewayId?: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; agentKind?: AgentKind; creatorOpenId?: string | null }): Binding {
+  hasActiveOrchestratorIdentityMigration(bindingId: string): boolean {
+    return Boolean(this.database.prepare("SELECT 1 FROM orchestrator_identity_migrations WHERE binding_id = ? AND state IN ('accepted','applying','uncertain') LIMIT 1").get(bindingId));
+  }
+
+  hasActiveOrchestratorIdentityMigrationForPane(pane: { workspaceId: string; paneId: string; terminalId?: string | null; paneToken?: string | null }): boolean {
+    if (!pane.terminalId || !pane.paneToken) return false;
+    return Boolean(this.database.prepare(`SELECT 1 FROM orchestrator_identity_migrations
+      WHERE state IN ('accepted','applying','uncertain')
+        AND expected_terminal_id = ? AND target_workspace_id = ? AND target_token = ?
+      LIMIT 1`).get(pane.terminalId, pane.workspaceId, pane.paneToken));
+  }
+
+  createPendingBinding(input: { id: string; kind?: Binding["kind"]; gatewayId?: string; projectId?: string | null; workspaceId: string; chatId: string; topicId: string | null; rootMessageId: string | null; title: string; agentKind?: AgentKind; creatorOpenId?: string | null }): Binding {
     const timestamp = now();
-    this.database.prepare(`INSERT INTO bindings(id, gateway_id, creator_open_id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, agent_kind, state, last_agent_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'traex', ?, 'pending', 'unknown', ?, ?)` ).run(input.id, input.gatewayId ?? "feishu:primary", input.creatorOpenId ?? null, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, input.agentKind ?? "traex", timestamp, timestamp);
+    this.database.prepare(`INSERT INTO bindings(id, kind, gateway_id, creator_open_id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, agent_kind, state, last_agent_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'traex', ?, 'pending', 'unknown', ?, ?)` ).run(input.id, input.kind ?? "task", input.gatewayId ?? "feishu:primary", input.creatorOpenId ?? null, input.projectId ?? null, input.workspaceId, input.chatId, input.topicId, input.rootMessageId, input.title, input.agentKind ?? "traex", timestamp, timestamp);
     return this.requireBinding(input.id);
+  }
+
+  createOrGetPendingOrchestratorBinding(input: { id: string; gatewayId: string; projectId: string; workspaceId: string; chatId: string; title: string; creatorOpenId: string }): { binding: Binding; created: boolean } {
+    return this.context.transaction("sqlite.binding-store.write", () => {
+      const timestamp = now();
+      const inserted = this.database.prepare(`INSERT INTO bindings(id, kind, gateway_id, creator_open_id, project_id, workspace_id, chat_id, topic_id, root_message_id, title, runtime, agent_kind, state, last_agent_state, created_at, updated_at)
+        VALUES (?, 'orchestrator', ?, ?, ?, ?, ?, NULL, NULL, ?, 'traex', 'traex', 'pending', 'unknown', ?, ?)
+        ON CONFLICT(gateway_id, chat_id) WHERE kind = 'orchestrator' AND state <> 'archived' DO NOTHING`
+      ).run(input.id, input.gatewayId, input.creatorOpenId, input.projectId, input.workspaceId, input.chatId, input.title, timestamp, timestamp);
+      const row = this.database.prepare("SELECT * FROM bindings WHERE gateway_id = ? AND chat_id = ? AND kind = 'orchestrator' AND state <> 'archived' ORDER BY created_at, id LIMIT 1").get(input.gatewayId, input.chatId) as BindingRow | undefined;
+      if (!row) throw new Error("Orchestrator binding reservation did not produce an owner");
+      return { binding: mapBinding(row), created: inserted.changes === 1 };
+    });
   }
 
   updateBinding(id: string, patch: Partial<Binding>): Binding { return this.persistBindingPatch(id, patch); }
   updateBindingMetadata(id: string, patch: BindingMetadataPatch): Binding { return this.persistBindingPatch(id, patch); }
+  projectCurrentRuntimeIdentityClaim(input: { claim: CurrentRuntimeIdentityClaim; paneToken: string | null }): Binding | null {
+    const { claim } = input;
+    const result = this.database.prepare(`UPDATE bindings SET
+      workspace_id = ?, pane_id = ?, pane_token = ?, traex_session_id = ?,
+      agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, attachment = ?, updated_at = ?
+      WHERE id = ? AND generation = ? AND session_epoch = ?`).run(
+      claim.attachment.workspaceId, claim.attachment.paneId, input.paneToken, claim.attachment.terminalId,
+      claim.nativeIdentity.source, claim.nativeIdentity.agent, claim.nativeIdentity.kind, claim.nativeIdentity.value,
+      claim.attachment.state, claim.updatedAt,
+      claim.owner.bindingId, claim.owner.bindingGeneration, claim.owner.sessionEpoch
+    );
+    return result.changes === 1 ? this.requireBinding(claim.owner.bindingId) : null;
+  }
   setPrimaryToolCapability(input: { bindingId: string; expectedGeneration: number; capabilityHash: string }): boolean {
     const binding = this.getBinding(input.bindingId);
     if (!binding || (binding.generation !== input.expectedGeneration && binding.generation + 1 !== input.expectedGeneration)) return false;
@@ -54,7 +94,7 @@ export class SqliteBindingLifecycleStore {
   hasPrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean { return Boolean(this.database.prepare("SELECT 1 FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").get(bindingId, expectedGeneration)); }
   revokePrimaryToolCapability(bindingId: string, expectedGeneration: number): boolean { return Number(this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(bindingId, expectedGeneration).changes) > 0; }
   persistBindingPatch(id: string, patch: Partial<Binding>): Binding {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.binding-store.write", () => {
       const normalized = { ...patch };
       if (patch.state && patch.lifecycle === undefined) {
         if (patch.state === "active") { normalized.lifecycle = "active"; normalized.provisioningCheckpoint = "activated"; if (patch.paneId) normalized.attachment = "attached"; }
@@ -75,7 +115,7 @@ export class SqliteBindingLifecycleStore {
 
   replaceProvisioningPane(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): Binding {
     const timestamp = now();
-    const result = this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, generation = generation + 1, last_agent_state = ?, last_observed_at = NULL, updated_at = ? WHERE id = ? AND pane_id = ? AND generation = ? AND lifecycle = 'provisioning' AND provisioning_checkpoint = 'pane_created'`).run(input.pane.paneId, input.pane.terminalId ?? null, input.pane.agentSession?.source ?? null, input.pane.agentSession?.agent ?? null, input.pane.agentSession?.kind ?? null, input.pane.agentSession?.value ?? null, input.pane.workspaceId, input.pane.agentState, timestamp, input.bindingId, input.expectedPaneId, input.expectedGeneration);
+    const result = this.database.prepare(`UPDATE bindings SET pane_id = ?, pane_token = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, generation = generation + 1, last_agent_state = ?, last_observed_at = NULL, updated_at = ? WHERE id = ? AND pane_id = ? AND generation = ? AND lifecycle = 'provisioning' AND provisioning_checkpoint = 'pane_created'`).run(input.pane.paneId, input.pane.paneToken ?? null, input.pane.terminalId ?? null, input.pane.agentSession?.source ?? null, input.pane.agentSession?.agent ?? null, input.pane.agentSession?.kind ?? null, input.pane.agentSession?.value ?? null, input.pane.workspaceId, input.pane.agentState, timestamp, input.bindingId, input.expectedPaneId, input.expectedGeneration);
     if (result.changes !== 1) throw new Error(`Provisioning pane replacement lost ownership for binding ${input.bindingId}`);
     return this.requireBinding(input.bindingId);
   }
@@ -88,7 +128,7 @@ export class SqliteBindingLifecycleStore {
   }
 
   applyRuntimeObservation(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; pane: HerdrPane }): RuntimeObservationApplication {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.binding-store.write", () => {
       let binding = this.requireBinding(input.bindingId);
       if (binding.paneId !== input.expectedPaneId || input.pane.paneId !== input.expectedPaneId || binding.generation !== input.expectedGeneration || (binding.lifecycle !== "active" && binding.lifecycle !== "draining") || binding.attachment === "orphaned") return { outcome: "stale_binding" };
       const persisted = binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue } : null;
@@ -99,8 +139,17 @@ export class SqliteBindingLifecycleStore {
       const terminalIdentityRefreshed = Boolean(binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && sameSession);
       if (binding.traexSessionId && input.pane.terminalId && binding.traexSessionId !== input.pane.terminalId && !sameSession) return { outcome: "terminal_identity_changed", binding };
       const nativeSessionMismatch = Boolean(persisted && observed && !sameSession);
+      if (nativeSessionMismatch && binding.kind === "orchestrator" && persisted && this.context.database.prepare(`SELECT 1 FROM orchestrator_clear_operations
+        WHERE binding_id = ? AND binding_generation = ? AND old_session_epoch = ?
+          AND expected_workspace_id = ? AND expected_pane_id = ? AND expected_terminal_id = ?
+          AND expected_session_source = ? AND expected_session_agent = ? AND expected_session_kind = ? AND expected_session_value = ?
+          AND state IN ('rotating','rotation-uncertain') LIMIT 1`).get(
+            binding.id, binding.generation, binding.sessionEpoch, binding.workspaceId, binding.paneId, binding.traexSessionId,
+            persisted.source, persisted.agent, persisted.kind, persisted.value
+          )) return { outcome: "session_rotation_pending", binding };
       if (nativeSessionMismatch) return { outcome: "terminal_identity_changed", binding };
-      if (terminalIdentityRefreshed || (!persisted && observed)) binding = this.persistBindingPatch(binding.id, { ...(terminalIdentityRefreshed ? { traexSessionId: input.pane.terminalId ?? null } : {}), ...(!persisted && observed ? { agentSessionSource: observed.source, agentSessionAgent: observed.agent, agentSessionKind: observed.kind, agentSessionValue: observed.value } : {}) });
+      const paneTokenChanged = Boolean(input.pane.paneToken && binding.paneToken !== input.pane.paneToken);
+      if (terminalIdentityRefreshed || (!persisted && observed) || paneTokenChanged) binding = this.persistBindingPatch(binding.id, { ...(terminalIdentityRefreshed ? { traexSessionId: input.pane.terminalId ?? null } : {}), ...(!persisted && observed ? { agentSessionSource: observed.source, agentSessionAgent: observed.agent, agentSessionKind: observed.kind, agentSessionValue: observed.value } : {}), ...(paneTokenChanged ? { paneToken: input.pane.paneToken! } : {}) });
       binding = this.transitionBinding(binding.id, { type: "pane_observed", runtime: input.pane.agentState });
       return { outcome: "applied", binding, terminalIdentityRefreshed, nativeSessionMismatch };
     });
@@ -110,18 +159,34 @@ export class SqliteBindingLifecycleStore {
     const binding = this.requireBinding(id);
     const next = transitionSession({ lifecycle: binding.lifecycle, attachment: binding.attachment, runtime: binding.lastAgentState, generation: binding.generation, provisioningCheckpoint: binding.provisioningCheckpoint, degradationCount: binding.degradationCount, hasCompletedTurn: binding.hasCompletedTurn }, { type: "pane_reattached", replacement });
     const suspended = transitionSession(next, { type: "archive_requested", hasActiveTurn: false });
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.binding-store.write", () => {
       const timestamp = now();
-      this.database.prepare(`UPDATE bindings SET pane_id = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`).run(pane.paneId, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, timestamp, timestamp, timestamp, id);
+      this.database.prepare(`UPDATE bindings SET pane_id = ?, pane_token = ?, traex_session_id = ?, agent_session_source = ?, agent_session_agent = ?, agent_session_kind = ?, agent_session_value = ?, workspace_id = ?, lifecycle = ?, attachment = ?, state = 'archived', generation = ?, last_agent_state = ?, degradation_count = 0, last_observed_at = ?, archived_at = ?, updated_at = ? WHERE id = ?`).run(pane.paneId, pane.paneToken ?? null, pane.terminalId ?? null, pane.agentSession?.source ?? null, pane.agentSession?.agent ?? null, pane.agentSession?.kind ?? null, pane.agentSession?.value ?? null, pane.workspaceId, suspended.lifecycle, suspended.attachment, suspended.generation, suspended.runtime, timestamp, timestamp, timestamp, id);
       if (!replacement) this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id = ? AND binding_generation = ?").run(id, suspended.generation);
       return this.requireBinding(id);
     });
   }
 
+  adoptBindingReviewOwnerIfEmpty(input: { bindingId: string; expectedGeneration: number; expectedPaneId: string; actorOpenId: string }): Binding | null {
+    const result = this.database.prepare(`UPDATE bindings
+      SET creator_open_id = ?, updated_at = ?
+      WHERE id = ? AND generation = ? AND pane_id = ?
+        AND state = 'active' AND lifecycle = 'active' AND attachment = 'attached'
+        AND creator_open_id IS NULL`).run(input.actorOpenId, now(), input.bindingId, input.expectedGeneration, input.expectedPaneId);
+    if (result.changes === 1) return this.requireBinding(input.bindingId);
+    const binding = this.getBinding(input.bindingId);
+    return binding && binding.generation === input.expectedGeneration && binding.paneId === input.expectedPaneId
+      && binding.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached"
+      ? binding
+      : null;
+  }
+
   getBinding(id: string): Binding | null { const row = this.database.prepare("SELECT * FROM bindings WHERE id = ?").get(id) as BindingRow | undefined; return row ? mapBinding(row) : null; }
   findBindingByTopic(topicId: string): Binding | null { const row = this.database.prepare("SELECT * FROM bindings WHERE topic_id = ? ORDER BY created_at DESC LIMIT 1").get(topicId) as BindingRow | undefined; return row ? mapBinding(row) : null; }
   findBindingByLarkScope(topicId: string | null, rootMessageId: string | null): Binding | null { if (!topicId && !rootMessageId) return null; const row = this.database.prepare("SELECT * FROM bindings WHERE (? IS NOT NULL AND topic_id = ?) OR (? IS NOT NULL AND root_message_id = ?) ORDER BY created_at DESC LIMIT 1").get(topicId, topicId, rootMessageId, rootMessageId) as BindingRow | undefined; return row ? mapBinding(row) : null; }
+  findOrchestratorBinding(gatewayId: string, chatId: string): Binding | null { const row = this.database.prepare("SELECT * FROM bindings WHERE gateway_id = ? AND chat_id = ? AND kind = 'orchestrator' AND state <> 'archived' ORDER BY created_at, id LIMIT 1").get(gatewayId, chatId) as BindingRow | undefined; return row ? mapBinding(row) : null; }
   findBindingByPane(paneId: string): Binding | null { const row = this.database.prepare("SELECT * FROM bindings WHERE pane_id = ? ORDER BY created_at DESC LIMIT 1").get(paneId) as BindingRow | undefined; return row ? mapBinding(row) : null; }
+  findBindingsByPane(paneId: string): Binding[] { return (this.database.prepare("SELECT * FROM bindings WHERE pane_id = ? ORDER BY created_at, id").all(paneId) as BindingRow[]).map(mapBinding); }
   listBindings(): Binding[] { return (this.database.prepare("SELECT * FROM bindings ORDER BY created_at").all() as BindingRow[]).map(mapBinding); }
   listBindingsByState(state: Binding["state"]): Binding[] { return (this.database.prepare("SELECT * FROM bindings WHERE state = ? ORDER BY created_at, id").all(state) as BindingRow[]).map(mapBinding); }
 
@@ -136,14 +201,32 @@ export class SqliteBindingLifecycleStore {
   }
 
   listFailures(chatId: string): FailureSummary[] {
-    const outbound = this.database.prepare(`SELECT o.id, o.binding_id, o.attempt_count, o.updated_at, o.error, b.pane_id, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM outbound_replies o LEFT JOIN bindings b ON b.id = o.binding_id LEFT JOIN project_selections s ON s.id = o.selection_id WHERE o.state = 'dead_letter' AND (b.chat_id = ? OR s.chat_id = ?) ORDER BY o.updated_at DESC`).all(chatId, chatId) as Array<{ id: string; binding_id: string | null; attempt_count: number; updated_at: string; error: string | null; pane_id: string | null; title: string | null; space_name: string | null }>;
-    const prompts = this.database.prepare(`SELECT p.id, p.binding_id, p.updated_at, p.error, b.pane_id, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id WHERE b.chat_id = ? AND p.state IN ('failed','cancelled') ORDER BY p.updated_at DESC`).all(chatId) as Array<{ id: string; binding_id: string; updated_at: string; error: string | null; pane_id: string | null; title: string; space_name: string }>;
-    const sessions = this.database.prepare(`SELECT b.id, b.updated_at, b.lifecycle, b.attachment, b.pane_id, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM bindings b WHERE b.chat_id = ? AND (b.lifecycle IN ('failed','provisioning') OR b.attachment IN ('degraded','orphaned')) ORDER BY b.updated_at DESC`).all(chatId) as Array<{ id: string; updated_at: string; lifecycle: string; attachment: string; pane_id: string | null; title: string; space_name: string }>;
-    return [...outbound.map((row): FailureSummary => ({ kind: "outbound", id: row.id, bindingId: row.binding_id, attemptCount: Number(row.attempt_count), updatedAt: row.updated_at, error: boundedError(row.error), ...(row.space_name ? { spaceName: row.space_name } : {}), paneId: row.pane_id, ...(row.title ? { title: row.title } : {}) })), ...prompts.map((row): FailureSummary => ({ kind: "prompt", id: row.id, bindingId: row.binding_id, updatedAt: row.updated_at, error: boundedError(row.error), spaceName: row.space_name, paneId: row.pane_id, title: row.title })), ...sessions.map((row): FailureSummary => ({ kind: "session", id: `session:${row.id}`, bindingId: row.id, updatedAt: row.updated_at, error: `Session is ${row.lifecycle}/${row.attachment}`, spaceName: row.space_name, paneId: row.pane_id, title: row.title }))].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    const outbound = this.database.prepare(`SELECT o.id, o.binding_id, o.attempt_count, o.updated_at, o.error,
+      o.effect_certainty,o.auto_recovery_count,o.kind,o.delivered_message_id,o.card_id_checkpoint,o.gateway_checkpoint_json,
+      b.pane_id, b.pane_token, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name
+      FROM outbound_replies o LEFT JOIN bindings b ON b.id = o.binding_id LEFT JOIN project_selections s ON s.id = o.selection_id
+      WHERE o.state = 'dead_letter' AND (b.chat_id = ? OR s.chat_id = ?) ORDER BY o.updated_at DESC`).all(chatId, chatId) as Array<{
+        id:string; binding_id:string|null; attempt_count:number; updated_at:string; error:string|null;
+        effect_certainty:OutboundReply["effectCertainty"]; auto_recovery_count:number; kind:OutboundReply["kind"];
+        delivered_message_id:string|null; card_id_checkpoint:string|null; gateway_checkpoint_json:string|null;
+        pane_id:string|null; pane_token:string|null; title:string|null; space_name:string|null;
+      }>;
+    const prompts = this.database.prepare(`SELECT p.id, p.binding_id, p.updated_at, p.error, b.pane_id, b.pane_token, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM prompt_jobs p JOIN bindings b ON b.id = p.binding_id WHERE b.chat_id = ? AND p.state IN ('failed','cancelled') ORDER BY p.updated_at DESC`).all(chatId) as Array<{ id: string; binding_id: string; updated_at: string; error: string | null; pane_id: string | null; pane_token: string | null; title: string; space_name: string }>;
+    const sessions = this.database.prepare(`SELECT b.id, b.updated_at, b.lifecycle, b.attachment, b.pane_id, b.pane_token, b.title, COALESCE((SELECT r.space_name FROM run_cards r WHERE r.binding_id = b.id ORDER BY r.created_at DESC LIMIT 1), b.project_id, b.workspace_id) AS space_name FROM bindings b WHERE b.chat_id = ? AND (b.lifecycle IN ('failed','provisioning') OR b.attachment IN ('degraded','orphaned')) ORDER BY b.updated_at DESC`).all(chatId) as Array<{ id: string; updated_at: string; lifecycle: string; attachment: string; pane_id: string | null; pane_token: string | null; title: string; space_name: string }>;
+    return [...outbound.map((row): FailureSummary => ({
+      kind: "outbound", id: row.id, bindingId: row.binding_id, attemptCount: Number(row.attempt_count),
+      retryAllowed: isDirectDeliveryRetryAllowed({
+        effectCertainty: row.effect_certainty, autoRecoveryCount: row.auto_recovery_count, kind: row.kind,
+        deliveredMessageId: row.delivered_message_id, cardIdCheckpoint: row.card_id_checkpoint,
+        gatewayCheckpointJson: row.gateway_checkpoint_json,
+      }),
+      updatedAt: row.updated_at, error: boundedError(row.error), ...(row.space_name ? { spaceName: row.space_name } : {}),
+      paneId: row.pane_id, paneToken: row.pane_token, ...(row.title ? { title: row.title } : {})
+    })), ...prompts.map((row): FailureSummary => ({ kind: "prompt", id: row.id, bindingId: row.binding_id, updatedAt: row.updated_at, error: boundedError(row.error), spaceName: row.space_name, paneId: row.pane_id, paneToken: row.pane_token, title: row.title })), ...sessions.map((row): FailureSummary => ({ kind: "session", id: `session:${row.id}`, bindingId: row.id, updatedAt: row.updated_at, error: `Session is ${row.lifecycle}/${row.attachment}`, spaceName: row.space_name, paneId: row.pane_id, paneToken: row.pane_token, title: row.title }))].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   createResetCandidate(input: { oldBindingId: string; newBindingId: string; title: string; actorOpenId: string; resetMessageId: string }): { previous: Binding; replacement: Binding; created: boolean } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.binding-store.write", () => {
       const previous = this.requireBinding(input.oldBindingId);
       const existing = this.database.prepare("SELECT * FROM bindings WHERE reset_message_id = ?").get(input.resetMessageId) as BindingRow | undefined;
       if (existing) return { previous, replacement: mapBinding(existing), created: false };
@@ -156,13 +239,15 @@ export class SqliteBindingLifecycleStore {
   }
 
   cutoverResetCandidate(input: { oldBindingId: string; newBindingId: string; cleanupOperationId: string; actorOpenId: string; expectedCwd: string }): { previous: Binding; replacement: Binding; cleanup: RetiredPaneCleanupOperation; cancelledPromptIds: string[] } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.binding-store.write", () => {
       const previous = this.requireBinding(input.oldBindingId); const candidate = this.requireBinding(input.newBindingId);
       if (previous.lifecycle !== "active" || previous.state !== "active" || !previous.projectId || !previous.topicId || !previous.rootMessageId || !previous.paneId || !previous.traexSessionId) throw new Error("Binding is not eligible for reset cutover");
       if (candidate.replacesBindingId !== previous.id || candidate.reservedTopicId !== previous.topicId || candidate.reservedRootMessageId !== previous.rootMessageId || candidate.lifecycle !== "provisioning" || candidate.provisioningCheckpoint !== "runtime_started" || !candidate.paneId || !candidate.traexSessionId) throw new Error("Reset candidate is not ready for cutover");
       const timestamp = now();
       const cancelledPromptIds = (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id = ? AND state = 'queued' ORDER BY created_at, id").all(previous.id) as Array<{ id: string }>).map((row) => row.id);
       this.database.prepare("UPDATE prompt_jobs SET state = 'cancelled', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'queued'").run("话题已开启新会话，排队请求未提交给 TraeX。", timestamp, previous.id);
+      this.database.prepare("UPDATE prompt_inputs SET state = 'cancelled', updated_at = ? WHERE binding_id = ? AND state = 'queued'").run(timestamp, previous.id);
+      this.database.prepare("UPDATE native_input_batches SET state = 'cancelled', updated_at = ? WHERE binding_id = ? AND state = 'collecting'").run(timestamp, previous.id);
       this.database.prepare("UPDATE prompt_jobs SET observation_state = 'detached', was_detached = 1, error = ?, updated_at = ? WHERE binding_id = ? AND state = 'running'").run("话题已开启新会话；Bridge 不再观察该 TraeX 请求，也不会重放。", timestamp, previous.id);
       this.database.prepare("UPDATE outbound_replies SET state = 'dismissed', error = ?, updated_at = ? WHERE binding_id = ? AND state = 'pending'").run("话题已开启新会话；不再投递旧会话更新。", timestamp, previous.id);
       this.database.prepare(`UPDATE bindings SET topic_id = NULL, root_message_id = NULL, retired_topic_id = ?, retired_root_message_id = ?, lifecycle = 'archived', state = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`).run(previous.topicId, previous.rootMessageId, timestamp, timestamp, previous.id);
@@ -173,10 +258,30 @@ export class SqliteBindingLifecycleStore {
     });
   }
 
+  cutoverAttachedPaneThread(input: { oldBindingId: string; newBindingId: string; actorOpenId: string }): { previous: Binding; replacement: Binding; cancelledPromptIds: string[] } {
+    return this.context.transaction("sqlite.binding-store.write", () => {
+      const previous = this.requireBinding(input.oldBindingId); const candidate = this.requireBinding(input.newBindingId);
+      if (previous.kind !== "task" || previous.lifecycle !== "active" || previous.state !== "active" || previous.attachment !== "attached" || !previous.paneId || !previous.topicId || !previous.rootMessageId) throw new Error("Binding is not eligible for attach cutover");
+      if (candidate.kind !== "task" || candidate.lifecycle !== "provisioning" || candidate.provisioningCheckpoint !== "thread_created" || candidate.paneId !== null || candidate.traexSessionId !== previous.traexSessionId || candidate.projectId !== previous.projectId || candidate.workspaceId !== previous.workspaceId || candidate.chatId !== previous.chatId || !candidate.topicId || !candidate.rootMessageId) throw new Error("Attach candidate is not ready for cutover");
+      const timestamp = now();
+      const cancelledPromptIds = (this.database.prepare("SELECT id FROM prompt_jobs WHERE binding_id=? AND state='queued' ORDER BY created_at,id").all(previous.id) as Array<{ id:string }>).map(({ id }) => id);
+      this.database.prepare("UPDATE prompt_jobs SET state='cancelled',error=?,updated_at=? WHERE binding_id=? AND state='queued'").run("Pane 已连接到新话题，旧话题排队请求未提交。", timestamp, previous.id);
+      this.database.prepare("UPDATE prompt_inputs SET state='cancelled',updated_at=? WHERE binding_id=? AND state='queued'").run(timestamp, previous.id);
+      this.database.prepare("UPDATE native_input_batches SET state='cancelled',updated_at=? WHERE binding_id=? AND state='collecting'").run(timestamp, previous.id);
+      this.database.prepare("UPDATE prompt_jobs SET observation_state='detached',was_detached=1,error=?,updated_at=? WHERE binding_id=? AND state='running'").run("Pane 已连接到新话题；旧话题停止观察当前请求且不会重放。", timestamp, previous.id);
+      this.database.prepare("UPDATE outbound_replies SET state='dismissed',error=?,updated_at=? WHERE binding_id=? AND state='pending'").run("Pane 已连接到新话题；不再投递旧话题更新。", timestamp, previous.id);
+      this.database.prepare("DELETE FROM primary_tool_capabilities WHERE binding_id=?").run(previous.id);
+      this.database.prepare("UPDATE bindings SET pane_id=NULL,lifecycle='archived',attachment='unattached',state='archived',archived_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, previous.id);
+      this.database.prepare("UPDATE bindings SET pane_id=?,lifecycle='active',attachment='attached',state='active',provisioning_checkpoint='activated',updated_at=? WHERE id=?").run(previous.paneId, timestamp, candidate.id);
+      this.database.prepare("INSERT INTO audit_log(actor_open_id,action,target,outcome,created_at) VALUES (?,'binding.attach',?,'cutover',?)").run(input.actorOpenId, `${previous.id}:${candidate.id}`, timestamp);
+      return { previous: this.requireBinding(previous.id), replacement: this.requireBinding(candidate.id), cancelledPromptIds };
+    });
+  }
+
   listRetiredPaneCleanupOperations(states: readonly RetiredPaneCleanupState[] = ["pending", "waiting_busy", "executing"]): RetiredPaneCleanupOperation[] { if (states.length === 0) return []; const placeholders = states.map(() => "?").join(","); return (this.database.prepare(`SELECT * FROM retired_pane_cleanup_operations WHERE state IN (${placeholders}) ORDER BY created_at, id`).all(...states) as RetiredPaneCleanupRow[]).map(mapRetiredPaneCleanup); }
   claimRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null { const result = this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'executing', attempt_count = attempt_count + 1, detail = NULL, updated_at = ? WHERE id = ? AND state IN ('pending','waiting_busy')").run(now(), id); return result.changes === 1 ? this.requireRetiredPaneCleanup(id) : null; }
   updateRetiredPaneCleanup(id: string, state: RetiredPaneCleanupState, detail: string | null = null): RetiredPaneCleanupOperation | null { const result = this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = ?, detail = ?, updated_at = ? WHERE id = ? AND state IN ('pending','waiting_busy','executing')").run(state, detail, now(), id); return result.changes === 1 ? this.requireRetiredPaneCleanup(id) : null; }
-  completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null { return this.context.transaction(() => { const operation = this.requireRetiredPaneCleanup(id); if (operation.state !== "executing") return null; const binding = this.requireBinding(operation.oldBindingId); if (binding.lifecycle !== "archived" || binding.paneId !== operation.paneId) throw new Error("Retired pane cleanup binding identity changed"); const timestamp = now(); this.database.prepare("UPDATE bindings SET lifecycle = 'closed', attachment = 'unattached', state = 'archived', last_agent_state = 'unknown', updated_at = ? WHERE id = ?").run(timestamp, binding.id); this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'succeeded', detail = NULL, updated_at = ? WHERE id = ? AND state = 'executing'").run(timestamp, id); return this.requireRetiredPaneCleanup(id); }); }
+  completeRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation | null { return this.context.transaction("sqlite.binding-store.write", () => { const operation = this.requireRetiredPaneCleanup(id); if (operation.state !== "executing") return null; const binding = this.requireBinding(operation.oldBindingId); if (binding.lifecycle !== "archived" || binding.paneId !== operation.paneId) throw new Error("Retired pane cleanup binding identity changed"); const timestamp = now(); this.database.prepare("UPDATE bindings SET lifecycle = 'closed', attachment = 'unattached', state = 'archived', last_agent_state = 'unknown', updated_at = ? WHERE id = ?").run(timestamp, binding.id); this.database.prepare("UPDATE retired_pane_cleanup_operations SET state = 'succeeded', detail = NULL, updated_at = ? WHERE id = ? AND state = 'executing'").run(timestamp, id); return this.requireRetiredPaneCleanup(id); }); }
 
   private requireBinding(id: string): Binding { const binding = this.getBinding(id); if (!binding) throw new Error(`Binding not found: ${id}`); return binding; }
   private requireRetiredPaneCleanup(id: string): RetiredPaneCleanupOperation { const row = this.database.prepare("SELECT * FROM retired_pane_cleanup_operations WHERE id = ?").get(id) as RetiredPaneCleanupRow | undefined; if (!row) throw new Error(`Retired pane cleanup ${id} not found`); return mapRetiredPaneCleanup(row); }

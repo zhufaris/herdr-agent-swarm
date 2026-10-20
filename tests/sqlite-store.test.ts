@@ -2,24 +2,51 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { createBridgeEvent } from "../src/domain/create-bridge-event.js";
 import { initialTopicView, reduceTopicView } from "../src/domain/topic-view.js";
 import { answerElementId, createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { renderRequestAnswerCard } from "../src/cards/run-card.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
-import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
+import { createQueuedWorkerTurnCard, workerTurnElementId } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
+import { PromptCapacityExceeded } from "../src/domain/prompt-capacity-error.js";
 import { createWorkerMainView, reduceWorkerMainView } from "../src/domain/worker-main-view.js";
-import { outboundLaneHeadSelectionSql } from "../src/store/sqlite/outbox-queue-store.js";
 import { outboundRetentionCandidateSelectionSql } from "../src/store/sqlite/outbox-retention-store.js";
 import { renderWorkerHumanReviewNotification } from "../src/cards/worker-human-review-notification.js";
 import { materializeOutboundReply } from "../src/events/outbound-intent-materializer.js";
 import { answerPageDeliveryFactsSql } from "../src/store/sqlite/projection-store.js";
+import { listPromptIdentityPromptIds, loadPromptIdentityCorrection, resolveCanonicalPromptId, resolvedPromptReferenceSql } from "../src/store/sqlite/prompt-identity-corrections.js";
+import type { SqliteContext } from "../src/store/sqlite/context.js";
+import { loadCompletionChoiceInvalidReason, normalizeAndPersistCompletionChoice, resolveCompletionChoiceSource } from "../src/store/sqlite/completion-choice-store.js";
+import { WORKER_EXPIRED_TARGET_PROOFS } from "../src/store/sqlite/outbox-recovery/semantic-recovery-proof.js";
+import { connectPreparedDeliveryProducers } from "../src/composition/create-outbound-runtime.js";
+import type { GatewayDeliveryIntent } from "../src/gateways/contract/plugin.js";
+import { queuedRunCardSelectionSql } from "../src/store/sqlite/prompt-store.js";
+import { workerMainCandidateSelectionSql } from "../src/store/sqlite/card-context-store.js";
+import { renderCompletionReviewCard } from "../src/cards/completion-actions.js";
+import { completionReviewActionSetIdentity } from "../src/domain/completion-action-set.js";
+import type { CurrentRuntimeIdentityClaim, RuntimeIdentityClaim, RuntimeIdentityOwner } from "../src/domain/runtime-identity-claim.js";
+import type { HerdrPane, RecoverOrphanBindingProjectionInput, RuntimeIdentityReconciliationApplication, RuntimeIdentityReconciliationPolicy } from "../src/domain/types.js";
+import { decideRuntimeIdentityReconciliation } from "../src/coordinator/pane-runtime-identity.js";
 
 let store: SqliteBindingStore | undefined;
 let temporaryDirectory: string | undefined;
+const globalSwarmTarget = { version: 1, kind: "swarm", bindingId: null, bindingGeneration: null, paneId: null, terminalId: null, nativeSession: null, activePromptId: null } as const;
+const LEGACY_WORKER_MAIN_SURFACE_REPLACE_PROOF = "feishu:surface.replace:worker-main:expired_worker_view_target:legacy-card-update-v1";
+const LEGACY_WORKER_TURN_SURFACE_REPLACE_PROOF = "feishu:surface.replace:worker-turn:expired_worker_view_target:legacy-card-update-v1";
+
+type NativeTurnIdentity = {
+  bindingId: string;
+  bindingGeneration: number;
+  paneId: string;
+  nativeSessionId: string;
+  turnId: string;
+  startedAt: string;
+};
+
 afterEach(() => {
   store?.close();
   store = undefined;
@@ -27,8 +54,398 @@ afterEach(() => {
   temporaryDirectory = undefined;
 });
 
+function nativeTurnCanonical(identity: NativeTurnIdentity): string {
+  return [
+    `binding_id=${identity.bindingId}`,
+    `binding_generation=${identity.bindingGeneration}`,
+    `pane_id=${identity.paneId}`,
+    `native_session_id=${identity.nativeSessionId}`,
+    `turn_id=${identity.turnId}`,
+    `started_at=${identity.startedAt}`
+  ].join("\n");
+}
+
+function nativeTurnHash(identity: NativeTurnIdentity): string {
+  return createHash("sha256").update(nativeTurnCanonical(identity)).digest("hex");
+}
+
+function nativeTurnSourceKey(identity: NativeTurnIdentity): string {
+  return `herdr-turn:v2:${nativeTurnHash(identity)}`;
+}
+
+function nativeTurnPromptId(identity: NativeTurnIdentity): string {
+  return `herdr-prompt:v1:${nativeTurnHash(identity)}`;
+}
+
+function connectPreparedTestDelivery(candidateStore: SqliteBindingStore): void {
+  const modules = candidateStore.capabilityModules();
+  connectPreparedDeliveryProducers(modules.outbox, modules.preparedDeliveryProducers, {
+    prepare: (intent: GatewayDeliveryIntent) => ({
+      protocolVersion: 1,
+      gatewayId: "feishu:primary",
+      profileId: "feishu-cardkit-v1",
+      rendererRevision: 1,
+      operation: intent.kind,
+      intent
+    })
+  }, { enqueuePreparedDelivery() {} });
+}
+
+type RuntimeIdentityClaimTestStore = SqliteBindingStore & {
+  loadRuntimeIdentityClaim(owner: RuntimeIdentityOwner): RuntimeIdentityClaim | null;
+  claimCurrentRuntimeIdentity(input: { claim: CurrentRuntimeIdentityClaim; paneToken: string | null }): { outcome: "claimed" | "unchanged" | "stale" | "conflict"; claim: RuntimeIdentityClaim | null };
+  reconcileRuntimeIdentity(input: { bindingId: string; expectedPaneId: string; expectedGeneration: number; expectedSessionEpoch: number; pane: HerdrPane; decide: RuntimeIdentityReconciliationPolicy; recovery?: Omit<RecoverOrphanBindingProjectionInput, "bindingId" | "expectedPaneId" | "expectedGeneration" | "pane"> }): RuntimeIdentityReconciliationApplication;
+};
+
+function currentRuntimeIdentityClaim(bindingId: string, bindingGeneration: number, sessionEpoch: number, sessionValue: string, paneId: string): CurrentRuntimeIdentityClaim {
+  return {
+    owner: { bindingId, bindingGeneration, sessionEpoch },
+    state: "current",
+    nativeIdentity: { source: "herdr:traex", agent: "traex", kind: "id", value: sessionValue },
+    attachment: { state: "attached", workspaceId: "w1", paneId, terminalId: `${paneId}:terminal` },
+    lastRejectedEvidenceFingerprint: null,
+    lastRejectedReason: null,
+    createdAt: "2026-10-18T00:00:00.000Z",
+    updatedAt: "2026-10-18T00:00:00.000Z"
+  };
+}
+
+function createParentedTestWorker(candidateStore: SqliteBindingStore, id = "i1") {
+  candidateStore.createPendingBinding({ id: "primary", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
+  candidateStore.updateBinding("primary", { paneId: "w1:primary", state: "active", lifecycle: "active", attachment: "attached" });
+  const created = candidateStore.createWorkerAgentInstance({
+    id, projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+    parent: { bindingId: "primary", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+    workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+  }, 4).instance;
+  return candidateStore.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+}
+
+function prepareWorkerHumanReview(candidateStore: SqliteBindingStore, options: { deliver?: boolean; supplement?: boolean } = {}) {
+  candidateStore.createPendingBinding({ id: "binding-worker-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+  candidateStore.updateBinding("binding-worker-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane" });
+  const created = candidateStore.createWorkerAgentInstance({
+    id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+    parent: { bindingId: "binding-worker-review", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+    workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+  }, 4).instance;
+  const worker = candidateStore.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+  const view = createQueuedWorkerTurnCard({
+    turnId: "turn-worker-review", instanceId: worker.id, instanceGeneration: worker.generation,
+    workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null,
+    rootMessageId: "worker-thread-root", requestText: "review durable flow", queuePosition: 1,
+    occurredAt: "2026-09-18T00:00:00.000Z"
+  });
+  candidateStore.acceptInstanceTurnWithCard({
+    id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1",
+    instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText,
+    parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard
+  });
+  candidateStore.database.prepare("UPDATE instance_turns SET runtime_turn_id = 'runtime-turn-review', runtime_turn_started_at = '2026-09-18T00:00:00.000Z' WHERE id = ?").run(view.turnId);
+  candidateStore.transitionInstanceTurnWithProjection({
+    turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started",
+    change: { type: "running", occurredAt: "2026-09-18T00:00:01.000Z" }, render: renderWorkerTurnCard,
+    renderHumanReviewNotification: renderWorkerHumanReviewNotification
+  });
+  candidateStore.transitionInstanceTurnWithProjection({
+    turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked",
+    change: { type: "blocked", occurredAt: "2026-09-18T00:00:02.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard,
+    renderHumanReviewNotification: renderWorkerHumanReviewNotification
+  });
+  const create = candidateStore.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:worker:") && kind === "card_reply")!;
+  for (const predecessor of candidateStore.listPendingOutboundReplies()) {
+    if (predecessor.id === create.id) break;
+    candidateStore.database.prepare("UPDATE outbound_replies SET state='delivered', delivered_message_id=?, updated_at=? WHERE id=? AND state='pending'")
+      .run(`predecessor-${predecessor.id}`, new Date().toISOString(), predecessor.id);
+  }
+  const projectionKey = create.idempotencyKey.slice(0, -":create".length);
+  if (options.deliver !== false) candidateStore.markOutboundReplyDelivered(create.id, "worker-review-message", "worker-review-card");
+
+  if (options.supplement) {
+    candidateStore.database.prepare(`INSERT INTO core_event_inbox(event_id, source_id, agent_kind, session_id, turn_id, source_cursor, occurred_at, event_json, ingested_at)
+      VALUES ('worker-review-candidate', 'source', 'traex', 'worker-session', 'runtime-turn-review', 'c1', '2026-09-18T00:00:03.000Z', '{}', '2026-09-18T00:00:03.000Z')`).run();
+    candidateStore.database.prepare(`INSERT INTO human_review_candidates(
+      source_event_id, owner_kind, owner_id, owner_generation, native_session_id, turn_id, notice, state, created_at, expires_at
+    ) VALUES ('worker-review-candidate', 'worker_turn', 'turn-worker-review', ?, 'worker-session', 'runtime-turn-review', 'Choose the test scope', 'pending', '2026-09-18T00:00:03.000Z', '2026-09-19T00:00:03.000Z')`).run(worker.generation);
+    candidateStore.transitionInstanceTurnWithProjection({
+      turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked",
+      change: { type: "blocked", occurredAt: "2026-09-18T00:00:04.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard,
+      renderHumanReviewNotification: renderWorkerHumanReviewNotification
+    });
+  }
+  return { worker, view, projectionKey, create };
+}
+
+function stageHistoricalNativeSubmission(candidateStore: SqliteBindingStore, promptId: string, dispatchedAt: string): void {
+  const staged = candidateStore.database.prepare(`
+    UPDATE prompt_jobs
+    SET state = 'submitted', observation_state = 'not_started', attempt_count = attempt_count + 1,
+      dispatched_at = NULL, native_submission_id = NULL, updated_at = ?
+    WHERE id = ? AND state = 'queued'
+  `).run(dispatchedAt, promptId);
+  if (Number(staged.changes) !== 1) throw new Error(`expected historical native submission ${promptId}`);
+  if (!candidateStore.markPromptNativeQueued({ promptId, bindingId: "b1", submissionId: promptId, dispatchedAt })) {
+    throw new Error(`expected historical native receipt ${promptId}`);
+  }
+}
+
+function prepareCorrectedExternalTurn(candidateStore: SqliteBindingStore): {
+  promptId: string;
+  canonicalPromptId: string;
+  turnId: string;
+  legacyStartedAt: string;
+  canonicalStartedAt: string;
+} {
+  candidateStore.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+  candidateStore.updateBinding("b1", {
+    state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1",
+    agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+  });
+  const turnId = "turn-1";
+  const legacyStartedAt = "2026-09-30T00:00:01.000Z";
+  const canonicalStartedAt = "2026-09-30T00:00:01.159Z";
+  const promptId = nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: legacyStartedAt });
+  const canonicalPromptId = nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: canonicalStartedAt });
+  candidateStore.adoptExternalTurn({
+    bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+    turnId, startedAt: legacyStartedAt, requestText: "direct task", externalPromptId: "ignored", externalMessageId: "legacy",
+    externalView: createQueuedRunCard({ promptId: "ignored", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct task", queuePosition: 0, occurredAt: legacyStartedAt }),
+    answerCardFor: renderRequestAnswerCard
+  });
+  const create = candidateStore.listPendingOutboundReplies()[0];
+  if (!create) throw new Error("expected initial external-turn Answer card");
+  candidateStore.markOutboundReplyDelivered(create.id, "answer-1", "card-1");
+  const corrected = candidateStore.correctExternalTurnStartedAt({
+    promptId,
+    bindingId: "b1",
+    expectedGeneration: 1,
+    expectedPaneId: "w1:p1",
+    expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+    turnId,
+    expectedStartedAt: legacyStartedAt,
+    canonicalStartedAt,
+    occurredAt: "2026-09-30T00:00:02.000Z"
+  });
+  if (corrected.promptId !== canonicalPromptId) throw new Error(`unexpected canonical prompt ${corrected.promptId}`);
+  return { promptId, canonicalPromptId, turnId, legacyStartedAt, canonicalStartedAt };
+}
+
+function promptIdentityContext(candidateStore: SqliteBindingStore): SqliteContext {
+  return candidateStore as unknown as SqliteContext;
+}
+
+it("resolves native, compatibility, and terminal-fence choices in precedence order", () => {
+  const native = { question: "Native?", defaultOption: { id: "native", label: "Native", submitText: "native" }, alternatives: [] };
+  const compatibility = { question: "Compatibility?", defaultOption: { id: "compatibility", label: "Compatibility", submitText: "compatibility" }, alternatives: [] };
+  const fence = ["Visible answer.", "", "```herdr-choice-list", JSON.stringify({
+    version: 2, intent: "human_review", question: "Fence?", default: "fence",
+    options: [{ id: "fence", label: "Fence", message: "default" }]
+  }), "```"].join("\n");
+
+  expect(resolveCompletionChoiceSource({ answer: "Visible answer.", assistantMessage: { schemaVersion: 2, text: "ignored", choice: native }, completionChoice: compatibility }))
+    .toEqual({ visibleAnswer: "Visible answer.", prompt: native, source: "native", decision: "selected" });
+  expect(resolveCompletionChoiceSource({ answer: "Visible answer.", completionChoice: compatibility }))
+    .toEqual({ visibleAnswer: "Visible answer.", prompt: compatibility, source: "compatibility", decision: "selected" });
+  expect(resolveCompletionChoiceSource({ answer: fence }))
+    .toMatchObject({ visibleAnswer: "Visible answer.", source: "terminal-fence", decision: "selected", prompt: { question: "Fence?" } });
+});
+
+it("falls back to the same-generation Binding pane token for legacy Answer Card views", () => {
+  store = new SqliteBindingStore(":memory:");
+  store.createPendingBinding({ id: "answer-token-binding", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Answer" });
+  store.updateBinding("answer-token-binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+  const view = createQueuedRunCard({
+    promptId: "answer-token-prompt", bindingId: "answer-token-binding", bindingGeneration: 1,
+    title: "Answer", workspaceId: "w1", paneId: "w1:p1", paneToken: null,
+    requestText: "answer", queuePosition: 1, occurredAt: "2026-10-19T00:00:00.000Z"
+  });
+  store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "message", actorOpenId: "user", body: view.requestText }, view, rootMessageId: "root", answerCard: {} });
+  store.updateBinding("answer-token-binding", { paneToken: "yx0c" });
+  expect(store.loadRunCard(view.promptId)).toMatchObject({ phase: "queued", paneToken: null });
+  store.saveRunCard({ ...store.loadRunCard(view.promptId)!, phase: "completed" });
+
+  expect(store.loadRunCard(view.promptId)).toMatchObject({ paneToken: "yx0c" });
+  expect((renderRequestAnswerCard(store.loadRunCard(view.promptId)!, { initialContent: "answer" }) as { header: { title: { content: string } } }).header.title.content)
+    .toContain("/ yx0c");
+
+  store.database.prepare("UPDATE bindings SET generation=2,pane_token='new2' WHERE id=?").run("answer-token-binding");
+  expect(store.loadRunCard(view.promptId)).toMatchObject({ paneToken: null });
+});
+
+it("keeps metadata ahead of malformed fences, returns conflicts, and normalizes terminal none into Continue", () => {
+  const choice = { question: "Approve?", defaultOption: { id: "approve", label: "Approve", submitText: "Approve it." }, alternatives: [] };
+  const malformed = "Visible answer.\n\n```herdr-choice-list\n{malformed}\n```";
+  const conflictingFence = ["Visible answer.", "", "```herdr-choice-list", JSON.stringify({
+    version: 2, intent: "human_review", question: "Different?", default: "different",
+    options: [{ id: "different", label: "Different", message: "default" }]
+  }), "```"].join("\n");
+  const explicitNone = ["Visible answer.", "", "```herdr-choice-list", JSON.stringify({ version: 2, intent: "none" }), "```"].join("\n");
+
+  expect(resolveCompletionChoiceSource({ answer: malformed, completionChoice: choice }))
+    .toEqual({ visibleAnswer: "Visible answer.", prompt: choice, source: "compatibility", decision: "selected" });
+  expect(resolveCompletionChoiceSource({ answer: conflictingFence, completionChoice: choice }))
+    .toEqual({ visibleAnswer: "Visible answer.", source: "none", decision: "conflict" });
+  expect(resolveCompletionChoiceSource({ answer: explicitNone, completionChoice: choice }))
+    .toEqual({
+      visibleAnswer: "Visible answer.",
+      prompt: { question: "是否继续？", defaultOption: { id: "continue", label: "继续", submitText: "continue" }, alternatives: [] },
+      source: "terminal-fence",
+      decision: "selected"
+    });
+  expect(resolveCompletionChoiceSource({ answer: "Visible answer." }))
+    .toEqual({ visibleAnswer: "Visible answer.", source: "none", decision: "none" });
+});
+
+it("accepts one equal structured and legacy terminal Choice but fails closed on conflict", () => {
+  store = new SqliteBindingStore(":memory:");
+  const choice = {
+    version: 2 as const, intent: "human_review" as const, question: "Choose?", default: "one",
+    options: [{ id: "one", label: "One", message: "default" }, { id: "two", label: "Two", message: "two" }]
+  };
+  const fence = ["Visible answer.", "", "```herdr-choice-list", JSON.stringify(choice), "```"].join("\n");
+
+  const equal = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "equal", ownerGeneration: 1,
+    answer: fence, completionChoice: choice, occurredAt: "2026-10-07T00:00:00.000Z"
+  });
+  expect(equal).toMatchObject({ answer: "Visible answer.", choice: { prompt: { question: "Choose?", defaultOption: { id: "one", label: "One", submitText: "default" }, alternatives: [{ id: "two", label: "Two", submitText: "two" }] } } });
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_choice_specifications WHERE owner_id='equal'").get()).toEqual({ count: 1 });
+
+  const conflict = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "conflict", ownerGeneration: 1,
+    answer: fence, completionChoice: { ...choice, question: "Different?" }, occurredAt: "2026-10-07T00:00:00.000Z"
+  });
+  expect(conflict).toEqual({ answer: "Visible answer.", choice: null });
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_choice_specifications WHERE owner_id='conflict'").get()).toEqual({ count: 0 });
+
+  const explicitNone = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "explicit-none-conflict", ownerGeneration: 1,
+    answer: ["Visible answer.", "", "```herdr-choice-list", JSON.stringify({ version: 2, intent: "none" }), "```"].join("\n"), completionChoice: choice, occurredAt: "2026-10-07T00:00:00.000Z"
+  });
+  expect(explicitNone).toMatchObject({
+    answer: "Visible answer.",
+    choice: { prompt: { question: "是否继续？", defaultOption: { id: "continue", label: "继续", submitText: "continue" }, alternatives: [] } }
+  });
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_choice_specifications WHERE owner_id='explicit-none-conflict'").get()).toEqual({ count: 1 });
+});
+
+it("normalizes a terminal intent-none protocol into one durable Continue choice card", () => {
+  store = new SqliteBindingStore(":memory:");
+  const answer = ["Visible answer.", "", "```herdr-choice-list", JSON.stringify({ version: 2, intent: "none" }), "```"].join("\n");
+
+  const result = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "none-continue", ownerGeneration: 1,
+    answer, occurredAt: "2026-10-19T00:00:00.000Z"
+  });
+
+  expect(result).toMatchObject({
+    answer: "Visible answer.",
+    choice: { prompt: { defaultOption: { id: "continue", label: "继续", submitText: "continue" }, alternatives: [] } }
+  });
+  expect(store.database.prepare("SELECT default_option_id, question FROM completion_choice_specifications WHERE owner_id='none-continue'").get())
+    .toEqual({ default_option_id: "continue", question: "是否继续？" });
+  expect(store.database.prepare("SELECT option_id,label,message FROM completion_choice_options WHERE specification_id=(SELECT id FROM completion_choice_specifications WHERE owner_id='none-continue')").all())
+    .toEqual([{ option_id: "continue", label: "继续", message: "continue" }]);
+  const card = renderCompletionReviewCard({ actionSetId: "action-none-continue", mentionOpenId: "ou_actor", choicePrompt: result.choice!.prompt });
+  expect(JSON.stringify(card)).toContain('"optionId":"continue"');
+  expect(JSON.stringify(card)).toContain("继续");
+
+  const repeated = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "none-continue", ownerGeneration: 1,
+    answer, occurredAt: "2026-10-19T00:00:01.000Z"
+  });
+  expect(repeated.choice?.id).toBe(result.choice?.id);
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_choice_specifications WHERE owner_id='none-continue'").get()).toEqual({ count: 1 });
+});
+
+it("persists one bounded malformed compatibility reason without creating a review prompt", () => {
+  store = new SqliteBindingStore(":memory:");
+  const answer = ["Visible answer.", "", "```herdr-choice-list", "{bad}", "```"].join("\n");
+  const result = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "invalid", ownerGeneration: 1,
+    answer, occurredAt: "2026-10-16T00:00:00.000Z"
+  });
+  expect(result).toEqual({ answer: "Visible answer.", choice: null, invalidReason: "invalid-json" });
+  expect(loadCompletionChoiceInvalidReason(promptIdentityContext(store), "primary-prompt", "invalid", 1)).toBe("invalid-json");
+  expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_choice_options WHERE specification_id=(SELECT id FROM completion_choice_specifications WHERE owner_id='invalid')").get()).toEqual({ count: 0 });
+});
+
+it("keeps a valid structured choice when the visible final protocol is malformed", () => {
+  store = new SqliteBindingStore(":memory:");
+  const choice = {
+    question: "Approve?",
+    defaultOption: { id: "approve", label: "Approve", submitText: "Approve it." },
+    alternatives: [{ id: "revise", label: "Revise", submitText: "Revise it." }]
+  };
+  const result = normalizeAndPersistCompletionChoice({
+    context: promptIdentityContext(store), ownerKind: "primary-prompt", ownerId: "recovered-choice", ownerGeneration: 1,
+    answer: "Visible answer.\n\n```herdr-choice-list\n{malformed}\n```",
+    completionChoice: choice, occurredAt: "2026-10-16T00:00:00.000Z"
+  });
+
+  expect(result.choice?.prompt).toEqual(choice);
+  expect(loadCompletionChoiceInvalidReason(promptIdentityContext(store), "primary-prompt", "recovered-choice", 1)).toBeNull();
+});
+
+function insertPromptIdentityCorrection(candidateStore: SqliteBindingStore, input: {
+  aliasPromptId: string;
+  canonicalPromptId: string;
+  bindingId?: string;
+  bindingGeneration?: number;
+  paneId?: string;
+  nativeSessionId?: string;
+  turnId?: string;
+  legacyStartedAt?: string;
+  canonicalStartedAt?: string;
+  createdAt?: string;
+}): void {
+  candidateStore.database.prepare(`
+    INSERT INTO prompt_identity_corrections(
+      alias_prompt_id, canonical_prompt_id, binding_id, binding_generation, pane_id, native_session_id, turn_id,
+      legacy_started_at, canonical_started_at, reason, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'canonical_start_correction', ?)
+  `).run(
+    input.aliasPromptId,
+    input.canonicalPromptId,
+    input.bindingId ?? "b1",
+    input.bindingGeneration ?? 1,
+    input.paneId ?? "w1:wrong-pane",
+    input.nativeSessionId ?? "session-1",
+    input.turnId ?? "turn-1",
+    input.legacyStartedAt ?? "2026-09-30T00:00:00.999Z",
+    input.canonicalStartedAt ?? "2026-09-30T00:00:01.159Z",
+    input.createdAt ?? "2026-09-30T00:00:04.100Z"
+  );
+}
+
+function expectInvalidPromptIdentityCorrectionReported(candidateStore: SqliteBindingStore): void {
+  expect(candidateStore.inspectIntegrity(20).issues).toContainEqual({
+    rule: "prompt_identity_correction_invalid",
+    table: "prompt_identity_corrections",
+    count: 1
+  });
+}
+
+function prepareDetachedRecoveryCandidate(candidateStore: SqliteBindingStore, options: { lastAgentState?: "idle" | "blocked"; withSuccessor?: boolean } = {}): void {
+  candidateStore.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+  candidateStore.updateBinding("b1", {
+    state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: options.lastAgentState ?? "idle",
+    agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+  });
+  const prompts = options.withSuccessor === false
+    ? [["blocked-head", "2026-09-05T00:00:00.000Z"]] as const
+    : [["blocked-head", "2026-09-05T00:00:00.000Z"], ["successor", "2026-09-05T00:00:01.000Z"]] as const;
+  for (const [id, occurredAt] of prompts) {
+    const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt });
+    candidateStore.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+  }
+  candidateStore.database.prepare("UPDATE prompt_jobs SET state='recovering', observation_state='detached', dispatched_at='2026-09-05T00:00:00.000Z', native_submission_id='blocked-head' WHERE id='blocked-head'").run();
+  candidateStore.database.prepare("UPDATE run_cards SET phase='running' WHERE prompt_id='blocked-head'").run();
+}
+
 function prepareSupersededAnswerCandidate(candidateStore: SqliteBindingStore): { replacementId: string; projectionKey: string } {
   candidateStore.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+  candidateStore.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
   const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
   candidateStore.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
   candidateStore.markOutboundReplyDelivered(candidateStore.listPendingOutboundReplies()[0]!.id, "answer-old", "card-old");
@@ -40,26 +457,22 @@ function prepareSupersededAnswerCandidate(candidateStore: SqliteBindingStore): {
     promptId: "p1", previousPageIndex: 0, nextPageIndex: 1, sourceStart: 0, nextElementId: answerElementId("p1", 1),
     rootMessageId: "root-1", viewVersion: 3, card: {}
   });
-  const replacement = candidateStore.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
-  candidateStore.checkpointOutboundReplyCard(replacement.id, "card-new");
-  candidateStore.markOutboundReplyDelivered(replacement.id, "answer-new", "card-new");
-  for (const revision of [1, 2, 3]) {
-    candidateStore.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 1, messageId: "answer-new", card: { revision } });
-  }
-  return { replacementId: replacement.id, projectionKey: "answer-static:p1:1:answer-new" };
+  return { replacementId: "", projectionKey: "answer-static:p1:1:answer-new" };
 }
 
 function prepareSupersededWorkerMainCandidate(candidateStore: SqliteBindingStore): { failedId: string; successorId: string } {
   candidateStore.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-root", title: "Primary" });
+  candidateStore.updateBinding("b1", { paneId: "w1:primary", state: "active", lifecycle: "active", attachment: "attached" });
   const worker = candidateStore.createWorkerAgentInstance({
     id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
     parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
     workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
   }, 4);
   if (worker.outcome !== "created") throw new Error("expected Worker");
+  candidateStore.attachAgentInstanceRuntime({ instanceId: worker.instance.id, expectedGeneration: worker.instance.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" });
   const initial = { ...createWorkerMainView({
     workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary",
-    runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: false, desiredState: "running", parentActive: true, paneId: null, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-19T00:00:00.000Z"
+    runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "w1:worker", workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-19T00:00:00.000Z"
   }), messageId: "worker-main", cardId: "worker-card", viewVersion: 2, deliveredVersion: 1 };
   candidateStore.reserveWorkerMainCard(initial, "primary-root", { version: 2 });
   const failed = candidateStore.listPendingOutboundReplies().find(({ workerId }) => workerId === "reviewer")!;
@@ -70,8 +483,634 @@ function prepareSupersededWorkerMainCandidate(candidateStore: SqliteBindingStore
   return { failedId: failed.id, successorId: successor.id };
 }
 
+function prepareExpiredWorkerMainTarget(candidateStore: SqliteBindingStore): { laneKey: string } {
+  candidateStore.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-root", title: "Primary" });
+  candidateStore.database.prepare("UPDATE bindings SET pane_id = 'w1:primary', state = 'active', lifecycle = 'active', attachment = 'attached' WHERE id = 'b1'").run();
+  const worker = candidateStore.createWorkerAgentInstance({
+    id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+    parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+    workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+  }, 4);
+  if (worker.outcome !== "created") throw new Error("expected Worker");
+  candidateStore.attachAgentInstanceRuntime({ instanceId: worker.instance.id, expectedGeneration: worker.instance.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" });
+  candidateStore.saveWorkerMainView({ ...createWorkerMainView({
+    workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary",
+    runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: false, desiredState: "running", parentActive: true, paneId: null, workspace: "/repo", branch: null, model: null, occurredAt: "2026-10-01T00:00:00.000Z"
+  }), messageId: "worker-main", cardId: "worker-card", viewVersion: 4, deliveredVersion: 3 });
+  candidateStore.database.prepare(`
+    INSERT INTO worker_session_threads(
+      id, publication_key, worker_id, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id,
+      chat_id, mode, source_main_message_id, action_message_id, topic_id, root_message_id, state, created_at, activated_at, stale_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?)
+  `).run(
+    "thread-reviewer-1",
+    "worker-thread:reviewer:1",
+    "reviewer",
+    1,
+    "b1",
+    1,
+    "w1:primary",
+    "c1",
+    "canonical-main",
+    null,
+    null,
+    "worker-topic",
+    "worker-main",
+    "2026-10-01T00:00:00.000Z",
+    "2026-10-01T00:00:00.000Z",
+    "2026-10-01T00:00:00.000Z"
+  );
+  return { laneKey: "gateway:feishu:primary:worker-main:reviewer:1" };
+}
+
+function prepareExpiredWorkerTurnTarget(candidateStore: SqliteBindingStore): { laneKey: string } {
+  candidateStore.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+  candidateStore.database.prepare("UPDATE bindings SET pane_id = 'w1:primary', state = 'active', lifecycle = 'active', attachment = 'attached' WHERE id = 'b1'").run();
+  const createdWorker = candidateStore.createWorkerAgentInstance({
+    id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+    parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+    workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+  }, 4).instance;
+  const worker = candidateStore.attachAgentInstanceRuntime({ instanceId: createdWorker.id, expectedGeneration: createdWorker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" })!;
+  const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+  candidateStore.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+  const create = candidateStore.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-1" && kind === "stream_card_create")!;
+  candidateStore.checkpointOutboundReplyCard(create.id, "worker-card");
+  candidateStore.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+  candidateStore.database.prepare(`
+    INSERT INTO worker_session_threads(
+      id, publication_key, worker_id, worker_session_generation, parent_binding_id, parent_binding_generation, parent_pane_id,
+      chat_id, mode, source_main_message_id, action_message_id, topic_id, root_message_id, state, created_at, activated_at, stale_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?)
+  `).run(
+    "thread-reviewer-1",
+    "worker-thread:reviewer:1",
+    "reviewer",
+    1,
+    "b1",
+    1,
+    "w1:primary",
+    "chat",
+    "canonical-main",
+    null,
+    null,
+    "worker-topic",
+    "worker-root",
+    "2026-10-01T00:00:00.000Z",
+    "2026-10-01T00:00:00.000Z",
+    "2026-10-01T00:00:00.000Z"
+  );
+  return { laneKey: "gateway:feishu:primary:worker-turn:turn-1:0" };
+}
+
+function mutateHistoricalOutboundReply(candidateStore: SqliteBindingStore, sql: string, replyId: string): void {
+  const trigger = candidateStore.database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_immutable_claim'"
+  ).get() as { sql: string };
+  candidateStore.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
+  try {
+    candidateStore.database.prepare(sql).run(replyId);
+  } finally {
+    candidateStore.database.exec(trigger.sql);
+  }
+}
+
+function prepareDirectExpiredWorkerMainTarget(candidateStore: SqliteBindingStore): {
+  failedClaim: OutboundDeliveryClaim;
+  failedId: string;
+  pendingId: string;
+  uncertainId: string;
+  laneKey: string;
+} {
+  const { laneKey } = prepareExpiredWorkerMainTarget(candidateStore);
+  candidateStore.enqueueOutboundReply({ id: "failed-worker-main", idempotencyKey: "failed-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 4, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":4}" });
+  const failedClaim = candidateStore.claimOutboundReply("failed-worker-main", null);
+  if (!failedClaim) throw new Error("expected claimed failed Worker Main");
+  candidateStore.enqueueOutboundReply({ id: "pending-worker-main", idempotencyKey: "pending-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 5, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":5}" });
+  candidateStore.enqueueOutboundReply({ id: "uncertain-worker-main", idempotencyKey: "uncertain-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 5, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":5,\"uncertain\":true}" });
+  candidateStore.database.prepare("UPDATE outbound_replies SET effect_certainty = 'uncertain' WHERE id = 'uncertain-worker-main'").run();
+  return { failedClaim, failedId: "failed-worker-main", pendingId: "pending-worker-main", uncertainId: "uncertain-worker-main", laneKey };
+}
+
+function prepareDirectExpiredWorkerTurnTarget(candidateStore: SqliteBindingStore): {
+  failedClaim: OutboundDeliveryClaim;
+  failedId: string;
+  pendingId: string;
+  uncertainId: string;
+  laneKey: string;
+} {
+  const { laneKey } = prepareExpiredWorkerTurnTarget(candidateStore);
+  candidateStore.enqueueOutboundReply({ id: "failed-worker-turn", idempotencyKey: "failed-worker-turn", workerTurnId: "turn-1", viewVersion: 4, streamPageIndex: 0, rootMessageId: "worker-message", kind: "card_update", payload: "{\"version\":4}" });
+  const failedClaim = candidateStore.claimOutboundReply("failed-worker-turn", null);
+  if (!failedClaim) throw new Error("expected claimed failed Worker Turn");
+  candidateStore.enqueueOutboundReply({ id: "pending-worker-turn", idempotencyKey: "pending-worker-turn", workerTurnId: "turn-1", viewVersion: 5, streamPageIndex: 0, rootMessageId: "worker-message", kind: "card_update", payload: "{\"version\":5}" });
+  candidateStore.enqueueOutboundReply({ id: "uncertain-worker-turn", idempotencyKey: "uncertain-worker-turn", workerTurnId: "turn-1", viewVersion: 7, streamPageIndex: 0, rootMessageId: "worker-message", kind: "card_update", payload: "{\"version\":7}" });
+  candidateStore.database.prepare("UPDATE outbound_replies SET effect_certainty = 'uncertain' WHERE id = 'uncertain-worker-turn'").run();
+  return { failedClaim, failedId: "failed-worker-turn", pendingId: "pending-worker-turn", uncertainId: "uncertain-worker-turn", laneKey };
+}
+
+function prepareHistoricalExpiredWorkerMainTarget(candidateStore: SqliteBindingStore): {
+  failedId: string;
+  pendingId: string;
+  claimedId: string;
+  uncertainId: string;
+  laneKey: string;
+} {
+  const { laneKey } = prepareExpiredWorkerMainTarget(candidateStore);
+  candidateStore.enqueueOutboundReply({ id: "failed-worker-main", idempotencyKey: "failed-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 4, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":4}" });
+  const failedClaim = candidateStore.claimOutboundReply("failed-worker-main", null);
+  if (!failedClaim) throw new Error("expected claimed failed Worker Main");
+  expect(candidateStore.markOutboundReplyFailedWithQuarantine(failedClaim, "message expired", {
+    failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031"
+  })).toMatchObject({ action: "blocked", reply: { state: "dead_letter" } });
+  candidateStore.enqueueOutboundReply({ id: "claimed-worker-main", idempotencyKey: "claimed-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 5, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":5,\"claimed\":true}" });
+  candidateStore.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', released_at = NULL WHERE failed_reply_id = 'failed-worker-main'").run();
+  candidateStore.database.prepare(`UPDATE outbound_replies
+    SET claim_attempt_id='historical-claim', claimed_at='2026-10-01T00:00:01.000Z', first_claimed_at='2026-10-01T00:00:01.000Z',
+      claim_expires_at='2099-01-01T00:00:00.000Z'
+    WHERE id='claimed-worker-main'`).run();
+  candidateStore.database.prepare("UPDATE outbox_lane_quarantines SET state = 'active', action = 'blocked', released_at = NULL WHERE failed_reply_id = 'failed-worker-main'").run();
+  candidateStore.enqueueOutboundReply({ id: "pending-worker-main", idempotencyKey: "pending-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 5, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":5}" });
+  candidateStore.enqueueOutboundReply({ id: "uncertain-worker-main", idempotencyKey: "uncertain-worker-main", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 5, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":5,\"uncertain\":true}" });
+  candidateStore.database.prepare("UPDATE outbound_replies SET effect_certainty = 'uncertain' WHERE id = 'uncertain-worker-main'").run();
+  return { failedId: "failed-worker-main", pendingId: "pending-worker-main", claimedId: "claimed-worker-main", uncertainId: "uncertain-worker-main", laneKey };
+}
+
+function prepareHistoricalExpiredWorkerTurnTarget(candidateStore: SqliteBindingStore): {
+  failedId: string;
+  pendingId: string;
+  laneKey: string;
+} {
+  const { laneKey } = prepareExpiredWorkerTurnTarget(candidateStore);
+  candidateStore.enqueueOutboundReply({ id: "failed-worker-turn", idempotencyKey: "failed-worker-turn", workerTurnId: "turn-1", viewVersion: 4, streamPageIndex: 0, rootMessageId: "worker-message", kind: "card_update", payload: "{\"version\":4}" });
+  const failedClaim = candidateStore.claimOutboundReply("failed-worker-turn", null);
+  if (!failedClaim) throw new Error("expected claimed failed Worker Turn");
+  expect(candidateStore.markOutboundReplyFailedWithQuarantine(failedClaim, "message expired", {
+    failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031"
+  })).toMatchObject({ action: "blocked", reply: { state: "dead_letter" } });
+  candidateStore.enqueueOutboundReply({ id: "pending-worker-turn", idempotencyKey: "pending-worker-turn", workerTurnId: "turn-1", viewVersion: 5, streamPageIndex: 0, rootMessageId: "worker-message", kind: "card_update", payload: "{\"version\":5}" });
+  return { failedId: "failed-worker-turn", pendingId: "pending-worker-turn", laneKey };
+}
+
+function withLegacyCompletionChoice(answer: string): string {
+  return [answer, "", "```herdr-choice-list", JSON.stringify({ version: 1, default: "default", options: [
+    { id: "default", label: "default", message: "default" },
+    { id: "continue", label: "继续", message: "继续。" }
+  ] }, null, 2), "```"].join("\n");
+}
+
+function preparePrimaryCompletionActions(candidateStore: SqliteBindingStore, dynamic: boolean) {
+  candidateStore.createPendingBinding({ id: "binding-native-actions", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+  candidateStore.updateBinding("binding-native-actions", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "working" });
+  const protocol = dynamic ? ["Choose one.", "", "```herdr-choice-list", JSON.stringify({ version: 1, default: "one", options: [
+    { id: "one", label: "方案一", message: "default" },
+    { id: "two", label: "方案二", message: "2" }
+  ] }, null, 2), "```"].join("\n") : withLegacyCompletionChoice("done");
+  const view = createQueuedRunCard({ promptId: "completed-native-actions", bindingId: "binding-native-actions", bindingGeneration: 1, title: "Completed", workspaceId: "w1", paneId: "primary-pane", requestText: "first", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+  candidateStore.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "old-message", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+  const create = candidateStore.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+  candidateStore.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+  candidateStore.updatePrompt(view.promptId, "running");
+  candidateStore.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer: protocol, occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp-native-actions" });
+  const actionSet = candidateStore.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" });
+  if (!actionSet || actionSet.state !== "available") throw new Error("expected available Primary completion actions");
+  return actionSet;
+}
+
 describe("SQLite store", () => {
+  it("atomically forms one immediate Native Input Batch and deduplicates its Feishu source", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nship the fix";
+    const view = createQueuedRunCard({
+      promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "ship the fix",
+      workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, replyContext: "ship the fix", queuePosition: 1,
+      occurredAt: "2026-10-02T01:00:00.000Z"
+    });
+    const batching = store as SqliteBindingStore & {
+      acceptImmediateNativeInputBatch(input: {
+        input: { id: string; bindingId: string; bindingGeneration: number; ingressSource: "feishu"; sourceMessageKey: string; larkMessageId: string; actorOpenId: string; body: string; rootMessageId: string; parentPromptId: string | null };
+        batchId: string; combinedBody: string; occurredAt: string; view: typeof view; answerCard: object; maxQueueDepth: number;
+      }): { inserted: boolean; prompt: { id: string; body: string; nativeSubmissionId: string | null }; view: typeof view };
+      getPromptInputBySource(ingressSource: "feishu", sourceMessageKey: string): { id: string; batchId: string | null; body: string } | null;
+      getNativeInputBatch(batchId: string): { id: string; executionPromptId: string | null; combinedBody: string | null; state: string } | null;
+      listNativeInputBatchMembers(batchId: string): Array<{ promptInputId: string; ordinal: number }>;
+    };
+
+    const first = batching.acceptImmediateNativeInputBatch({
+      input: {
+        id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu",
+        sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1",
+        body: "ship the fix", rootMessageId: "root", parentPromptId: null
+      },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z",
+      view, answerCard: { batch: 1 }, maxQueueDepth: 20
+    });
+    const duplicate = batching.acceptImmediateNativeInputBatch({
+      input: {
+        id: "input-ignored", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu",
+        sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1",
+        body: "changed duplicate", rootMessageId: "root", parentPromptId: null
+      },
+      batchId: "batch-ignored", combinedBody: "[Feishu message 1/1]\nchanged duplicate",
+      occurredAt: "2026-10-02T01:00:01.000Z",
+      view: { ...view, promptId: "batch-ignored", requestText: "changed duplicate" },
+      answerCard: { batch: "ignored" }, maxQueueDepth: 1
+    });
+
+    expect(first).toMatchObject({ inserted: true, prompt: { id: "batch-1", body: combinedBody, nativeSubmissionId: "batch-1" }, view: { promptId: "batch-1", requestText: combinedBody, replyContext: "ship the fix" } });
+    expect(duplicate).toMatchObject({ inserted: false, prompt: { id: "batch-1", body: combinedBody }, view: { promptId: "batch-1" } });
+    expect(batching.getPromptInputBySource("feishu", "message-1")).toEqual(expect.objectContaining({ id: "input-1", batchId: "batch-1", body: "ship the fix" }));
+    expect(batching.getNativeInputBatch("batch-1")).toEqual(expect.objectContaining({ id: "batch-1", executionPromptId: "batch-1", combinedBody, state: "formed" }));
+    expect(batching.listNativeInputBatchMembers("batch-1")).toEqual([{ batchId: "batch-1", promptInputId: "input-1", ordinal: 0 }]);
+    expect(store.getPrompt("batch-1")).toEqual(expect.objectContaining({ larkMessageId: null, ingressSource: "feishu", sourceMessageKey: "feishu-batch:v1:batch-1" }));
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "batch-1")).toHaveLength(1);
+  });
+
+  it("rejects an immediate Native Input Batch whose Reply Context differs from its source", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nship the fix";
+    const view = createQueuedRunCard({
+      promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "ship the fix",
+      workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, replyContext: "different",
+      queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z"
+    });
+
+    expect(() => store!.acceptImmediateNativeInputBatch({
+      input: {
+        id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu",
+        sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1",
+        body: "ship the fix", rootMessageId: "root", parentPromptId: null
+      },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z",
+      view, answerCard: {}, maxQueueDepth: 20
+    })).toThrow("Immediate Native Input Batch reply context does not match its source input");
+    expect(store.getPrompt("batch-1")).toBeNull();
+  });
+
+  it.each([
+    ["submitted", "attached"],
+    ["running", "attached"],
+    ["recovering", "detached"],
+    ["uncertain", "completed"]
+  ] as const)("keeps a formed Native Input Batch queued behind a %s predecessor", (state, observationState) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nsecond";
+    store.acceptImmediateNativeInputBatch({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-2", body: "second", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z",
+      view: createQueuedRunCard({ promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "second", workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z" }),
+      answerCard: {}, maxQueueDepth: 20
+    });
+    store.enqueuePrompt({ id: "predecessor", bindingId: "b1", larkMessageId: "message-predecessor", actorOpenId: "user-1", body: "first" });
+    store.database.prepare(`
+      UPDATE prompt_jobs
+      SET state = ?, observation_state = ?, dispatched_at = '2026-10-02T00:59:59.000Z',
+          created_at = '2026-10-02T00:59:58.000Z', updated_at = '2026-10-02T00:59:59.000Z'
+      WHERE id = 'predecessor'
+    `).run(state, observationState);
+
+    expect(store.claimNextDispatchablePrompt("b1", { nativeInputBatchOnly: true })).toBeNull();
+    expect(store.getPrompt("batch-1")).toMatchObject({ state: "queued", observationState: "not_started" });
+
+    store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed' WHERE id = 'predecessor'").run();
+    expect(store.claimNextDispatchablePrompt("b1", { nativeInputBatchOnly: true })).toMatchObject({
+      prompt: { id: "batch-1", state: "submitted" }, executionBody: "second", nativeInputBatch: true
+    });
+  });
+
+  it.each([
+    ["working", "idle"],
+    ["blocked", "done"]
+  ] as const)("claims a formed Native Input Batch only after persisted %s runtime settles to %s", (agentState, settledState) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nnext";
+    store.acceptImmediateNativeInputBatch({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "next", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z",
+      view: createQueuedRunCard({ promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "next", workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z" }),
+      answerCard: {}, maxQueueDepth: 20
+    });
+    store.updateBinding("b1", { lastAgentState: agentState });
+
+    expect(store.claimNextDispatchablePrompt("b1", { nativeInputBatchOnly: true })).toBeNull();
+    expect(store.getPrompt("batch-1")).toMatchObject({ state: "queued", observationState: "not_started" });
+
+    store.updateBinding("b1", { lastAgentState: settledState });
+    expect(store.claimNextDispatchablePrompt("b1", { nativeInputBatchOnly: true })).toMatchObject({
+      prompt: { id: "batch-1", state: "submitted" }, executionBody: "next", nativeInputBatch: true
+    });
+  });
+
+  it("counts Native Input Batch source messages for backpressure and rolls back rejected admission", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const firstBody = "[Feishu message 1/1]\nfirst";
+    const firstView = createQueuedRunCard({ promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "first", workspaceId: "w1", paneId: "w1:p1", requestText: firstBody, queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z" });
+    const accepted = store.acceptImmediateNativeInputBatch({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "first", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", combinedBody: firstBody, occurredAt: "2026-10-02T01:00:00.000Z", view: firstView, answerCard: { batch: 1 }, maxQueueDepth: 1
+    });
+    const secondBody = "[Feishu message 1/1]\nsecond";
+    const secondView = createQueuedRunCard({ promptId: "batch-2", bindingId: "b1", bindingGeneration: 1, title: "second", workspaceId: "w1", paneId: "w1:p1", requestText: secondBody, queuePosition: 2, occurredAt: "2026-10-02T01:00:01.000Z" });
+
+    expect(() => store!.acceptImmediateNativeInputBatch({
+      input: { id: "input-2", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-2", larkMessageId: "message-2", actorOpenId: "user-1", body: "second", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-2", combinedBody: secondBody, occurredAt: "2026-10-02T01:00:01.000Z", view: secondView, answerCard: { batch: 2 }, maxQueueDepth: 1
+    })).toThrow(PromptCapacityExceeded);
+    expect(store.getPromptInputBySource("feishu", "message-2")).toBeNull();
+    expect(store.getNativeInputBatch("batch-2")).toBeNull();
+    expect(store.listNativeInputBatchMembers("batch-2")).toEqual([]);
+    expect(store.getPrompt("batch-2")).toBeNull();
+    expect(store.loadRunCard("batch-2")).toBeNull();
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "batch-2")).toEqual([]);
+  });
+
+  it("does not supersede completion actions or partially write a collecting input at capacity", () => {
+    store = new SqliteBindingStore(":memory:");
+    const actionSet = preparePrimaryCompletionActions(store, false);
+    const holder = createQueuedRunCard({
+      promptId: "capacity-holder", bindingId: "binding-native-actions", bindingGeneration: 1,
+      title: "holder", workspaceId: "w1", paneId: "primary-pane", requestText: "holder",
+      queuePosition: 1, occurredAt: "2026-10-02T01:00:02.000Z"
+    });
+    store.acceptPrompt({
+      prompt: { id: holder.promptId, bindingId: holder.bindingId, larkMessageId: "holder-message", ingressSource: "feishu", actorOpenId: "ou_actor", body: "holder" },
+      view: holder, rootMessageId: "primary-root", answerCard: {}
+    });
+
+    expect(() => store!.acceptCollectingNativeInput({
+      input: {
+        id: "deferred-input", bindingId: "binding-native-actions", bindingGeneration: 1,
+        ingressSource: "feishu", sourceMessageKey: "deferred-message", larkMessageId: "deferred-message",
+        actorOpenId: "ou_actor", body: "later", rootMessageId: "primary-root", parentPromptId: null
+      },
+      batchId: "deferred-batch", occurredAt: "2026-10-02T01:00:03.000Z", windowMs: 2_000, maxQueueDepth: 1
+    })).toThrow(PromptCapacityExceeded);
+
+    expect(store.getPromptInputBySource("feishu", "deferred-message")).toBeNull();
+    expect(store.getNativeInputBatch("deferred-batch")).toBeNull();
+    expect(store.listNativeInputBatchMembers("deferred-batch")).toEqual([]);
+    expect(store.getPrompt("deferred-batch")).toBeNull();
+    expect(store.loadRunCard("deferred-batch")).toBeNull();
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "deferred-batch")).toEqual([]);
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE id = ?").get(actionSet.id)).toEqual({ state: "available", reason: null });
+  });
+
+  it("keeps recovering Native Input Batch members inside source-message backpressure", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nfirst";
+    store.acceptImmediateNativeInputBatch({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "first", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z",
+      view: createQueuedRunCard({ promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "first", workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z" }),
+      answerCard: {}, maxQueueDepth: 1
+    });
+    store.database.prepare("UPDATE prompt_jobs SET state='recovering', observation_state='detached', dispatched_at='2026-10-02T01:00:01.000Z' WHERE id='batch-1'").run();
+    store.updateBinding("b1", { lastAgentState: "working" });
+
+    expect(() => store!.acceptCollectingNativeInput({
+      input: { id: "input-2", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-2", larkMessageId: "message-2", actorOpenId: "user-1", body: "second", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-2", occurredAt: "2026-10-02T01:00:02.000Z", windowMs: 2_000, maxQueueDepth: 1
+    })).toThrow(PromptCapacityExceeded);
+    expect(store.getPromptInputBySource("feishu", "message-2")).toBeNull();
+  });
+
+  it("keeps uncertain Native Input Batch members inside source-message backpressure", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nfirst";
+    store.acceptImmediateNativeInputBatch({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "first", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z",
+      view: createQueuedRunCard({ promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "first", workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z" }),
+      answerCard: {}, maxQueueDepth: 1
+    });
+    store.database.prepare("UPDATE prompt_jobs SET state='uncertain', observation_state='completed', dispatched_at='2026-10-02T01:00:01.000Z' WHERE id='batch-1'").run();
+    store.updateBinding("b1", { lastAgentState: "working" });
+
+    expect(() => store!.acceptCollectingNativeInput({
+      input: { id: "input-2", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-2", larkMessageId: "message-2", actorOpenId: "user-1", body: "second", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-2", occurredAt: "2026-10-02T01:00:02.000Z", windowMs: 2_000, maxQueueDepth: 1
+    })).toThrow(PromptCapacityExceeded);
+    expect(store.getPromptInputBySource("feishu", "message-2")).toBeNull();
+  });
+
+  it("preserves one immediate Native Input Batch and its idempotency across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "native-input-batch-"));
+    const path = join(temporaryDirectory, "state.sqlite");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\npersist me";
+    const view = createQueuedRunCard({ promptId: "batch-1", bindingId: "b1", bindingGeneration: 1, title: "persist me", workspaceId: "w1", paneId: "w1:p1", requestText: combinedBody, replyContext: "persist me", queuePosition: 1, occurredAt: "2026-10-02T01:00:00.000Z" });
+    store.acceptImmediateNativeInputBatch({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "persist me", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", combinedBody, occurredAt: "2026-10-02T01:00:00.000Z", view, answerCard: { batch: 1 }, maxQueueDepth: 20
+    });
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    const duplicate = store.acceptImmediateNativeInputBatch({
+      input: { id: "input-new", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "changed", body: "changed", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-new", combinedBody: "[Feishu message 1/1]\nchanged", occurredAt: "2026-10-02T01:00:01.000Z", view: { ...view, promptId: "batch-new" }, answerCard: { batch: "new" }, maxQueueDepth: 20
+    });
+    expect(duplicate).toMatchObject({ inserted: false, prompt: { id: "batch-1", nativeSubmissionId: "batch-1", body: combinedBody } });
+    expect(store.loadRunCard("batch-1")).toEqual(expect.objectContaining({ requestText: combinedBody, replyContext: "persist me" }));
+    expect(store.listNativeInputBatchMembers("batch-1")).toEqual([{ batchId: "batch-1", promptInputId: "input-1", ordinal: 0 }]);
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "batch-1")).toHaveLength(1);
+  });
+
+  it("fences Native Input Batch application tables with the instance lease", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const lease = store.acquireInstanceLease("owner", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+    store.activateWriteFence("owner", lease.fencingToken);
+    store.database.prepare("UPDATE instance_lease SET fencing_token = fencing_token + 1").run();
+
+    expect(() => store!.database.prepare(`INSERT INTO native_input_batches(
+      id, binding_id, binding_generation, state, window_opened_at, drain_due_at, created_at, updated_at
+    ) VALUES ('batch-1', 'b1', 1, 'collecting', 'now', 'now', 'now', 'now')`).run()).toThrow("stale_instance_lease");
+    expect(() => store!.database.prepare(`INSERT INTO prompt_inputs(
+      id, binding_id, binding_generation, ingress_source, source_message_key, lark_message_id, actor_open_id, body, root_message_id, state, created_at, updated_at
+    ) VALUES ('input-1', 'b1', 1, 'feishu', 'message-1', 'message-1', 'user', 'body', 'root', 'queued', 'now', 'now')`).run()).toThrow("stale_instance_lease");
+  });
+
+  it("collects active-turn inputs for a fixed two-second window before forming one FIFO batch", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    const batching = store as SqliteBindingStore & {
+      acceptCollectingNativeInput(input: any): { inserted: boolean; batch: { id: string; drainDueAt: string } };
+      formDueNativeInputBatch(input: any): { outcome: "not_due" | "formed"; batch?: { id: string; combinedBody: string }; prompt?: { id: string; body: string }; nextBatch?: { id: string } | null };
+    };
+
+    const first = batching.acceptCollectingNativeInput({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "first", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", occurredAt: "2026-10-02T01:00:00.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+    const second = batching.acceptCollectingNativeInput({
+      input: { id: "input-2", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-2", larkMessageId: "message-2", actorOpenId: "user-2", body: "second", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-ignored", occurredAt: "2026-10-02T01:00:01.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+    const duplicate = batching.acceptCollectingNativeInput({
+      input: { id: "input-duplicate", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "changed", body: "changed", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-duplicate", occurredAt: "2026-10-02T01:00:01.500Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+
+    expect(first).toMatchObject({ inserted: true, batch: { id: "batch-1", drainDueAt: "2026-10-02T01:00:02.000Z" } });
+    expect(second).toMatchObject({ inserted: true, batch: { id: "batch-1", drainDueAt: "2026-10-02T01:00:02.000Z" } });
+    expect(duplicate).toMatchObject({ inserted: false, input: { id: "input-1", body: "first" }, batch: { id: "batch-1", drainDueAt: "2026-10-02T01:00:02.000Z" } });
+    expect(store.getPrompt("batch-1")).toBeNull();
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    store.updateBinding("b1", { lastAgentState: "idle" });
+    expect(batching.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:01.999Z", nextBatchId: "batch-2", windowMs: 2_000, createProjection: vi.fn() })).toMatchObject({ outcome: "not_due", batch: { id: "batch-1" } });
+
+    const formed = batching.formDueNativeInputBatch({
+      bindingId: "b1", occurredAt: "2026-10-02T01:00:02.000Z", nextBatchId: "batch-2", windowMs: 2_000,
+      createProjection: ({ batchId, binding: currentBinding, combinedBody, replyContext, queuePosition }: any) => {
+        const view = createQueuedRunCard({ promptId: batchId, bindingId: currentBinding.id, bindingGeneration: currentBinding.generation, title: "first", workspaceId: currentBinding.workspaceId, paneId: currentBinding.paneId, requestText: combinedBody, replyContext, queuePosition, occurredAt: "2026-10-02T01:00:02.000Z" });
+        return { view, rootMessageId: "root", answerCard: { batch: batchId } };
+      }
+    });
+    expect(formed).toMatchObject({
+      outcome: "formed",
+      batch: { id: "batch-1", combinedBody: "[Feishu message 1/2]\nfirst\n\n[Feishu message 2/2]\nsecond" },
+      prompt: { id: "batch-1", body: "[Feishu message 1/2]\nfirst\n\n[Feishu message 2/2]\nsecond" },
+      view: { requestText: "[Feishu message 1/2]\nfirst\n\n[Feishu message 2/2]\nsecond", replyContext: "first\n\nsecond" },
+      nextBatch: null
+    });
+    expect(store.listNativeInputBatchMembers("batch-1")).toEqual([
+      { batchId: "batch-1", promptInputId: "input-1", ordinal: 0 },
+      { batchId: "batch-1", promptInputId: "input-2", ordinal: 1 }
+    ]);
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "batch-1")).toHaveLength(1);
+    expect(batching.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:02.000Z", nextBatchId: "batch-race", windowMs: 2_000, createProjection: vi.fn() })).toEqual({ outcome: "none" });
+  });
+
+  it("drains seven active-turn inputs as fixed-window FIFO batches of three, three, and one", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "blocked" });
+    for (let index = 1; index <= 7; index += 1) {
+      store.acceptCollectingNativeInput({
+        input: { id: `input-${index}`, bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: `message-${index}`, larkMessageId: `message-${index}`, actorOpenId: `user-${index}`, body: `body-${index}`, rootMessageId: "root", parentPromptId: null },
+        batchId: `batch-proposed-${index}`, occurredAt: `2026-10-02T01:00:00.00${index}Z`, windowMs: 2_000, maxQueueDepth: 20
+      });
+    }
+    const createProjection = ({ batchId, binding: currentBinding, combinedBody, titleSource, queuePosition }: any) => {
+      const view = createQueuedRunCard({ promptId: batchId, bindingId: currentBinding.id, bindingGeneration: currentBinding.generation, title: titleSource, workspaceId: currentBinding.workspaceId, paneId: currentBinding.paneId, requestText: combinedBody, queuePosition, occurredAt: "formed" });
+      return { view, rootMessageId: "root", answerCard: { batch: batchId } };
+    };
+
+    const first = store.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:02.001Z", nextBatchId: "batch-2", windowMs: 2_000, createProjection });
+    const second = store.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:04.001Z", nextBatchId: "batch-3", windowMs: 2_000, createProjection });
+    const third = store.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:06.001Z", nextBatchId: "batch-4", windowMs: 2_000, createProjection });
+
+    expect(first).toMatchObject({ outcome: "formed", batch: { id: "batch-proposed-1" }, nextBatch: { id: "batch-2", drainDueAt: "2026-10-02T01:00:04.001Z" } });
+    expect(second).toMatchObject({ outcome: "formed", batch: { id: "batch-2" }, nextBatch: { id: "batch-3", drainDueAt: "2026-10-02T01:00:06.001Z" } });
+    expect(third).toMatchObject({ outcome: "formed", batch: { id: "batch-3" }, nextBatch: null });
+    expect(store.listNativeInputBatchMembers("batch-proposed-1").map((member) => member.promptInputId)).toEqual(["input-1", "input-2", "input-3"]);
+    expect(store.listNativeInputBatchMembers("batch-2").map((member) => member.promptInputId)).toEqual(["input-4", "input-5", "input-6"]);
+    expect(store.listNativeInputBatchMembers("batch-3").map((member) => member.promptInputId)).toEqual(["input-7"]);
+    expect(store.getPrompt("batch-proposed-1")?.body).toBe("[Feishu message 1/3]\nbody-1\n\n[Feishu message 2/3]\nbody-2\n\n[Feishu message 3/3]\nbody-3");
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.cardRole === "answer")).toHaveLength(3);
+  });
+
+  it("recovers a collecting Native Input Batch after reopen and keeps its original deadline", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "collecting-native-input-batch-"));
+    const path = join(temporaryDirectory, "state.sqlite");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    store.acceptCollectingNativeInput({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "recover", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", occurredAt: "2026-10-02T01:00:00.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    expect(store.scanDurablePromptWork().hints).toContainEqual({ kind: "prompt-ready", bindingId: "b1" });
+    expect(store.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:01.999Z", nextBatchId: "batch-2", windowMs: 2_000, createProjection: vi.fn() }))
+      .toMatchObject({ outcome: "not_due", batch: { id: "batch-1", drainDueAt: "2026-10-02T01:00:02.000Z" } });
+    const formed = store.formDueNativeInputBatch({
+      bindingId: "b1", occurredAt: "2026-10-02T01:00:02.000Z", nextBatchId: "batch-2", windowMs: 2_000,
+      createProjection: ({ batchId, binding: currentBinding, combinedBody, titleSource, queuePosition }) => {
+        const view = createQueuedRunCard({ promptId: batchId, bindingId: currentBinding.id, bindingGeneration: currentBinding.generation, title: titleSource, workspaceId: currentBinding.workspaceId, paneId: currentBinding.paneId, requestText: combinedBody, queuePosition, occurredAt: "2026-10-02T01:00:02.000Z" });
+        return { view, rootMessageId: "root", answerCard: { batch: batchId } };
+      }
+    });
+    expect(formed).toMatchObject({ outcome: "formed", batch: { id: "batch-1" }, prompt: { id: "batch-1" } });
+  });
+
+  it("terminalizes a collecting Native Input Batch when its binding generation is stale", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    store.acceptCollectingNativeInput({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "stale", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", occurredAt: "2026-10-02T01:00:00.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+    store.updateBinding("b1", { generation: 2 });
+
+    expect(store.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:02.000Z", nextBatchId: "batch-2", windowMs: 2_000, createProjection: vi.fn() }))
+      .toEqual({ outcome: "none" });
+    expect(store.getNativeInputBatch("batch-1")).toMatchObject({ state: "cancelled", executionPromptId: null });
+    expect(store.getPromptInputBySource("feishu", "message-1")).toMatchObject({ state: "cancelled", batchId: null });
+    expect(store.scanDurablePromptWork().hints).not.toContainEqual({ kind: "prompt-ready", bindingId: "b1" });
+  });
+
+  it("gives competing SQLite drainers one durable Native Input Batch winner", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "competing-native-input-batch-drain-"));
+    const path = join(temporaryDirectory, "state.sqlite");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    store.acceptCollectingNativeInput({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "user-1", body: "race", rootMessageId: "root", parentPromptId: null },
+      batchId: "batch-1", occurredAt: "2026-10-02T01:00:00.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+    const competitor = new SqliteBindingStore(path);
+    const createProjection = ({ batchId, binding: currentBinding, combinedBody, titleSource, queuePosition }: any) => {
+      const view = createQueuedRunCard({ promptId: batchId, bindingId: currentBinding.id, bindingGeneration: currentBinding.generation, title: titleSource, workspaceId: currentBinding.workspaceId, paneId: currentBinding.paneId, requestText: combinedBody, queuePosition, occurredAt: "2026-10-02T01:00:02.000Z" });
+      return { view, rootMessageId: "root", answerCard: { batch: batchId } };
+    };
+    try {
+      const first = store.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:02.000Z", nextBatchId: "batch-next-a", windowMs: 2_000, createProjection });
+      const second = competitor.formDueNativeInputBatch({ bindingId: "b1", occurredAt: "2026-10-02T01:00:02.000Z", nextBatchId: "batch-next-b", windowMs: 2_000, createProjection });
+
+      expect([first.outcome, second.outcome]).toEqual(["formed", "none"]);
+      expect(competitor.listNativeInputBatchMembers("batch-1")).toEqual([{ batchId: "batch-1", promptInputId: "input-1", ordinal: 0 }]);
+      expect(competitor.listPendingOutboundReplies().filter((reply) => reply.promptId === "batch-1")).toHaveLength(1);
+    } finally {
+      competitor.close();
+    }
+  });
+
   describe("outbound delivery claims", () => {
+    it("bounds pending outbox inspection instead of materializing the whole backlog", () => {
+      store = new SqliteBindingStore(":memory:");
+      for (let index = 0; index < 300; index += 1) {
+        store.enqueueOutboundReply({ id: `pending-${index}`, idempotencyKey: `pending-${index}`, rootMessageId: "message", kind: "card_update", payload: "{}" });
+      }
+
+      expect(store.listPendingOutboundReplies(3)).toHaveLength(3);
+      expect(store.listPendingOutboundReplies()).toHaveLength(256);
+      expect(() => store.listPendingOutboundReplies(10_001)).toThrow("Invalid pending outbound list limit");
+    });
+
     it("stores new delivery intents without duplicating the canonical payload", () => {
       store = new SqliteBindingStore(":memory:");
       store.enqueueOutboundReply({ id: "v2", idempotencyKey: "v2", rootMessageId: "message", kind: "card_update", payload: '{"large":"body"}' });
@@ -84,7 +1123,7 @@ describe("SQLite store", () => {
 
     it("compacts only equivalent inactive version 1 delivery intents", () => {
       store = new SqliteBindingStore(":memory:");
-      for (const id of ["safe", "mismatch", "malformed", "active"]) {
+      for (const id of ["active", "safe", "mismatch", "malformed"]) {
         store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: id, kind: "card_update", payload: `{"id":"${id}"}` });
         store.database.prepare("UPDATE outbound_replies SET intent_json = json_object('schemaVersion', 1, 'kind', 'card', 'materializedPayload', payload) WHERE id = ?").run(id);
       }
@@ -125,7 +1164,7 @@ describe("SQLite store", () => {
       expect(store.claimOutboundReply("first", "2000-01-01T00:00:00.000Z")).toBeNull();
       const first = store.claimOutboundReply("first", null)!;
       expect(store.claimOutboundReply("first", null)).toBeNull();
-      expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+      expect(store.getOperationalSummary().deliveryRings).toMatchObject({ activeClaims: 1, ready: 0 });
       expect(store.markOutboundReplyDelivered("first", "message")).toBe(false);
       expect(store.checkpointOutboundReplyCard(first, "card")).not.toBeNull();
       expect(store.markOutboundReplyFailedWithQuarantine(first, "temporary", { failureClass: "transient", httpStatus: 503, larkErrorCode: null })).not.toBeNull();
@@ -154,6 +1193,56 @@ describe("SQLite store", () => {
       expect(() => store!.enqueueOutboundReply({ id: "replacement", idempotencyKey: "first", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
     });
 
+    it("freezes the outbound effect when a Gateway plan survives a pre-claim restart", () => {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), "prepared-outbound-effect-freeze-"));
+      const databasePath = join(temporaryDirectory, "bridge.db");
+      const original = { id: "original", idempotencyKey: "prepared-effect", rootMessageId: "message", kind: "card_update" as const, payload: '{"version":1}', viewVersion: 1 };
+      store = new SqliteBindingStore(databasePath);
+      store.enqueueOutboundReply(original);
+      const planJson = '{"gatewayId":"feishu:primary","profileId":"feishu-cardkit-v1","operation":"surface.replace"}';
+      const prepared = store.prepareOutboundGatewayPlan("original", { gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: planJson })!;
+      expect(prepared).toMatchObject({ attemptCount: 0, gatewayPlanJson: planJson, gatewayPlanHash: expect.any(String) });
+      const currentTrigger = (store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_immutable_claim'").get() as { sql: string }).sql;
+      const legacyTrigger = currentTrigger.replace("WHEN (OLD.first_claimed_at IS NOT NULL OR OLD.gateway_plan_json IS NOT NULL OR OLD.gateway_plan_hash IS NOT NULL OR OLD.payload_compacted_at IS NOT NULL OR NEW.payload_compacted_at IS NOT OLD.payload_compacted_at) AND (", "WHEN OLD.first_claimed_at IS NOT NULL AND (");
+      expect(legacyTrigger).not.toBe(currentTrigger);
+      store.database.exec("DROP TRIGGER outbound_replies_immutable_claim");
+      store.database.exec(legacyTrigger);
+      store.database.prepare("UPDATE outbound_replies SET updated_at = 'frozen' WHERE id = 'original'").run();
+      store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
+      store.close();
+
+      store = new SqliteBindingStore(databasePath);
+      expect((store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_immutable_claim'").get() as { sql: string }).sql).toContain("OLD.gateway_plan_json IS NOT NULL");
+      expect(store.enqueueOutboundReply({ ...original, id: "identical-replay" })).toMatchObject({ id: "original", payload: '{"version":1}', viewVersion: 1, gatewayPlanJson: planJson, updatedAt: "frozen" });
+      expect(store.enqueueOutboundReply({ ...original, id: "history-replay", workClass: "history" })).toMatchObject({ id: "original", workClass: "live", updatedAt: "frozen" });
+      expect(() => store!.enqueueOutboundReply({ ...original, id: "changed-replay", payload: '{"version":2}', viewVersion: 2 })).toThrow("outbound_idempotency_conflict");
+      expect(() => store!.enqueueOutboundReply({ ...original, id: "changed-target", targetChatId: "other-chat" })).toThrow("outbound_idempotency_conflict");
+      expect(() => store!.enqueueOutboundReply({ ...original, id: "changed-owner", promptId: "other-prompt" })).toThrow("outbound_idempotency_conflict");
+      expect(() => store!.enqueueOutboundReply({ ...original, id: "changed-lane", laneKeyOverride: "other-lane" })).toThrow("outbound_idempotency_conflict");
+      expect(() => store!.enqueueOutboundReply({ ...original, id: "changed-snapshot", projectionKey: "answer:other", snapshotRevision: 2 })).toThrow("outbound_idempotency_conflict");
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET payload = '{\"version\":3}' WHERE id = 'original'").run()).toThrow("immutable_outbound_revision");
+      expect(() => store!.database.prepare("UPDATE outbound_replies SET shortcut_panel_id = 'other-panel' WHERE id = 'original'").run()).toThrow("immutable_outbound_revision");
+      const claim = store.claimOutboundReply("original", null)!;
+      expect(claim).toMatchObject({ reply: { id: "original", payload: '{"version":1}', viewVersion: 1, gatewayPlanJson: planJson } });
+      expect(store.markOutboundReplyDelivered(claim, "message")).toBe(true);
+      expect(() => store!.enqueueOutboundReply({ ...original, id: "changed-after-delivery", targetRole: "operation_result" })).toThrow("outbound_idempotency_conflict");
+    });
+
+    it("replays a prepared status update with its canonical reused card sequence", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+      const route = { bindingId: "b1", targetRole: "session_status" as const, rootMessageId: "main", kind: "card_update" as const, laneKeyOverride: "primary-main:b1:1" };
+      store.enqueueOutboundReply({ ...route, id: "older", idempotencyKey: "older", payload: '{"version":1}', viewVersion: 1, cardSequence: 1 });
+      const prepared = store.enqueueOutboundReply({ ...route, id: "prepared", idempotencyKey: "prepared", payload: '{"version":2}', viewVersion: 2, cardSequence: 2 });
+      expect(prepared.cardSequence).toBe(1);
+      const planJson = '{"gatewayId":"feishu:primary","profileId":"feishu-cardkit-v1","operation":"surface.replace"}';
+      store.prepareOutboundGatewayPlan("prepared", { gatewayId: "feishu:primary", gatewayProfileId: "feishu-cardkit-v1", gatewayPlanJson: planJson });
+
+      expect(store.enqueueOutboundReply({ ...route, id: "replay", idempotencyKey: "prepared", payload: '{"version":2}', viewVersion: 2, cardSequence: 2 }))
+        .toMatchObject({ id: "prepared", cardSequence: 1, gatewayPlanJson: planJson });
+    });
+
     it("freezes a Gateway plan onto a released legacy claim exactly once", () => {
       store = new SqliteBindingStore(":memory:");
       store.enqueueOutboundReply({ id: "legacy", idempotencyKey: "legacy", rootMessageId: "message", kind: "card_reply", payload: "{}" });
@@ -176,9 +1265,10 @@ describe("SQLite store", () => {
       expect(() => store!.enqueueOutboundReply({ id: "changed", idempotencyKey: "same-effect", workClass: "history", rootMessageId: "message", kind: "card_update", payload: "changed" })).toThrow("outbound_idempotency_conflict");
     });
 
-    it("quarantines an uncertain effect and requires explicit manual retry", () => {
+    it("quarantines an uncertain effect without offering direct manual retry", () => {
       store = new SqliteBindingStore(":memory:");
       store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
       store.enqueueOutboundReply({ id: "uncertain", idempotencyKey: "uncertain", bindingId: "b1", rootMessageId: "root", kind: "card_reply", payload: "{}" });
       const claim = store.claimOutboundReply("uncertain", null)!;
 
@@ -188,17 +1278,57 @@ describe("SQLite store", () => {
       expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 100)).toEqual([]);
       expect(store.getOperationalSummary()).toMatchObject({ uncertainDeliveryEffects: 1, eligibleDeadLetterRecoveries: 0, outboxQuarantines: { active: 1 } });
 
-      expect(store.retryDeadLetter("uncertain", "c1", "admin")).toBe("retried");
-      expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "pending", effectCertainty: "uncertain" });
-      const retried = store.claimOutboundReply("uncertain", null)!;
-      expect(store.markOutboundReplyDelivered(retried, "message")).toBe(true);
-      expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "delivered", effectCertainty: null });
+      expect(store.retryDeadLetter("uncertain", "c1", "admin")).toBe("unsafe");
+      expect(store.getOutboundReply("uncertain")).toMatchObject({ state: "dead_letter", effectCertainty: "uncertain" });
+      expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id='uncertain'").get()).toEqual({ state: "active" });
+    });
+
+    it("dismisses only never-attempted legacy completion cards with exact inline-card evidence", () => {
+      store = new SqliteBindingStore(":memory:");
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+      const cases = ["eligible", "claimed", "attempted", "checkpointed", "delivered", "dead-lettered"] as const;
+      const insertObligation = store.database.prepare(`INSERT INTO completion_notification_obligations(
+        owner_kind, owner_id, owner_generation, binding_id, binding_generation, required_view_version,
+        state, notification_reply_id, created_at, updated_at, released_at
+      ) VALUES ('primary-prompt', ?, 1, 'b1', 1, 1, 'released', ?, 'now', 'now', 'now')`);
+      const insertAction = store.database.prepare(`INSERT INTO completion_action_sets(
+        id, owner_kind, owner_id, owner_generation, binding_id, binding_generation, page_index, card_id, card_message_id,
+        mention_open_id, state, selected_action, result_source_key, reason, created_at, updated_at, decided_at
+      ) VALUES (?, 'primary-prompt', ?, 1, 'b1', 1, 0, ?, ?, 'ou_actor', 'available', NULL, NULL, NULL, 'now', 'now', NULL)`);
+      for (const name of cases) {
+        const ownerId = `prompt-${name}`;
+        const legacyId = `legacy-${name}`;
+        const messageId = `answer-${name}`;
+        store.enqueuePrompt({ id: ownerId, bindingId: "b1", larkMessageId: `message-${name}`, actorOpenId: "u1", body: name });
+        store.enqueueOutboundReply({ id: legacyId, idempotencyKey: `primary-next-input:b1:1:${ownerId}`, bindingId: "b1", rootMessageId: "root", kind: "card_reply", targetRole: "operation_result", payload: "{}" });
+        store.enqueueOutboundReply({ id: `inline-${name}`, idempotencyKey: `inline-${name}`, bindingId: "b1", rootMessageId: messageId, kind: "card_update", payload: "{}" });
+        store.database.prepare("UPDATE outbound_replies SET prompt_id = ? WHERE id IN (?, ?)").run(ownerId, legacyId, `inline-${name}`);
+        insertObligation.run(ownerId, legacyId);
+        insertAction.run(`action-${name}`, ownerId, `card-${name}`, messageId);
+      }
+      store.database.prepare("UPDATE outbound_replies SET claim_attempt_id='claim',claimed_at='now' WHERE id='legacy-claimed'").run();
+      store.database.prepare("UPDATE outbound_replies SET state='dead_letter',first_claimed_at='now',attempt_count=1,failure_class='transient',effect_certainty='uncertain',error='timeout',dead_lettered_at='now' WHERE id='legacy-attempted'").run();
+      store.database.prepare("UPDATE outbound_replies SET card_id_checkpoint='legacy-card',gateway_checkpoint_json=json_object('kind','surface','gatewayId','feishu:primary','opaqueId','legacy-card') WHERE id='legacy-checkpointed'").run();
+      store.database.prepare("UPDATE outbound_replies SET state='delivered',delivered_message_id='legacy-message',card_id_checkpoint='legacy-card' WHERE id='legacy-delivered'").run();
+      store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', dead_lettered_at = 'now' WHERE id = 'legacy-dead-lettered'").run();
+
+      expect(store.capabilityModules().startupViews.dismissEligibleLegacyCompletionNotifications()).toBe(1);
+      expect(store.database.prepare("SELECT id, state FROM outbound_replies WHERE id LIKE 'legacy-%' ORDER BY id").all()).toEqual([
+        { id: "legacy-attempted", state: "dead_letter" },
+        { id: "legacy-checkpointed", state: "pending" },
+        { id: "legacy-claimed", state: "pending" },
+        { id: "legacy-dead-lettered", state: "dead_letter" },
+        { id: "legacy-delivered", state: "delivered" },
+        { id: "legacy-eligible", state: "dismissed" }
+      ]);
+      expect(store.capabilityModules().startupViews.dismissEligibleLegacyCompletionNotifications()).toBe(0);
     });
 
     it("does not let semantic recovery override an uncertain external effect", () => {
       store = new SqliteBindingStore(":memory:");
       store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-      store.updateBinding("b1", { statusMessageId: "main-1" });
+      store.updateBinding("b1", { statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
       store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
       const failed = store.listPendingOutboundReplies()[0]!;
       const claim = store.claimOutboundReply(failed.id, null)!;
@@ -234,11 +1364,12 @@ describe("SQLite store", () => {
       store.database.prepare("INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at, released_at) VALUES (?, 'first', 'replaceable_card', 'permanent', 'released', 'released_newer_snapshot', 'old rejection', 'old', 'old', 'old')").run(claim.reply.laneKey);
       store.close();
       store = new SqliteBindingStore(path);
-      store.database.prepare("UPDATE instance_lease SET expires_at = '2000-01-01T00:00:00.000Z'").run();
+      store.database.prepare("UPDATE instance_lease SET expires_at=?,expires_at_ms=?").run("2000-01-01T00:00:00.000Z", Date.UTC(2000, 0, 1));
       const lease = store.acquireInstanceLease("owner-b", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
       store.activateWriteFence("owner-b", lease.fencingToken);
+      store.recoverPriorOwnerClaimsBatch("owner-b", lease.fencingToken, null);
       expect(store.getOutboundReply("first")).toMatchObject({ state: "dead_letter", failureClass: "unknown", cardIdCheckpoint: "existing-card" });
-      expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+      expect(store.getOperationalSummary().deliveryRings).toMatchObject({ pending: 0, activeClaims: 0 });
       expect(store.markOutboundReplyDelivered(claim, "late-message")).toBe(false);
       expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 100)).toEqual([]);
       expect(store.database.prepare("SELECT count(*) AS count FROM prompt_jobs").get()).toMatchObject({ count: 0 });
@@ -269,16 +1400,16 @@ describe("SQLite store", () => {
     });
   });
   describe("durable delivery recovery evidence", () => {
-    it("keeps a failed snapshot unresolved without any successor", () => {
+    it("keeps a failed snapshot blocked without any exact successor", () => {
       store = new SqliteBindingStore(":memory:");
       store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "message", kind: "card_update", payload: "{}" });
-      expect(store.markOutboundReplyFailedWithQuarantine("failed", "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230028" })).toMatchObject({ action: "released_newer_snapshot" });
+      expect(store.markOutboundReplyFailedWithQuarantine("failed", "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230028" })).toMatchObject({ action: "blocked" });
       expect(store.listPendingOutboundReplies()).toEqual([]);
       expect(store.getOutboundReply("failed")).toMatchObject({ state: "dead_letter" });
-      expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 1, outboxQuarantines: { active: 0 } });
+      expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 1, unresolvedDeadLetters: 1, outboxQuarantines: { active: 1 } });
     });
 
-    it("preserves both failures when another failure overwrites the lane quarantine", () => {
+    it("preserves both failures when another failure overwrites the lane quarantine and a later snapshot cannot bypass it", () => {
       store = new SqliteBindingStore(":memory:");
       for (const id of ["first", "second"]) {
         store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: "message", kind: "card_update", payload: "{}" });
@@ -287,15 +1418,11 @@ describe("SQLite store", () => {
       expect(store.database.prepare("SELECT failed_reply_id FROM outbox_lane_quarantines").all()).toEqual([{ failed_reply_id: "second" }]);
       expect(store.getOperationalSummary()).toMatchObject({ deadLetters: 2, unresolvedDeadLetters: 2 });
       store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", rootMessageId: "message", kind: "card_update", payload: "{}" });
-      const claim = store.claimOutboundReply("successor", null)!;
+      expect(store.claimOutboundReply("successor", null)).toBeNull();
       expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(2);
-      expect(store.markOutboundReplyDelivered(claim, "message")).toBe(true);
-      expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(0);
-      store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
-      expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(0);
-      expect(store.database.prepare("SELECT failed_reply_id, state, resolved_by_reply_id FROM delivery_recoveries ORDER BY failed_reply_id").all()).toEqual([
-        { failed_reply_id: "first", state: "recovered", resolved_by_reply_id: "successor" },
-        { failed_reply_id: "second", state: "recovered", resolved_by_reply_id: "successor" }
+      expect(store.database.prepare("SELECT failed_reply_id, state, action, resolved_by_reply_id FROM delivery_recoveries ORDER BY failed_reply_id").all()).toEqual([
+        { failed_reply_id: "first", state: "unresolved", action: "blocked", resolved_by_reply_id: null },
+        { failed_reply_id: "second", state: "unresolved", action: "blocked", resolved_by_reply_id: null }
       ]);
     });
   });
@@ -338,6 +1465,7 @@ describe("SQLite store", () => {
   describe("Worker Session threads", () => {
     function activeWorkerStore(messageId: string | null) {
       store = new SqliteBindingStore(":memory:");
+      connectPreparedTestDelivery(store);
       store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
       store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
       const worker = store.createWorkerAgentInstance({
@@ -346,9 +1474,17 @@ describe("SQLite store", () => {
         workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/.worktree/reviewer", branch: "swarm/reviewer", baseCommit: "base" }
       }, 4);
       if (worker.outcome !== "created") throw new Error("expected Worker");
+      const attached = store.attachAgentInstanceRuntime({
+        instanceId: worker.instance.id,
+        expectedGeneration: worker.instance.generation,
+        herdrWorkspaceId: "ws-reviewer",
+        paneId: "w1:worker",
+        nativeSessionId: "worker-session"
+      });
+      if (!attached) throw new Error("expected attached Worker");
       const view = { ...createWorkerMainView({
         workerId: worker.instance.id, workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary",
-        runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: false, desiredState: "running", parentActive: true, paneId: null, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: null, occurredAt: "2026-09-11T00:00:00.000Z"
+        runtimeGeneration: attached.generation, runtimeState: attached.observedState, runtimeAttached: true, desiredState: "running", parentActive: true, paneId: attached.runtimeRef?.paneId ?? null, workspace: "/repo/.worktree/reviewer", branch: "swarm/reviewer", model: null, occurredAt: "2026-09-11T00:00:00.000Z"
       }), messageId, cardId: messageId ? "canonical-card" : null };
       store.saveWorkerMainView(view);
       return view;
@@ -360,7 +1496,16 @@ describe("SQLite store", () => {
       expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
       expect(store!.workerSessionThreads.reserve(input)).toBe("duplicate");
       const [reply] = store!.listPendingOutboundReplies();
-      expect(reply).toMatchObject({ kind: "group_card_create", rootMessageId: null, targetChatId: "chat", threadAliasId: null, workerThreadId: expect.any(String), workerId: "reviewer", workerSessionGeneration: 1, laneKey: "gateway:feishu:primary:worker-thread:reviewer:1" });
+      expect(reply).toMatchObject({
+        kind: "group_card_create",
+        rootMessageId: null,
+        targetChatId: "chat",
+        threadAliasId: null,
+        workerThreadId: expect.any(String),
+        workerId: "reviewer",
+        workerSessionGeneration: 1,
+        deliveryScope: { kind: "pane", workspaceId: "ws-reviewer", paneId: "w1:worker" }
+      });
       const claim = store!.claimOutboundReply(reply!.id, null)!;
       expect(() => store!.database.prepare("UPDATE outbound_replies SET worker_thread_id = NULL WHERE id = ?").run(reply!.id)).toThrow("immutable_outbound_revision");
       expect(store!.markOutboundReplyDelivered(claim, "worker-root", "worker-card", "worker-topic")).toBe(true);
@@ -370,20 +1515,48 @@ describe("SQLite store", () => {
       expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     });
 
+    it("checkpoints an exact pre-T8 Worker Main create without a projection key", () => {
+      const view = activeWorkerStore(null);
+      store!.enqueueOutboundReply({
+        id: "legacy-worker-main-create",
+        idempotencyKey: "worker-main:create:reviewer:1",
+        bindingId: "b1",
+        workerId: "reviewer",
+        workerSessionGeneration: 1,
+        viewVersion: view.viewVersion,
+        rootMessageId: "primary-root",
+        kind: "card_reply",
+        payload: JSON.stringify({ schema: "2.0" })
+      });
+
+      const claim = store!.claimOutboundReply("legacy-worker-main-create", null);
+      expect(claim).not.toBeNull();
+      if (!claim) throw new Error("expected legacy Worker Main create claim");
+      expect(store!.markOutboundReplyDelivered(claim, "legacy-worker-main", "legacy-worker-card")).toBe(true);
+      expect(store!.loadWorkerMainView("reviewer", 1)).toMatchObject({
+        messageId: "legacy-worker-main",
+        cardId: "legacy-worker-card",
+        deliveredVersion: view.viewVersion
+      });
+    });
+
     it("resolves only the exact active canonical Worker thread for directory forwarding", () => {
       const view = activeWorkerStore(null);
       expect(store!.workerSessionThreads.reserve({ publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: {} })).toBe("reserved");
       const reply = store!.listPendingOutboundReplies()[0]!;
       expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(reply.id, null)!, "worker-root", "worker-card", "worker-topic")).toBe(true);
-      const target = { chatId: "chat", workerId: "reviewer", runtimeGeneration: 1, workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
+      const target = { chatId: "chat", workerId: "reviewer", runtimeGeneration: view.runtimeGeneration, workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
 
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget(target)).toEqual({ conversationId: "worker-topic", rootMessageId: "worker-root" });
-      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, runtimeGeneration: 2 })).toBeNull();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryThreadId(target)).toBe("worker-topic");
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, runtimeGeneration: view.runtimeGeneration + 1 })).toBeNull();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryThreadId({ ...target, runtimeGeneration: view.runtimeGeneration + 1 })).toBeNull();
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, chatId: "other-chat" })).toBeNull();
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, parentPaneId: "w1:old" })).toBeNull();
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget({ ...target, sourceMainMessageId: "old-main" })).toBeNull();
       store!.database.prepare("UPDATE worker_session_threads SET mode = 'legacy-entry', source_main_message_id = 'worker-root' WHERE worker_id = 'reviewer'").run();
       expect(store!.workerSessionThreads.resolveCanonicalDirectoryTarget(target)).toBeNull();
+      expect(store!.workerSessionThreads.resolveCanonicalDirectoryThreadId(target)).toBeNull();
     });
 
     it("releases one Primary entry only after canonical Worker Thread activation", () => {
@@ -396,6 +1569,13 @@ describe("SQLite store", () => {
       expect(() => store!.registerWorkerThreadEntry({ commandIntentId: command.id, workerId: "reviewer", workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, rootMessageId: "different-root" })).toThrow("conflicts with existing command intent");
       expect(store!.database.prepare("SELECT COUNT(*) AS count FROM worker_thread_entry_requests WHERE command_intent_id = 'worker-create'").get()).toEqual({ count: 1 });
       expect(store!.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "worker-session" && targetId === "reviewer")).toMatchObject({ requestedDependencyRevision: revisionAfterRegistration });
+      for (let guard = 0; store!.listPendingOutboundReplies().length > 0 && guard < 10; guard += 1) {
+        const pending = store!.listPendingOutboundReplies()[0]!;
+        const pendingClaim = store!.claimOutboundReply(pending.id, null);
+        if (!pendingClaim) throw new Error(`expected claimable predecessor: ${pending.id}`);
+        expect(store!.markOutboundReplyDelivered(pendingClaim, `predecessor-${pending.id}`, "predecessor-card")).toBe(true);
+      }
+      expect(store!.listPendingOutboundReplies()).toEqual([]);
       const input = { publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main" as const, viewVersion: view.viewVersion, card: { schema: "2.0" } };
       expect(store!.workerSessionThreads.reserve(input)).toBe("reserved");
       expect(store!.listPendingOutboundReplies().filter(({ kind }) => kind === "group_card_create")).toHaveLength(1);
@@ -411,8 +1591,20 @@ describe("SQLite store", () => {
       expect(entries[0]).toMatchObject({ bindingId: "b1", rootMessageId: "primary-root", kind: "card_reply" });
       expect(JSON.parse(entries[0]!.payload)).toEqual({ entry: { workerName: "reviewer", workerId: "reviewer", workerSessionGeneration: 1, messageId: "worker-root" } });
       expect(store!.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'worker-create'").get()).toEqual({ state: "reserved" });
+      for (let guard = 0; guard < 10; guard += 1) {
+        const predecessor = store!.listPendingOutboundReplies()[0];
+        if (!predecessor || predecessor.id === entries[0]!.id) break;
+        const predecessorClaim = store!.claimOutboundReply(predecessor.id, null);
+        if (!predecessorClaim) throw new Error(`expected claimable predecessor: ${predecessor.id}`);
+        expect(store!.markOutboundReplyDelivered(predecessorClaim, `predecessor-${predecessor.id}`, "predecessor-card")).toBe(true);
+      }
+      expect(store!.markOutboundReplyDelivered(store!.claimOutboundReply(entries[0]!.id, null)!, "primary-entry-message", "primary-entry-card")).toBe(true);
+      const deliveredMain = store!.loadWorkerMainView("reviewer", 1)!;
+      expect(deliveredMain).toMatchObject({ messageId: "worker-root", cardId: "worker-card" });
+      expect(deliveredMain.deliveredVersion).toBe(deliveredMain.viewVersion);
       store!.projectCardContext(invalidation!, { workerMain: () => ({ schema: "2.0" }), workerThreadEntryReady: (entry) => ({ entry }), workerTask: () => ({ schema: "2.0" }), primaryMain: () => ({ schema: "2.0" }), primaryPaneEntry: () => ({ schema: "2.0" }), primaryAnswer: () => ({ schema: "2.0" }) });
-      expect(store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "worker-thread-entry:worker-create")).toHaveLength(1);
+      expect(store!.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "worker-thread-entry:worker-create")).toHaveLength(0);
+      expect(store!.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE idempotency_key = 'worker-thread-entry:worker-create'").get()).toEqual({ count: 1 });
     });
 
     it("releases a Primary entry registered after the canonical Worker Main Card is current", () => {
@@ -445,7 +1637,10 @@ describe("SQLite store", () => {
       store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
       const worker = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/reviewer", branch: "reviewer", baseCommit: "base" } }, 4);
       if (worker.outcome !== "created") throw new Error("expected Worker");
-      const view = createWorkerMainView({ workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary", runtimeGeneration: worker.instance.generation, runtimeState: worker.instance.observedState, runtimeAttached: false, desiredState: "running", parentActive: true, paneId: null, workspace: "/repo/reviewer", branch: "reviewer", model: null, occurredAt: "2026-09-13T00:00:00.000Z" });
+      const attached = store.attachAgentInstanceRuntime({ instanceId: worker.instance.id, expectedGeneration: worker.instance.generation, herdrWorkspaceId: "ws-reviewer", paneId: "w1:worker", nativeSessionId: "worker-session" });
+      if (!attached) throw new Error("expected attached Worker");
+      connectPreparedTestDelivery(store);
+      const view = createWorkerMainView({ workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", workerName: "reviewer", ownerName: "Primary", runtimeGeneration: attached.generation, runtimeState: attached.observedState, runtimeAttached: true, desiredState: "running", parentActive: true, paneId: attached.runtimeRef?.paneId ?? null, workspace: "/repo/reviewer", branch: "reviewer", model: null, occurredAt: "2026-09-13T00:00:00.000Z" });
       store.saveWorkerMainView(view);
       expect(store.workerSessionThreads.reserve({ publicationKey: "worker-thread:reviewer:1", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "canonical-main", viewVersion: view.viewVersion, card: {} })).toBe("reserved");
       const group = store.listPendingOutboundReplies().find(({ kind }) => kind === "group_card_create")!;
@@ -457,18 +1652,24 @@ describe("SQLite store", () => {
       }
       store.database.prepare("UPDATE worker_thread_entry_requests SET worker_session_generation = 2 WHERE command_intent_id = 'stale-entry'").run();
       store.database.exec("DELETE FROM card_context_invalidations");
+      const metadata = store.database.prepare("SELECT singleton_id, epoch, fingerprint FROM schema_metadata").all();
+      const markers = store.database.prepare("SELECT version FROM schema_migrations ORDER BY version").all();
       store.close(); store = new SqliteBindingStore(path);
 
       expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ targetKind: "worker-session", targetId: "reviewer", targetGeneration: 1, reason: "startup.worker-thread-entry-backfill" })]);
       expect(store.database.prepare("SELECT state FROM worker_thread_entry_requests WHERE command_intent_id = 'stale-entry'").get()).toEqual({ state: "stale" });
       expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 43").get()).toEqual({ version: 43 });
+      expect(store.database.prepare("SELECT singleton_id, epoch, fingerprint FROM schema_metadata").all()).toEqual(metadata);
+      expect(store.database.prepare("SELECT version FROM schema_migrations ORDER BY version").all()).toEqual(markers);
       store.close(); store = new SqliteBindingStore(path);
       expect(store.listPendingCardContextInvalidations()).toEqual([expect.objectContaining({ requestedDependencyRevision: 1, projectedDependencyRevision: 0 })]);
+      expect(store.database.prepare("SELECT singleton_id, epoch, fingerprint FROM schema_metadata").all()).toEqual(metadata);
+      expect(store.database.prepare("SELECT version FROM schema_migrations ORDER BY version").all()).toEqual(markers);
     });
 
     it("activates a passive legacy entry without moving the canonical Worker Main Card", () => {
       const view = activeWorkerStore("canonical-worker-main");
-      const fencedTarget = { instanceId: "reviewer", runtimeGeneration: 1, workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, conversationKey: "binding:b1", parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
+      const fencedTarget = { instanceId: "reviewer", runtimeGeneration: view.runtimeGeneration, workerSessionGeneration: 1, bindingId: "b1", bindingGeneration: 1, conversationKey: "binding:b1", parentPaneId: "w1:primary", sourceMainMessageId: "primary-root" };
       expect(store!.workerSessionThreads.reserveLegacyEntry({ actionMessageId: "stale-pane", chatId: "chat", target: { ...fencedTarget, parentPaneId: "w1:old" }, render: () => ({}) })).toEqual({ kind: "stale" });
       expect(store!.workerSessionThreads.reserveLegacyEntry({ actionMessageId: "stale-main", chatId: "chat", target: { ...fencedTarget, sourceMainMessageId: "old-main" }, render: () => ({}) })).toEqual({ kind: "stale" });
       const input = { publicationKey: "worker-entry:reviewer:1", actionMessageId: "instances-card", workerId: "reviewer", workerSessionGeneration: 1, parentBindingId: "b1", parentBindingGeneration: 1, parentPaneId: "w1:primary", targetChatId: "chat", mode: "legacy-entry" as const, sourceMainMessageId: "canonical-worker-main", card: { schema: "2.0" } };
@@ -488,7 +1689,7 @@ describe("SQLite store", () => {
       store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "primary-topic", rootMessageId: "primary-root", title: "Primary" });
       store.updateBinding("b1", { paneId: "w1:primary", statusMessageId: "primary-root", state: "active", lifecycle: "active", attachment: "attached" });
       store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: null }, workspace: { id: "ws-reviewer", kind: "git-worktree", cwd: "/repo/reviewer", branch: "reviewer", baseCommit: "base" } }, 4);
-      store.database.exec("DROP TABLE worker_session_threads; DELETE FROM schema_migrations WHERE version = 35");
+      store.database.exec("DROP TABLE worker_session_threads; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 35");
       store!.close(); store = undefined;
 
       store = new SqliteBindingStore(path);
@@ -500,41 +1701,54 @@ describe("SQLite store", () => {
 
   it("keeps a failed Main rebuild unresolved until its exact replacement is acknowledged", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "locked-main", state: "active", lifecycle: "active", attachment: "attached" });
     store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
     const failed = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300317", recoveryKind: "stale_main_card" });
     const replacement = store.listPendingOutboundReplies()[0]!;
     expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { replacement_pending: 1 } });
-    const first = store.claimOutboundReply(replacement.id, null)!;
-    store.markOutboundReplyFailedWithQuarantine(first, "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" });
+    const lease = store.acquireInstanceLease("main-rebuild-test", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+    store.activateWriteFence(lease.ownerId, lease.fencingToken);
+    const firstDelivery = store.preparedDeliveries.hydratePreparedDelivery(replacement.id);
+    if (firstDelivery.status !== "prepared") throw new Error("expected prepared Main rebuild");
+    const first = store.preparedDeliveries.claimPreparedDelivery({ delivery: firstDelivery.delivery, at: new Date().toISOString(), expiresAt: "2099-01-01T00:00:00.000Z" })!;
+    store.preparedDeliveries.failPreparedDelivery(first, { error: "rejected", metadata: { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" }, retryAt: new Date().toISOString() });
     expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(2);
     expect(store.retryDeadLetter(replacement.id, "c1", "admin")).toBe("retried");
     expect(store.getOperationalSummary().deliveryRecoveries).toMatchObject({ unresolved: 1, replacement_pending: 1 });
-    const retry = store.claimOutboundReply(replacement.id, null)!;
-    expect(store.markOutboundReplyDelivered(first, "stale")).toBe(false);
-    expect(store.markOutboundReplyDelivered(retry, "rebuilt-main")).toBe(true);
+    const retryDelivery = store.preparedDeliveries.hydratePreparedDelivery(replacement.id);
+    if (retryDelivery.status !== "prepared") throw new Error("expected prepared Main rebuild retry");
+    const retry = store.preparedDeliveries.claimPreparedDelivery({ delivery: retryDelivery.delivery, at: new Date().toISOString(), expiresAt: "2099-01-01T00:00:00.000Z" })!;
+    expect(store.preparedDeliveries.acknowledgePreparedDelivery(first, { messageId: "stale", surfaceId: null, threadId: null })).toBe(false);
+    expect(store.preparedDeliveries.acknowledgePreparedDelivery(retry, { messageId: "rebuilt-main", surfaceId: null, threadId: null })).toBe(true);
     expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 0, deliveryRecoveries: { recovered: 2 } });
   });
 
   it("does not use a Main rebuild receipt to resolve a different binding generation", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "locked-main", state: "active", lifecycle: "active", attachment: "attached" });
     store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root", { version: 2 });
     const failed = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyFailedWithQuarantine(failed.id, "locked", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "300317", recoveryKind: "stale_main_card" });
     const replacement = store.listPendingOutboundReplies()[0]!;
-    const claim = store.claimOutboundReply(replacement.id, null)!;
+    const lease = store.acquireInstanceLease("main-rebuild-generation-test", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+    store.activateWriteFence(lease.ownerId, lease.fencingToken);
+    const delivery = store.preparedDeliveries.hydratePreparedDelivery(replacement.id);
+    if (delivery.status !== "prepared") throw new Error("expected prepared Main rebuild");
+    const claim = store.preparedDeliveries.claimPreparedDelivery({ delivery: delivery.delivery, at: new Date().toISOString(), expiresAt: "2099-01-01T00:00:00.000Z" })!;
     store.database.prepare("UPDATE bindings SET generation = generation + 1 WHERE id = 'b1'").run();
-    store.markOutboundReplyDelivered(claim, "rebuilt-main");
+    store.preparedDeliveries.acknowledgePreparedDelivery(claim, { messageId: "rebuilt-main", surfaceId: null, threadId: null });
     expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { replacement_pending: 1, recovered: 0 } });
   });
 
   it("preserves failed receipt evidence across manual retry and authorized dismissal", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", bindingId: "b1", rootMessageId: "root", kind: "text", payload: "message" });
     store.markOutboundReplyFailedWithQuarantine("failed", "original failure", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_request" });
     expect(store.dismissDeadLetter("failed", "other-chat", "admin")).toBe("unauthorized");
@@ -543,37 +1757,79 @@ describe("SQLite store", () => {
     expect(store.getOperationalSummary().deliveryRecoveries.unresolved).toBe(1);
     store.markOutboundReplyFailedWithQuarantine("failed", "second failure", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_request" });
     expect(store.database.prepare("SELECT reason FROM delivery_recoveries WHERE failed_reply_id = 'failed'").get()).toMatchObject({ reason: "original failure" });
-    expect(store.dismissDeadLetter("failed", "c1", "admin")).toBe("dismissed");
+    expect(store.dismissDeadLetter("failed", "c1", "admin", "failure-card-message")).toBe("dismissed");
+    expect(store.database.prepare(`SELECT state,error,failure_class,effect_certainty,http_status,lark_error_code
+      FROM outbound_replies WHERE id='failed'`).get()).toEqual({
+        state: "dismissed",
+        error: "second failure",
+        failure_class: "permanent",
+        effect_certainty: "rejected",
+        http_status: 400,
+        lark_error_code: "bad_request",
+      });
+    expect(store.database.prepare("SELECT action_kind, semantic_key, message_id, state FROM card_dismissals").all()).toEqual([{
+      action_kind: "dead_letter_dismiss", semantic_key: "dead-letter:failed",
+      message_id: "failure-card-message", state: "deleting"
+    }]);
     store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
     expect(store.getOperationalSummary().deliveryRecoveries).toMatchObject({ unresolved: 0, dismissed: 1, recovered: 0 });
   });
 
   it("does not resolve failures using another target, same version, or unknown effect", () => {
     store = new SqliteBindingStore(":memory:");
-    for (const [id, target, version, failureClass] of [["failed", "target", 2, "permanent"], ["unknown", "unknown-target", 2, "unknown"]] as const) {
-      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: target, kind: "card_update", viewVersion: version, payload: "{}" });
+    for (const [bindingId, paneId] of [["failed-binding", "failed-pane"], ["wrong-binding", "wrong-pane"], ["unknown-binding", "unknown-pane"]] as const) {
+      store.createPendingBinding({ id: bindingId, workspaceId: "w1", chatId: "c1", topicId: `${bindingId}-topic`, rootMessageId: `${bindingId}-root`, title: bindingId });
+      store.updateBinding(bindingId, { paneId, state: "active", lifecycle: "active", attachment: "attached" });
+    }
+    for (const [id, bindingId, target, version, failureClass] of [["failed", "failed-binding", "target", 2, "permanent"], ["unknown", "unknown-binding", "unknown-target", 2, "unknown"]] as const) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, bindingId, rootMessageId: target, kind: "card_update", viewVersion: version, payload: "{}" });
       if (failureClass === "permanent") store.markOutboundReplyFailedWithQuarantine(id, "rejected", { failureClass, httpStatus: 400, larkErrorCode: null });
       else store.markOutboundReplyDeadLetter(id, "uncertain", { failureClass, httpStatus: null, larkErrorCode: null });
     }
-    for (const [id, target, version] of [["wrong-target", "another-target", 3], ["same-version", "target", 2], ["unknown-successor", "unknown-target", 3]] as const) {
-      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: target, kind: "card_update", viewVersion: version, payload: "{}" });
-      store.markOutboundReplyDelivered(store.claimOutboundReply(id, null)!, target);
+    for (const [id, bindingId, target, version] of [["wrong-target", "wrong-binding", "another-target", 3], ["same-version", "failed-binding", "target", 2], ["unknown-successor", "unknown-binding", "unknown-target", 3]] as const) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, bindingId, rootMessageId: target, kind: "card_update", viewVersion: version, payload: "{}" });
+      const claim = store.claimOutboundReply(id, null);
+      if (id === "same-version" || id === "unknown-successor") {
+        expect(claim).toBeNull();
+        continue;
+      }
+      expect(claim).not.toBeNull();
+      store.markOutboundReplyDelivered(claim!, target);
     }
     expect(store.getOperationalSummary().unresolvedDeadLetters).toBe(2);
   });
 
   it("rolls back an acknowledgement when its recovery evidence cannot be committed", () => {
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "target", kind: "card_update", payload: "{}" });
-    store.markOutboundReplyFailedWithQuarantine("failed", "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
-    store.enqueueOutboundReply({ id: "new", idempotencyKey: "new", rootMessageId: "target", kind: "card_update", payload: "{}" });
-    const claim = store.claimOutboundReply("new", null)!;
+    connectPreparedTestDelivery(store);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const first = { ...initialTopicView("b1"), title: "First", viewVersion: 1 };
+    expect(store.reserveMainCard(first, "root-1", { version: 1 })).toBe("reserved");
+    const [create] = store.listPendingOutboundReplies();
+    store.markOutboundReplyDelivered(create!.id, "main-card-1");
+    const second = { ...first, title: "Second", viewVersion: 2 };
+    expect(store.reserveMainCard(second, "root-1", { version: 2 })).toBe("reserved");
+    const failed = store.listPendingOutboundReplies()[0]!;
+    const failedClaim = store.claimOutboundReply(failed.id, null)!;
+    const third = { ...second, title: "Third", viewVersion: 3 };
+    expect(store.reserveMainCard(third, "root-1", { version: 3 })).toBe("reserved");
+    expect(store.markOutboundReplyFailedWithQuarantine(failedClaim, "rejected", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({
+      action: "released_newer_snapshot"
+    });
+    const successorId = store.listPendingOutboundReplies()[0]!.id;
+    store.preparedDeliveries.recoverQuarantinedRingHeads({ afterScopeKey: null, limit: 64, at: new Date().toISOString() });
+    const lease = store.acquireInstanceLease("recovery-rollback-test", new Date().toISOString(), "2099-01-01T00:00:00.000Z")!;
+    store.activateWriteFence(lease.ownerId, lease.fencingToken);
+    const successor = store.preparedDeliveries.hydratePreparedDelivery(successorId);
+    if (successor.status !== "prepared") throw new Error("expected prepared Main successor");
+    const claim = store.preparedDeliveries.claimPreparedDelivery({ delivery: successor.delivery, at: new Date().toISOString(), expiresAt: "2099-01-01T00:00:00.000Z" })!;
     store.database.exec("CREATE TEMP TRIGGER fail_recovery BEFORE UPDATE ON delivery_recoveries BEGIN SELECT RAISE(ABORT, 'test_recovery_failure'); END");
-    expect(() => store!.markOutboundReplyDelivered(claim, "target")).toThrow("test_recovery_failure");
-    expect(store.getOutboundReply("new")).toMatchObject({ state: "pending", deliveredMessageId: null });
-    expect(store.getOperationalSummary().deliveryRecoveries.unresolved).toBe(1);
+    expect(() => store!.preparedDeliveries.acknowledgePreparedDelivery(claim, { messageId: "main-card-1", surfaceId: null, threadId: null })).toThrow("test_recovery_failure");
+    expect(store.getOutboundReply(successorId)).toMatchObject({ state: "pending", deliveredMessageId: null });
+    expect(store.getOperationalSummary().deliveryRecoveries).toMatchObject({ unresolved: 0, replacement_pending: 1, recovered: 0 });
     store.database.exec("DROP TRIGGER fail_recovery");
-    expect(store.markOutboundReplyDelivered(claim, "target")).toBe(true);
+    expect(store.preparedDeliveries.acknowledgePreparedDelivery(claim, { messageId: "main-card-1", surfaceId: null, threadId: null })).toBe(true);
     expect(store.getOperationalSummary().deliveryRecoveries.recovered).toBe(1);
   });
 
@@ -587,18 +1843,20 @@ describe("SQLite store", () => {
     }
     store.enqueueOutboundReply({ id: "proof", idempotencyKey: "proof", rootMessageId: "proven", kind: "card_update", payload: "{}" });
     store.markOutboundReplyDelivered("proof", "proven");
-    store.database.exec("DROP TRIGGER delivery_recoveries_dead_letter; DROP TABLE delivery_recoveries; DELETE FROM schema_migrations WHERE version = 31");
+    store.database.exec("DROP TRIGGER delivery_recoveries_dead_letter; DROP TABLE delivery_recoveries; DELETE FROM schema_migrations WHERE version = 31 OR version >= 112; DROP TABLE schema_metadata");
     store.close();
     store = new SqliteBindingStore(path);
-    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { recovered: 1, unresolved: 1 } });
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 2, deliveryRecoveries: { recovered: 0, unresolved: 2 } });
     store.pruneDeliveredOutboundReplies("2099-01-01T00:00:00.000Z", 100);
     store.close();
     store = new SqliteBindingStore(path);
-    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 1, deliveryRecoveries: { recovered: 1, unresolved: 1 } });
-    expect(store.database.prepare("SELECT resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = 'proven'").get()).toMatchObject({ resolved_by_reply_id: "proof", resolved_message_id: "proven" });
+    expect(store.getOperationalSummary()).toMatchObject({ unresolvedDeadLetters: 2, deliveryRecoveries: { recovered: 0, unresolved: 2 } });
+    expect(store.database.prepare("SELECT action, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = 'proven'").get()).toMatchObject({
+      action: "legacy_unproven", resolved_by_reply_id: null, resolved_message_id: null
+    });
   });
 
-  it("atomically accepts an exact human-interruption continuation and consumes its interaction", () => {
+  it("atomically accepts an exact human-interruption continuation with managed Prompt identity and one-shot effects", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
@@ -608,19 +1866,56 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE run_cards SET phase = 'failed', notice = ?, answer_message_id = 'answer-parent' WHERE prompt_id = 'parent'").run("TraeX turn was interrupted by a human operator");
     store.createCardInteraction({ id: "continue-1", bindingId: "b1", bindingGeneration: 1, actorOpenId: "creator", actionKind: "continuation", parentPromptId: "parent", targetPromptId: null, expiresAt: "2099-01-01T00:00:00.000Z" });
     const childView = createQueuedRunCard({ promptId: "child", bindingId: "b1", bindingGeneration: 1, conversionParentPromptId: "parent", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "continue from tests", queuePosition: 1, occurredAt: "now" });
-    const input = { interactionId: "continue-1", parentPromptId: "parent", sourceAnswerMessageId: "answer-parent", expectedBindingGeneration: 1, actorOpenId: "creator", accepted: { prompt: { id: "child", bindingId: "b1", larkMessageId: "card:continue-1", actorOpenId: "creator", body: "continue from tests", parentPromptId: "parent" }, view: childView, rootMessageId: "root", answerCard: {}, expectedBindingGeneration: 1 } };
+    const input = {
+      interactionId: "continue-1",
+      parentPromptId: "parent",
+      sourceAnswerMessageId: "answer-parent",
+      expectedBindingGeneration: 1,
+      actorOpenId: "creator",
+      accepted: {
+        prompt: {
+          id: "child",
+          bindingId: "b1",
+          larkMessageId: null,
+          ingressSource: "internal",
+          sourceMessageKey: "card-continuation:v1:continue-1",
+          actorOpenId: "creator",
+          body: "continue from tests",
+          parentPromptId: "parent"
+        },
+        view: childView,
+        rootMessageId: "root",
+        answerCard: {},
+        expectedBindingGeneration: 1
+      }
+    };
 
-    expect(store.acceptInterruptedContinuation(input)).toMatchObject({ inserted: true, prompt: { id: "child", parentPromptId: "parent" } });
+    const accepted = store.acceptInterruptedContinuation(input);
+    expect(accepted.commitState).toBe("committed");
+    expect(accepted.result).toMatchObject({ inserted: true, prompt: {
+      id: "child", parentPromptId: "parent", ingressSource: "internal", sourceMessageKey: "card-continuation:v1:continue-1", nativeSubmissionId: "child"
+    } });
+    expect(accepted.consumeEffects().map((effect) => effect.kind)).toEqual(["outbound-wake", "prompt-wake", "lifecycle-event"]);
     expect(store.getCardInteraction("continue-1")).toMatchObject({ state: "consumed", resultCode: "continuation" });
-    expect(store.acceptInterruptedContinuation(input)).toMatchObject({ inserted: false, prompt: { id: "child" } });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE lark_message_id = 'card:continue-1'").get()).toEqual({ count: 1 });
+    const duplicate = store.acceptInterruptedContinuation(input);
+    expect(duplicate.commitState).toBe("committed");
+    expect(duplicate.result).toMatchObject({ inserted: false, prompt: { id: "child", nativeSubmissionId: "child" } });
+    expect(duplicate.consumeEffects()).toEqual([]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE source_message_key = 'card-continuation:v1:continue-1'").get()).toEqual({ count: 1 });
   });
 
   it("migrates durable Worker session identity and context projection tables", () => {
     store = new SqliteBindingStore(":memory:");
 
     expect(store.database.prepare("PRAGMA table_info(agent_instances)").all()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "worker_session_generation", notnull: 1, dflt_value: "1" })
+      expect.objectContaining({ name: "worker_session_generation", notnull: 1, dflt_value: "1" }),
+      expect.objectContaining({ name: "pane_token" })
+    ]));
+    expect(store.database.prepare("PRAGMA table_info(bindings)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "pane_token" })
+    ]));
+    expect(store.database.prepare("PRAGMA table_info(run_cards)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "pane_token" })
     ]));
     expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('worker_main_views','card_context_invalidations') ORDER BY name").all()).toEqual([
       { name: "card_context_invalidations" }, { name: "worker_main_views" }
@@ -649,6 +1944,119 @@ describe("SQLite store", () => {
     ]);
   });
 
+  it("migrates Prompt execution lifecycle when legacy migration 69 is already recorded", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-prompt-lifecycle-version-collision-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (69)").run();
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 69").get()).toEqual({ version: 69 });
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("PRAGMA foreign_keys = OFF");
+    const currentSql = (legacy.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'prompt_jobs'").get() as { sql: string }).sql;
+    const legacySql = currentSql
+      .replace(/^CREATE TABLE prompt_jobs\b/, "CREATE TABLE prompt_jobs_legacy")
+      .replace("('queued','submitted','running','recovering','uncertain','delivered','failed','cancelled')", "('queued','running','delivered','failed','cancelled')");
+    expect(legacySql).not.toBe(currentSql);
+    const columns = (legacy.prepare("PRAGMA table_info(prompt_jobs)").all() as Array<{ name: string }>).map(({ name }) => `"${name}"`).join(", ");
+    // This shape predates T3 metadata.  Removing it is part of modelling a
+    // genuine historical reopen, rather than asking a verified-current
+    // database with an externally corrupted catalog to replay migrations.
+    legacy.exec(`${legacySql}; INSERT INTO prompt_jobs_legacy(${columns}) SELECT ${columns} FROM prompt_jobs; DROP TABLE prompt_jobs; ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs; DELETE FROM schema_migrations WHERE version = 72 OR version >= 112; DROP TABLE schema_metadata; PRAGMA foreign_keys = ON;`);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.claimNextDispatchablePrompt("b1")).toMatchObject({ prompt: { id: "p1", state: "submitted" } });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 72").get()).toEqual({ version: 72 });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.getPrompt("p1")).toMatchObject({ state: "submitted" });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("expands legacy Run Card execution phases without rewriting historical terminal outcomes", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-run-card-phase-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    for (const [id, phase] of [["active", "running"], ["historical", "failed"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: null, requestText: id, queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
+      store.database.prepare("UPDATE run_cards SET phase = ? WHERE prompt_id = ?").run(phase, id);
+    }
+    store.updateBinding("b1", { paneToken: "legacy-token" });
+    store.database.prepare("UPDATE run_cards SET pane_token = NULL WHERE prompt_id = 'historical'").run();
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    const currentViewSql = (legacy.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'run_cards_view'").get() as { sql: string }).sql;
+    const oldViewSql = currentViewSql.replace(
+      "CASE WHEN phase IN ('completed', 'failed') THEN COALESCE(run_cards.pane_token, (SELECT bindings.pane_token FROM bindings WHERE bindings.id = run_cards.binding_id AND bindings.generation = run_cards.binding_generation)) ELSE pane_token END",
+      "pane_token"
+    );
+    expect(oldViewSql).not.toBe(currentViewSql);
+    legacy.exec("PRAGMA foreign_keys = OFF; DROP VIEW run_cards_view");
+    const currentSql = (legacy.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run_cards'").get() as { sql: string }).sql;
+    const legacySql = currentSql
+      .replace(/^CREATE TABLE run_cards\b/, "CREATE TABLE run_cards_legacy")
+      .replace("('queued','submitted','running','recovering','uncertain','blocked','completed','failed')", "('queued','running','blocked','completed','failed')");
+    expect(legacySql).not.toBe(currentSql);
+    const columns = (legacy.prepare("PRAGMA table_info(run_cards)").all() as Array<{ name: string }>).map(({ name }) => `"${name}"`).join(", ");
+    legacy.exec(`${legacySql}; INSERT INTO run_cards_legacy(${columns}) SELECT ${columns} FROM run_cards; DROP TABLE run_cards; ALTER TABLE run_cards_legacy RENAME TO run_cards; ${oldViewSql}; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 70; PRAGMA foreign_keys = ON;`);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT prompt_id, phase FROM run_cards ORDER BY prompt_id").all()).toEqual([
+      { prompt_id: "active", phase: "running" },
+      { prompt_id: "historical", phase: "failed" }
+    ]);
+    for (const phase of ["submitted", "recovering", "uncertain"]) {
+      expect(() => store!.database.prepare("UPDATE run_cards SET phase = ? WHERE prompt_id = 'active'").run(phase)).not.toThrow();
+    }
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 70").get()).toEqual({ version: 70 });
+    expect(store.database.prepare("SELECT state_json FROM run_cards_view WHERE prompt_id = 'active'").get()).toBeTruthy();
+    expect(store.database.prepare("SELECT json_extract(state_json, '$.paneToken') AS paneToken FROM run_cards_view WHERE prompt_id = 'historical'").get()).toEqual({ paneToken: "legacy-token" });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("migrates and persists the structured Run Card Task List title", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-run-card-task-title-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("DROP VIEW run_cards_view; ALTER TABLE run_cards DROP COLUMN task_list_title; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 71");
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("PRAGMA table_info(run_cards)").all()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "task_list_title", notnull: 0 })]));
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 71").get()).toEqual({ version: 71 });
+    expect(store.loadRunCard("p1")).toMatchObject({ taskListTitle: null });
+    store.saveRunCard({ ...store.loadRunCard("p1")!, taskListTitle: "Running focused verification" });
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.loadRunCard("p1")).toMatchObject({ taskListTitle: "Running focused verification" });
+    expect(store.database.prepare("SELECT json_extract(state_json, '$.taskListTitle') AS title FROM run_cards_view WHERE prompt_id = 'p1'").get()).toEqual({ title: "Running focused verification" });
+    expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
   it("backfills TraeX as the Primary Agent kind for legacy bindings and project selections", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-primary-agent-kind-migration-"));
     const path = join(temporaryDirectory, "state.sqlite");
@@ -656,11 +2064,227 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "legacy-binding", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Legacy" });
     store.createProjectSelection({ id: "legacy-selection", commandMessageId: "cmd", chatId: "c1", topicId: null, rootMessageId: "root-selection", actorOpenId: "u1", requestedTitle: null, expiresAt: "2099-01-01T00:00:00.000Z", card: {} });
     store.database.exec("ALTER TABLE bindings DROP COLUMN agent_kind; ALTER TABLE project_selections DROP COLUMN agent_kind");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
     store = new SqliteBindingStore(path);
 
     expect(store.getBinding("legacy-binding")?.agentKind).toBe("traex");
     expect(store.getProjectSelection("legacy-selection")?.agentKind).toBe("traex");
+  });
+
+  it("reserves one non-archived Orchestrator binding per Gateway chat", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const first = store.createOrGetPendingOrchestratorBinding({
+      id: "orchestrator-1", gatewayId: "feishu:primary", projectId: "bridge",
+      workspaceId: "w1", chatId: "chat", title: "Orchestrator", creatorOpenId: "user-1"
+    });
+    const duplicate = store.createOrGetPendingOrchestratorBinding({
+      id: "orchestrator-2", gatewayId: "feishu:primary", projectId: "bridge",
+      workspaceId: "w1", chatId: "chat", title: "Another", creatorOpenId: "user-2"
+    });
+    const task = store.createPendingBinding({
+      id: "task-1", gatewayId: "feishu:primary", projectId: "bridge",
+      workspaceId: "w1", chatId: "chat", topicId: "task-topic", rootMessageId: "task-root", title: "Task"
+    });
+
+    expect(first).toMatchObject({ created: true, binding: { id: "orchestrator-1", kind: "orchestrator" } });
+    expect(duplicate).toMatchObject({ created: false, binding: { id: "orchestrator-1", kind: "orchestrator" } });
+    expect(store.findOrchestratorBinding("feishu:primary", "chat")?.id).toBe("orchestrator-1");
+    expect(task.kind).toBe("task");
+    expect(store.listBindings()).toHaveLength(2);
+  });
+
+  it("persists Binding and Prompt session epochs across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-orchestrator-session-epoch-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const binding = store.createPendingBinding({
+      id: "orchestrator-1", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "bridge",
+      workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Orchestrator"
+    });
+    const prompt = store.enqueuePrompt({
+      id: "prompt-1", bindingId: binding.id, larkMessageId: "message-1", actorOpenId: "user-1", body: "work", parentPromptId: null
+    }).prompt;
+
+    expect(binding.sessionEpoch).toBe(1);
+    expect(prompt.sessionEpoch).toBe(1);
+    store.updateBinding(binding.id, { sessionEpoch: 2 });
+    const nextPrompt = store.enqueuePrompt({
+      id: "prompt-2", bindingId: binding.id, larkMessageId: "message-2", actorOpenId: "user-1", body: "new context", parentPromptId: null
+    }).prompt;
+    expect(nextPrompt.sessionEpoch).toBe(2);
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.getBinding(binding.id)?.sessionEpoch).toBe(2);
+    expect(store.getPrompt(prompt.id)?.sessionEpoch).toBe(1);
+    expect(store.getPrompt(nextPrompt.id)?.sessionEpoch).toBe(2);
+  });
+
+  it("persists and deduplicates the exact Orchestrator clear fence across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-orchestrator-clear-operation-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({
+      id: "orchestrator-1", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "bridge",
+      workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Orchestrator"
+    });
+    store.updateBinding("orchestrator-1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1", lastAgentState: "idle"
+    });
+    const clearStore = (store.capabilityModules() as unknown as { orchestratorClear: {
+      accept(input: Record<string, unknown>): { operation: Record<string, unknown>; inserted: boolean };
+      get(id: string): Record<string, unknown> | null;
+    } }).orchestratorClear;
+    const input = {
+      id: "clear-1", idempotencyKey: "clear:confirm-1", actorOpenId: "user-1", sourceMessageId: "message-1", confirmationId: "confirm-1",
+      bindingId: "orchestrator-1", bindingGeneration: 1, oldSessionEpoch: 1,
+      expectedWorkspaceId: "w1", expectedPaneId: "w1:p1", expectedTerminalId: "terminal-1",
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      expectedStateChangeSeq: 17
+    };
+
+    expect(clearStore.accept(input)).toMatchObject({ inserted: true, operation: { ...input, state: "accepted", attemptCount: 0, receipt: null } });
+    expect(clearStore.accept(input)).toMatchObject({ inserted: false, operation: { id: "clear-1" } });
+    expect(() => clearStore.accept({ ...input, id: "clear-collision" })).toThrow("different Orchestrator clear operation");
+    store.close();
+
+    store = new SqliteBindingStore(path);
+    const reopened = (store.capabilityModules() as unknown as { orchestratorClear: { get(id: string): Record<string, unknown> | null } }).orchestratorClear;
+    expect(reopened.get("clear-1")).toMatchObject({ ...input, state: "accepted", attemptCount: 0, receipt: null });
+  });
+
+  it("atomically applies a rotation receipt while preserving stable Binding identity", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({
+      id: "orchestrator-1", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "bridge",
+      workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Orchestrator"
+    });
+    const before = store.updateBinding("orchestrator-1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", paneToken: "orch", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1", lastAgentState: "idle"
+    });
+    store.saveTopicView({ ...initialTopicView(before.id), bindingGeneration: before.generation, workspaceId: before.workspaceId, paneId: before.paneId, phase: "done", activePromptId: "old-prompt", answer: "old answer", currentAnswer: { messageId: "old-answer", pageIndex: 0 }, context: "old context" });
+    const clearStore = (store.capabilityModules() as unknown as { orchestratorClear: {
+      accept(input: Record<string, unknown>): { operation: Record<string, unknown>; inserted: boolean };
+      claimNext(bindingId: string): Record<string, unknown> | null;
+      applyRotationReceipt(input: Record<string, unknown>): { operation: Record<string, unknown>; binding: Record<string, unknown> } | null;
+    } }).orchestratorClear;
+    clearStore.accept({
+      id: "clear-1", idempotencyKey: "clear:confirm-1", actorOpenId: "user-1", sourceMessageId: "message-1", confirmationId: "confirm-1",
+      bindingId: before.id, bindingGeneration: before.generation, oldSessionEpoch: before.sessionEpoch,
+      expectedWorkspaceId: before.workspaceId, expectedPaneId: before.paneId, expectedTerminalId: before.traexSessionId,
+      expectedSession: { source: before.agentSessionSource, agent: before.agentSessionAgent, kind: before.agentSessionKind, value: before.agentSessionValue },
+      expectedStateChangeSeq: 17
+    });
+
+    expect(clearStore.claimNext(before.id)).toMatchObject({ id: "clear-1", state: "rotating", attemptCount: 1 });
+    const receipt = {
+      operationId: "clear-1", paneId: "w1:p1", terminalId: "terminal-1",
+      oldSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      newSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-2" }
+    };
+    const applied = clearStore.applyRotationReceipt({ operationId: "clear-1", receipt });
+
+    expect(applied).toMatchObject({ operation: { state: "succeeded", receipt }, binding: {
+      id: before.id, generation: before.generation, sessionEpoch: 2, workspaceId: before.workspaceId, paneId: before.paneId,
+      paneToken: before.paneToken, traexSessionId: before.traexSessionId, agentSessionValue: "session-2", title: before.title
+    } });
+    expect(store.loadRuntimeIdentityClaim({ bindingId: before.id, bindingGeneration: before.generation, sessionEpoch: 1 })).toMatchObject({
+      state: "released", nativeIdentity: { value: "session-1" }, attachment: { paneId: "w1:p1", terminalId: "terminal-1" }
+    });
+    expect(store.loadRuntimeIdentityClaim({ bindingId: before.id, bindingGeneration: before.generation, sessionEpoch: 2 })).toMatchObject({
+      state: "current", nativeIdentity: { value: "session-2" }, attachment: { paneId: "w1:p1", terminalId: "terminal-1" }
+    });
+    expect(store.loadTopicView(before.id)).toMatchObject({
+      bindingId: before.id, bindingGeneration: before.generation, phase: "ready", activePromptId: null, answer: null, currentAnswer: null, context: null
+    });
+  });
+
+  it("rolls an Orchestrator rotation receipt back when its new session already has an owner", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "orchestrator-conflict", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "bridge", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Orchestrator" });
+    store.createPendingBinding({ id: "session-winner", projectId: "bridge", workspaceId: "w1", chatId: "chat", topicId: "winner-topic", rootMessageId: "winner-root", title: "Winner" });
+    const source = store.updateBinding("orchestrator-conflict", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", paneToken: "orch", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1", lastAgentState: "idle"
+    });
+    const winner = store.updateBinding("session-winner", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p2", traexSessionId: "terminal-2",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-2", lastAgentState: "idle"
+    });
+    expect(store.claimCurrentRuntimeIdentity({ claim: currentRuntimeIdentityClaim(winner.id, winner.generation, winner.sessionEpoch, "session-2", "w1:p2"), paneToken: null })).toMatchObject({ outcome: "claimed" });
+    const clear = store.capabilityModules().orchestratorClear;
+    clear.accept({
+      id: "clear-conflict", idempotencyKey: "clear:conflict", actorOpenId: "user-1", sourceMessageId: "message-1", confirmationId: "confirm-1",
+      bindingId: source.id, bindingGeneration: source.generation, oldSessionEpoch: source.sessionEpoch,
+      expectedWorkspaceId: source.workspaceId, expectedPaneId: source.paneId!, expectedTerminalId: source.traexSessionId!,
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, expectedStateChangeSeq: 17
+    });
+    expect(clear.claimNext(source.id)).toMatchObject({ state: "rotating" });
+    const beforeBinding = store.getBinding(source.id);
+    const receipt = {
+      operationId: "clear-conflict", paneId: "w1:p1", terminalId: "terminal-1",
+      oldSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" },
+      newSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-2" }
+    };
+
+    expect(() => clear.applyRotationReceipt({ operationId: "clear-conflict", receipt })).toThrow("Runtime identity transition conflict");
+
+    expect(store.getBinding(source.id)).toEqual(beforeBinding);
+    expect(clear.get("clear-conflict")).toMatchObject({ state: "rotating", receipt: null });
+    expect(store.loadRuntimeIdentityClaim({ bindingId: source.id, bindingGeneration: source.generation, sessionEpoch: source.sessionEpoch })).toBeNull();
+    expect(store.loadRuntimeIdentityClaim({ bindingId: winner.id, bindingGeneration: winner.generation, sessionEpoch: winner.sessionEpoch })).toMatchObject({ state: "current", nativeIdentity: { value: "session-2" } });
+  });
+
+  it("prevents Prompt admission from racing an active Orchestrator rotation", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "orchestrator-1", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "bridge", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Orchestrator" });
+    const binding = store.updateBinding("orchestrator-1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", paneToken: "orch", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1", lastAgentState: "idle"
+    });
+    const clear = store.capabilityModules().orchestratorClear;
+    clear.accept({
+      id: "clear-1", idempotencyKey: "clear:confirm-1", actorOpenId: "user-1", sourceMessageId: "message-1", confirmationId: "confirm-1",
+      bindingId: binding.id, bindingGeneration: binding.generation, oldSessionEpoch: binding.sessionEpoch,
+      expectedWorkspaceId: binding.workspaceId, expectedPaneId: binding.paneId!, expectedTerminalId: binding.traexSessionId!,
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, expectedStateChangeSeq: 17
+    });
+    expect(clear.claimNext(binding.id)).toMatchObject({ state: "rotating" });
+
+    expect(() => store!.enqueuePrompt({ id: "prompt-race", bindingId: binding.id, larkMessageId: "message-race", actorOpenId: "user-1", body: "race", parentPromptId: null }))
+      .toThrow("rotation is in progress");
+    expect(store.getPrompt("prompt-race")).toBeNull();
+  });
+
+  it("does not dispatch a queued Prompt owned by an older session epoch", () => {
+    store = new SqliteBindingStore(":memory:");
+    const binding = store.createPendingBinding({ id: "orchestrator-1", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "bridge", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Orchestrator" });
+    store.updateBinding(binding.id, { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    const prompt = store.enqueuePrompt({ id: "prompt-old", bindingId: binding.id, larkMessageId: "message-old", actorOpenId: "user-1", body: "old", parentPromptId: null }).prompt;
+    store.updateBinding(binding.id, { sessionEpoch: 2 });
+
+    expect(prompt.sessionEpoch).toBe(1);
+    expect(store.claimNextDispatchablePrompt(binding.id)).toBeNull();
+    expect(store.getPrompt(prompt.id)).toMatchObject({ state: "queued", sessionEpoch: 1 });
+  });
+
+  it("additively migrates legacy bindings to task kind before creating the Orchestrator singleton index", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-orchestrator-binding-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "legacy-task", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Legacy task" });
+    store.database.exec("DROP INDEX bindings_active_orchestrator; ALTER TABLE bindings DROP COLUMN kind; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 78");
+    store.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.getBinding("legacy-task")).toMatchObject({ kind: "task" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 78").get()).toEqual({ version: 78 });
+    expect(store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'bindings_active_orchestrator'").get()).toMatchObject({ sql: expect.stringContaining("kind = 'orchestrator'") });
   });
 
   it("uses the partial ordering index for pending card-context scans", () => {
@@ -685,7 +2309,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.database.exec(`
-      DELETE FROM schema_migrations WHERE version = 43;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 43;
       DROP INDEX card_context_invalidations_pending;
       CREATE INDEX card_context_invalidations_pending ON card_context_invalidations(projected_dependency_revision, requested_dependency_revision, updated_at);
     `);
@@ -702,6 +2326,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const add = (id: string, state: "queued" | "running" | "delivered" | "failed") => {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: null, requestText: id, queuePosition: 1, occurredAt: "2026-09-07T00:00:00.000Z" });
       store!.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
@@ -724,7 +2349,7 @@ describe("SQLite store", () => {
       CREATE UNIQUE INDEX prompt_jobs_source_prompt_once ON prompt_jobs(source_prompt_id) WHERE source_prompt_id IS NOT NULL;
       UPDATE prompt_jobs SET dispatch_kind = 'steering', steering_origin = 'automatic' WHERE id LIKE 'steer-%';
     `);
-    store.database.prepare("DELETE FROM schema_migrations WHERE version = 30").run();
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 30");
     store.close(); store = undefined;
 
     store = new SqliteBindingStore(path);
@@ -765,6 +2390,114 @@ describe("SQLite store", () => {
     expect(store.claimNextCommandIntent("project:project")).toMatchObject({ id: "command-2", state: "executing" });
   });
 
+  it("atomically consumes a CardKit interaction into one binding Command intent without legacy work", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.createCardInteraction({ id: "interaction-1", bindingId: "b1", bindingGeneration: 1, actorOpenId: "admin", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2026-10-01T00:10:00.000Z" });
+    const intent = {
+      id: "card-command-1", idempotencyKey: "interaction:interaction-1:rename", laneKey: "binding:b1",
+      command: { kind: "rename", title: "Renamed" } as const,
+      context: { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "interaction-1", actorOpenId: "admin", projectId: "project", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: null, activePromptId: null } },
+      replayPolicy: "safe-before-effect" as const, acceptedAt: "2026-10-01T00:00:00.000Z"
+    };
+    const commands = store.capabilityModules().commandIntents;
+
+    expect(commands.acceptCardCommandIntent({ interactionId: "interaction-1", expectedBindingGeneration: 1, intent, now: intent.acceptedAt }, (view) => view)).toMatchObject({ outcome: "accepted", intent: { id: "card-command-1", laneKey: "binding:b1" } });
+    expect(commands.acceptCardCommandIntent({ interactionId: "interaction-1", expectedBindingGeneration: 1, intent: { ...intent, id: "ignored" }, now: intent.acceptedAt }, (view) => view)).toMatchObject({ outcome: "duplicate", intent: { id: "card-command-1" } });
+    for (const mismatch of [
+      { ...intent, id: "wrong-lane", laneKey: "binding:other" },
+      { ...intent, id: "wrong-command", command: { kind: "rename", title: "Different" } as const },
+      { ...intent, id: "wrong-context", context: { ...intent.context, projectId: "other" } },
+      { ...intent, id: "wrong-policy", replayPolicy: "non-replayable" as const }
+    ]) {
+      expect(commands.acceptCardCommandIntent({ interactionId: "interaction-1", expectedBindingGeneration: 1, intent: mismatch, now: intent.acceptedAt }, (view) => view)).toEqual({ outcome: "stale", intent: null });
+    }
+    expect(store.getCardInteraction("interaction-1")).toMatchObject({ state: "consumed", resultCode: "rename" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM command_status_views").get()).toEqual({ count: 1 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE projection_key = 'command-status:card-command-1'").get()).toEqual({ count: 1 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM session_operations").get()).toEqual({ count: 0 });
+  });
+
+  it("does not create Command work when replaying a consumed CardKit interaction without its exact card intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.createCardInteraction({ id: "consumed-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "admin", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2026-10-01T00:10:00.000Z" });
+    store.consumeCardInteraction({ id: "consumed-interaction", actorOpenId: "admin", bindingId: "b1", bindingGeneration: 1, now: "2026-10-01T00:00:00.000Z", resultCode: "rename" });
+    const intent = {
+      id: "missing-card-command", idempotencyKey: "interaction:consumed-interaction:rename", laneKey: "binding:b1",
+      command: { kind: "rename", title: "Renamed" } as const,
+      context: { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "consumed-interaction", actorOpenId: "admin", projectId: "project", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: null, activePromptId: null } },
+      replayPolicy: "safe-before-effect" as const, acceptedAt: "2026-10-01T00:00:01.000Z"
+    };
+
+    expect(store.capabilityModules().commandIntents.acceptCardCommandIntent({ interactionId: "consumed-interaction", expectedBindingGeneration: 1, intent, now: intent.acceptedAt }, (view) => view)).toEqual({ outcome: "stale", intent: null });
+    expect(store.getCommandIntent("missing-card-command")).toBeNull();
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM command_status_views").get()).toEqual({ count: 0 });
+  });
+
+  it("reuses a consumed CardKit interaction only for an exact existing card intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.createCardInteraction({ id: "source-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "admin", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2026-10-01T00:10:00.000Z" });
+    store.consumeCardInteraction({ id: "source-interaction", actorOpenId: "admin", bindingId: "b1", bindingGeneration: 1, now: "2026-10-01T00:00:00.000Z", resultCode: "rename" });
+    const intent = {
+      id: "literal-command", idempotencyKey: "interaction:source-interaction:rename", laneKey: "binding:b1",
+      command: { kind: "rename", title: "Renamed" } as const,
+      context: { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "source-interaction", actorOpenId: "admin", projectId: "project", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: null, activePromptId: null } },
+      replayPolicy: "safe-before-effect" as const, acceptedAt: "2026-10-01T00:00:01.000Z"
+    };
+    expect(store.acceptCommandIntent(intent)).toMatchObject({ outcome: "accepted" });
+
+    expect(store.capabilityModules().commandIntents.acceptCardCommandIntent({ interactionId: "source-interaction", expectedBindingGeneration: 1, intent: { ...intent, id: "ignored" }, now: intent.acceptedAt }, (view) => view)).toEqual({ outcome: "stale", intent: null });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 1 });
+  });
+
+  it("rolls back CardKit interaction consumption when Command status outbox admission fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.createCardInteraction({ id: "rollback-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "admin", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2026-10-01T00:10:00.000Z" });
+    store.enqueueOutboundReply({ id: "occupied-card-command", idempotencyKey: "command-status:rollback-card:create", rootMessageId: "root", kind: "card_reply", payload: "{}", workClass: "history" });
+    const intent = {
+      id: "rollback-card", idempotencyKey: "interaction:rollback-interaction:rename", laneKey: "binding:b1",
+      command: { kind: "rename", title: "Renamed" } as const,
+      context: { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "rollback-interaction", actorOpenId: "admin", projectId: "project", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: null, activePromptId: null } },
+      replayPolicy: "safe-before-effect" as const, acceptedAt: "2026-10-01T00:00:00.000Z"
+    };
+
+    expect(() => store!.capabilityModules().commandIntents.acceptCardCommandIntent({ interactionId: "rollback-interaction", expectedBindingGeneration: 1, intent, now: intent.acceptedAt }, (view) => view)).toThrow("outbound_idempotency_conflict");
+    expect(store.getCardInteraction("rollback-interaction")).toMatchObject({ state: "active", resultCode: null });
+    expect(store.getCommandIntent("rollback-card")).toBeNull();
+    expect(store.getCommandStatusView("rollback-card")).toBeNull();
+  });
+
+  it("rejects stale CardKit stop admission before creating executable Command work", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", creatorOpenId: "admin", projectId: "project", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.createCardInteraction({ id: "stop-interaction", bindingId: "b1", bindingGeneration: 1, actorOpenId: "admin", actionKind: "more_actions", parentPromptId: null, targetPromptId: null, expiresAt: "2026-10-01T00:10:00.000Z" });
+    const intent = {
+      id: "card-stop", idempotencyKey: "interaction:stop-interaction:stop", laneKey: "binding:b1",
+      command: { kind: "stop" } as const,
+      context: { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "stop-interaction", actorOpenId: "admin", projectId: "project", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: null, activePromptId: "stale-prompt" } },
+      replayPolicy: "non-replayable" as const, acceptedAt: "2026-10-01T00:00:00.000Z"
+    };
+
+    expect(store.capabilityModules().commandIntents.acceptCardCommandIntent({ interactionId: "stop-interaction", expectedBindingGeneration: 1, intent, now: intent.acceptedAt }, (view) => view))
+      .toEqual({ outcome: "stale", intent: null });
+    expect(store.getCardInteraction("stop-interaction")).toMatchObject({ state: "active", resultCode: null });
+    expect(store.getCommandIntent("card-stop")).toBeNull();
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM command_status_views").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM session_operations").get()).toEqual({ count: 0 });
+  });
+
   it("atomically projects Command intent lifecycle through one durable status card", () => {
     store = new SqliteBindingStore(":memory:");
     const context = { chatId: "chat", topicId: null, rootMessageId: "root", sourceMessageId: "message-1", actorOpenId: "admin", projectId: "project", workspaceId: "workspace", primary: null };
@@ -782,10 +2515,15 @@ describe("SQLite store", () => {
     expect(store.getCommandStatusView("status-1")).toMatchObject({ state: "executing", revision: 2 });
     pending = store.listPendingOutboundReplies();
     expect(pending).toHaveLength(1);
-    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE id = ?").get(pending[0]!.id)).toEqual({ snapshot_revision: 2 });
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE id = ?").get(pending[0]!.id)).toEqual({ snapshot_revision: 1 });
 
     const claim = store.claimOutboundReply(pending[0]!.id, null)!;
     expect(store.markOutboundReplyDelivered(claim, "status-message", "status-card")).toBe(true);
+    expect(store.getCommandStatusView("status-1")).toMatchObject({ messageId: "status-message", cardId: "status-card", deliveredRevision: 1 });
+    pending = store.listPendingOutboundReplies();
+    expect(pending).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "status-message" })]);
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE id = ?").get(pending[0]!.id)).toEqual({ snapshot_revision: 2 });
+    expect(store.markOutboundReplyDelivered(store.claimOutboundReply(pending[0]!.id, null)!, "status-message", "status-card")).toBe(true);
     expect(store.getCommandStatusView("status-1")).toMatchObject({ messageId: "status-message", cardId: "status-card", deliveredRevision: 2 });
     expect(store.finishCommandIntent("status-1", "succeeded", { code: "created", detail: null, operationKind: "binding", operationId: "binding-1" })).toMatchObject({ state: "succeeded" });
     expect(store.getCommandStatusView("status-1")).toMatchObject({ state: "succeeded", revision: 3, deliveredRevision: 2 });
@@ -840,7 +2578,7 @@ describe("SQLite store", () => {
     const confirmation = {
       id: "confirmation-1", sourceMessageId: "message-1", actorOpenId: "admin", chatId: "chat", topicId: null, rootMessageId: "message-1",
       envelope: { version: 1, family: "swarm", command: { kind: "new", title: "Fix login", agentKind: "traex" } } as const,
-      expectedBindingId: null, expectedBindingGeneration: null, expectedInstanceId: null, expectedInstanceGeneration: null,
+      frozenTarget: globalSwarmTarget,
       expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z"
     };
     const input = { confirmation, outbox: { id: "confirmation-card-1", idempotencyKey: "natural-language-confirmation:confirmation-1", card: { type: "confirmation" } } };
@@ -856,14 +2594,14 @@ describe("SQLite store", () => {
   it("consumes or cancels a natural-language confirmation exactly once for its actor and chat", () => {
     store = new SqliteBindingStore(":memory:");
     const stage = (id: string) => store!.stageNaturalLanguageCommandConfirmation({
-      confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "stop" } }, expectedBindingId: null, expectedBindingGeneration: null, expectedInstanceId: null, expectedInstanceGeneration: null, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" },
+      confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "stop" } }, frozenTarget: globalSwarmTarget, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" },
       outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} }
     });
     stage("confirm"); stage("cancel");
 
-    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "intruder", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "unauthorized", confirmation: { state: "pending" } });
-    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "consumed", confirmation: { state: "consumed", resultDetail: "confirmed" } });
-    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:02:00.000Z" })).toMatchObject({ outcome: "already-resolved", confirmation: { state: "consumed" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "intruder", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: globalSwarmTarget })).toMatchObject({ outcome: "unauthorized", confirmation: { state: "pending" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: globalSwarmTarget })).toMatchObject({ outcome: "consumed", confirmation: { state: "consumed", resultDetail: "confirmed" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:02:00.000Z", resolvedTarget: globalSwarmTarget })).toMatchObject({ outcome: "already-resolved", confirmation: { state: "consumed" } });
     expect(store.decideNaturalLanguageCommandConfirmation({ id: "cancel", decision: "cancel", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "cancelled", confirmation: { state: "cancelled" } });
   });
 
@@ -871,30 +2609,115 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
     const stage = (id: string, expiresAt: string) => store!.stageNaturalLanguageCommandConfirmation({
-      confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "rename", title: "New title" } }, expectedBindingId: "binding-1", expectedBindingGeneration: 1, expectedInstanceId: null, expectedInstanceGeneration: null, expiresAt, createdAt: "2026-09-19T00:00:00.000Z" },
+      confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "rename", title: "New title" } }, frozenTarget: { ...globalSwarmTarget, bindingId: "binding-1", bindingGeneration: 1, paneId: "w1:p1" }, expiresAt, createdAt: "2026-09-19T00:00:00.000Z" },
       outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} }
     });
     stage("expired", "2026-09-19T00:00:30.000Z");
-    expect(store.decideNaturalLanguageCommandConfirmation({ id: "expired", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "expired", confirmation: { state: "expired" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "expired", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: { ...globalSwarmTarget, bindingId: "binding-1", bindingGeneration: 1, paneId: "w1:p1" } })).toMatchObject({ outcome: "expired", confirmation: { state: "expired" } });
 
     stage("stale", "2026-09-19T01:00:00.000Z");
     store.database.prepare("UPDATE bindings SET generation = 2 WHERE id = 'binding-1'").run();
-    expect(store.decideNaturalLanguageCommandConfirmation({ id: "stale", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled", resultDetail: "stale_context" } });
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "stale", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: { ...globalSwarmTarget, bindingId: "binding-1", bindingGeneration: 2, paneId: "w1:p1" } })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled", resultDetail: "stale_context" } });
+  });
+
+  it("rejects every canonical Swarm identity drift and malformed frozen targets", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    const frozen = { version: 1, kind: "swarm", bindingId: "binding-1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, activePromptId: "prompt-1" } as const;
+    const changed = [
+      { ...frozen, bindingGeneration: 2 }, { ...frozen, paneId: "w1:p2" }, { ...frozen, terminalId: "terminal-2" },
+      { ...frozen, nativeSession: { ...frozen.nativeSession, value: "session-2" } }, { ...frozen, activePromptId: "prompt-2" }
+    ];
+    changed.forEach((resolvedTarget, index) => {
+      const id = `drift-${index}`;
+      store!.stageNaturalLanguageCommandConfirmation({ confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "stop" } }, frozenTarget: frozen, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" }, outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} } });
+      expect(store!.decideNaturalLanguageCommandConfirmation({ id, decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled", resultDetail: "stale_context" } });
+    });
+
+    store.stageNaturalLanguageCommandConfirmation({ confirmation: { id: "malformed", sourceMessageId: "message-malformed", actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "stop" } }, frozenTarget: frozen, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" }, outbox: { id: "card-malformed", idempotencyKey: "confirmation:malformed", card: {} } });
+    store.database.prepare("UPDATE natural_language_command_confirmations SET frozen_target_json = ? WHERE id = ?").run('{"version":99}', "malformed");
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "malformed", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: frozen })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled", resultDetail: "stale_context" } });
+    store.stageNaturalLanguageCommandConfirmation({ confirmation: { id: "cancel-malformed", sourceMessageId: "message-cancel-malformed", actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command: { kind: "stop" } }, frozenTarget: frozen, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" }, outbox: { id: "card-cancel-malformed", idempotencyKey: "confirmation:cancel-malformed", card: {} } });
+    store.database.prepare("UPDATE natural_language_command_confirmations SET frozen_target_json = ? WHERE id = ?").run("not-json", "cancel-malformed");
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "cancel-malformed", decision: "cancel", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toMatchObject({ outcome: "cancelled", confirmation: { state: "cancelled", resultDetail: "cancelled_by_user" } });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 63").get()).toEqual({ version: 63 });
+  });
+
+  it("rejects same-name Worker replacement and Worker session drift before consumption", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    const frozen = { version: 1, kind: "worker", instanceId: "worker-old", instanceGeneration: 3, workerSessionGeneration: 4, parentBindingId: "binding-1", parentBindingGeneration: 2, parentPaneId: "w1:p1" } as const;
+    for (const [id, resolvedTarget] of [
+      ["replacement", { ...frozen, instanceId: "worker-new" }],
+      ["session", { ...frozen, workerSessionGeneration: 5 }]
+    ] as const) {
+      store.stageNaturalLanguageCommandConfirmation({ confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "instance", command: { kind: "stop_instance", name: "reviewer" } }, frozenTarget: frozen, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" }, outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} } });
+      expect(store.decideNaturalLanguageCommandConfirmation({ id, decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled" } });
+    }
+  });
+
+  it("fails closed on malformed persisted command JSON while cancellation remains parse-free", () => {
+    store = new SqliteBindingStore(":memory:");
+    const frozenTarget = { version: 1, kind: "worker", instanceId: "worker", instanceGeneration: 1, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "w1:p1" } as const;
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    const stage = (id: string) => store!.stageNaturalLanguageCommandConfirmation({ confirmation: { id, sourceMessageId: `message-${id}`, actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "instance", command: { kind: "stop_instance", name: "reviewer" } }, frozenTarget, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" }, outbox: { id: `card-${id}`, idempotencyKey: `confirmation:${id}`, card: {} } });
+
+    stage("malformed-command-confirm");
+    store.database.prepare("UPDATE natural_language_command_confirmations SET command_json = ? WHERE id = ?").run('{"version":99}', "malformed-command-confirm");
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "malformed-command-confirm", decision: "confirm", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toEqual({ outcome: "stale", confirmation: null });
+    expect(store.database.prepare("SELECT state, result_detail FROM natural_language_command_confirmations WHERE id = ?").get("malformed-command-confirm")).toEqual({ state: "cancelled", result_detail: "invalid_command_envelope" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM swarm_command_intents").get()).toEqual({ count: 0 });
+
+    stage("malformed-command-cancel");
+    store.database.prepare("UPDATE natural_language_command_confirmations SET command_json = ? WHERE id = ?").run("not-json", "malformed-command-cancel");
+    expect(store.decideNaturalLanguageCommandConfirmation({ id: "malformed-command-cancel", decision: "cancel", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z" })).toEqual({ outcome: "cancelled", confirmation: null });
+    expect(store.database.prepare("SELECT state, result_detail FROM natural_language_command_confirmations WHERE id = ?").get("malformed-command-cancel")).toEqual({ state: "cancelled", result_detail: "cancelled_by_user" });
+  });
+
+  it("migration 63 cancels legacy pending confirmations without inventing frozen identity", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "swarm-confirmation-63-"));
+    const databasePath = join(temporaryDirectory, "legacy.db");
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+      CREATE TABLE natural_language_command_confirmations(
+        id TEXT PRIMARY KEY, source_message_id TEXT NOT NULL UNIQUE, actor_open_id TEXT NOT NULL, chat_id TEXT NOT NULL, topic_id TEXT, root_message_id TEXT NOT NULL,
+        command_json TEXT NOT NULL, expected_binding_id TEXT, expected_binding_generation INTEGER, expected_instance_id TEXT, expected_instance_generation INTEGER,
+        state TEXT NOT NULL, expires_at TEXT NOT NULL, result_detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT
+      );
+      INSERT INTO natural_language_command_confirmations VALUES ('legacy', 'message-legacy', 'admin', 'chat', NULL, 'root', '{"version":1,"family":"swarm","command":{"kind":"stop"}}', NULL, NULL, NULL, NULL, 'pending', '2099-01-01T00:00:00.000Z', NULL, '2026-09-19T00:00:00.000Z', '2026-09-19T00:00:00.000Z', NULL);
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(databasePath);
+    expect(store.getNaturalLanguageCommandConfirmation("legacy")).toMatchObject({ state: "cancelled", frozenTarget: null, resultDetail: "legacy_incomplete_frozen_identity" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 63").get()).toEqual({ version: 63 });
   });
 
   it("atomically consumes a natural-language confirmation with its Swarm command intent", () => {
     store = new SqliteBindingStore(":memory:");
     const command = { kind: "new", title: "Fix login", agentKind: "traex" } as const;
     store.stageNaturalLanguageCommandConfirmation({
-      confirmation: { id: "atomic", sourceMessageId: "message-atomic", actorOpenId: "admin", chatId: "chat", topicId: null, rootMessageId: "message-atomic", envelope: { version: 1, family: "swarm", command }, expectedBindingId: null, expectedBindingGeneration: null, expectedInstanceId: null, expectedInstanceGeneration: null, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" },
+      confirmation: { id: "atomic", sourceMessageId: "message-atomic", actorOpenId: "admin", chatId: "chat", topicId: null, rootMessageId: "message-atomic", envelope: { version: 1, family: "swarm", command }, frozenTarget: globalSwarmTarget, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" },
       outbox: { id: "atomic-card", idempotencyKey: "confirmation:atomic", card: {} }
     });
     const context = { chatId: "chat", topicId: null, rootMessageId: "message-atomic", sourceMessageId: "natural-language-confirmation:atomic", actorOpenId: "admin", projectId: null, workspaceId: null, primary: null };
-    const input = { id: "atomic", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", commandIntent: { id: "intent-atomic", idempotencyKey: "natural-language-confirmation:atomic:new", laneKey: "chat:chat", command, context, replayPolicy: "reconcilable" as const, acceptedAt: "2026-09-19T00:01:00.000Z" } };
+    const input = { id: "atomic", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: globalSwarmTarget, commandIntent: { id: "intent-atomic", idempotencyKey: "natural-language-confirmation:atomic:new", laneKey: "chat:chat", command, context, replayPolicy: "reconcilable" as const, acceptedAt: "2026-09-19T00:01:00.000Z" } };
 
     expect(store.confirmNaturalLanguageSwarmCommand(input)).toMatchObject({ outcome: "consumed", confirmation: { state: "consumed" }, commandIntent: { outcome: "accepted", intent: { id: "intent-atomic", state: "accepted" } } });
     expect(store.confirmNaturalLanguageSwarmCommand({ ...input, commandIntent: { ...input.commandIntent, id: "ignored" } })).toMatchObject({ outcome: "already-resolved", confirmation: { state: "consumed" } });
     expect(store.getCommandIntent("intent-atomic")).toMatchObject({ command, state: "accepted" });
+  });
+
+  it("atomically cancels a drifted Swarm confirmation without creating its CommandIntent", () => {
+    store = new SqliteBindingStore(":memory:");
+    const command = { kind: "stop" } as const;
+    const frozenTarget = { version: 1, kind: "swarm", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal", nativeSession: null, activePromptId: "prompt-1" } as const;
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.stageNaturalLanguageCommandConfirmation({ confirmation: { id: "atomic-stale", sourceMessageId: "message-atomic-stale", actorOpenId: "admin", chatId: "chat", topicId: "topic", rootMessageId: "root", envelope: { version: 1, family: "swarm", command }, frozenTarget, expiresAt: "2026-09-19T01:00:00.000Z", createdAt: "2026-09-19T00:00:00.000Z" }, outbox: { id: "atomic-stale-card", idempotencyKey: "confirmation:atomic-stale", card: {} } });
+    const context = { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "natural-language-confirmation:atomic-stale", actorOpenId: "admin", projectId: "p1", workspaceId: "w1", primary: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p2", terminalId: "terminal", nativeSession: null, activePromptId: "prompt-1" } };
+    expect(store.confirmNaturalLanguageSwarmCommand({ id: "atomic-stale", actorOpenId: "admin", chatId: "chat", decidedAt: "2026-09-19T00:01:00.000Z", resolvedTarget: { ...frozenTarget, paneId: "w1:p2" }, commandIntent: { id: "intent-stale", idempotencyKey: "natural-language-confirmation:atomic-stale:stop", laneKey: "binding:b1", command, context, replayPolicy: "non-replayable", acceptedAt: "2026-09-19T00:01:00.000Z" } })).toMatchObject({ outcome: "stale", confirmation: { state: "cancelled", resultDetail: "stale_context" } });
+    expect(store.getCommandIntent("intent-stale")).toBeNull();
   });
 
   it("persists Controller interpretation FIFO and never requeues possibly dispatched work", () => {
@@ -954,7 +2777,7 @@ describe("SQLite store", () => {
     }, 4);
     const run = createQueuedRunCard({ promptId: "prompt-1", bindingId: "binding-1", bindingGeneration: 1, title: "Task", workspaceId: "w1", paneId: "primary-pane", requestText: "request", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: run.promptId, bindingId: run.bindingId, larkMessageId: "request", actorOpenId: "u1", body: run.requestText }, view: run, rootMessageId: "root", answerCard: {} });
-    store.database.exec("DELETE FROM card_context_invalidations; DELETE FROM schema_migrations WHERE version = 23");
+    store.database.exec("DELETE FROM card_context_invalidations; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 23");
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.listPendingCardContextInvalidations()).toEqual(expect.arrayContaining([
@@ -964,25 +2787,23 @@ describe("SQLite store", () => {
     ]));
   });
 
-  it("migrates pending Primary card updates onto generation-scoped lanes", () => {
+  it("keeps semantic card lanes while assigning Primary updates to one Pane Ring", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-card-context-lanes-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
-    const run = createQueuedRunCard({ promptId: "prompt-1", bindingId: "binding-1", bindingGeneration: 1, title: "Task", workspaceId: "w1", paneId: null, requestText: "request", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.updateBinding("binding-1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const run = createQueuedRunCard({ promptId: "prompt-1", bindingId: "binding-1", bindingGeneration: 1, title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: run.promptId, bindingId: run.bindingId, larkMessageId: "request", actorOpenId: "u1", body: run.requestText }, view: run, rootMessageId: "root", answerCard: {} });
     store.enqueueOutboundReply({ id: "main-update", idempotencyKey: "main-update", bindingId: "binding-1", viewVersion: 2, targetRole: "session_status", rootMessageId: "main", kind: "card_update", payload: "{}" });
     store.enqueueOutboundReply({ id: "answer-update", idempotencyKey: "answer-update", bindingId: "binding-1", promptId: "prompt-1", viewVersion: 2, cardRole: "answer", rootMessageId: "answer", kind: "card_update", payload: "{}" });
-    store.database.exec("DELETE FROM schema_migrations WHERE version = 22; UPDATE outbound_replies SET lane_key = CASE id WHEN 'main-update' THEN 'message:main' WHEN 'answer-update' THEN 'answer:prompt-1' ELSE lane_key END;");
-    store.close(); store = new SqliteBindingStore(path);
-
     expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies WHERE id IN ('main-update','answer-update') ORDER BY id").all()).toEqual([
       { id: "answer-update", lane_key: "gateway:feishu:primary:primary-answer:prompt-1:1" },
       { id: "main-update", lane_key: "gateway:feishu:primary:primary-main:binding-1:1" }
     ]);
-    expect(store.database.prepare("SELECT lane_key FROM outbox_lane_heads WHERE reply_id IN ('main-update','answer-update') ORDER BY lane_key").all()).toEqual([
-      { lane_key: "gateway:feishu:primary:primary-answer:prompt-1:1" },
-      { lane_key: "gateway:feishu:primary:primary-main:binding-1:1" }
+    expect(store.database.prepare("SELECT id, scope_kind, scope_workspace_id, scope_pane_id FROM outbound_replies WHERE id IN ('main-update','answer-update') ORDER BY id").all()).toEqual([
+      { id: "answer-update", scope_kind: "pane", scope_workspace_id: "w1", scope_pane_id: "w1:p1" },
+      { id: "main-update", scope_kind: "pane", scope_workspace_id: "w1", scope_pane_id: "w1:p1" }
     ]);
   });
 
@@ -1029,27 +2850,29 @@ describe("SQLite store", () => {
     expect(store.listPendingCardContextInvalidations()).toEqual([]);
   });
 
-  it("keeps Worker Main delivery in a session lane independent from Worker Task delivery", () => {
+  it("serializes Worker Main and Worker Task delivery in the parent Primary Pane Ring", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    connectPreparedTestDelivery(store);
     const created = store.createWorkerAgentInstance({
       id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
-      parent: { bindingId: "binding-1", bindingGeneration: 3, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
     const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     const main = createWorkerMainView({
-      workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 3, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary",
+      workerId: worker.id, workerSessionGeneration: 1, parentBindingId: "binding-1", parentBindingGeneration: 1, parentPaneId: "primary-pane", workerName: worker.name, ownerName: "Primary",
       runtimeGeneration: worker.generation, runtimeState: worker.observedState, workspace: "/repo", branch: null, model: null, occurredAt: "2026-09-05T00:00:00.000Z"
     });
     store.reserveWorkerMainCard(main, "primary-root", { version: 1 });
     store.acceptInstanceTurn({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
-    store.enqueueOutboundReply({ id: "task-update", idempotencyKey: "task-update", workerTurnId: "turn-1", rootMessageId: "task-message", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "task-update", idempotencyKey: "task-update", workerTurnId: "turn-1", workerId: worker.id, workerSessionGeneration: worker.workerSessionGeneration, rootMessageId: "task-message", kind: "card_update", payload: "{}" });
 
-    expect(store.database.prepare("SELECT id, lane_key FROM outbound_replies ORDER BY delivery_order").all()).toEqual([
-      expect.objectContaining({ lane_key: "gateway:feishu:primary:worker-main:reviewer:1" }),
-      { id: "task-update", lane_key: "gateway:feishu:primary:worker-turn:turn-1" }
-    ]);
+    const rows = store.database.prepare("SELECT id, scope_kind, scope_key FROM outbound_replies ORDER BY delivery_order").all() as Array<{ id: string; scope_kind: string; scope_key: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows.map(({ scope_kind }) => scope_kind)).toEqual(["pane", "pane"]);
+    expect(rows[0]!.scope_key).toBe(rows[1]!.scope_key);
   });
 
   it("retires a never-attempted legacy Worker Task Card intent without replaying the turn", () => {
@@ -1061,8 +2884,8 @@ describe("SQLite store", () => {
     });
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: created.id, instanceGeneration: created.generation, workerSessionGeneration: 1, workerName: created.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: created.id, instanceGeneration: created.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "source", view, render: renderWorkerTurnCard });
-    store.enqueueOutboundReply({ id: "never-sent", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}" });
-    store.enqueueOutboundReply({ id: "legacy-followup", idempotencyKey: "worker-turn:update:turn-1:2", workerTurnId: "turn-1", rootMessageId: "task-message", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "never-sent", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}", globalDelivery: true });
+    store.enqueueOutboundReply({ id: "legacy-followup", idempotencyKey: "worker-turn:update:turn-1:2", workerTurnId: "turn-1", rootMessageId: "task-message", kind: "card_update", payload: "{}", globalDelivery: true });
 
     expect(store.retireUndeliveredWorkerTaskCardIntents()).toBe(1);
     expect(store.getOutboundReply("never-sent")).toMatchObject({ state: "dismissed", error: "Retired by Worker Session single-card migration" });
@@ -1080,9 +2903,9 @@ describe("SQLite store", () => {
     });
     const queued = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptInstanceTurnWithCard({ id: queued.turnId, idempotencyKey: queued.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: queued.requestText, parentTurnId: null, sourceMessageId: "source", view: queued, render: renderWorkerTurnCard });
-    store.enqueueOutboundReply({ id: "delivered", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}" });
+    store.enqueueOutboundReply({ id: "delivered", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}", globalDelivery: true });
     store.markOutboundReplyDelivered("delivered", "task-message", "task-card");
-    store.enqueueOutboundReply({ id: "uncertain", idempotencyKey: "worker-turn:create:turn-1:1", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}" });
+    store.enqueueOutboundReply({ id: "uncertain", idempotencyKey: "worker-turn:create:turn-1:1", workerTurnId: "turn-1", rootMessageId: "root", kind: "stream_card_create", payload: "{}", globalDelivery: true });
     store.checkpointOutboundReplyCard("uncertain", "possibly-created-card");
     const originalTurn = store.getInstanceTurn(queued.turnId);
 
@@ -1122,15 +2945,49 @@ describe("SQLite store", () => {
     expect(String(prepare.mock.calls[1]?.[0])).toContain("INDEXED BY agent_instances_worker_parent_name");
   });
 
-  it("bounds Worker Main history and uses the Worker-session index", () => {
+  it("selects one Worker Main candidate before hydrating its large payload", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
     store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
-    const worker = store.createWorkerAgentInstance({
+    const created = store.createWorkerAgentInstance({
       id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
       parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
       workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
     }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    for (const [turnId, phase, occurredAt] of [
+      ["active", "running", "2026-09-05T00:00:02.000Z"],
+      ["terminal", "completed", "2026-09-05T00:00:03.000Z"],
+      ["queued", "queued", "2026-09-05T00:00:01.000Z"]
+    ] as const) {
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: `${turnId} task`, queuePosition: 1, occurredAt });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: turnId, view, render: renderWorkerTurnCard });
+      store.database.prepare("UPDATE worker_turn_cards SET phase = ?, answer = ?, progress_json = ?, result_capture = ? WHERE turn_id = ?")
+        .run(phase, `${turnId}-answer-`.repeat(10_000), JSON.stringify([{ label: `${turnId}-progress-`.repeat(10_000) }]), "captured", turnId);
+    }
+
+    const prepare = vi.spyOn(store.database, "prepare");
+    expect(store.loadWorkerMainProjectionSource(worker.id, 1)).toMatchObject({ currentTask: { turnId: "active" }, queueCount: 1, nextTaskTitle: "queued task" });
+    const workerSql = prepare.mock.calls.map(([sql]) => String(sql)).filter((sql) => sql.includes("worker_turn_cards"));
+    expect(workerSql.filter((sql) => /SELECT \* FROM worker_turn_cards/.test(sql))).toEqual([
+      expect.stringMatching(/WHERE turn_id = \?/)
+    ]);
+    expect(workerSql.length).toBeLessThanOrEqual(3);
+    const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${workerMainCandidateSelectionSql}`).all(worker.id, 1) as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("worker_turn_cards_session_terminal_updated"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("USE TEMP B-TREE"))).toBe(false);
+  });
+
+  it("bounds Worker Main history and uses the Worker-session index", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-1", { paneId: "primary-pane", state: "active", lifecycle: "active", attachment: "attached" });
+    const created = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "binding-1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
     for (let index = 0; index < 8; index += 1) {
       const turnId = `turn-${index}`;
       const occurredAt = `2026-09-05T00:0${index}:00.000Z`;
@@ -1193,14 +3050,16 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: answer.promptId, bindingId: answer.bindingId, larkMessageId: "request", actorOpenId: "u1", body: answer.requestText }, view: answer, rootMessageId: "root-binding-1", answerCard: {} });
 
     const createTask = (workerId: string, bindingId: string, paneId: string, actorBindingId: string) => {
+      const activeParentPaneId = bindingId === "binding-1" ? "primary-pane-1" : "primary-pane-2";
       const created = store!.createWorkerAgentInstance({
         id: workerId, projectId: "p1", name: workerId, role: "worker", agentKind: "traex", model: null, desiredState: "running",
-        parent: { bindingId, bindingGeneration: 1, paneId, nativeSessionId: `primary-${workerId}` },
+        parent: { bindingId, bindingGeneration: 1, paneId: activeParentPaneId, nativeSessionId: `primary-${workerId}` },
         workspace: { id: `ws-${workerId}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
       }, 4).instance;
       const worker = store!.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: `worker-${workerId}`, nativeSessionId: `session-${workerId}` })!;
       const view = createQueuedWorkerTurnCard({ turnId: `turn-${workerId}`, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "root-binding-1", requestText: `Task ${workerId}`, queuePosition: 1, occurredAt: "2026-09-05T00:00:01.000Z" });
       store!.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "thread-primary", projectId: "p1", bindingId: actorBindingId, bindingGeneration: 1, parentPromptId: answer.promptId }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: view.turnId, view, render: renderWorkerTurnCard });
+      if (paneId !== activeParentPaneId) store!.database.prepare("UPDATE agent_instances SET parent_pane_id = ? WHERE id = ?").run(paneId, worker.id);
       return worker.id;
     };
 
@@ -1228,7 +3087,7 @@ describe("SQLite store", () => {
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     store.acceptInstanceTurn({ id: "primary-turn", idempotencyKey: "primary-turn", actor: { kind: "thread-primary", projectId: "p1", bindingId: "binding-1", bindingGeneration: 3, parentPromptId: "prompt-1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "work" });
     store.acceptInstanceTurn({ id: "malformed-turn", idempotencyKey: "malformed-turn", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "legacy" });
-    store.database.exec("DELETE FROM schema_migrations WHERE version = 27; UPDATE instance_turns SET actor_kind = NULL, source_binding_id = NULL, source_binding_generation = NULL, source_parent_prompt_id = NULL; UPDATE instance_turns SET actor_json = 'not-json' WHERE id = 'malformed-turn';");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 27; UPDATE instance_turns SET actor_kind = NULL, source_binding_id = NULL, source_binding_generation = NULL, source_parent_prompt_id = NULL; UPDATE instance_turns SET actor_json = 'not-json' WHERE id = 'malformed-turn';");
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id FROM instance_turns WHERE id = 'primary-turn'").get()).toEqual({ actor_kind: "thread-primary", source_binding_id: "binding-1", source_binding_generation: 3, source_parent_prompt_id: "prompt-1" });
@@ -1341,7 +3200,7 @@ describe("SQLite store", () => {
       INSERT INTO worker_pane_close_steps_legacy VALUES ('close-operation', 'binding-close', 'w1:primary', 'worker-close', 'w1:worker', 'executing', NULL, '2026-09-17T00:00:00.000Z', '2026-09-17T00:00:00.000Z');
       DROP TABLE worker_pane_close_steps;
       ALTER TABLE worker_pane_close_steps_legacy RENAME TO worker_pane_close_steps;
-      DELETE FROM schema_migrations WHERE version = 45;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 45;
       PRAGMA foreign_keys = ON;
     `);
     legacy.close();
@@ -1367,7 +3226,7 @@ describe("SQLite store", () => {
     expect(store.acceptInstanceTurnWithCard(input)).toMatchObject({ inserted: false, turn: { id: "turn-1" } });
     expect(store.loadWorkerTurnCard("turn-1")).toMatchObject({ requestText: "review", queuePosition: 1 });
     expect(store.listPendingOutboundReplies().filter(({ workerTurnId }) => workerTurnId === "turn-1")).toEqual([expect.objectContaining({
-      idempotencyKey: "worker-turn:create:turn-1:0", kind: "stream_card_create", rootMessageId: "root-1"
+      idempotencyKey: "worker-turn:create:turn-1:0", kind: "stream_card_create", intentKind: "stream-card", rootMessageId: "root-1"
     })]);
     expect(store.hasPendingOutboundReplyForWorkerTurn("turn-1")).toBe(true);
     expect(store.hasPendingOutboundReplyForWorkerTurn("missing")).toBe(false);
@@ -1375,7 +3234,841 @@ describe("SQLite store", () => {
     expect(pendingPlan.some(({ detail }) => detail.includes("outbound_replies_worker_pending"))).toBe(true);
   });
 
-  it("reserves one durable Human Review notification for a Worker blocked episode", () => {
+  it("persists a waiting Worker completion obligation without notifying before final Task Card delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-next-input", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-next-input", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-next-input", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", paneToken: "p001", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-completed", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review durable flow", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+
+    const completed = store.transitionInstanceTurnWithProjection({
+      turnId: view.turnId,
+      expectedGeneration: worker.generation,
+      state: "completed",
+      result: "finding",
+      eventKind: "turn.completed",
+      change: { type: "completed", occurredAt: "2026-10-01T00:00:01.000Z", answer: withLegacyCompletionChoice("finding") },
+      render: renderWorkerTurnCard
+    });
+
+    expect(completed).toMatchObject({
+      turn: { state: "completed", result: "finding" },
+      view: { phase: "completed", answer: "finding" },
+      completionActionEligibility: { outcome: "deferred" }
+    });
+    const notifications = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"));
+    expect(notifications).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'worker-turn' AND owner_id = ?").get(view.turnId)).toEqual({ state: "waiting_for_answer" });
+
+    const successor = createQueuedWorkerTurnCard({ turnId: "turn-after-completion", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "new request", queuePosition: 1, occurredAt: "2026-10-01T00:00:02.000Z" });
+    expect(store.acceptInstanceTurnWithCard({ id: successor.turnId, idempotencyKey: successor.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: successor.requestText, parentTurnId: null, sourceMessageId: "m2", view: successor, render: renderWorkerTurnCard })).toMatchObject({ inserted: true, turn: { state: "queued" } });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+  });
+
+  it.each([
+    [{ kind: "human", userId: "ou_actor", channel: "feishu" } as const, "ou_creator", "ou_actor", "waiting_for_answer"],
+    [{ kind: "human", userId: "local-user", channel: "local" } as const, "ou_creator", "ou_creator", "waiting_for_answer"],
+    [{ kind: "human", userId: "local-user", channel: "local" } as const, null, null, "missing_mention_target"]
+  ] as const)("resolves the Worker completion mention from actor provenance %o", (actor, creatorOpenId, expectedMention, expectedState) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-mention", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId });
+    store.updateBinding("binding-worker-mention", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-mention", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-mention", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "completed", result: "final", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-10-01T00:00:01.000Z", answer: withLegacyCompletionChoice("final") }, render: renderWorkerTurnCard });
+    const completed = store.loadWorkerTurnCard(view.turnId)!;
+    store.database.prepare("UPDATE worker_turn_cards SET delivered_version = ? WHERE turn_id = ?").run(completed.viewVersion, view.turnId);
+    store.database.prepare("UPDATE worker_turn_card_pages SET state = 'finished', card_id = 'worker-card', message_id = 'worker-message' WHERE turn_id = ?").run(view.turnId);
+
+    const actions = store.prepareWorkerCompletionActionSet({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message" });
+    if (expectedMention) expect(actions).toMatchObject({ state: "available", mentionOpenId: expectedMention });
+    else {
+      expect(actions).toBeNull();
+      expect(store.loadWorkerTurnCard(view.turnId)).toMatchObject({ phase: "completed", answer: "final" });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_action_sets WHERE owner_kind = 'worker-turn' AND owner_id = ? AND state = 'available'").get(view.turnId)).toEqual({ count: 0 });
+    }
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'worker-turn' AND owner_id = ?").get(view.turnId)).toEqual({ state: expectedState });
+  });
+
+  it("prepares one durable completion action set for the exact final Worker Task page", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-actions", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-worker-actions", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-actions", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", paneToken: "p001", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-worker-actions", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "completed", result: "final", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-10-01T00:00:01.000Z", answer: withLegacyCompletionChoice("final") }, render: renderWorkerTurnCard });
+    store.database.prepare("UPDATE worker_turn_card_pages SET state = 'finished' WHERE turn_id = ?").run(view.turnId);
+
+    const actions = store.prepareWorkerCompletionActionSet({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message" });
+
+    expect(actions).toMatchObject({ state: "available", mentionOpenId: "ou_actor", ownerKind: "worker-turn", ownerId: view.turnId, ownerGeneration: worker.workerSessionGeneration, cardMessageId: "worker-message" });
+    expect(store.prepareWorkerCompletionActionSet({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message" })).toEqual(actions);
+    expect(store.database.prepare(`SELECT owner_kind, owner_id, owner_generation, binding_id, binding_generation, page_index, card_id, card_message_id, mention_open_id, state
+      FROM completion_action_sets WHERE owner_kind = 'worker-turn' AND owner_id = ?`).get(view.turnId)).toEqual({
+      owner_kind: "worker-turn", owner_id: view.turnId, owner_generation: worker.workerSessionGeneration,
+      binding_id: "binding-worker-actions", binding_generation: 1, page_index: 0, card_id: "worker-card",
+      card_message_id: "worker-message", mention_open_id: "ou_actor", state: "available"
+    });
+    if (!actions || actions.state !== "available") throw new Error("expected available Worker completion actions");
+    store.database.prepare("UPDATE completion_action_sets SET choice_specification_id = NULL WHERE id = ?").run(actions.id);
+    expect(store.listActionableWorkerTurnCardIds()).toContain(view.turnId);
+    store.database.prepare("UPDATE worker_turn_cards SET instance_generation=? WHERE turn_id=?").run(worker.generation + 99, view.turnId);
+    expect(store.listActionableWorkerTurnCardIds()).not.toContain(view.turnId);
+    store.database.prepare("UPDATE worker_turn_cards SET instance_generation=? WHERE turn_id=?").run(worker.generation, view.turnId);
+    expect(store.reserveWorkerTurnCardHydration({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message", card: { completionActions: "available", actionSetId: actions.id } })).toBe("reserved");
+    const availableHydration = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "card_update")!;
+    store.markOutboundReplyDelivered(availableHydration.id, "worker-message", "worker-card");
+    const pendingMention = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"));
+    expect(pendingMention).toMatchObject({ state: "pending", kind: "text" });
+    expect(store.getWorkerTurnCardDeliveryFacts(view.turnId, 0).finalUpdateState).toBe("delivered");
+    expect(store.listActionableWorkerTurnCardIds()).not.toContain(view.turnId);
+    const followup = createQueuedWorkerTurnCard({ turnId: "turn-worker-followup", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: view.turnId, rootMessageId: view.rootMessageId, requestText: "继续。", queuePosition: 1, occurredAt: "2026-10-01T00:00:02.000Z" });
+    const acceptance = {
+      actionSetId: actions.id, selection: "continue" as const, ownerTurnId: view.turnId, ownerGeneration: worker.workerSessionGeneration,
+      cardMessageId: "worker-message", chatId: "chat", actorOpenId: "ou_actor",
+      accepted: { id: followup.turnId, idempotencyKey: `completion-action:v1:${actions.id}:continue`, actor: { kind: "human" as const, userId: "ou_actor", channel: "feishu" as const }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "followup" as const, text: "继续。", parentTurnId: view.turnId, sourceMessageId: "worker-message", view: followup, render: renderWorkerTurnCard }
+    };
+
+    expect(store.acceptWorkerCompletionAction(acceptance)).toMatchObject({ inserted: true, turn: { id: followup.turnId, kind: "followup", parentTurnId: view.turnId, text: "继续。" }, completionActionOwnerTurnIds: [view.turnId] });
+    expect(store.acceptWorkerCompletionAction(acceptance)).toMatchObject({ inserted: false, turn: { id: followup.turnId }, completionActionOwnerTurnIds: [view.turnId] });
+    expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = ?").get(pendingMention!.id)).toEqual({
+      state: "dismissed",
+      error: "Human Review mention became obsolete before first delivery attempt"
+    });
+    expect(store.database.prepare("SELECT state, selected_action, result_source_key FROM completion_action_sets WHERE id = ?").get(actions.id)).toEqual({ state: "consumed", selected_action: "continue", result_source_key: `completion-action:v1:${actions.id}:continue` });
+    expect(store.getWorkerTurnCardDeliveryFacts(view.turnId, 0).finalUpdateState).toBeNull();
+    expect(store.listActionableWorkerTurnCardIds()).toContain(view.turnId);
+    expect(store.reserveWorkerTurnCardHydration({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message", card: { completionActions: "consumed" } })).toBe("reserved");
+    const consumedHydration = store.listPendingOutboundReplies().filter(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "card_update").at(-1)!;
+    store.markOutboundReplyDelivered(consumedHydration.id, "worker-message", "worker-card");
+    expect(store.listActionableWorkerTurnCardIds()).not.toContain(view.turnId);
+    expect(store.listInstanceTurns(worker.id).items.filter(({ parentTurnId }) => parentTurnId === view.turnId)).toHaveLength(1);
+  });
+
+  it("reserves one fresh authoritative Worker Turn review card in its canonical Worker thread", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-fresh-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-worker-fresh-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer-fresh", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-fresh-review", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer-fresh", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", paneToken: "p001", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-worker-fresh-review", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "completed", result: "final", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-10-01T00:00:01.000Z", answer: withLegacyCompletionChoice("final") }, render: renderWorkerTurnCard });
+    store.database.prepare("UPDATE worker_turn_card_pages SET state = 'finished' WHERE turn_id = ?").run(view.turnId);
+    const actionSetId = completionReviewActionSetIdentity("worker-turn", view.turnId, worker.workerSessionGeneration);
+    const card = renderCompletionReviewCard({
+      actionSetId, mentionOpenId: "ou_actor",
+      choicePrompt: { question: "请选择下一步。", defaultOption: { id: "default", label: "默认", submitText: "default" }, alternatives: [] }
+    });
+    store.database.prepare("UPDATE agent_instances SET desired_state='stopped' WHERE id=?").run(worker.id);
+    expect(store.prepareWorkerCompletionActionSet({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message", card })).toBeNull();
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_action_sets WHERE id=?").get(actionSetId)).toEqual({ count: 0 });
+    store.database.prepare("UPDATE agent_instances SET desired_state='running' WHERE id=?").run(worker.id);
+    const actions = (store as unknown as { prepareWorkerCompletionActionSet(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): unknown }).prepareWorkerCompletionActionSet({
+      turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message", card
+    });
+    const review = store.listPendingOutboundReplies().find(({ projectionKey }) => projectionKey === `completion-review:${actionSetId}:surface:1`);
+
+    expect(actions).toMatchObject({ id: actionSetId, state: "available", presentationKind: "fresh-card" });
+    expect(review).toMatchObject({ kind: "card_reply", bindingId: "binding-worker-fresh-review", rootMessageId: "worker-root", targetRole: "operation_result" });
+    expect(store.database.prepare(`SELECT presentation_kind,state,presentation_reply_id,presentation_message_id
+      FROM completion_action_sets WHERE id=?`).get(actionSetId)).toEqual({
+        presentation_kind: "fresh-card", state: "presenting", presentation_reply_id: review!.id, presentation_message_id: null
+      });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    store.database.prepare("UPDATE agent_instances SET desired_state='stopped' WHERE id=?").run(worker.id);
+    expect(() => store!.markOutboundReplyDelivered(review!.id, "worker-review-message", "worker-review-card")).toThrow("ACK identity conflict");
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actionSetId)).toEqual({ state: "presenting" });
+    store.database.prepare("UPDATE agent_instances SET desired_state='running' WHERE id=?").run(worker.id);
+    store.updateBinding("binding-worker-fresh-review", { sessionEpoch: 2 });
+    expect(() => store!.markOutboundReplyDelivered(review!.id, "worker-review-message", "worker-review-card")).toThrow("ACK identity conflict");
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actionSetId)).toEqual({ state: "presenting" });
+    store.updateBinding("binding-worker-fresh-review", { sessionEpoch: 1 });
+    expect(store.markOutboundReplyDelivered(review!.id, "worker-review-message", "worker-review-card")).toBe(true);
+    expect(store.database.prepare("SELECT state,presentation_message_id,presentation_card_id FROM completion_action_sets WHERE id=?").get(actionSetId)).toEqual({
+      state: "active", presentation_message_id: "worker-review-message", presentation_card_id: "worker-review-card"
+    });
+    const interactions = store.capabilityModules().instance;
+    expect(interactions.resolveFreshWorkerCompletionReview({ actionSetId, optionId: "default", messageId: "worker-review-message", actorOpenId: "ou_actor", chatId: "chat" })).toEqual({
+      ownerTurnId: view.turnId, ownerGeneration: worker.workerSessionGeneration, cardMessageId: "worker-review-message"
+    });
+    expect(interactions.resolveFreshWorkerCompletionReview({ actionSetId, optionId: "default", messageId: "wrong-message", actorOpenId: "ou_actor", chatId: "chat" })).toBeNull();
+    const followup = createQueuedWorkerTurnCard({
+      turnId: "turn-worker-fresh-followup", instanceId: worker.id, instanceGeneration: worker.generation,
+      workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: view.turnId,
+      rootMessageId: view.rootMessageId, requestText: "default", queuePosition: 1, occurredAt: "2026-10-01T00:00:02.000Z"
+    });
+    const acceptance = {
+      actionSetId, optionId: "default", ownerTurnId: view.turnId, ownerGeneration: worker.workerSessionGeneration,
+      cardMessageId: "worker-review-message", chatId: "chat", actorOpenId: "ou_actor",
+      accepted: {
+        id: followup.turnId, idempotencyKey: `completion-choice:v1:${actionSetId}:default`, actor: { kind: "human" as const, userId: "ou_actor", channel: "feishu" as const },
+        projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "followup" as const,
+        text: "default", parentTurnId: view.turnId, sourceMessageId: "worker-review-message", view: followup, render: renderWorkerTurnCard
+      }
+    };
+    expect(store.acceptWorkerCompletionAction(acceptance)).toMatchObject({ inserted: true, turn: { id: followup.turnId, parentTurnId: view.turnId } });
+    expect(store.acceptWorkerCompletionAction(acceptance)).toMatchObject({ inserted: false, turn: { id: followup.turnId } });
+    expect(store.database.prepare("SELECT state,selected_choice_option_id FROM completion_action_sets WHERE id=?").get(actionSetId)).toEqual({
+      state: "consumed", selected_choice_option_id: "default"
+    });
+    expect(store.listInstanceTurns(worker.id).items.filter(({ parentTurnId }) => parentTurnId === view.turnId)).toHaveLength(1);
+  });
+
+  it("keeps Worker Human Review inline after the component Task snapshot is delivered", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-notify", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-worker-notify", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer-notify", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-notify", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", paneToken: "p001", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-worker-notify", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    const answer = "Done.\n\n```herdr-choice-list\n{\"version\":2,\"intent\":\"human_review\",\"question\":\"是否继续？\",\"default\":\"yes\",\"options\":[{\"id\":\"yes\",\"label\":\"继续\",\"message\":\"default\"}]}\n```";
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-10-01T00:00:01.000Z", answer }, render: renderWorkerTurnCard });
+    store.database.prepare("UPDATE worker_turn_card_pages SET state = 'finished' WHERE turn_id = ?").run(view.turnId);
+    const actions = store.prepareWorkerCompletionActionSet({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message" })!;
+    expect(store.reserveWorkerTurnCardHydration({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message", card: { actionSetId: actions.id } })).toBe("reserved");
+    const componentReply = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "card_update")!;
+
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.markOutboundReplyDelivered(componentReply.id, "worker-message", "worker-card")).toBe(true);
+    expect(store.markOutboundReplyDelivered(componentReply.id, "worker-message", "worker-card")).toBe(false);
+
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state, notification_reply_id FROM completion_notification_obligations WHERE owner_kind = 'worker-turn' AND owner_id = ?").get(view.turnId)).toEqual({
+      state: "suppressed",
+      notification_reply_id: null
+    });
+    expect(store.prepareWorkerCompletionActionSet({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message" })).toEqual(actions);
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actions.id)).toEqual({ state: "available" });
+  });
+
+  it("atomically ignores a fresh Worker Human Review choice without creating a Turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-ignore", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-worker-ignore", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-ignore", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-worker-ignore", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-03T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === view.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    const answer = "Done.\n\n```herdr-choice-list\n{\"version\":2,\"intent\":\"human_review\",\"question\":\"是否继续？\",\"default\":\"yes\",\"options\":[{\"id\":\"yes\",\"label\":\"继续\",\"message\":\"default\"}]}\n```";
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "completed", result: answer, eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-10-03T00:00:01.000Z", answer }, render: renderWorkerTurnCard });
+    store.database.prepare("UPDATE worker_turn_card_pages SET state = 'finished' WHERE turn_id = ?").run(view.turnId);
+    const actionSetId = completionReviewActionSetIdentity("worker-turn", view.turnId, worker.workerSessionGeneration);
+    const actions = store.prepareWorkerCompletionActionSet({
+      turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message",
+      card: renderCompletionReviewCard({ actionSetId, mentionOpenId: "ou_actor", choicePrompt: { question: "是否继续？", defaultOption: { id: "yes", label: "继续", submitText: "default" }, alternatives: [] } })
+    });
+    if (!actions) throw new Error("expected Worker Human Review actions");
+    const review = store.listPendingOutboundReplies().find(({ projectionKey }) => projectionKey === `completion-review:${actionSetId}:surface:1`)!;
+    store.markOutboundReplyDelivered(review.id, "worker-review-message", "worker-review-card");
+    const turnCount = store.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get();
+    const ignore = { actionSetId: actions.id, ownerTurnId: view.turnId, ownerGeneration: worker.workerSessionGeneration, cardMessageId: "worker-review-message", chatId: "chat", actorOpenId: "ou_actor" };
+
+    expect(store.ignoreWorkerCompletionAction(ignore)).toEqual({ ownerId: view.turnId, changed: true });
+    expect(store.ignoreWorkerCompletionAction(ignore)).toEqual({ ownerId: view.turnId, changed: false });
+    expect(store.database.prepare("SELECT action_kind, semantic_key, message_id, state FROM card_dismissals").all()).toEqual([]);
+    expect(() => store!.ignoreWorkerCompletionAction({ ...ignore, actorOpenId: "ou_other" })).toThrow("Worker completion action is no longer available");
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get()).toEqual(turnCount);
+    expect(store.database.prepare("SELECT state,reason FROM completion_action_sets WHERE id=?").get(actions.id)).toEqual({ state: "consumed", reason: "ignored" });
+  });
+
+  it("atomically supersedes an active fresh Worker completion review when later Human work is accepted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-supersede", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-worker-supersede", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-supersede", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", paneToken: "p001", nativeSessionId: "worker-session" })!;
+    const completedView = createQueuedWorkerTurnCard({ turnId: "turn-before-human", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: completedView.turnId, idempotencyKey: completedView.turnId, actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: completedView.requestText, parentTurnId: null, sourceMessageId: "m1", view: completedView, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === completedView.turnId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.transitionInstanceTurnWithProjection({ turnId: completedView.turnId, expectedGeneration: worker.generation, state: "completed", result: "final", eventKind: "turn.completed", change: { type: "completed", occurredAt: "2026-10-01T00:00:01.000Z", answer: withLegacyCompletionChoice("final") }, render: renderWorkerTurnCard });
+    store.database.prepare("UPDATE worker_turn_card_pages SET state = 'finished' WHERE turn_id = ?").run(completedView.turnId);
+    const actionSetId = completionReviewActionSetIdentity("worker-turn", completedView.turnId, worker.workerSessionGeneration);
+    const actions = store.prepareWorkerCompletionActionSet({
+      turnId: completedView.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message",
+      card: renderCompletionReviewCard({ actionSetId, mentionOpenId: "ou_actor", choicePrompt: { question: "请选择下一步。", defaultOption: { id: "default", label: "默认", submitText: "default" }, alternatives: [] } })
+    });
+    const review = store.listPendingOutboundReplies().find(({ projectionKey }) => projectionKey === `completion-review:${actionSetId}:surface:1`)!;
+    store.markOutboundReplyDelivered(review.id, "worker-review-message", "worker-review-card");
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state,notification_reply_id FROM completion_notification_obligations WHERE owner_kind='worker-turn' AND owner_id=?").get(completedView.turnId)).toEqual({ state: "suppressed", notification_reply_id: null });
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actions!.id)).toEqual({ state: "active" });
+
+    const detached = store.detachAgentInstanceRuntime({ instanceId: worker.id, expectedGeneration: worker.generation, reason: "pane replaced" })!;
+    const replaced = store.attachAgentInstanceRuntime({ instanceId: detached.id, expectedGeneration: detached.generation, herdrWorkspaceId: "w1", paneId: "worker-pane-2", paneToken: "p002", nativeSessionId: "worker-session-2" })!;
+    const successor = createQueuedWorkerTurnCard({ turnId: "turn-after-human", instanceId: replaced.id, instanceGeneration: replaced.generation, workerSessionGeneration: replaced.workerSessionGeneration, workerName: replaced.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "new request", queuePosition: 1, occurredAt: "2026-10-01T00:00:02.000Z" });
+    const accepted = store.acceptInstanceTurnWithCard({ id: successor.turnId, idempotencyKey: "lark:m2", actor: { kind: "human", userId: "ou_actor", channel: "feishu" }, projectId: "p1", instanceId: replaced.id, instanceGeneration: replaced.generation, kind: "turn", text: successor.requestText, parentTurnId: null, sourceMessageId: "m2", view: successor, render: renderWorkerTurnCard });
+
+    expect(accepted).toMatchObject({ inserted: true, completionActionOwnerTurnIds: [completedView.turnId] });
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE id = ?").get(actions!.id)).toEqual({ state: "superseded", reason: "successor-accepted" });
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id=?").get(review.id)).toEqual({ state: "delivered" });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state,notification_reply_id FROM completion_notification_obligations WHERE owner_kind='worker-turn' AND owner_id=?").get(completedView.turnId)).toEqual({ state: "suppressed", notification_reply_id: null });
+    expect(() => store!.ignoreWorkerCompletionAction({ actionSetId: actions!.id, ownerTurnId: completedView.turnId, ownerGeneration: worker.workerSessionGeneration, cardMessageId: "worker-review-message", chatId: "chat", actorOpenId: "ou_actor" })).toThrow("Worker completion action is no longer available");
+  });
+
+  it("persists a waiting Primary completion obligation without notifying before final Answer delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-next-input", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-next-input", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-completed", bindingId: "binding-primary-next-input", bindingGeneration: 1, title: "Analyze durability", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "analyze durable flow", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m1", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.updatePrompt(view.promptId, "running");
+
+    const completed = store.completeTurn({
+      promptId: view.promptId, bindingId: view.bindingId, answer: withLegacyCompletionChoice("finding"), occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp"
+    });
+
+    expect(completed).toMatchObject({
+      binding: { id: view.bindingId, lastAgentState: "done" }
+    });
+    expect(store.getPrompt(view.promptId)).toMatchObject({ state: "delivered", observationState: "completed" });
+    expect(store.loadRunCard(view.promptId)).toMatchObject({ phase: "completed", answer: "finding" });
+    const notifications = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"));
+    expect(notifications).toHaveLength(0);
+    expect(store.database.prepare(`SELECT owner_kind, owner_id, binding_id, binding_generation, state
+      FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = ?`).all(view.promptId)).toEqual([{
+      owner_kind: "primary-prompt",
+      owner_id: view.promptId,
+      binding_id: view.bindingId,
+      binding_generation: 1,
+      state: "waiting_for_answer"
+    }]);
+  });
+
+  it("persists one available Primary completion action set for the exact final Answer Card", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-actions", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-actions", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-actions", bindingId: "binding-primary-actions", bindingGeneration: 1, title: "Analyze durability", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "analyze durable flow", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m1", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    store.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer: withLegacyCompletionChoice("done"), occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp" });
+
+    const actions = (store as unknown as { preparePrimaryCompletionActionSet(input: { promptId: string; pageIndex: number; cardId: string; messageId: string }): unknown }).preparePrimaryCompletionActionSet({
+      promptId: view.promptId,
+      pageIndex: 0,
+      cardId: "answer-card",
+      messageId: "answer-message"
+    });
+
+    expect(actions).toMatchObject({
+      state: "available",
+      mentionOpenId: "ou_actor",
+      ownerKind: "primary-prompt",
+      ownerId: view.promptId,
+      ownerGeneration: 1,
+      cardMessageId: "answer-message"
+    });
+    expect(store.database.prepare(`SELECT owner_kind, owner_id, state, mention_open_id, card_message_id
+      FROM completion_action_sets WHERE owner_kind = 'primary-prompt' AND owner_id = ?`).get(view.promptId)).toEqual({
+      owner_kind: "primary-prompt",
+      owner_id: view.promptId,
+      state: "available",
+      mention_open_id: "ou_actor",
+      card_message_id: "answer-message"
+    });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+  });
+
+  it("keeps Primary Human Review inline after the component Answer snapshot is delivered", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-notify", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-notify", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-notify", bindingId: "binding-primary-notify", bindingGeneration: 1, title: "Choose", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "choose", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m1", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    store.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer: "Done.\n\n```herdr-choice-list\n{\"version\":2,\"intent\":\"human_review\",\"question\":\"是否继续？\",\"default\":\"yes\",\"options\":[{\"id\":\"yes\",\"label\":\"继续\",\"message\":\"default\"}]}\n```", occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp" });
+    const actions = store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" })!;
+    expect(store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message", card: { actionSetId: actions.id } })).toBe("reserved");
+    const componentReply = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "card_update")!;
+
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.markOutboundReplyDelivered(componentReply.id, "answer-message", "answer-card")).toBe(true);
+    expect(store.markOutboundReplyDelivered(componentReply.id, "answer-message", "answer-card")).toBe(false);
+
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state, notification_reply_id FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = ?").get(view.promptId)).toEqual({
+      state: "suppressed",
+      notification_reply_id: null
+    });
+    expect(store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" })).toEqual(actions);
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actions.id)).toEqual({ state: "available" });
+    store.updateBinding(view.bindingId, { attachment: "orphaned" });
+    expect(store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" })).toEqual(actions);
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE id = ?").get(actions.id)).toEqual({ state: "available", reason: null });
+    expect(store.database.prepare("SELECT state, notification_reply_id FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = ?").get(view.promptId)).toEqual({
+      state: "suppressed",
+      notification_reply_id: null
+    });
+  });
+
+  it("reserves one fresh authoritative Primary Prompt review card", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-fresh-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-fresh-review", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", traexSessionId: "primary-session",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "primary-session", lastAgentState: "working"
+    });
+    const view = createQueuedRunCard({ promptId: "prompt-fresh-review", bindingId: "binding-primary-fresh-review", bindingGeneration: 1, title: "Choose", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "choose", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m1", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    store.completeTurn({
+      promptId: view.promptId, bindingId: view.bindingId, answer: "Decision ready.", occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp-fresh-review",
+      completionChoice: { question: "是否继续？", defaultOption: { id: "yes", label: "继续", submitText: "default" }, alternatives: [] }
+    });
+    const actionSetId = completionReviewActionSetIdentity("primary-prompt", view.promptId, 1);
+    const card = renderCompletionReviewCard({
+      actionSetId, mentionOpenId: "ou_actor",
+      choicePrompt: { question: "是否继续？", defaultOption: { id: "yes", label: "继续", submitText: "default" }, alternatives: [] }
+    });
+    const actions = (store as unknown as { preparePrimaryCompletionActionSet(input: { promptId: string; pageIndex: number; cardId: string; messageId: string; card: object }): unknown }).preparePrimaryCompletionActionSet({
+      promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message", card
+    });
+    const review = store.listPendingOutboundReplies().find(({ projectionKey }) => projectionKey === `completion-review:${actionSetId}:surface:1`);
+
+    expect(actions).toMatchObject({ id: actionSetId, state: "available", presentationKind: "fresh-card" });
+    expect(review).toMatchObject({ kind: "card_reply", rootMessageId: "primary-root", targetRole: "operation_result" });
+    expect(JSON.stringify(JSON.parse(review!.payload))).toContain("<at id=ou_actor></at>");
+    expect(store.database.prepare(`SELECT presentation_kind,state,presentation_reply_id,presentation_message_id
+      FROM completion_action_sets WHERE id=?`).get(actionSetId)).toEqual({
+        presentation_kind: "fresh-card", state: "presenting", presentation_reply_id: review!.id, presentation_message_id: null
+      });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    store.database.prepare("UPDATE outbound_replies SET effect_certainty='uncertain',attempt_count=1 WHERE id=?").run(review!.id);
+    expect(store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message", card }))
+      .toEqual(actions);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE projection_key=?").get(review!.projectionKey)).toEqual({ count: 1 });
+
+    const interactions = store.capabilityModules().cardInteraction;
+    const choose = (optionId: string, messageId = "review-message", actorOpenId = "ou_actor", chatId = "chat") =>
+      interactions.decidePrimaryCompletionReview({ actionSetId, optionId, messageId, actorOpenId, chatId, occurredAt: "2026-10-01T00:00:02.000Z" });
+    expect(() => choose("yes")).toThrow("no longer available");
+    expect(store.markOutboundReplyDelivered(review!.id, "review-message", "review-card")).toBe(true);
+    expect(() => choose("yes", "wrong-message")).toThrow("no longer available");
+    expect(() => choose("yes", "review-message", "ou_other")).toThrow("no longer available");
+    expect(() => choose("yes", "review-message", "ou_actor", "other-chat")).toThrow("no longer available");
+    expect(() => choose("missing")).toThrow("no longer available");
+
+    const accepted = choose("yes");
+    expect(accepted).toMatchObject({ ownerKind: "primary-prompt", kind: "submission", promptId: view.promptId, inserted: true });
+    expect(choose("yes")).toMatchObject({ kind: "submission", promptId: view.promptId, inserted: false });
+    expect(() => choose("ignore")).toThrow("no longer available");
+    expect(store.database.prepare(`SELECT ingress_source,actor_json,text,state,owner_kind,owner_id,owner_generation FROM submission_intents
+      WHERE submission_id=?`).get(accepted.kind === "submission" ? accepted.submissionId : "missing")).toEqual({
+        ingress_source: "feishu:primary",
+        actor_json: JSON.stringify({ kind: "human", id: "ou_actor", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", gatewayId: "feishu:primary" }),
+        text: "default", state: "recorded", owner_kind: "primary", owner_id: view.bindingId, owner_generation: 1
+      });
+    expect(store.capabilityModules().agentInputs.get(accepted.kind === "submission" ? accepted.submissionId : "missing")?.input).toEqual({
+      schemaVersion: 2,
+      text: "default",
+      choice: { actionSetId, optionId: "yes", sourceMessageId: "review-message" }
+    });
+  });
+
+  it("does not reserve a fresh Primary Prompt review after agent-kind drift", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-review-agent-drift", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-review-agent-drift", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", agentKind: "traex", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-review-agent-drift", bindingId: "binding-primary-review-agent-drift", bindingGeneration: 1, title: "Choose", workspaceId: "w1", paneId: "primary-pane", agentKind: "traex", requestText: "choose", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-agent-drift", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    store.completeTurn({
+      promptId: view.promptId, bindingId: view.bindingId, answer: "Decision ready.", occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp-agent-drift",
+      completionChoice: { version: 2, intent: "human_review", question: "是否继续？", default: "yes", options: [{ id: "yes", label: "继续", message: "default" }] }
+    });
+    store.updateBinding(view.bindingId, { agentKind: "pi" });
+    const actionSetId = completionReviewActionSetIdentity("primary-prompt", view.promptId, 1);
+
+    expect(store.preparePrimaryCompletionActionSet({
+      promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message",
+      card: renderCompletionReviewCard({ actionSetId, mentionOpenId: "ou_actor", choicePrompt: { question: "是否继续？", defaultOption: { id: "yes", label: "继续", submitText: "default" }, alternatives: [] } })
+    })).toBeNull();
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_action_sets WHERE id=?").get(actionSetId)).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE projection_key=?").get(`completion-review:${actionSetId}:surface:1`)).toEqual({ count: 0 });
+  });
+
+  it("atomically normalizes and persists ordered Primary completion choices", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-choices", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-choices", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-choices", bindingId: "binding-primary-choices", bindingGeneration: 1, title: "Choose", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "choose", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-choice", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    const protocol = ["Choose one.", "", "```herdr-choice-list", JSON.stringify({ version: 1, default: "one", options: [
+      { id: "one", label: "方案一", message: "default" },
+      { id: "two", label: "方案二", message: "2" }
+    ] }, null, 2), "```"].join("\n");
+
+    store.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer: protocol, occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp-choice" });
+    const actions = store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" });
+
+    expect(store.loadRunCard(view.promptId)?.answer).toBe("Choose one.");
+    expect(actions).toMatchObject({ state: "available", choicePrompt: {
+      question: "请选择下一步。",
+      defaultOption: { id: "one", label: "方案一", submitText: "default" },
+      alternatives: [{ id: "two", label: "方案二", submitText: "2" }]
+    } });
+    expect(store.database.prepare("SELECT option_id, label, message FROM completion_choice_options ORDER BY ordinal").all()).toEqual([
+      { option_id: "one", label: "方案一", message: "default" },
+      { option_id: "two", label: "方案二", message: "2" }
+    ]);
+  });
+
+  it("persists a structural Primary Human Review question with its ordered choices", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-review-choice", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-review-choice", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-review-choice", bindingId: "binding-primary-review-choice", bindingGeneration: 1, title: "Choose", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "choose", queuePosition: 1, occurredAt: "2026-10-03T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-review", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    const completionChoice = {
+      question: "是否批准重启？",
+      defaultOption: { id: "approve", label: "批准", submitText: "default" },
+      alternatives: [{ id: "cancel", label: "取消", submitText: "取消重启" }]
+    };
+
+    const completed = store.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer: "Decision ready.", completionChoice, occurredAt: "2026-10-03T00:00:01.000Z", outputFingerprint: "fp-review-choice" });
+    const actions = store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" });
+
+    expect(completed.completionActionEligibility).toEqual({ outcome: "deferred" });
+    expect(store.loadRunCard(view.promptId)?.answer).toBe("Decision ready.");
+    expect(actions).toMatchObject({ choicePrompt: {
+      question: "是否批准重启？",
+      defaultOption: { id: "approve", label: "批准", submitText: "default" },
+      alternatives: [{ id: "cancel", label: "取消", submitText: "取消重启" }]
+    } });
+    expect(store.database.prepare("SELECT question FROM completion_choice_specifications WHERE owner_id = ?").get(view.promptId)).toEqual({ question: "是否批准重启？" });
+    if (!actions) throw new Error("expected Primary Human Review actions");
+    const promptCount = store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get();
+    const ignore = { actionSetId: actions.id, ownerPromptId: view.promptId, ownerGeneration: 1, cardMessageId: "answer-message", actorOpenId: "ou_actor" };
+    expect(store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message", card: { actionSetId: actions.id } })).toBe("reserved");
+    const componentReply = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "card_update")!;
+    store.markOutboundReplyDelivered(componentReply.id, "answer-message", "answer-card");
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state,notification_reply_id FROM completion_notification_obligations WHERE owner_kind='primary-prompt' AND owner_id=?").get(view.promptId)).toEqual({ state: "suppressed", notification_reply_id: null });
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actions.id)).toEqual({ state: "available" });
+    expect(store.ignorePrimaryCompletionAction(ignore)).toEqual({ ownerId: view.promptId, changed: true });
+    expect(store.ignorePrimaryCompletionAction(ignore)).toEqual({ ownerId: view.promptId, changed: false });
+    expect(store.database.prepare("SELECT action_kind, semantic_key, message_id, state FROM card_dismissals").all()).toEqual([{
+      action_kind: "primary_completion_ignore", semantic_key: `completion-action:${actions.id}`,
+      message_id: "answer-message", state: "deleting"
+    }]);
+    expect(() => store!.ignorePrimaryCompletionAction({ ...ignore, actorOpenId: "ou_other" })).toThrow("Completion action is no longer available");
+    expect(store.database.prepare("SELECT state, reason, selected_action, selected_choice_option_id FROM completion_action_sets WHERE id = ?").get(actions.id)).toEqual({
+      state: "consumed", reason: "ignored", selected_action: null, selected_choice_option_id: null
+    });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual(promptCount);
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" })).toMatchObject({ state: "consumed", ignored: true });
+  });
+
+  it("creates durable Continue completion work for an explicit version 2 none decision", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-no-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-no-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-no-review", bindingId: "binding-primary-no-review", bindingGeneration: 1, title: "Done", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "finish", queuePosition: 1, occurredAt: "2026-10-03T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-none", ingressSource: "feishu", actorOpenId: "ou_actor", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.updatePrompt(view.promptId, "running");
+    const answer = "Done.\n\n```herdr-choice-list\n{\"version\":2,\"intent\":\"none\"}\n```";
+
+    const completed = store.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer, occurredAt: "2026-10-03T00:00:01.000Z", outputFingerprint: "fp-none" });
+
+    expect(completed.completionActionEligibility).toEqual({ outcome: "deferred" });
+    expect(store.loadRunCard(view.promptId)?.answer).toBe("Done.");
+    expect(store.database.prepare("SELECT question,default_option_id FROM completion_choice_specifications WHERE owner_id = ?").get(view.promptId))
+      .toEqual({ question: "是否继续？", default_option_id: "continue" });
+    expect(store.database.prepare("SELECT option_id,label,message FROM completion_choice_options WHERE specification_id=(SELECT id FROM completion_choice_specifications WHERE owner_id=?)").all(view.promptId))
+      .toEqual([{ option_id: "continue", label: "继续", message: "continue" }]);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_id = ?").get(view.promptId))
+      .toEqual({ state: "waiting_for_answer" });
+  });
+
+  it("atomically supersedes an available Primary completion action set when a later Human Message is accepted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-actions", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_creator" });
+    store.updateBinding("binding-primary-actions", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", traexSessionId: "session-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const completed = createQueuedRunCard({ promptId: "completed", bindingId: "binding-primary-actions", bindingGeneration: 1, title: "Completed", workspaceId: "w1", paneId: "primary-pane", requestText: "first", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: completed.promptId, bindingId: completed.bindingId, larkMessageId: "m1", actorOpenId: "ou_actor", body: completed.requestText }, view: completed, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === completed.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(completed.promptId, "running");
+    store.completeTurn({ promptId: completed.promptId, bindingId: completed.bindingId, answer: withLegacyCompletionChoice("done"), occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp" });
+    const actionSetId = completionReviewActionSetIdentity("primary-prompt", completed.promptId, 1);
+    const actionSet = store.preparePrimaryCompletionActionSet({
+      promptId: completed.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message",
+      card: renderCompletionReviewCard({
+        actionSetId, mentionOpenId: "ou_actor",
+        choicePrompt: { question: "请选择下一步。", defaultOption: { id: "default", label: "默认", submitText: "default" }, alternatives: [] }
+      })
+    })!;
+    const review = store.listPendingOutboundReplies().find(({ projectionKey }) => projectionKey === `completion-review:${actionSetId}:surface:1`)!;
+    store.markOutboundReplyDelivered(review.id, "review-message", "review-card");
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state,notification_reply_id FROM completion_notification_obligations WHERE owner_kind='primary-prompt' AND owner_id=?").get(completed.promptId)).toEqual({ state: "suppressed", notification_reply_id: null });
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id=?").get(actionSet.id)).toEqual({ state: "active" });
+    store.updateBinding(completed.bindingId, { sessionEpoch: 2, traexSessionId: "session-2", agentSessionValue: "session-2" });
+    expect(() => store!.capabilityModules().cardInteraction.decidePrimaryCompletionReview({
+      actionSetId: actionSet.id, optionId: "default", messageId: "review-message", actorOpenId: "ou_actor", chatId: "chat", occurredAt: "2026-10-01T00:00:01.500Z"
+    })).toThrow("no longer available");
+    const successor = createQueuedRunCard({ promptId: "successor", bindingId: completed.bindingId, bindingGeneration: 1, title: "Next", workspaceId: "w1", paneId: "primary-pane", requestText: "next", queuePosition: 1, occurredAt: "2026-10-01T00:00:02.000Z" });
+
+    const receipt = store.acceptPromptWithEffects({
+      prompt: { id: successor.promptId, bindingId: successor.bindingId, larkMessageId: "m2", actorOpenId: "ou_actor", body: successor.requestText },
+      view: successor,
+      rootMessageId: "primary-root",
+      answerCard: {},
+      expectedBindingGeneration: 1
+    });
+
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE id = ?").get(actionSet.id)).toEqual({ state: "superseded", reason: "successor-accepted" });
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id=?").get(review.id)).toEqual({ state: "delivered" });
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind='primary-prompt' AND owner_id=?").get(completed.promptId)).toEqual({ state: "suppressed" });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state,notification_reply_id FROM completion_notification_obligations WHERE owner_kind='primary-prompt' AND owner_id=?").get(completed.promptId)).toEqual({ state: "suppressed", notification_reply_id: null });
+    expect(receipt.consumeEffects()).toContainEqual({ kind: "answer-converge", promptId: completed.promptId });
+  });
+
+  it("atomically supersedes fixed Primary completion actions when an immediate native Human batch is accepted", () => {
+    store = new SqliteBindingStore(":memory:");
+    const actionSet = preparePrimaryCompletionActions(store, false);
+    store.updateBinding("binding-native-actions", { lastAgentState: "idle" });
+    const combinedBody = "[Feishu message 1/1]\nnew human input";
+    const view = createQueuedRunCard({ promptId: "batch-immediate", bindingId: "binding-native-actions", bindingGeneration: 1, title: "Next", workspaceId: "w1", paneId: "primary-pane", requestText: combinedBody, queuePosition: 1, occurredAt: "2026-10-01T00:00:02.000Z" });
+
+    const accepted = store.acceptImmediateNativeInputBatch({
+      input: { id: "input-immediate", bindingId: "binding-native-actions", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "native-immediate", larkMessageId: "native-immediate", actorOpenId: "ou_actor", body: "new human input", rootMessageId: "primary-root", parentPromptId: null },
+      batchId: "batch-immediate", combinedBody, occurredAt: "2026-10-01T00:00:02.000Z", view, answerCard: {}, maxQueueDepth: 20
+    });
+
+    expect(accepted.supersededPromptIds).toEqual(["completed-native-actions"]);
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE id = ?").get(actionSet.id)).toEqual({ state: "superseded", reason: "successor-accepted" });
+    expect(() => store!.acceptPrimaryCompletionAction({
+      actionSetId: actionSet.id, selection: "continue", ownerPromptId: "completed-native-actions", ownerGeneration: 1,
+      cardMessageId: "answer-message", actorOpenId: "ou_actor",
+      accepted: { prompt: { id: "forbidden", bindingId: "binding-native-actions", larkMessageId: null, ingressSource: "internal", sourceMessageKey: `completion-action:v1:${actionSet.id}:continue`, actorOpenId: "ou_actor", body: "继续。", parentPromptId: "completed-native-actions" }, view: { ...view, promptId: "forbidden", requestText: "继续。" }, rootMessageId: "primary-root", answerCard: {}, expectedBindingGeneration: 1 }
+    })).toThrow("Completion action is no longer available");
+  });
+
+  it("supersedes dynamic Primary completion choices as soon as native collection starts and keeps them unavailable when the batch forms", () => {
+    store = new SqliteBindingStore(":memory:");
+    const actionSet = preparePrimaryCompletionActions(store, true);
+    store.updateBinding("binding-native-actions", { lastAgentState: "working" });
+
+    const collected = store.acceptCollectingNativeInput({
+      input: { id: "input-collected", bindingId: "binding-native-actions", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "native-collected", larkMessageId: "native-collected", actorOpenId: "ou_actor", body: "new human input", rootMessageId: "primary-root", parentPromptId: null },
+      batchId: "batch-collected", occurredAt: "2026-10-01T00:00:02.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+
+    expect(collected.supersededPromptIds).toEqual(["completed-native-actions"]);
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE id = ?").get(actionSet.id)).toEqual({ state: "superseded", reason: "successor-accepted" });
+    expect(() => store!.resolvePrimaryCompletionChoice({ actionSetId: actionSet.id, optionId: "one", ownerPromptId: "completed-native-actions", ownerGeneration: 1, cardMessageId: "answer-message", actorOpenId: "ou_actor" })).toThrow("Completion choice is no longer available");
+    expect(() => store!.ignorePrimaryCompletionAction({ actionSetId: actionSet.id, ownerPromptId: "completed-native-actions", ownerGeneration: 1, cardMessageId: "answer-message", actorOpenId: "ou_actor" })).toThrow("Completion action is no longer available");
+
+    store.updateBinding("binding-native-actions", { lastAgentState: "idle" });
+    const formed = store.formDueNativeInputBatch({
+      bindingId: "binding-native-actions", occurredAt: "2026-10-01T00:00:04.000Z", nextBatchId: "batch-next", windowMs: 2_000,
+      createProjection: ({ batchId, binding, combinedBody, queuePosition }) => ({
+        view: createQueuedRunCard({ promptId: batchId, bindingId: binding.id, bindingGeneration: binding.generation, title: "Next", workspaceId: binding.workspaceId, paneId: binding.paneId, requestText: combinedBody, queuePosition, occurredAt: "2026-10-01T00:00:04.000Z" }),
+        rootMessageId: "primary-root", answerCard: {}
+      })
+    });
+    expect(formed).toMatchObject({ outcome: "formed", prompt: { id: "batch-collected" } });
+    expect(store.database.prepare("SELECT state FROM completion_action_sets WHERE id = ?").get(actionSet.id)).toEqual({ state: "superseded" });
+  });
+
+  it("records distinct monotonic migration identities for merged completion, batching, redelivery, binding, delete, epoch, and clear features", () => {
+    store = new SqliteBindingStore(":memory:");
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version BETWEEN 73 AND 81 ORDER BY version").all()).toEqual([
+      { version: 73 }, { version: 74 }, { version: 75 }, { version: 76 }, { version: 77 }, { version: 78 },
+      { version: 79 }, { version: 80 }, { version: 81 }
+    ]);
+  });
+
+  it.each([
+    ["feishu", "ou_actor", "ou_creator", "waiting_for_answer", "ou_actor"],
+    ["internal", "ou_actor", "ou_creator", "waiting_for_answer", "ou_creator"],
+    ["internal", "system:actor", null, "missing_mention_target", null]
+  ] as const)("resolves the Primary completion mention from %s provenance into %s", (ingressSource, actorOpenId, creatorOpenId, expectedState, expectedMention) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-mention", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId });
+    store.updateBinding("binding-primary-mention", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-mention", bindingId: "binding-primary-mention", bindingGeneration: 1, title: "Mention", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "request", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m1", ingressSource, actorOpenId, body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    const create = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === view.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "answer-message", "answer-card");
+    store.updatePrompt(view.promptId, "running");
+    store.completeTurn({ promptId: view.promptId, bindingId: view.bindingId, answer: withLegacyCompletionChoice("done"), occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp" });
+    const actions = store.preparePrimaryCompletionActionSet({ promptId: view.promptId, pageIndex: 0, cardId: "answer-card", messageId: "answer-message" });
+    if (expectedMention) expect(actions).toMatchObject({ state: "available", mentionOpenId: expectedMention });
+    else {
+      expect(actions).toBeNull();
+      expect(store.loadRunCard(view.promptId)).toMatchObject({ phase: "completed", answer: "done" });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_action_sets WHERE owner_kind = 'primary-prompt' AND owner_id = ? AND state = 'available'").get(view.promptId)).toEqual({ count: 0 });
+    }
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = ?").get(view.promptId)).toEqual({ state: expectedState });
+  });
+
+  it("allows Primary completion actions when an uncertain same-timestamp prompt is an earlier FIFO predecessor", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-predecessor", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-predecessor", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const predecessor = createQueuedRunCard({ promptId: "prompt-predecessor", bindingId: "binding-primary-predecessor", bindingGeneration: 1, title: "Predecessor", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "older uncertain request", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    const current = createQueuedRunCard({ promptId: "prompt-current", bindingId: "binding-primary-predecessor", bindingGeneration: 1, title: "Current", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "current request", queuePosition: 2, occurredAt: "2026-10-01T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: predecessor.promptId, bindingId: predecessor.bindingId, larkMessageId: "m1", actorOpenId: "ou_predecessor", body: predecessor.requestText }, view: predecessor, rootMessageId: "primary-root", answerCard: {} });
+    store.updatePrompt(predecessor.promptId, "uncertain");
+    store.acceptPrompt({ prompt: { id: current.promptId, bindingId: current.bindingId, larkMessageId: "m2", ingressSource: "feishu", actorOpenId: "ou_actor", body: current.requestText }, view: current, rootMessageId: "primary-root", answerCard: {} });
+    const currentCreate = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === current.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(currentCreate.id, "current-answer", "current-card");
+    store.updatePrompt(current.promptId, "running");
+
+    store.completeTurn({
+      promptId: current.promptId, bindingId: current.bindingId, answer: withLegacyCompletionChoice("current finding"), occurredAt: "2026-10-01T00:00:01.000Z", outputFingerprint: "fp",
+    });
+    expect(store.getPrompt(predecessor.promptId)).toMatchObject({ state: "uncertain" });
+    expect(store.preparePrimaryCompletionActionSet({ promptId: current.promptId, pageIndex: 0, cardId: "current-card", messageId: "current-answer" })).toMatchObject({ state: "available", mentionOpenId: "ou_actor" });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = ?").get(current.promptId)).toEqual({ state: "waiting_for_answer" });
+  });
+
+  it.each(["queued", "submitted", "running", "recovering", "uncertain"] as const)("suppresses Primary completion actions for a %s same-binding successor", (successorState) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-successor", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-successor", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "p000", lastAgentState: "working" });
+    const current = createQueuedRunCard({ promptId: "prompt-current", bindingId: "binding-primary-successor", bindingGeneration: 1, title: "Current", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "current request", queuePosition: 1, occurredAt: "2026-10-01T00:00:00.000Z" });
+    const successor = createQueuedRunCard({ promptId: "prompt-successor", bindingId: "binding-primary-successor", bindingGeneration: 1, title: "Successor", workspaceId: "w1", paneId: "primary-pane", paneToken: "p000", requestText: "successor request", queuePosition: 2, occurredAt: "2026-10-01T00:00:01.000Z" });
+    store.acceptPrompt({ prompt: { id: current.promptId, bindingId: current.bindingId, larkMessageId: "m1", actorOpenId: "ou_actor", body: current.requestText }, view: current, rootMessageId: "primary-root", answerCard: {} });
+    store.acceptPrompt({ prompt: { id: successor.promptId, bindingId: successor.bindingId, larkMessageId: "m2", actorOpenId: "u1", body: successor.requestText }, view: successor, rootMessageId: "primary-root", answerCard: {} });
+    const currentCreate = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === current.promptId && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(currentCreate.id, "current-answer", "current-card");
+    store.updatePrompt(current.promptId, "running");
+    if (successorState !== "queued") store.updatePrompt(successor.promptId, successorState);
+
+    const completed = store.completeTurn({
+      promptId: current.promptId, bindingId: current.bindingId, answer: withLegacyCompletionChoice("finding"), occurredAt: "2026-10-01T00:00:02.000Z", outputFingerprint: "fp",
+    });
+
+    expect(completed).toMatchObject({ completionActionEligibility: { outcome: "deferred" } });
+    expect(store.preparePrimaryCompletionActionSet({ promptId: current.promptId, pageIndex: 0, cardId: "current-card", messageId: "current-answer" })).toBeNull();
+    expect(store.reserveAnswerFinish({ promptId: current.promptId, pageIndex: 0, cardId: "current-card", messageId: "current-answer", summary: "done", finalizedCard: { final: true } })).toBe("reserved");
+    const finish = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === current.promptId && kind === "stream_finish")!;
+    store.markOutboundReplyDelivered(finish.id, "current-card", "current-card");
+    const finalAnswer = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === current.promptId && kind === "card_update")!;
+    store.markOutboundReplyDelivered(finalAnswer.id, "current-answer", "current-card");
+    expect(store.getPrompt(successor.promptId)).toMatchObject({ state: successorState });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("primary-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = ?").get(current.promptId)).toEqual({ state: "suppressed" });
+  });
+
+  it("persists superseded Worker completion actions when same-generation successor work is accepted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-next-input", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-next-input", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-next-input", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    for (const [turnId, second] of [["turn-current", 0], ["turn-successor", 1]] as const) {
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: turnId, queuePosition: second + 1, occurredAt: `2026-10-01T00:00:0${second}.000Z` });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `m${second}`, view, render: renderWorkerTurnCard });
+    }
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-current" && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "current-message", "current-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+
+    const completed = store.transitionInstanceTurnWithProjection({
+      turnId: "turn-current", expectedGeneration: worker.generation, state: "completed", result: "done", eventKind: "turn.completed",
+      change: { type: "completed", occurredAt: "2026-10-01T00:00:02.000Z", answer: withLegacyCompletionChoice("done") }, render: renderWorkerTurnCard
+    });
+
+    expect(completed).toMatchObject({ completionActionEligibility: { outcome: "deferred" } });
+    expect(store.reserveWorkerTurnCardHydration({ turnId: "turn-current", pageIndex: 0, cardId: "current-card", messageId: "current-message", card: { final: true } })).toBe("reserved");
+    const hydration = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-current" && kind === "card_update")!;
+    store.markOutboundReplyDelivered(hydration.id, "current-message", "current-card");
+    expect(store.prepareWorkerCompletionActionSet({ turnId: "turn-current", pageIndex: 0, cardId: "current-card", messageId: "current-message" })).toBeNull();
+    expect(store.reserveWorkerTurnFinish({ turnId: "turn-current", pageIndex: 0, cardId: "current-card", summary: "Completed" })).toBe("reserved");
+    const finish = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-current" && kind === "stream_finish")!;
+    store.markOutboundReplyDelivered(finish.id, "current-message", "current-card");
+    expect(store.getInstanceTurn("turn-successor")).toMatchObject({ state: "queued" });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE owner_kind = 'worker-turn' AND owner_id = 'turn-current'").get()).toEqual({ state: "superseded", reason: "successor-present" });
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'worker-turn' AND owner_id = 'turn-current'").get()).toEqual({ state: "suppressed" });
+  });
+
+  it.each(["queued", "claimed", "dispatching", "running", "blocked", "dispatch-uncertain"] as const)("persists superseded Worker completion actions for a %s same-generation successor", (successorState) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-successor-state", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-successor-state", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-successor-state", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    for (const [turnId, queuePosition] of [["turn-current", 1], ["turn-successor", 2]] as const) {
+      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: turnId, queuePosition, occurredAt: `2026-10-01T00:00:0${queuePosition}.000Z` });
+      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `m${queuePosition}`, view, render: renderWorkerTurnCard });
+    }
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-current" && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "current-message", "current-card");
+    store.claimNextInstanceTurn(worker.id, worker.generation);
+    store.database.prepare("UPDATE instance_turns SET state = ? WHERE id = 'turn-successor'").run(successorState);
+
+    const completed = store.transitionInstanceTurnWithProjection({
+      turnId: "turn-current", expectedGeneration: worker.generation, state: "completed", result: "done", eventKind: "turn.completed",
+      change: { type: "completed", occurredAt: "2026-10-01T00:00:03.000Z", answer: withLegacyCompletionChoice("done") }, render: renderWorkerTurnCard
+    });
+
+    expect(completed).toMatchObject({ completionActionEligibility: { outcome: "deferred" } });
+    expect(store.reserveWorkerTurnCardHydration({ turnId: "turn-current", pageIndex: 0, cardId: "current-card", messageId: "current-message", card: { final: true } })).toBe("reserved");
+    const hydration = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-current" && kind === "card_update")!;
+    store.markOutboundReplyDelivered(hydration.id, "current-message", "current-card");
+    expect(store.prepareWorkerCompletionActionSet({ turnId: "turn-current", pageIndex: 0, cardId: "current-card", messageId: "current-message" })).toBeNull();
+    expect(store.reserveWorkerTurnFinish({ turnId: "turn-current", pageIndex: 0, cardId: "current-card", summary: "Completed" })).toBe("reserved");
+    const finish = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-current" && kind === "stream_finish")!;
+    store.markOutboundReplyDelivered(finish.id, "current-message", "current-card");
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-next-input:"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state, reason FROM completion_action_sets WHERE owner_kind = 'worker-turn' AND owner_id = 'turn-current'").get()).toEqual({ state: "superseded", reason: "successor-present" });
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'worker-turn' AND owner_id = 'turn-current'").get()).toEqual({ state: "suppressed" });
+  });
+
+  it("creates and resolves one mutable Human Review card for a Worker blocked episode", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "binding-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary 51g1", creatorOpenId: "ou_primary" });
     store.updateBinding("binding-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
@@ -1386,14 +4079,173 @@ describe("SQLite store", () => {
     store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-18T00:00:01.000Z" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
 
     const blocked = store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-18T00:00:02.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
-    const reviewReplies = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"));
+    const reviewCreate = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:worker:") && kind === "card_reply")!;
+    const projectionKey = reviewCreate.idempotencyKey.slice(0, -":create".length);
 
-    expect(blocked).toMatchObject({ notification: { outcome: "reserved", mention: "included" } });
-    expect(reviewReplies).toHaveLength(1);
-    expect(reviewReplies[0]).toMatchObject({ bindingId: "binding-review", rootMessageId: "primary-root", kind: "card_reply", targetRole: "operation_result", workerTurnId: null, workerId: null });
-    expect(reviewReplies[0]!.idempotencyKey).toMatch(/^worker-review:reviewer:1:turn-review:\d+$/);
-    expect(reviewReplies[0]!.laneKey).toContain("reply:");
-    expect(reviewReplies[0]!.payload).toContain("<at id=ou_primary></at>");
+    expect(blocked).toMatchObject({ notification: { outcome: "reserved", kind: "requested", mention: "included" } });
+    expect(reviewCreate).toMatchObject({ bindingId: "binding-review", rootMessageId: "primary-root", kind: "card_reply", targetRole: "operation_result", workerTurnId: null, workerId: "reviewer", workerSessionGeneration: 1 });
+    expect(reviewCreate.idempotencyKey).toBe(`${projectionKey}:create`);
+    expect(reviewCreate.payload).toContain("<at id=ou_primary></at>");
+    expect(store.markOutboundReplyDelivered(reviewCreate.id, "worker-review-message", "worker-review-card")).toBe(true);
+
+    const resolved = store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-18T00:00:03.000Z" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
+    expect(resolved).toMatchObject({ notification: { outcome: "reserved", kind: "resolved", mention: "omitted" } });
+    const reviewUpdate = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+    expect(reviewUpdate).toMatchObject({ rootMessageId: "worker-review-message", kind: "card_update", targetRole: "operation_result", workerTurnId: null, workerId: "reviewer", workerSessionGeneration: 1 });
+    expect(reviewUpdate.payload).toContain("Worker 已恢复");
+    expect(reviewUpdate.payload).not.toContain("<at id=");
+    expect(store.database.prepare("SELECT state, message_id, card_id, view_version, delivered_version FROM worker_human_review_episodes").get()).toEqual({
+      state: "resolved", message_id: "worker-review-message", card_id: "worker-review-card", view_version: 2, delivered_version: 1
+    });
+  });
+
+  it("supplements the delivered Worker Human Review card from a matching structured-input candidate", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-worker-supplement", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-worker-supplement", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane" });
+    const created = store.createWorkerAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", parent: { bindingId: "binding-worker-supplement", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" }, workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: created.id, expectedGeneration: created.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-worker-supplement", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-thread-root", requestText: "review durable flow", queuePosition: 1, occurredAt: "2026-09-18T00:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    store.database.prepare("UPDATE instance_turns SET runtime_turn_id = 'runtime-turn-1', runtime_turn_started_at = '2026-09-18T00:00:00.000Z' WHERE id = ?").run(view.turnId);
+    store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started", change: { type: "running", occurredAt: "2026-09-18T00:00:01.000Z" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification });
+    expect(store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-18T00:00:02.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification })).toMatchObject({ notification: { outcome: "reserved", kind: "requested" } });
+    const reviewCreate = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:worker:") && kind === "card_reply")!;
+    const projectionKey = reviewCreate.idempotencyKey.slice(0, -":create".length);
+    expect(store.markOutboundReplyDelivered(reviewCreate.id, "worker-review-message", "worker-review-card")).toBe(true);
+
+    store.database.prepare(`INSERT INTO core_event_inbox(event_id, source_id, agent_kind, session_id, turn_id, source_cursor, occurred_at, event_json, ingested_at)
+      VALUES ('worker-candidate', 'source', 'traex', 'worker-session', 'runtime-turn-1', 'c1', '2026-09-18T00:00:03.000Z', '{}', '2026-09-18T00:00:03.000Z')`).run();
+    store.database.prepare(`INSERT INTO human_review_candidates(
+      source_event_id, owner_kind, owner_id, owner_generation, native_session_id, turn_id, notice, state, created_at, expires_at
+    ) VALUES ('worker-candidate', 'worker_turn', 'turn-worker-supplement', ?, 'worker-session', 'runtime-turn-1', 'Choose the test scope', 'pending', '2026-09-18T00:00:03.000Z', '2026-09-19T00:00:03.000Z')`).run(worker.generation);
+
+    expect(store.transitionInstanceTurnWithProjection({ turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked", change: { type: "blocked", occurredAt: "2026-09-18T00:00:04.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard, renderHumanReviewNotification: renderWorkerHumanReviewNotification })).toMatchObject({
+      notification: { outcome: "reserved", kind: "updated", mention: "omitted" }
+    });
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+    expect(update).toMatchObject({ kind: "card_update", rootMessageId: "worker-review-message" });
+    expect(update.payload).toContain("Choose the test scope");
+    expect(update.payload).not.toContain("<at id=");
+  });
+
+  it("keeps a prepared Worker Human Review create immutable when a supplement arrives", () => {
+    store = new SqliteBindingStore(":memory:");
+    expect(() => prepareWorkerHumanReview(store!, { deliver: false, supplement: true })).toThrow("outbound_idempotency_conflict");
+
+    const pending = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:worker:"));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ kind: "card_reply", rootMessageId: "primary-root" });
+    expect(pending[0]!.payload).not.toContain("Choose the test scope");
+    expect(pending[0]!.payload).toContain("<at id=ou_primary></at>");
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE id = ?").get(pending[0]!.id)).toEqual({ snapshot_revision: 1 });
+    expect(store.database.prepare("SELECT view_version, delivered_version FROM worker_human_review_episodes").get()).toEqual({ view_version: 1, delivered_version: 0 });
+  });
+
+  it("catches up a Worker Human Review supplement after its create was claimed", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { worker, view, create, projectionKey } = prepareWorkerHumanReview(store, { deliver: false });
+    const createClaim = store.claimOutboundReply(create.id, null)!;
+    store.database.prepare(`INSERT INTO core_event_inbox(event_id, source_id, agent_kind, session_id, turn_id, source_cursor, occurred_at, event_json, ingested_at)
+      VALUES ('worker-inflight-candidate', 'source', 'traex', 'worker-session', 'runtime-turn-review', 'c1', '2026-09-18T00:00:03.000Z', '{}', '2026-09-18T00:00:03.000Z')`).run();
+    store.database.prepare(`INSERT INTO human_review_candidates(
+      source_event_id, owner_kind, owner_id, owner_generation, native_session_id, turn_id, notice, state, created_at, expires_at
+    ) VALUES ('worker-inflight-candidate', 'worker_turn', 'turn-worker-review', ?, 'worker-session', 'runtime-turn-review', 'Choose the test scope', 'pending', '2026-09-18T00:00:03.000Z', '2026-09-19T00:00:03.000Z')`).run(worker.generation);
+
+    const supplemented = store.transitionInstanceTurnWithProjection({
+      turnId: view.turnId, expectedGeneration: worker.generation, state: "blocked", eventKind: "turn.blocked",
+      change: { type: "blocked", occurredAt: "2026-09-18T00:00:04.000Z", notice: "Needs local review" }, render: renderWorkerTurnCard,
+      renderHumanReviewNotification: renderWorkerHumanReviewNotification
+    });
+    if (supplemented.notification?.outcome !== "reserved") throw new Error(JSON.stringify(supplemented.notification));
+    expect(supplemented).toMatchObject({ notification: { outcome: "reserved", kind: "updated" } });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.includes(":revision:"))).toHaveLength(0);
+
+    expect(store.markOutboundReplyDelivered(createClaim, "worker-review-message", "worker-review-card")).toBe(true);
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+    expect(update).toMatchObject({ kind: "card_update", rootMessageId: "worker-review-message" });
+    expect(update.payload).toContain("Choose the test scope");
+    expect(update.payload).not.toContain("<at id=");
+  });
+
+  it("replaces a rejected open Worker Human Review target once without replaying the turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { view, projectionKey } = prepareWorkerHumanReview(store, { supplement: true });
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+    const failedClaim = store.claimOutboundReply(update.id, null)!;
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failedClaim, "target withdrawn", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230011", recoveryKind: "defunct_target"
+    })).toMatchObject({ action: "replace_human_review_target", reply: { state: "dead_letter" } });
+    const replacements = store.listPendingOutboundReplies().filter(({ idempotencyKey, kind }) =>
+      idempotencyKey.startsWith("human-review:worker:") && idempotencyKey.includes(":surface:2:create") && kind === "card_reply"
+    );
+    expect(replacements).toHaveLength(1);
+    expect(replacements[0]).toMatchObject({ rootMessageId: "primary-root", workerTurnId: null, workerId: "reviewer", workerSessionGeneration: 1 });
+    expect(replacements[0]!.payload).toContain("<at id=ou_primary></at>");
+    expect(store.database.prepare("SELECT state, surface_generation, message_id, card_id, delivered_version FROM worker_human_review_episodes").get()).toEqual({
+      state: "open", surface_generation: 2, message_id: null, card_id: null, delivered_version: 0
+    });
+    expect(store.getInstanceTurn(view.turnId)).toMatchObject({ state: "blocked" });
+
+    expect(store.markOutboundReplyFailedWithQuarantine(update.id, "duplicate callback", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230011", recoveryKind: "defunct_target"
+    })).toMatchObject({ action: "replace_human_review_target" });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.includes(":surface:2:create"))).toHaveLength(1);
+  });
+
+  it("dismisses a rejected Worker Human Review update after its episode resolved", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { worker, view, projectionKey } = prepareWorkerHumanReview(store);
+    store.transitionInstanceTurnWithProjection({
+      turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started",
+      change: { type: "running", occurredAt: "2026-09-18T00:00:03.000Z" }, render: renderWorkerTurnCard,
+      renderHumanReviewNotification: renderWorkerHumanReviewNotification
+    });
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+
+    expect(store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(update.id, null)!, "message expired", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031", recoveryKind: "expired_worker_view_target"
+    })).toMatchObject({ action: "dismiss_human_review_target", reply: { state: "dismissed" } });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.includes(":surface:2:create"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state, surface_generation FROM worker_human_review_episodes").get()).toEqual({ state: "resolved", surface_generation: 1 });
+  });
+
+  it("does not replace a Worker Human Review target when update delivery is uncertain", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { view, projectionKey } = prepareWorkerHumanReview(store, { supplement: true });
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+
+    expect(store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(update.id, null)!, "response timeout", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null, recoveryKind: "expired_worker_view_target"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter", effectCertainty: "uncertain" } });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.includes(":surface:2:create"))).toHaveLength(0);
+    expect(store.database.prepare("SELECT state, surface_generation, message_id FROM worker_human_review_episodes").get()).toEqual({
+      state: "open", surface_generation: 1, message_id: "worker-review-message"
+    });
+    expect(store.getInstanceTurn(view.turnId)).toMatchObject({ state: "blocked" });
+  });
+
+  it("keeps a delivered Worker Human Review surface mutable across database reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-human-review-reopen-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const { worker, view, projectionKey } = prepareWorkerHumanReview(store);
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT state, surface_generation, view_version, delivered_version, message_id, card_id FROM worker_human_review_episodes").get()).toEqual({
+      state: "open", surface_generation: 1, view_version: 1, delivered_version: 1,
+      message_id: "worker-review-message", card_id: "worker-review-card"
+    });
+    expect(store.transitionInstanceTurnWithProjection({
+      turnId: view.turnId, expectedGeneration: worker.generation, state: "running", eventKind: "turn.started",
+      change: { type: "running", occurredAt: "2026-09-18T00:00:03.000Z" }, render: renderWorkerTurnCard,
+      renderHumanReviewNotification: renderWorkerHumanReviewNotification
+    })).toMatchObject({ notification: { outcome: "reserved", kind: "resolved", mention: "omitted" } });
+    expect(store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)).toMatchObject({
+      kind: "card_update", rootMessageId: "worker-review-message"
+    });
   });
 
   it("deduplicates repeated blocked observations and notifies a later blocked episode", () => {
@@ -1409,13 +4261,247 @@ describe("SQLite store", () => {
     transition("running", 1);
     expect(transition("blocked", 2)).toMatchObject({ notification: { outcome: "reserved", mention: "omitted" } });
     expect(transition("blocked", 3)).toMatchObject({ notification: { outcome: "skipped", reason: "not-blocked-transition" } });
-    transition("running", 4);
+    const firstCreate = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:worker:"))!;
+    expect(store.markOutboundReplyDelivered(firstCreate.id, "review-message-1", "review-card-1")).toBe(true);
+    expect(transition("running", 4)).toMatchObject({ notification: { outcome: "reserved", kind: "resolved" } });
+    const resolvedUpdate = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:worker:"))!;
+    expect(store.markOutboundReplyDelivered(resolvedUpdate.id, "review-message-1", "review-card-1")).toBe(true);
     expect(transition("blocked", 5)).toMatchObject({ notification: { outcome: "reserved", mention: "omitted" } });
 
-    const notifications = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("worker-review:"));
-    expect(notifications).toHaveLength(2);
-    expect(new Set(notifications.map(({ idempotencyKey }) => idempotencyKey)).size).toBe(2);
+    const notifications = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:worker:"));
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]!.idempotencyKey).not.toBe(firstCreate.idempotencyKey);
     expect(store.listInstanceEvents(worker.id).filter(({ kind }) => kind === "turn.blocked")).toHaveLength(2);
+  });
+
+  it("atomically creates and updates one Primary Human Review card per blocked episode", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary 51g1", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", paneToken: "51g1", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-review", bindingId: "binding-primary-review", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "deploy safely", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "prompt-review", bindingId: "binding-primary-review", larkMessageId: "m-review", actorOpenId: "ou_primary", body: "deploy safely" }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.updateBinding("binding-primary-review", { lastAgentState: "idle" });
+    expect(store.claimNextDispatchablePrompt("binding-primary-review")).toMatchObject({ prompt: { id: "prompt-review", state: "submitted" } });
+    store.updateBinding("binding-primary-review", { lastAgentState: "working" });
+    const render = (input: object) => input;
+    const observe = (state: "working" | "blocked", second: number) => store!.observePrimaryPromptState({
+      bindingId: "binding-primary-review", promptId: "prompt-review", expectedGeneration: 1, expectedPaneId: "primary-pane", state,
+      notice: state === "blocked" ? "TraeX is waiting for local approval" : null,
+      occurredAt: `2026-09-30T08:00:0${second}.000Z`, renderHumanReviewNotification: render
+    });
+
+    expect(observe("blocked", 1)).toMatchObject({ outcome: "applied", notification: { outcome: "reserved", kind: "requested", mention: "included" } });
+    expect(observe("blocked", 2)).toMatchObject({ outcome: "unchanged", notification: { outcome: "skipped", reason: "not-transition" } });
+    const firstCreate = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:primary:") && kind === "card_reply")!;
+    const firstProjectionKey = firstCreate.idempotencyKey.slice(0, -":create".length);
+    expect(firstCreate.payload).toContain('"creatorOpenId":"ou_primary"');
+    expect(store.markOutboundReplyDelivered(firstCreate.id, "review-message-1", "review-card-1")).toBe(true);
+
+    expect(observe("working", 3)).toMatchObject({ outcome: "applied", notification: { outcome: "reserved", kind: "resolved", mention: "omitted" } });
+    expect(observe("working", 4)).toMatchObject({ outcome: "unchanged", notification: { outcome: "skipped", reason: "not-transition" } });
+    const firstUpdate = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey === `${firstProjectionKey}:revision:2` && kind === "card_update")!;
+    expect(firstUpdate).toMatchObject({ rootMessageId: "review-message-1" });
+    expect(firstUpdate.payload).toContain('"state":"resolved"');
+    expect(firstUpdate.payload).toContain('"creatorOpenId":null');
+
+    expect(observe("blocked", 5)).toMatchObject({ outcome: "applied", notification: { outcome: "reserved", kind: "requested", mention: "included" } });
+    const secondCreate = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:primary:") && idempotencyKey !== firstCreate.idempotencyKey && kind === "card_reply")!;
+    const secondProjectionKey = secondCreate.idempotencyKey.slice(0, -":create".length);
+    expect(secondCreate.payload).toContain('"creatorOpenId":"ou_primary"');
+    expect(firstCreate.idempotencyKey).toBe(`${firstProjectionKey}:create`);
+    expect(firstUpdate.idempotencyKey).toBe(`${firstProjectionKey}:revision:2`);
+    expect(secondCreate.idempotencyKey).toBe(`${secondProjectionKey}:create`);
+    expect(secondProjectionKey).not.toBe(firstProjectionKey);
+    expect(JSON.parse(firstCreate.payload)).toMatchObject({ state: "waiting", creatorOpenId: "ou_primary", paneId: "primary-pane", paneToken: "51g1" });
+    expect(JSON.parse(firstUpdate.payload)).toMatchObject({ state: "resolved", creatorOpenId: null, paneId: "primary-pane", paneToken: "51g1" });
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM primary_human_review_episodes GROUP BY state ORDER BY state").all()).toEqual([
+      { state: "open", count: 1 },
+      { state: "resolved", count: 1 }
+    ]);
+    expect(new Set([firstCreate, firstUpdate, secondCreate].map(({ laneKey }) => laneKey))).toEqual(new Set(["gateway:feishu:primary:primary-review:binding-primary-review:1"]));
+  });
+
+  it("resolves a delivered Primary Human Review episode by updating its original card", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-mutable", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-mutable", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-mutable", bindingId: "binding-primary-mutable", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "deploy safely", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "prompt-mutable", bindingId: "binding-primary-mutable", larkMessageId: "m-mutable", actorOpenId: "ou_primary", body: "deploy safely" }, view, rootMessageId: "primary-root", answerCard: {} });
+    const answerCreate = store.listPendingOutboundReplies().find(({ promptId, kind }) => promptId === "prompt-mutable" && kind === "stream_card_create")!;
+    expect(store.markOutboundReplyDelivered(answerCreate.id, "answer-message", "answer-card")).toBe(true);
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'prompt-mutable'").run();
+    const observe = (state: "working" | "blocked", second: number) => store!.observePrimaryPromptState({
+      bindingId: "binding-primary-mutable", promptId: "prompt-mutable", expectedGeneration: 1, expectedPaneId: "primary-pane", state,
+      notice: state === "blocked" ? "Needs local review" : null, occurredAt: `2026-09-30T08:00:0${second}.000Z`,
+      renderHumanReviewNotification: (input) => input
+    });
+
+    expect(observe("blocked", 1)).toMatchObject({ notification: { outcome: "reserved", kind: "requested" } });
+    const created = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:primary:") && kind === "card_reply")!;
+    const projectionKey = created.idempotencyKey.slice(0, -":create".length);
+    expect(created.kind).toBe("card_reply");
+    expect(created.payload).toContain('"creatorOpenId":"ou_primary"');
+    expect(store.markOutboundReplyDelivered(created.id, "review-message", "review-card")).toBe(true);
+    expect(store.database.prepare("SELECT lark_message_id, answer_message_id FROM run_cards WHERE prompt_id = 'prompt-mutable'").get()).toEqual({
+      lark_message_id: null, answer_message_id: "answer-message"
+    });
+
+    expect(observe("working", 2)).toMatchObject({ notification: { outcome: "reserved", kind: "resolved", mention: "omitted" } });
+    const updates = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith(`${projectionKey}:revision:`));
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ kind: "card_update", rootMessageId: "review-message", idempotencyKey: `${projectionKey}:revision:2` });
+    expect(updates[0]!.payload).toContain('"state":"resolved"');
+    expect(updates[0]!.payload).toContain('"creatorOpenId":null');
+    expect(store.database.prepare("SELECT message_id, card_id, view_version, delivered_version FROM primary_human_review_episodes").get()).toEqual({
+      message_id: "review-message", card_id: "review-card", view_version: 2, delivered_version: 1
+    });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? AND kind = 'card_reply'").get(projectionKey)).toEqual({ count: 1 });
+  });
+
+  it("keeps a prepared Primary Human Review create immutable before delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-coalesced", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-coalesced", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-coalesced", bindingId: "binding-primary-coalesced", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "deploy safely", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-coalesced", actorOpenId: "ou_primary", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = ?").run(view.promptId);
+    const observe = (state: "working" | "blocked", second: number) => store!.observePrimaryPromptState({
+      bindingId: view.bindingId, promptId: view.promptId, expectedGeneration: 1, expectedPaneId: "primary-pane", state,
+      notice: state === "blocked" ? "Needs local review" : null, occurredAt: `2026-09-30T08:00:0${second}.000Z`,
+      renderHumanReviewNotification: (input) => input
+    });
+
+    expect(observe("blocked", 1)).toMatchObject({ notification: { outcome: "reserved", kind: "requested", mention: "included" } });
+    const initial = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:primary:"))!;
+    expect(() => observe("working", 2)).toThrow("outbound_idempotency_conflict");
+
+    const pending = store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:primary:"));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ id: initial.id, idempotencyKey: initial.idempotencyKey, kind: "card_reply", rootMessageId: "primary-root" });
+    expect(pending[0]!.payload).toContain('"state":"waiting"');
+    expect(pending[0]!.payload).toContain('"creatorOpenId":"ou_primary"');
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE id = ?").get(initial.id)).toEqual({ snapshot_revision: 1 });
+    expect(store.database.prepare("SELECT state, message_id, card_id, view_version, delivered_version FROM primary_human_review_episodes").get()).toEqual({
+      state: "open", message_id: null, card_id: null, view_version: 1, delivered_version: 0
+    });
+  });
+
+  it("catches up a Primary Human Review update after its create was claimed", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-inflight", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-inflight", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-inflight", bindingId: "binding-primary-inflight", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "deploy safely", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-inflight", actorOpenId: "ou_primary", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = ?").run(view.promptId);
+    const observe = (state: "working" | "blocked", second: number) => store!.observePrimaryPromptState({
+      bindingId: view.bindingId, promptId: view.promptId, expectedGeneration: 1, expectedPaneId: "primary-pane", state,
+      notice: state === "blocked" ? "Needs local review" : null, occurredAt: `2026-09-30T08:00:0${second}.000Z`,
+      renderHumanReviewNotification: (input) => input
+    });
+
+    expect(observe("blocked", 1)).toMatchObject({ notification: { outcome: "reserved", kind: "requested" } });
+    const created = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:primary:"))!;
+    for (const predecessor of store.listPendingOutboundReplies()) {
+      if (predecessor.id === created.id) break;
+      store.database.prepare("UPDATE outbound_replies SET state='delivered', delivered_message_id=?, updated_at=? WHERE id=? AND state='pending'")
+        .run(`predecessor-${predecessor.id}`, new Date().toISOString(), predecessor.id);
+    }
+    const createClaim = store.claimOutboundReply(created.id, null)!;
+    expect(observe("working", 2)).toMatchObject({ notification: { outcome: "reserved", kind: "resolved" } });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.includes(":revision:"))).toHaveLength(0);
+
+    expect(store.markOutboundReplyDelivered(createClaim, "review-message", "review-card")).toBe(true);
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.includes(":revision:2"))!;
+    expect(update).toMatchObject({ kind: "card_update", rootMessageId: "review-message" });
+    expect(update.payload).toContain('"state":"resolved"');
+    expect(update.payload).toContain('"creatorOpenId":null');
+  });
+
+  it("keeps a delivered Primary Human Review target across reopen and supplements that card", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "primary-human-review-surface-"));
+    const databasePath = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(databasePath);
+    store.createPendingBinding({ id: "binding-primary-reopen", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-reopen", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", agentSessionKind: "id", agentSessionValue: "session-1", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-reopen", bindingId: "binding-primary-reopen", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "deploy safely", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m-reopen", actorOpenId: "ou_primary", body: view.requestText }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', transcript_turn_id = 'turn-1' WHERE id = ?").run(view.promptId);
+    const observe = (candidateStore: SqliteBindingStore, state: "working" | "blocked", second: number) => candidateStore.observePrimaryPromptState({
+      bindingId: view.bindingId, promptId: view.promptId, expectedGeneration: 1, expectedPaneId: "primary-pane", state,
+      notice: state === "blocked" ? "Needs local review" : null, occurredAt: `2026-09-30T08:00:0${second}.000Z`,
+      renderHumanReviewNotification: (input) => input
+    });
+
+    expect(observe(store, "blocked", 1)).toMatchObject({ notification: { outcome: "reserved", kind: "requested" } });
+    const created = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:primary:"))!;
+    const projectionKey = created.idempotencyKey.slice(0, -":create".length);
+    expect(store.markOutboundReplyDelivered(created.id, "review-message", "review-card")).toBe(true);
+    store.close();
+    store = new SqliteBindingStore(databasePath);
+
+    store.database.prepare(`INSERT INTO core_event_inbox(event_id, source_id, agent_kind, session_id, turn_id, source_cursor, occurred_at, event_json, ingested_at)
+      VALUES ('candidate-reopen', 'source', 'traex', 'session-1', 'turn-1', 'c1', '2026-09-30T08:00:02.000Z', '{}', '2026-09-30T08:00:02.000Z')`).run();
+    store.database.prepare(`INSERT INTO human_review_candidates(
+      source_event_id, owner_kind, owner_id, owner_generation, native_session_id, turn_id, notice, state, created_at, expires_at
+    ) VALUES ('candidate-reopen', 'binding', 'binding-primary-reopen', 1, 'session-1', 'turn-1', 'Choose the deployment lane', 'pending', '2026-09-30T08:00:02.000Z', '2026-10-01T08:00:02.000Z')`).run();
+
+    expect(observe(store, "blocked", 3)).toMatchObject({ outcome: "unchanged", notification: { outcome: "reserved", kind: "updated", mention: "omitted" } });
+    const update = store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === `${projectionKey}:revision:2`)!;
+    expect(update).toMatchObject({ kind: "card_update", rootMessageId: "review-message" });
+    expect(update.payload).toContain("Choose the deployment lane");
+    expect(update.payload).toContain('"creatorOpenId":null');
+  });
+
+  it("atomically absorbs matching pre-block input into the first Primary review episode", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-candidate", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "ou_primary" });
+    store.updateBinding("binding-primary-candidate", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", agentSessionKind: "id", agentSessionValue: "session-1", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "prompt-candidate", bindingId: "binding-primary-candidate", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "deploy safely", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "prompt-candidate", bindingId: "binding-primary-candidate", larkMessageId: "m-candidate", actorOpenId: "ou_primary", body: "deploy safely" }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', transcript_turn_id = 'turn-1', transcript_turn_started_at = '2026-09-30T08:00:00.000Z' WHERE id = 'prompt-candidate'").run();
+    store.database.prepare(`INSERT INTO core_event_inbox(event_id, source_id, agent_kind, session_id, turn_id, source_cursor, occurred_at, event_json, ingested_at)
+      VALUES (?, 'source', 'traex', 'session-1', ?, ?, '2026-09-30T08:00:00.000Z', '{}', '2026-09-30T08:00:00.000Z')`).run("candidate-match", "turn-1", "c1");
+    store.database.prepare(`INSERT INTO core_event_inbox(event_id, source_id, agent_kind, session_id, turn_id, source_cursor, occurred_at, event_json, ingested_at)
+      VALUES (?, 'source', 'traex', 'session-1', ?, ?, '2026-09-30T08:00:00.000Z', '{}', '2026-09-30T08:00:00.000Z')`).run("candidate-other", "turn-other", "c2");
+    store.database.prepare(`INSERT INTO human_review_candidates(
+      source_event_id, owner_kind, owner_id, owner_generation, native_session_id, turn_id, notice, state, created_at, expires_at
+    ) VALUES ('candidate-match', 'binding', 'binding-primary-candidate', 1, 'session-1', 'turn-1', 'Choose the deployment lane', 'pending', '2026-09-30T08:00:00.000Z', '2026-10-01T08:00:00.000Z'),
+      ('candidate-other', 'binding', 'binding-primary-candidate', 1, 'session-1', 'turn-other', 'Unrelated question', 'pending', '2026-09-30T08:00:00.000Z', '2026-10-01T08:00:00.000Z')`).run();
+
+    const observed = store.observePrimaryPromptState({
+      bindingId: "binding-primary-candidate", promptId: "prompt-candidate", expectedGeneration: 1, expectedPaneId: "primary-pane", state: "blocked",
+      notice: "TraeX is waiting for local input", occurredAt: "2026-09-30T08:00:01.000Z", renderHumanReviewNotification: (input) => input
+    });
+
+    expect(observed).toMatchObject({ notification: { outcome: "reserved", kind: "requested" } });
+    const notification = store.listPendingOutboundReplies().find(({ idempotencyKey, kind }) => idempotencyKey.startsWith("human-review:primary:") && kind === "card_reply");
+    expect(JSON.parse(notification!.payload).notice).toContain("Choose the deployment lane");
+    expect(store.database.prepare("SELECT state, absorbed_episode_id FROM human_review_candidates WHERE source_event_id = 'candidate-match'").get()).toMatchObject({ state: "absorbed", absorbed_episode_id: expect.any(String) });
+    expect(store.database.prepare("SELECT state FROM human_review_candidates WHERE source_event_id = 'candidate-other'").get()).toEqual({ state: "pending" });
+  });
+
+  it("repairs a missing Primary review episode for an already-blocked runtime and rolls back on render failure", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-primary-review", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary", creatorOpenId: "unsafe open id" });
+    store.updateBinding("binding-primary-review", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "blocked" });
+    const view = createQueuedRunCard({ promptId: "prompt-review", bindingId: "binding-primary-review", title: "Review", workspaceId: "w1", paneId: "primary-pane", requestText: "review", queuePosition: 1, occurredAt: "2026-09-30T08:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "prompt-review", bindingId: "binding-primary-review", larkMessageId: "m-review", actorOpenId: "user", body: "review" }, view, rootMessageId: "primary-root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'prompt-review'").run();
+    const input = {
+      bindingId: "binding-primary-review", promptId: "prompt-review", expectedGeneration: 1, expectedPaneId: "primary-pane", state: "blocked" as const,
+      notice: "needs local input", occurredAt: "2026-09-30T08:00:01.000Z"
+    };
+
+    expect(() => store!.observePrimaryPromptState({ ...input, renderHumanReviewNotification: () => { throw new Error("render failed"); } })).toThrow("render failed");
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM primary_human_review_episodes").get()).toEqual({ count: 0 });
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey.startsWith("human-review:primary:"))).toHaveLength(0);
+
+    expect(store.observePrimaryPromptState({ ...input, renderHumanReviewNotification: (notification) => notification })).toMatchObject({
+      outcome: "unchanged", notification: { outcome: "reserved", kind: "requested", mention: "omitted" }
+    });
+    expect(store.observePrimaryPromptState({ ...input, renderHumanReviewNotification: (notification) => notification })).toMatchObject({
+      outcome: "unchanged", notification: { outcome: "skipped", reason: "not-transition" }
+    });
   });
 
   it("commits blocked state but skips notification when the parent route is stale", () => {
@@ -1459,7 +4545,7 @@ describe("SQLite store", () => {
     store.acceptInstanceTurn({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "review" });
     store.enqueueOutboundReply({ id: "content", idempotencyKey: "content", workerTurnId: "turn-1", rootMessageId: "card", kind: "stream_content", payload: JSON.stringify({ pageIndex: 3, elementId: "answer-3", content: "done" }) });
     store.enqueueOutboundReply({ id: "malformed", idempotencyKey: "malformed", workerTurnId: "turn-1", rootMessageId: "card", kind: "stream_content", payload: "not-json" });
-    store.database.exec("DELETE FROM schema_migrations WHERE version = 28; UPDATE outbound_replies SET stream_page_index = NULL, stream_element_id = NULL;");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 28; UPDATE outbound_replies SET stream_page_index = NULL, stream_element_id = NULL;");
 
     store.close(); store = undefined;
     store = new SqliteBindingStore(path);
@@ -1559,12 +4645,12 @@ describe("SQLite store", () => {
     });
     expect(store.findWorkerTurnByCardMessage("missing-card")).toBeNull();
 
-    store.database.prepare("INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, state, sequence, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?, ?, 'active', 0, ?, ?)").run("legacy-reviewer-page", "turn-reviewer", "legacy-element", "continuation-reviewer", "legacy-card", "now", "now");
+    store.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = ?, state = 'active' WHERE turn_id = ? AND page_index = 0").run("continuation-reviewer", "legacy-card", "turn-reviewer");
     expect(store.findWorkerTurnByCardMessage("continuation-reviewer")).toMatchObject({
       turn: { id: "turn-reviewer", instanceId: "reviewer" }
     });
 
-    store.database.prepare("INSERT INTO worker_turn_card_pages(id, turn_id, page_index, page_start, element_id, message_id, card_id, state, sequence, created_at, updated_at) VALUES (?, ?, 0, 0, ?, ?, ?, 'active', 0, ?, ?)").run("legacy-implementer-page", "turn-implementer", "legacy-element-2", "task-card-reviewer", "legacy-card-2", "now", "now");
+    store.database.prepare("UPDATE worker_turn_card_pages SET message_id = ?, card_id = ?, state = 'active' WHERE turn_id = ? AND page_index = 0").run("task-card-reviewer", "legacy-card-2", "turn-implementer");
     expect(store.findWorkerTurnByCardMessage("task-card-reviewer")).toBeNull();
   });
 
@@ -1574,7 +4660,7 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
     store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     store.acceptInstanceTurn({ id: "historical", idempotencyKey: "historical", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: "reviewer", instanceGeneration: 1, kind: "turn", text: "old" });
-    store.database.exec("DROP TABLE worker_turn_card_pages; DROP TABLE worker_turn_cards; DELETE FROM schema_migrations WHERE version = 8");
+    store.database.exec("DROP TABLE worker_turn_card_pages; DROP TABLE worker_turn_cards; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 8");
     store.close(); store = undefined;
 
     store = new SqliteBindingStore(path);
@@ -1593,10 +4679,10 @@ describe("SQLite store", () => {
     const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
     const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: "review", queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
     store.acceptInstanceTurnWithCard({ id: "turn-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review", parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
-    store.enqueueOutboundReply({ id: "legacy-create", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", viewVersion: view.viewVersion, rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }) });
+    store.enqueueOutboundReply({ id: "legacy-create", idempotencyKey: "worker-turn:create:turn-1:0", workerTurnId: "turn-1", viewVersion: view.viewVersion, rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }), globalDelivery: true });
     store.markOutboundReplyDelivered("legacy-create", "worker-message-1", "worker-card-1");
     store.database.prepare("UPDATE worker_turn_card_pages SET sequence = 1 WHERE turn_id = ? AND page_index = 0").run("turn-1");
-    store.database.exec("DELETE FROM schema_migrations WHERE version = 9");
+    store.database.exec("DELETE FROM schema_migrations WHERE version = 9 OR version >= 112; DROP TABLE schema_metadata");
     store.close(); store = undefined;
 
     store = new SqliteBindingStore(path);
@@ -1605,27 +4691,6 @@ describe("SQLite store", () => {
     expect(store.listWorkerTurnCardPages("turn-1")).toEqual([expect.objectContaining({ state: "active", sequence: 1, messageId: "worker-message-1", cardId: "worker-card-1" })]);
     expect(store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_turn_card_pages'").get()).toMatchObject({ sql: expect.stringContaining("'frozen'") });
     expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-  });
-
-  it("isolates a failed Worker turn lane from another Worker turn", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createAgentInstance({ id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    const worker = store.attachAgentInstanceRuntime({ instanceId: "reviewer", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
-    for (const turnId of ["turn-a", "turn-b"]) {
-      const view = createQueuedWorkerTurnCard({ turnId, instanceId: worker.id, instanceGeneration: worker.generation, workerName: worker.name, parentTurnId: null, rootMessageId: "root-1", requestText: turnId, queuePosition: 1, occurredAt: "2026-09-01T00:00:00.000Z" });
-      store.acceptInstanceTurnWithCard({ id: turnId, idempotencyKey: turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: turnId, parentTurnId: null, sourceMessageId: `message-${turnId}`, view, render: renderWorkerTurnCard });
-    }
-    for (const turnId of ["turn-a", "turn-b"]) {
-      const view = store.loadWorkerTurnCard(turnId)!;
-      store.enqueueOutboundReply({ id: `legacy-${turnId}`, idempotencyKey: `worker-turn:create:${turnId}:0`, workerTurnId: turnId, rootMessageId: "root", kind: "stream_card_create", payload: JSON.stringify({ card: renderWorkerTurnCard(view), stream: { pageIndex: 0, pageStart: 0, elementId: view.elementId } }) });
-    }
-    const failed = store.getOutboundReply("legacy-turn-a")!;
-
-    expect(store.markOutboundReplyFailedWithQuarantine(failed.id, "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked" });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ workerTurnId: "turn-b" })]);
-    expect(store.database.prepare("SELECT DISTINCT lane_key FROM outbound_replies ORDER BY lane_key").all()).toEqual([
-      { lane_key: "gateway:feishu:primary:worker-turn:turn-a" }, { lane_key: "gateway:feishu:primary:worker-turn:turn-b" }
-    ]);
   });
 
   it("settles one Worker card and recomputes queued card positions atomically", () => {
@@ -1650,6 +4715,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.database.exec("DROP TABLE session_operations");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
     store = undefined;
 
@@ -1672,6 +4738,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root", answerCard: {} });
     store.database.exec(`
@@ -1682,6 +4749,7 @@ describe("SQLite store", () => {
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
       );
     `);
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
     store = undefined;
 
@@ -1691,22 +4759,250 @@ describe("SQLite store", () => {
     expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({ deliveryMode: "streaming" })]);
   });
 
-  it("atomically adopts the unique queued prompt matching an external Herdr turn", () => {
+  it("creates a distinct exact Herdr-origin Prompt when a no-submission turn matches queued Feishu text", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 3, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const queued = createQueuedRunCard({ promptId: "queued", bindingId: "b1", bindingGeneration: 3, title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "line 1\r\nline 2", queuePosition: 1, occurredAt: "2026-08-31T10:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "queued", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "line 1\r\nline 2" }, view: queued, rootMessageId: "root", answerCard: {} });
     const startedAt = new Date(Date.now() + 1_000).toISOString();
+    const expectedIdentity = {
+      bindingId: "b1",
+      bindingGeneration: 3,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "turn-1",
+      startedAt
+    };
 
     const result = store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 3, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
-      turnId: "turn-1", startedAt, requestText: "line 1\nline 2", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
+      turnId: "turn-1", startedAt, requestText: "line 1\nline 2", externalPromptId: "random-external-id", externalMessageId: "herdr-turn:session-1:turn-1",
       externalView: { ...queued, promptId: "external" }, answerCardFor: renderRequestAnswerCard
     });
 
-    expect(result).toMatchObject({ outcome: "adopted_queued", prompt: { id: "queued", executionOrigin: "herdr", state: "running", observationState: "attached", transcriptTurnId: "turn-1" }, supersededPromptIds: [], outboxReserved: true });
+    expect(result).toMatchObject({
+      outcome: "created_external",
+      prompt: {
+        id: nativeTurnPromptId(expectedIdentity),
+        larkMessageId: null,
+        ingressSource: "herdr",
+        sourceMessageKey: nativeTurnSourceKey(expectedIdentity),
+        executionOrigin: "herdr",
+        state: "running",
+        observationState: "attached",
+        transcriptTurnId: "turn-1"
+      },
+      supersededPromptIds: [],
+      outboxReserved: true
+    });
+    expect(store.getPrompt("queued")).toMatchObject({
+      state: "queued",
+      observationState: "not_started",
+      executionOrigin: "bridge",
+      ingressSource: "feishu",
+      sourceMessageKey: "m1",
+      transcriptTurnId: null
+    });
+    expect(store.loadRunCard("queued")).toMatchObject({ phase: "queued", queuePosition: 1 });
+  });
+
+  it("reuses one exact Herdr-origin Prompt across duplicate observations of the same tuple", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const startedAt = "2026-09-30T00:00:01.000Z";
+    const identity = { bindingId: "b1", bindingGeneration: 2, paneId: "w1:p1", nativeSessionId: "session-1", turnId: "turn-1", startedAt };
+    const expectedPromptId = nativeTurnPromptId(identity);
+    const externalView = createQueuedRunCard({ promptId: "ignored", bindingId: "b1", bindingGeneration: 2, title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: startedAt });
+
+    const first = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt, requestText: "direct", externalPromptId: "random-1", externalMessageId: "legacy-1", externalView, answerCardFor: renderRequestAnswerCard
+    });
+    const second = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt, requestText: "direct", externalPromptId: "random-2", externalMessageId: "legacy-2", externalView, answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(first).toMatchObject({ outcome: "created_external", prompt: { id: expectedPromptId } });
+    expect(second).toMatchObject({ outcome: "already_owned", prompt: { id: expectedPromptId } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE execution_origin = 'herdr'").get()).toEqual({ count: 1 });
+  });
+
+  it("binds an exact historical native submission without disturbing another retained receipt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    for (const promptId of ["p1", "p2"] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      const historicalCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId)!;
+      mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET gateway_plan_json = NULL, gateway_plan_hash = NULL WHERE id = ?", historicalCreate.id);
+      stageHistoricalNativeSubmission(store, promptId, `2026-09-28T15:00:0${promptId === "p1" ? "1" : "2"}.000Z`);
+      if (promptId === "p1") store.markPromptObservationDetached(promptId, "legacy native queue observer detached");
+    }
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-2", startedAt: "2026-09-28T15:00:03.000Z", requestText: "p2", requestSubmissionId: "p2",
+      externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-2",
+      externalView: createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "p2", queuePosition: 0, occurredAt: "2026-09-28T15:00:03.000Z" }),
+      answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "adopted_queued", prompt: { id: "p2", nativeSubmissionId: "p2", transcriptTurnId: "turn-2", observationState: "attached" }, supersededPromptIds: [] });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "recovering", observationState: "detached", nativeSubmissionId: "p1", transcriptTurnId: null });
     expect(store.getPrompt("external")).toBeNull();
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.cardRole === "answer")).toHaveLength(2);
+  });
+
+  it("does not supersede recovering historical native submissions when a newer direct Herdr turn has no submission identity", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    for (const promptId of ["stale-1", "stale-2"] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      stageHistoricalNativeSubmission(store, promptId, `2026-09-28T15:00:0${promptId === "stale-1" ? "1" : "2"}.000Z`);
+      store.markPromptObservationDetached(promptId, "observer lost");
+    }
+    const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: "2026-09-28T15:00:03.000Z" });
+    const expectedPromptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 1,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "direct-turn",
+      startedAt: "2026-09-28T15:00:03.000Z"
+    });
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "direct-turn", startedAt: "2026-09-28T15:00:03.000Z", requestText: "direct", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:direct-turn",
+      externalView, answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: expectedPromptId, transcriptTurnId: "direct-turn" }, supersededPromptIds: [] });
+    expect(store.getPrompt("stale-1")).toMatchObject({ state: "recovering", observationState: "detached", nativeSubmissionId: "stale-1", transcriptTurnId: null });
+    expect(store.getPrompt("stale-2")).toMatchObject({ state: "recovering", observationState: "detached", nativeSubmissionId: "stale-2", transcriptTurnId: null });
+  });
+
+  it("does not supersede an identity-less native submission dispatched after the observed external turn", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const view = createQueuedRunCard({ promptId: "newer", bindingId: "b1", title: "Newer", workspaceId: "w1", paneId: "w1:p1", requestText: "newer", queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "newer", bindingId: "b1", larkMessageId: "m-newer", actorOpenId: "u1", body: "newer" }, view, rootMessageId: "root", answerCard: {} });
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("newer");
+    expect(store.markPromptNativeQueued({ promptId: "newer", bindingId: "b1", submissionId: "newer", dispatchedAt: "2026-09-28T15:00:04.000Z" })).toBe(true);
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "older-direct-turn", startedAt: "2026-09-28T15:00:03.000Z", requestText: "direct", externalPromptId: "external", externalMessageId: "herdr-turn:session-1:older-direct-turn",
+      externalView: createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: "2026-09-28T15:00:03.000Z" }), answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "conflict", prompt: null, supersededPromptIds: [] });
+    expect(store.getPrompt("newer")).toMatchObject({ state: "submitted", observationState: "detached", nativeSubmissionId: "newer", transcriptTurnId: null });
+    expect(store.getPrompt("external")).toBeNull();
+  });
+
+  it("makes the pinned model effective when its native submission is adopted", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const historicalCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1")!;
+    mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET gateway_plan_json = NULL, gateway_plan_hash = NULL WHERE id = ?", historicalCreate.id);
+    store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.5" });
+    expect(store.claimNextDispatchablePrompt("b1")).toMatchObject({
+      prompt: { id: "p1" }, model: { name: "GPT-5.5", revision: 1 }
+    });
+    expect(store.markPromptNativeQueued({ promptId: "p1", bindingId: "b1", submissionId: "p1", dispatchedAt: "2026-09-28T15:00:01.000Z" })).toBe(true);
+
+    const result = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-1", startedAt: "2026-09-28T15:00:02.000Z", requestText: "work", requestSubmissionId: "p1",
+      externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
+      externalView: createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 0, occurredAt: "2026-09-28T15:00:02.000Z" }),
+      answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(result).toMatchObject({ outcome: "adopted_queued", prompt: { id: "p1", transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-09-28T15:00:02.000Z" } });
+    expect(store.getModelPreference("b1")).toMatchObject({
+      state: "effective", desiredModel: "GPT-5.5", desiredRevision: 1,
+      effectiveModel: "GPT-5.5", effectiveRevision: 1,
+      dispatchPromptId: null, preparedOperationId: null
+    });
+  });
+
+  it("does not change a model preference for the wrong native submission, generation, or revision", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.5" });
+    store.claimNextDispatchablePrompt("b1");
+    store.markPromptNativeQueued({ promptId: "p1", bindingId: "b1", submissionId: "p1", dispatchedAt: "2026-09-28T15:00:01.000Z" });
+    const adoption = {
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" },
+      turnId: "turn-1", startedAt: "2026-09-28T15:00:02.000Z", requestText: "work", requestSubmissionId: "p1",
+      externalPromptId: "external", externalMessageId: "herdr-turn:session-1:turn-1",
+      externalView: createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 0, occurredAt: "2026-09-28T15:00:02.000Z" }),
+      answerCardFor: renderRequestAnswerCard
+    };
+
+    expect(store.adoptExternalTurn({ ...adoption, requestSubmissionId: "wrong" })).toMatchObject({ outcome: "conflict" });
+    expect(store.adoptExternalTurn({ ...adoption, expectedGeneration: 2 })).toMatchObject({ outcome: "stale_binding" });
+    expect(store.getModelPreference("b1")).toMatchObject({ state: "applying", desiredRevision: 1, dispatchPromptId: "p1" });
+    expect(store.getPrompt("p1")).toMatchObject({ observationState: "detached", transcriptTurnId: null });
+
+    store.database.prepare("UPDATE binding_model_preferences SET desired_revision = 2 WHERE binding_id = 'b1'").run();
+    expect(() => store!.adoptExternalTurn(adoption)).toThrow("adoption was not atomically fenced");
+    expect(store.getModelPreference("b1")).toMatchObject({ state: "applying", desiredRevision: 2, effectiveRevision: null, dispatchPromptId: "p1" });
+    expect(store.getPrompt("p1")).toMatchObject({ observationState: "detached", transcriptTurnId: null });
+  });
+
+  it("routes a historical bound native submission to external observation without treating retained receipts as active turns", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    for (const promptId of ["pending", "active"] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+      const historicalCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId)!;
+      mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET gateway_plan_json = NULL, gateway_plan_hash = NULL WHERE id = ?", historicalCreate.id);
+      stageHistoricalNativeSubmission(store, promptId, promptId === "pending" ? "2026-09-28T15:00:01.000Z" : "2026-09-28T15:00:02.000Z");
+      if (promptId === "pending") store.markPromptObservationDetached(promptId, "legacy native queue observer detached");
+    }
+    store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId: "turn-active", startedAt: "2026-09-28T15:00:03.000Z", requestText: "active", requestSubmissionId: "active",
+      externalPromptId: "external", externalMessageId: "external",
+      externalView: createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "active", queuePosition: 0, occurredAt: "2026-09-28T15:00:03.000Z" }),
+      answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(store.getActiveBridgePrompt("b1", 1)).toBeNull();
+    expect(store.getActiveExternalPrompt("b1", 1)).toMatchObject({ id: "active", transcriptTurnId: "turn-active" });
   });
 
   it("updates an already delivered queued Answer Card after external adoption", () => {
@@ -1718,6 +5014,14 @@ describe("SQLite store", () => {
     const create = store.listPendingOutboundReplies()[0]!;
     store.markOutboundReplyDelivered(create.id, "answer-1", "card-1");
     const startedAt = new Date(Date.now() + 1_000).toISOString();
+    const expectedPromptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 1,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "turn-1",
+      startedAt
+    });
 
     const result = store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
@@ -1725,8 +5029,9 @@ describe("SQLite store", () => {
       externalView: { ...queued, promptId: "external" }, answerCardFor: renderRequestAnswerCard
     });
 
-    expect(result).toMatchObject({ outcome: "adopted_queued", outboxReserved: false });
+    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: expectedPromptId }, outboxReserved: true });
     expect(store.loadRunCard("queued")).toMatchObject({ phase: "queued", answerMessageId: "answer-1", answerCardId: "card-1" });
+    expect(store.loadRunCard(expectedPromptId)).toMatchObject({ phase: "running", queuePosition: 0, answerMessageId: null, startedAt });
   });
 
   it("creates an independently rendered Answer Card when no queued prompt uniquely matches", () => {
@@ -1734,6 +5039,14 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 2, title: "Direct work", workspaceId: "w1", paneId: "w1:p1", requestText: "direct work", queuePosition: 0, occurredAt: "2026-08-31T10:00:01.000Z" });
+    const expectedPromptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 2,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "turn-2",
+      startedAt: "2026-08-31T10:00:01.000Z"
+    });
 
     const result = store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
@@ -1741,9 +5054,69 @@ describe("SQLite store", () => {
       externalView, answerCardFor: renderRequestAnswerCard
     });
 
-    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: "external", executionOrigin: "herdr", state: "running", observationState: "attached", transcriptTurnId: "turn-2" }, outboxReserved: true });
-    expect(store.loadRunCard("external")).toMatchObject({ phase: "queued", queuePosition: 0, startedAt: null });
-    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: "external", kind: "stream_card_create", cardRole: "answer" })]));
+    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: expectedPromptId, executionOrigin: "herdr", state: "running", observationState: "attached", transcriptTurnId: "turn-2" }, outboxReserved: true });
+    expect(store.loadRunCard(expectedPromptId)).toMatchObject({ phase: "running", queuePosition: 0, startedAt: "2026-08-31T10:00:01.000Z" });
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({
+      promptId: expectedPromptId, idempotencyKey: `run-card:create:${expectedPromptId}:answer`,
+      kind: "stream_card_create", intentKind: "stream-card", cardRole: "answer"
+    })]));
+  });
+
+  it("does not treat the same turn ID in a different native session as the same Herdr-origin Prompt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task 1" });
+    store.createPendingBinding({ id: "b2", workspaceId: "w1", chatId: "c1", topicId: "t2", rootMessageId: "root-2", title: "Task 2" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 1, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    store.updateBinding("b2", { state: "active", lifecycle: "active", attachment: "attached", generation: 1, paneId: "w1:p2", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-2" });
+    const turnId = "shared-turn";
+    const startedAt = "2026-09-30T00:00:01.000Z";
+
+    const first = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId, startedAt, requestText: "direct one", externalPromptId: "random-1", externalMessageId: "legacy-1",
+      externalView: createQueuedRunCard({ promptId: "ignored-1", bindingId: "b1", title: "Direct 1", workspaceId: "w1", paneId: "w1:p1", requestText: "direct one", queuePosition: 0, occurredAt: startedAt }),
+      answerCardFor: renderRequestAnswerCard
+    });
+    store.completeTurn({ promptId: nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt }), bindingId: "b1", answer: "done", outputFingerprint: "fp-1", occurredAt: "2026-09-30T00:00:02.000Z" });
+
+    const second = store.adoptExternalTurn({
+      bindingId: "b2", expectedGeneration: 1, expectedPaneId: "w1:p2", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-2" },
+      turnId, startedAt, requestText: "direct two", externalPromptId: "random-2", externalMessageId: "legacy-2",
+      externalView: createQueuedRunCard({ promptId: "ignored-2", bindingId: "b2", title: "Direct 2", workspaceId: "w1", paneId: "w1:p2", requestText: "direct two", queuePosition: 0, occurredAt: startedAt }),
+      answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(first).toMatchObject({ outcome: "created_external", prompt: { id: nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt }) } });
+    expect(second).toMatchObject({ outcome: "created_external", prompt: { id: nativeTurnPromptId({ bindingId: "b2", bindingGeneration: 1, paneId: "w1:p2", nativeSessionId: "session-2", turnId, startedAt }) } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE execution_origin = 'herdr'").get()).toEqual({ count: 2 });
+  });
+
+  it("does not treat the same turn ID with a different canonical start as the same Herdr-origin Prompt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 1, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
+    const turnId = "shared-turn";
+    const firstStartedAt = "2026-09-30T00:00:01.000Z";
+    const secondStartedAt = "2026-09-30T00:00:02.000Z";
+
+    const first = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId, startedAt: firstStartedAt, requestText: "direct one", externalPromptId: "random-1", externalMessageId: "legacy-1",
+      externalView: createQueuedRunCard({ promptId: "ignored-1", bindingId: "b1", title: "Direct 1", workspaceId: "w1", paneId: "w1:p1", requestText: "direct one", queuePosition: 0, occurredAt: firstStartedAt }),
+      answerCardFor: renderRequestAnswerCard
+    });
+    store.completeTurn({ promptId: nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: firstStartedAt }), bindingId: "b1", answer: "done", outputFingerprint: "fp-1", occurredAt: "2026-09-30T00:00:01.500Z" });
+
+    const second = store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId, startedAt: secondStartedAt, requestText: "direct two", externalPromptId: "random-2", externalMessageId: "legacy-2",
+      externalView: createQueuedRunCard({ promptId: "ignored-2", bindingId: "b1", title: "Direct 2", workspaceId: "w1", paneId: "w1:p1", requestText: "direct two", queuePosition: 0, occurredAt: secondStartedAt }),
+      answerCardFor: renderRequestAnswerCard
+    });
+
+    expect(first).toMatchObject({ outcome: "created_external", prompt: { id: nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: firstStartedAt }) } });
+    expect(second).toMatchObject({ outcome: "created_external", prompt: { id: nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: secondStartedAt }) } });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE execution_origin = 'herdr'").get()).toEqual({ count: 2 });
   });
 
   it("fails an idle external turn only while every durable identity fence still matches", () => {
@@ -1752,9 +5125,17 @@ describe("SQLite store", () => {
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     store.database.prepare("UPDATE bindings SET last_agent_state = 'idle', last_observed_at = '2026-08-31T10:00:02.000Z' WHERE id = 'b1'").run();
     const startedAt = "2026-08-31T10:00:01.000Z";
+    const promptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 2,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "turn-1",
+      startedAt
+    });
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 2, title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: ":q", queuePosition: 0, occurredAt: startedAt });
     store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "turn-1", startedAt, requestText: ":q", externalPromptId: "external", externalMessageId: "external", externalView, answerCardFor: renderRequestAnswerCard });
-    const input = { promptId: "external", bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, expectedObservedAt: "2026-08-31T10:00:02.000Z", turnId: "turn-1", startedAt, error: "missing terminal event", occurredAt: "2026-08-31T10:01:00.000Z" };
+    const input = { promptId, bindingId: "b1", expectedGeneration: 2, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, expectedObservedAt: "2026-08-31T10:00:02.000Z", turnId: "turn-1", startedAt, error: "missing terminal event", occurredAt: "2026-08-31T10:01:00.000Z" };
 
     expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedGeneration: 1 })).toBe(false);
     expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedPaneId: "w1:p2" })).toBe(false);
@@ -1767,15 +5148,21 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE bindings SET attachment = 'attached', last_agent_state = 'working' WHERE id = 'b1'").run();
     expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
     store.database.prepare("UPDATE bindings SET last_agent_state = 'idle' WHERE id = 'b1'").run();
-    store.database.prepare("UPDATE run_cards SET binding_generation = 1 WHERE prompt_id = 'external'").run();
+    store.database.prepare("UPDATE run_cards SET binding_generation = 1 WHERE prompt_id = ?").run(promptId);
     expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
-    store.database.prepare("UPDATE run_cards SET binding_generation = 2 WHERE prompt_id = 'external'").run();
-    expect(store.getPrompt("external")).toMatchObject({ state: "running", observationState: "attached" });
+    store.database.prepare("UPDATE run_cards SET binding_generation = 2 WHERE prompt_id = ?").run(promptId);
+    expect(store.getPrompt(promptId)).toMatchObject({ state: "running", observationState: "attached" });
+    store.database.prepare("UPDATE bindings SET last_observed_at = ? WHERE id = 'b1'").run(startedAt);
+    expect(store.failExternalTurnWithoutTerminalEvent({ ...input, expectedObservedAt: startedAt })).toBe(false);
+    store.database.prepare("UPDATE bindings SET last_observed_at = ? WHERE id = 'b1'").run(input.expectedObservedAt);
 
     expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(true);
     expect(store.failExternalTurnWithoutTerminalEvent(input)).toBe(false);
-    expect(store.getPrompt("external")).toMatchObject({ state: "failed", observationState: "completed", error: "missing terminal event" });
-    expect(store.loadRunCard("external")).toMatchObject({ phase: "failed", notice: "missing terminal event" });
+    expect(store.getPrompt(promptId)).toMatchObject({ state: "failed", observationState: "completed", error: "missing terminal event" });
+    expect(store.loadRunCard(promptId)).toMatchObject({ phase: "failed", notice: "missing terminal event" });
+    expect(store.database.prepare("SELECT actor_open_id, action, outcome FROM audit_log WHERE action = 'turn.recovery.terminalized'").get()).toEqual({
+      actor_open_id: "system:turn-recovery", action: "turn.recovery.terminalized", outcome: "uncertain"
+    });
   });
 
   it("atomically supersedes an exact-owned detached prompt with a later external turn", () => {
@@ -1790,6 +5177,14 @@ describe("SQLite store", () => {
     expect(store.claimPromptTranscriptTurn({ promptId: "old", bindingId: "b1", turnId: "old-turn", startedAt: "2026-08-31T10:00:01.250Z" })).toMatchObject({ state: "claimed" });
     store.markPromptObservationDetached("old", "uncertain");
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "New", workspaceId: "w1", paneId: "w1:p1", requestText: "new work", queuePosition: 0, occurredAt: "2026-08-31T10:00:02.000Z" });
+    const expectedPromptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 1,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "new-turn",
+      startedAt: "2026-08-31T10:00:02.000Z"
+    });
 
     const result = store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
@@ -1797,10 +5192,10 @@ describe("SQLite store", () => {
       supersede: { promptId: "old", turnId: "old-turn", startedAt: "2026-08-31T10:00:01.250Z" }, externalView, answerCardFor: renderRequestAnswerCard
     });
 
-    expect(result).toMatchObject({ outcome: "created_external", supersededPromptIds: ["old"], prompt: { id: "external", transcriptTurnId: "new-turn" }, outboxReserved: true });
-    expect(store.getPrompt("old")).toMatchObject({ state: "failed", observationState: "completed", transcriptTurnId: "old-turn" });
-    expect(store.loadRunCard("old")).toMatchObject({ phase: "failed", notice: expect.stringContaining("newer Herdr turn") });
-    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: "external", cardRole: "answer" })]));
+    expect(result).toMatchObject({ outcome: "created_external", supersededPromptIds: ["old"], prompt: { id: expectedPromptId, transcriptTurnId: "new-turn" }, outboxReserved: true });
+    expect(store.getPrompt("old")).toMatchObject({ state: "uncertain", observationState: "completed", transcriptTurnId: "old-turn" });
+    expect(store.loadRunCard("old")).toMatchObject({ phase: "uncertain", notice: expect.stringContaining("newer Herdr turn") });
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ promptId: expectedPromptId, cardRole: "answer" })]));
   });
 
   it("rejects supersession when the detached prompt fence does not match", () => {
@@ -1826,8 +5221,16 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE prompt_jobs SET state='running', observation_state='detached', dispatched_at='2026-08-31T10:00:01.000Z', transcript_turn_id='old-turn', transcript_turn_started_at='2026-08-31T10:00:01.000Z' WHERE id='old'").run();
     store.database.prepare("UPDATE run_cards SET phase='running' WHERE prompt_id='old'").run();
     const externalView = createQueuedRunCard({ promptId: "external", bindingId: "b1", title: "new", workspaceId: "w1", paneId: "w1:p1", requestText: "new", queuePosition: 0, occurredAt: "2026-08-31T10:00:02.000Z" });
+    const expectedPromptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 1,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "new-turn",
+      startedAt: "2026-08-31T10:00:02.000Z"
+    });
     const result = store.adoptExternalTurn({ bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, turnId: "new-turn", startedAt: "2026-08-31T10:00:02.000Z", requestText: "new", externalPromptId: "external", externalMessageId: "external", supersede: { promptId: "old", turnId: "old-turn", startedAt: "2026-08-31T10:00:01.000Z" }, externalView, answerCardFor: renderRequestAnswerCard });
-    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: "external" } });
+    expect(result).toMatchObject({ outcome: "created_external", prompt: { id: expectedPromptId } });
     expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started", executionOrigin: "bridge" });
   });
 
@@ -1855,6 +5258,7 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "creator" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
     store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c1", topicId: "t2", rootMessageId: "other-root", title: "Other" });
+    store.updateBinding("b2", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w2:p1", lastAgentState: "idle" });
     const seed = (id: string, bindingId: string, occurredAt: string) => {
       const view = createQueuedRunCard({ promptId: id, bindingId, title: id, workspaceId: bindingId === "b1" ? "w1" : "w2", paneId: `${bindingId}:p1`, requestText: `private ${id}`, queuePosition: 1, occurredAt });
       store!.acceptPrompt({ prompt: { id, bindingId, larkMessageId: `m-${id}`, actorOpenId: "u1", body: `private ${id}` }, view, rootMessageId: bindingId === "b1" ? "root" : "other-root", answerCard: { phase: "queued", id } });
@@ -1864,7 +5268,7 @@ describe("SQLite store", () => {
     seed("queued", "b1", "2026-09-05T00:00:02.000Z");
     seed("third", "b1", "2026-09-05T00:00:03.000Z");
     seed("other", "b2", "2026-09-05T00:00:00.000Z");
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id IN ('oldest','newer','third','other')").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id IN ('oldest','newer','third','other')").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id IN ('oldest','newer','third','other')").run();
     const initialCreate = store.listPendingOutboundReplies().find((reply) => reply.promptId === "oldest")!;
     store.markOutboundReplyDelivered(initialCreate.id, "answer-oldest", "card-oldest");
@@ -1876,19 +5280,103 @@ describe("SQLite store", () => {
     });
 
     expect(result).toEqual({ outcome: "skipped", promptId: "oldest", outboxReserved: true });
-    expect(store.getPrompt("oldest")).toMatchObject({ state: "failed", observationState: "completed", error: reason, updatedAt: "2026-09-05T00:01:00.000Z" });
-    expect(store.loadRunCard("oldest")).toMatchObject({ phase: "failed", notice: reason, finishedAt: "2026-09-05T00:01:00.000Z" });
-    expect(store.getPrompt("newer")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("oldest")).toMatchObject({ state: "cancelled", observationState: "completed", error: reason, updatedAt: "2026-09-05T00:01:00.000Z" });
+    expect(store.loadRunCard("oldest")).toMatchObject({ phase: "uncertain", notice: reason, finishedAt: "2026-09-05T00:01:00.000Z" });
+    expect(store.getPrompt("newer")).toMatchObject({ state: "recovering", observationState: "detached" });
     expect(store.getPrompt("queued")).toMatchObject({ state: "queued", observationState: "not_started" });
-    expect(store.getPrompt("third")).toMatchObject({ state: "running", observationState: "detached" });
-    expect(store.getPrompt("other")).toMatchObject({ state: "running", observationState: "detached" });
-    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({
-      idempotencyKey: "run-card:update:oldest:answer:2", kind: "card_update", rootMessageId: "answer-oldest", payload: JSON.stringify({ phase: "failed", notice: reason, version: 2 })
-    }));
+    expect(store.getPrompt("third")).toMatchObject({ state: "recovering", observationState: "detached" });
+    expect(store.getPrompt("other")).toMatchObject({ state: "recovering", observationState: "detached" });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "oldest")).toEqual([
+      expect.objectContaining({ kind: "card_update", intentKind: "card", viewVersion: 2, rootMessageId: "answer-oldest" })
+    ]);
     expect(store.database.prepare("SELECT actor_open_id, action, target, outcome FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({
-      actor_open_id: "creator", action: "swarm.skip", target: "binding:b1:prompt:oldest:message:skip-message", outcome: "skipped"
+      actor_open_id: "creator", action: "swarm.skip", target: "binding:b1:prompt:oldest:message:skip-message", outcome: "uncertain"
     });
     expect(JSON.stringify(store.database.prepare("SELECT * FROM audit_log WHERE action = 'swarm.skip'").get())).not.toContain("private oldest");
+  });
+
+  it("terminalizes an uncertain completed blocker so its FIFO successor can run", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "idle" });
+    for (const [index, promptId] of ["uncertain", "following"].entries()) {
+      const view = createQueuedRunCard({
+        promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId,
+        queuePosition: index + 1, occurredAt: `2026-09-05T00:00:0${index}.000Z`
+      });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+    }
+    store.database.prepare("UPDATE prompt_jobs SET state = 'uncertain', observation_state = 'completed' WHERE id = 'uncertain'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'uncertain' WHERE prompt_id = 'uncertain'").run();
+
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.skipOldestDetachedPrompt({
+      bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip",
+      reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({})
+    })).toMatchObject({ outcome: "skipped", promptId: "uncertain" });
+    expect(store.getPrompt("uncertain")).toMatchObject({ state: "cancelled", observationState: "completed", error: "human skip" });
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt).toMatchObject({ id: "following", state: "submitted" });
+  });
+
+  it("auto-skips an expired FIFO head with exact idle session fences", () => {
+    store = new SqliteBindingStore(":memory:");
+    prepareDetachedRecoveryCandidate(store);
+
+    const result = store.advanceDetachedPromptRecovery({
+      promptId: "blocked-head", bindingId: "b1", expectedBindingGeneration: 1, expectedPaneId: "w1:p1", expectedNativeSessionId: "session-1",
+      expiredBefore: "2026-09-05T00:30:00.000Z", occurredAt: "2026-09-05T00:31:00.000Z",
+      reason: "⚠ 已跳过 1 条无法确认结果的历史请求；后续消息仍在同步。", renderRunCard: () => ({})
+    });
+
+    expect(result).toMatchObject({ outcome: "skipped", promptId: "blocked-head", attemptCount: 1 });
+    expect(store.getPrompt("blocked-head")).toMatchObject({ state: "cancelled", observationState: "completed" });
+    expect(store.getPrompt("successor")).toMatchObject({ state: "queued" });
+    expect(store.database.prepare("SELECT actor_open_id, action, outcome FROM audit_log WHERE action='swarm.auto_skip'").get()).toEqual({ actor_open_id: "system:auto-skip", action: "swarm.auto_skip", outcome: "uncertain" });
+  });
+
+  it("does not require a queued successor, but refuses auto-skip when the pane is blocked or exact turn identity exists", () => {
+    store = new SqliteBindingStore(":memory:");
+    prepareDetachedRecoveryCandidate(store, { lastAgentState: "blocked", withSuccessor: false });
+    const input = { promptId: "blocked-head", bindingId: "b1", expectedBindingGeneration: 1, expectedPaneId: "w1:p1", expectedNativeSessionId: "session-1", expiredBefore: "2026-09-05T00:30:00.000Z", occurredAt: "2026-09-05T00:31:00.000Z", reason: "skip", renderRunCard: () => ({}) };
+
+    expect(store.advanceDetachedPromptRecovery(input)).toEqual({ outcome: "stale" });
+    store.updateBinding("b1", { lastAgentState: "idle" });
+    expect(store.advanceDetachedPromptRecovery(input)).toMatchObject({ outcome: "skipped", promptId: "blocked-head" });
+
+    store = new SqliteBindingStore(":memory:");
+    prepareDetachedRecoveryCandidate(store, { withSuccessor: false });
+    store.database.prepare("UPDATE prompt_jobs SET transcript_turn_id='turn-1', transcript_turn_started_at='2026-09-05T00:00:00.000Z' WHERE id='blocked-head'").run();
+    expect(store.advanceDetachedPromptRecovery(input)).toEqual({ outcome: "stale" });
+    expect(store.getPrompt("blocked-head")).toMatchObject({ state: "recovering", observationState: "detached" });
+  });
+
+  it("persists bounded detached recovery observations and skips on the third due attempt", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-detached-recovery-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    prepareDetachedRecoveryCandidate(store);
+    const observe = (occurredAt: string) => store!.advanceDetachedPromptRecovery({
+      promptId: "blocked-head", bindingId: "b1", expectedBindingGeneration: 1, expectedPaneId: "w1:p1", expectedNativeSessionId: "session-1",
+      expiredBefore: "2026-09-04T00:00:00.000Z", occurredAt, reason: "bounded skip", renderRunCard: () => ({})
+    });
+
+    expect(observe("2026-09-05T00:00:10.000Z")).toEqual({ outcome: "observed", attemptCount: 1, nextAttemptAt: "2026-09-05T00:00:40.000Z" });
+    expect(observe("2026-09-05T00:00:20.000Z")).toEqual({ outcome: "deferred", attemptCount: 1, nextAttemptAt: "2026-09-05T00:00:40.000Z" });
+    store.close();
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 59").get()).toEqual({ version: 59 });
+    expect(observe("2026-09-05T00:00:40.000Z")).toEqual({ outcome: "observed", attemptCount: 2, nextAttemptAt: "2026-09-05T00:01:40.000Z" });
+    store.database.exec("CREATE TEMP TRIGGER reject_auto_skip_audit BEFORE INSERT ON audit_log WHEN NEW.action = 'swarm.auto_skip' BEGIN SELECT RAISE(ABORT, 'forced_auto_skip_audit_failure'); END");
+    expect(() => observe("2026-09-05T00:01:40.000Z")).toThrow("forced_auto_skip_audit_failure");
+    expect(store.getPrompt("blocked-head")).toMatchObject({ state: "recovering", observationState: "detached" });
+    expect(store.database.prepare("SELECT attempt_count FROM detached_prompt_recovery_attempts WHERE prompt_id='blocked-head'").get()).toEqual({ attempt_count: 2 });
+    store.database.exec("DROP TRIGGER reject_auto_skip_audit");
+    expect(observe("2026-09-05T00:01:40.000Z")).toMatchObject({ outcome: "skipped", promptId: "blocked-head", attemptCount: 3 });
+    expect(observe("2026-09-05T00:02:40.000Z")).toEqual({ outcome: "stale" });
+    expect(store.getPrompt("blocked-head")).toMatchObject({ state: "cancelled", observationState: "completed", error: "bounded skip" });
+    expect(store.getPrompt("successor")).toMatchObject({ state: "queued" });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM detached_prompt_recovery_attempts").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action='swarm.auto_skip'").get()).toEqual({ count: 1 });
   });
 
   it("does not skip another prompt when detached skip is stale or has no eligible target", () => {
@@ -1898,17 +5386,36 @@ describe("SQLite store", () => {
     for (const [id, occurredAt] of [["first", "2026-09-05T00:00:00.000Z"], ["second", "2026-09-05T00:00:01.000Z"]] as const) {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
-      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = ?").run(id);
+      store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = ?").run(id);
       store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = ?").run(id);
     }
     const input = { bindingId: "b1", expectedBindingGeneration: 2, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) };
 
     expect(store.skipOldestDetachedPrompt(input)).toEqual({ outcome: "stale" });
-    expect(store.getPrompt("first")).toMatchObject({ state: "running", observationState: "detached" });
-    expect(store.getPrompt("second")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("first")).toMatchObject({ state: "recovering", observationState: "detached" });
+    expect(store.getPrompt("second")).toMatchObject({ state: "recovering", observationState: "detached" });
     store.database.prepare("UPDATE prompt_jobs SET state = 'delivered', observation_state = 'completed' WHERE id IN ('first','second')").run();
     expect(store.skipOldestDetachedPrompt({ ...input, expectedBindingGeneration: 1 })).toEqual({ outcome: "none" });
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 0 });
+  });
+
+  it("defers Primary completion-action eligibility when detached observation completes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", creatorOpenId: "ou_creator" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
+
+    expect(store.settleDetachedPrompt({
+      promptId: "p1", bindingId: "b1", runtime: "idle", occurredAt: "2026-09-05T00:01:01.000Z",
+      terminal: { kind: "completed", answer: withLegacyCompletionChoice("detached answer"), outputFingerprint: "fp" }
+    })).toEqual({ settled: true, completionActionEligibility: { outcome: "deferred" } });
+
+    expect(store.listPendingOutboundReplies().filter(({ idempotencyKey }) => idempotencyKey === "primary-next-input:b1:1:p1")).toHaveLength(0);
+    expect(store.database.prepare("SELECT state FROM completion_notification_obligations WHERE owner_kind = 'primary-prompt' AND owner_id = 'p1'").get()).toEqual({ state: "waiting_for_answer" });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "delivered", observationState: "completed" });
   });
 
   it("does not let detached observation settle a prompt after skip won the state CAS", () => {
@@ -1917,17 +5424,17 @@ describe("SQLite store", () => {
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = 'p1'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
 
     expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) })).toMatchObject({ outcome: "skipped" });
     expect(store.settleDetachedPrompt({
       promptId: "p1", bindingId: "b1", runtime: "idle", occurredAt: "2026-09-05T00:01:01.000Z",
       terminal: { kind: "completed", answer: "late answer", outputFingerprint: "late" }
-    })).toBe(false);
+    })).toMatchObject({ settled: false, completionActionEligibility: { outcome: "skipped", reason: "not-completion" } });
 
-    expect(store.getPrompt("p1")).toMatchObject({ state: "failed", observationState: "completed", error: "human skip" });
-    expect(store.loadRunCard("p1")).toMatchObject({ phase: "failed", notice: "human skip" });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "cancelled", observationState: "completed", error: "human skip" });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "uncertain", notice: "human skip" });
     expect(store.getBinding("b1")).toMatchObject({ lastAgentState: "working", lastOutputFingerprint: null });
   });
 
@@ -1938,51 +5445,57 @@ describe("SQLite store", () => {
     for (const [id, occurredAt] of [["first", "2026-09-05T00:00:00.000Z"], ["second", "2026-09-05T00:00:01.000Z"]] as const) {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "root", answerCard: {} });
-      store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = ?").run(id);
+      store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = ?").run(id);
       store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = ?").run(id);
     }
-    store.database.exec("CREATE TRIGGER lose_first_skip BEFORE UPDATE OF state ON prompt_jobs WHEN OLD.id = 'first' AND NEW.state = 'failed' BEGIN SELECT RAISE(IGNORE); END");
+    store.database.exec("CREATE TRIGGER lose_first_skip BEFORE UPDATE OF state ON prompt_jobs WHEN OLD.id = 'first' AND NEW.state = 'cancelled' BEGIN SELECT RAISE(IGNORE); END");
 
     expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) })).toEqual({ outcome: "stale" });
-    expect(store.getPrompt("first")).toMatchObject({ state: "running", observationState: "detached" });
-    expect(store.getPrompt("second")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("first")).toMatchObject({ state: "recovering", observationState: "detached" });
+    expect(store.getPrompt("second")).toMatchObject({ state: "recovering", observationState: "detached" });
   });
 
   it("does not skip a detached prompt owned by an earlier binding generation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 2 });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p0" });
     const view = createQueuedRunCard({ promptId: "old", bindingId: "b1", bindingGeneration: 1, title: "old", workspaceId: "w1", paneId: "w1:p0", requestText: "old", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "old", bindingId: "b1", larkMessageId: "m-old", actorOpenId: "u1", body: "old" }, view, rootMessageId: "root", answerCard: {} });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'old'").run();
+    store.updateBinding("b1", { paneId: "w1:p1", generation: 2 });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = 'old'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'old'").run();
 
     expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 2, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => ({}) })).toEqual({ outcome: "none" });
-    expect(store.getPrompt("old")).toMatchObject({ state: "running", observationState: "detached" });
+    expect(store.getPrompt("old")).toMatchObject({ state: "recovering", observationState: "detached" });
   });
 
-  it("rolls back detached skip when its durable card projection fails", () => {
+  it("renders a terminal CardKit projection when skipping a delivered Answer", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "private", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "private" }, view, rootMessageId: "root", answerCard: {} });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = 'p1'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
 
-    expect(() => store!.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: () => { throw new Error("render failed"); } })).toThrow("render failed");
-    expect(store.getPrompt("p1")).toMatchObject({ state: "running", observationState: "detached", error: null });
-    expect(store.loadRunCard("p1")).toMatchObject({ phase: "running" });
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 0 });
+    const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1")!;
+    store.markOutboundReplyDelivered(create.id, "answer-p1", "card-p1");
+    expect(store.skipOldestDetachedPrompt({ bindingId: "b1", expectedBindingGeneration: 1, actorOpenId: "creator", sourceMessageId: "skip", reason: "human skip", occurredAt: "2026-09-05T00:01:00.000Z", rootMessageId: "root", renderRunCard: (run) => ({ phase: run.phase, version: run.viewVersion }) })).toMatchObject({ outcome: "skipped", outboxReserved: true });
+    expect(store.getPrompt("p1")).toMatchObject({ state: "cancelled", observationState: "completed", error: "human skip" });
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "uncertain" });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([
+      expect.objectContaining({ kind: "card_update", intentKind: "card", viewVersion: 2, rootMessageId: "answer-p1" })
+    ]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action = 'swarm.skip'").get()).toEqual({ count: 1 });
   });
 
-  it("updates the original pending Answer Card creation when skipping before delivery", () => {
+  it("preserves a prepared CardKit create and catches up the terminal skipped projection after ACK", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "p1", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: { phase: "queued" } });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached' WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = 'p1'").run();
     store.database.prepare("UPDATE run_cards SET phase = 'running' WHERE prompt_id = 'p1'").run();
     const original = store.listPendingOutboundReplies()[0]!;
 
@@ -1990,7 +5503,17 @@ describe("SQLite store", () => {
 
     const replies = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1");
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatchObject({ id: original.id, idempotencyKey: "run-card:create:p1:answer", kind: "stream_card_create", viewVersion: 2, payload: JSON.stringify({ phase: "failed", version: 2 }) });
+    expect(replies[0]).toMatchObject({ id: original.id, idempotencyKey: "run-card:create:p1:answer", kind: "stream_card_create", intentKind: "stream-card", viewVersion: 1 });
+    expect(JSON.parse(replies[0]!.payload)).toMatchObject({ phase: "queued" });
+    expect(store.markOutboundReplyDelivered(original.id, "answer-p1", "card-p1")).toBe(true);
+    const invalidation = store.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "primary-turn" && targetId === "p1")!;
+    expect(store.projectCardContext(invalidation, {
+      primaryAnswer: (run) => ({ phase: run.phase, version: run.viewVersion }),
+      primaryMain: () => { throw new Error("not used"); }, workerMain: () => { throw new Error("not used"); }, workerTask: () => { throw new Error("not used"); }
+    })).toBe("reserved");
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([
+      expect.objectContaining({ kind: "card_update", intentKind: "card", viewVersion: 2, rootMessageId: "answer-p1" })
+    ]);
   });
 
   it("claims a priority Primary turn before ordinary FIFO without reordering the ordinary queue", () => {
@@ -2073,38 +5596,94 @@ describe("SQLite store", () => {
     store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.4" });
     store.claimNextDispatchablePrompt("b1");
 
-    expect(store.markModelPromptPrepared({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 2, operationId: "wrong" })).toBe(false);
-    expect(store.markModelPromptPrepared({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
+    expect(store.recordModelDispatchEvidence({ kind: "prepared", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 2, operationId: "wrong" })).toBe(false);
+    expect(store.recordModelDispatchEvidence({ kind: "prepared", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
     expect(store.getModelPreference("b1")).toMatchObject({ state: "applying", preparedOperationId: "op1" });
-    expect(store.rollbackPreparedModelPrompt({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "wrong" })).toBe(false);
+    expect(store.recordModelDispatchEvidence({ kind: "prepare_aborted", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "wrong" })).toBe(false);
     store.markPromptDispatched("p1", "2026-09-05T00:00:01.000Z");
-    expect(store.rollbackPreparedModelPrompt({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
-    expect(store.getPrompt("p1")).toMatchObject({ dispatchedAt: null, observationState: "attached" });
+    expect(store.recordModelDispatchEvidence({ kind: "prepare_aborted", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
+    expect(store.getPrompt("p1")).toMatchObject({ state: "queued", dispatchedAt: null, observationState: "not_started", modelName: null, modelRevision: null });
     expect(store.getModelPreference("b1")).toMatchObject({ state: "pending", dispatchPromptId: null, preparedOperationId: null });
-    store.database.prepare("UPDATE binding_model_preferences SET state = 'applying', dispatch_prompt_id = 'p1', prepared_operation_id = 'op1' WHERE binding_id = 'b1'").run();
-    expect(store.markModelPromptAccepted({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "wrong", turnId: "turn-1" })).toBe(false);
-    expect(store.markModelPromptAccepted({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1", turnId: "turn-1" })).toBe(true);
+    expect(store.claimNextDispatchablePrompt("b1")).toMatchObject({ prompt: { id: "p1", state: "submitted" }, model: { name: "GPT-5.4", revision: 1 } });
+    expect(store.recordModelDispatchEvidence({ kind: "prepared", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" })).toBe(true);
+    expect(store.recordModelDispatchEvidence({ kind: "accepted", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "wrong", turnId: "turn-1" })).toBe(false);
+    expect(store.recordModelDispatchEvidence({ kind: "accepted", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1", turnId: "turn-1" })).toBe(true);
     expect(store.getModelPreference("b1")).toMatchObject({ state: "effective", effectiveModel: "GPT-5.4", effectiveRevision: 1, dispatchPromptId: null });
     expect(store.getPrompt("p1")).toMatchObject({ transcriptTurnId: "turn-1" });
   });
 
-  it("requeues only model claims proven not prepared and makes prepared claims uncertain on recovery", () => {
+  it("requeues managed model claims proven not prepared and makes prepared claims uncertain on recovery", () => {
     store = new SqliteBindingStore(":memory:");
     for (const id of ["safe", "prepared"] as const) {
       store.createPendingBinding({ id, workspaceId: `w-${id}`, chatId: "c1", topicId: `t-${id}`, rootMessageId: `root-${id}`, title: id });
       store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w-${id}:p1`, lastAgentState: "idle" });
       const view = createQueuedRunCard({ promptId: `p-${id}`, bindingId: id, title: id, workspaceId: `w-${id}`, paneId: `w-${id}:p1`, requestText: id, queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
-      store.acceptPrompt({ prompt: { id: `p-${id}`, bindingId: id, larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: `root-${id}`, answerCard: {} });
+      store.acceptPromptWithEffects({ prompt: { id: `p-${id}`, bindingId: id, larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: `root-${id}`, answerCard: {} });
       store.acceptModelPreference({ bindingId: id, bindingGeneration: 1, model: "GPT-5.4" });
       store.claimNextDispatchablePrompt(id);
     }
-    store.markModelPromptPrepared({ bindingId: "prepared", bindingGeneration: 1, promptId: "p-prepared", revision: 1, operationId: "op-prepared" });
+    store.recordModelDispatchEvidence({ kind: "prepared", bindingId: "prepared", bindingGeneration: 1, promptId: "p-prepared", revision: 1, operationId: "op-prepared" });
 
     store.recoverRunningPrompts();
 
-    expect(store.getPrompt("p-safe")).toMatchObject({ state: "queued", observationState: "not_started", modelName: null, modelRevision: null });
+    expect(store.getPrompt("p-safe")).toMatchObject({
+      state: "queued", observationState: "not_started", modelName: null, modelRevision: null, nativeSubmissionId: "p-safe"
+    });
     expect(store.getModelPreference("safe")).toMatchObject({ state: "pending", dispatchPromptId: null });
-    expect(store.getPrompt("p-prepared")).toMatchObject({ state: "running", observationState: "detached", modelName: "GPT-5.4", modelRevision: 1 });
+    expect(store.getPrompt("p-prepared")).toMatchObject({ state: "recovering", observationState: "detached", modelName: "GPT-5.4", modelRevision: 1 });
+    expect(store.getModelPreference("prepared")).toMatchObject({ state: "uncertain", dispatchPromptId: "p-prepared", preparedOperationId: "op-prepared" });
+  });
+
+  it("requeues a managed bridge claim before native queue proof and detaches it after proof on recovery", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["safe", "submitted"] as const) {
+      store.createPendingBinding({ id, workspaceId: `w-${id}`, chatId: "c1", topicId: `t-${id}`, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w-${id}:p1`, lastAgentState: "idle" });
+      const view = createQueuedRunCard({ promptId: `p-${id}`, bindingId: id, title: id, workspaceId: `w-${id}`, paneId: `w-${id}:p1`, requestText: id, queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+      store.acceptPromptWithEffects({ prompt: { id: `p-${id}`, bindingId: id, larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: `root-${id}`, answerCard: {} });
+      store.claimNextDispatchablePrompt(id);
+    }
+    expect(store.markPromptNativeQueued({
+      promptId: "p-submitted", bindingId: "submitted", submissionId: "p-submitted", dispatchedAt: "2026-09-05T00:00:01.000Z"
+    })).toBe(true);
+
+    expect(store.recoverRunningPrompts()).toBe(2);
+
+    expect(store.getPrompt("p-safe")).toMatchObject({
+      state: "queued", observationState: "not_started", dispatchedAt: null, transcriptTurnId: null, nativeSubmissionId: "p-safe"
+    });
+    expect(store.loadRunCard("p-safe")).toMatchObject({ phase: "queued", startedAt: null, notice: null });
+    expect(store.getPrompt("p-submitted")).toMatchObject({
+      state: "recovering", observationState: "detached", wasDetached: true, dispatchedAt: "2026-09-05T00:00:01.000Z", nativeSubmissionId: "p-submitted"
+    });
+    expect(store.loadRunCard("p-submitted")).toMatchObject({
+      phase: "recovering", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求"
+    });
+  });
+
+  it("requeues only detached claims with no dispatch, foreign native, transcript, or prepared-operation evidence", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["safe", "dispatched", "native", "transcript", "prepared"] as const) {
+      store.createPendingBinding({ id, workspaceId: `w-${id}`, chatId: "c1", topicId: `t-${id}`, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { state: "active", lifecycle: "active", attachment: "attached", paneId: `w-${id}:p1`, lastAgentState: "idle" });
+      const view = createQueuedRunCard({ promptId: `p-${id}`, bindingId: id, title: id, workspaceId: `w-${id}`, paneId: `w-${id}:p1`, requestText: id, queuePosition: 1, occurredAt: "2026-09-05T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: `p-${id}`, bindingId: id, larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: `root-${id}`, answerCard: {} });
+      store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'detached', was_detached = 1 WHERE id = ?").run(`p-${id}`);
+    }
+    store.database.prepare("UPDATE prompt_jobs SET dispatched_at = '2026-09-05T00:00:01.000Z' WHERE id = 'p-dispatched'").run();
+    store.database.prepare("UPDATE prompt_jobs SET native_submission_id = 'submission-native' WHERE id = 'p-native'").run();
+    store.database.prepare("UPDATE prompt_jobs SET transcript_turn_id = 'turn-transcript', transcript_turn_started_at = '2026-09-05T00:00:01.000Z' WHERE id = 'p-transcript'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running' WHERE id = 'p-transcript'").run();
+    store.acceptModelPreference({ bindingId: "prepared", bindingGeneration: 1, model: "GPT-5.4" });
+    store.database.prepare("UPDATE prompt_jobs SET model_name = 'GPT-5.4', model_revision = 1 WHERE id = 'p-prepared'").run();
+    store.database.prepare("UPDATE binding_model_preferences SET state = 'applying', dispatch_prompt_id = 'p-prepared', prepared_operation_id = 'op-prepared' WHERE binding_id = 'prepared'").run();
+
+    store.recoverRunningPrompts();
+
+    expect(store.getPrompt("p-safe")).toMatchObject({ state: "queued", observationState: "not_started", wasDetached: true });
+    expect(store.loadRunCard("p-safe")).toMatchObject({ phase: "queued", startedAt: null, notice: null });
+    for (const id of ["dispatched", "native", "prepared"] as const) expect(store.getPrompt(`p-${id}`)).toMatchObject({ state: "recovering", observationState: "detached" });
+    expect(store.getPrompt("p-transcript")).toMatchObject({ state: "running", observationState: "detached" });
     expect(store.getModelPreference("prepared")).toMatchObject({ state: "uncertain", dispatchPromptId: "p-prepared", preparedOperationId: "op-prepared" });
   });
 
@@ -2122,7 +5701,7 @@ describe("SQLite store", () => {
     store.failPrompt({ promptId: "p-failed", error: "prepare rejected", occurredAt: "2026-09-05T00:00:01.000Z" });
     expect(store.getModelPreference("failed")).toMatchObject({ state: "pending", dispatchPromptId: null, preparedOperationId: null });
 
-    store.markModelPromptPrepared({ bindingId: "detached", bindingGeneration: 1, promptId: "p-detached", revision: 1, operationId: "op-detached" });
+    store.recordModelDispatchEvidence({ kind: "prepared", bindingId: "detached", bindingGeneration: 1, promptId: "p-detached", revision: 1, operationId: "op-detached" });
     store.markPromptDispatched("p-detached", "2026-09-05T00:00:01.000Z");
     store.markPromptObservationDetached("p-detached", "commit outcome unknown");
     expect(store.getModelPreference("detached")).toMatchObject({ state: "uncertain", dispatchPromptId: "p-detached", preparedOperationId: "op-detached" });
@@ -2143,6 +5722,11 @@ describe("SQLite store", () => {
 
     expect(store.claimPromptTranscriptTurn({ ...claim, startedAt: new Date(Date.parse(dispatched.dispatchedAt!) - 1_001).toISOString() })).toMatchObject({ state: "ineligible", prompt: { transcriptTurnId: null } });
     expect(store.claimPromptTranscriptTurn(claim)).toMatchObject({ state: "claimed", prompt: { transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt } });
+    expect(store.listPromptTranscriptTurns("p1")).toMatchObject([{ turnId, chainId: turnId, parentTurnId: null, origin: "prompt", ordinal: 0 }]);
+    const childTurnId = "01a052d3-9c14-70e1-a375-397e2ecb55eb";
+    expect(store.adoptPromptTranscriptContinuation({ promptId: "p1", bindingId: "b1", bindingGeneration: 1, turnId: childTurnId, startedAt: new Date(Date.parse(startedAt) + 250).toISOString(), parentTurnId: turnId, chainId: turnId })).toMatchObject({ state: "adopted", turn: { turnId: childTurnId, parentTurnId: turnId, chainId: turnId, ordinal: 1 } });
+    expect(store.adoptPromptTranscriptContinuation({ promptId: "p1", bindingId: "b1", bindingGeneration: 1, turnId: childTurnId, startedAt: new Date(Date.parse(startedAt) + 250).toISOString(), parentTurnId: turnId, chainId: turnId })).toMatchObject({ state: "matched" });
+    expect(store.adoptPromptTranscriptContinuation({ promptId: "p1", bindingId: "b1", bindingGeneration: 1, turnId: "01a052d3-9c14-70e1-a375-397e2ecb55ec", startedAt: new Date(Date.parse(startedAt) + 500).toISOString(), parentTurnId: "missing-parent", chainId: turnId })).toMatchObject({ state: "ineligible" });
     expect(store.claimPromptTranscriptTurn(claim)).toMatchObject({ state: "matched", prompt: { transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt } });
     expect(store.claimPromptTranscriptTurn({ ...claim, turnId: "01a052d3-9c14-70e1-a375-397e2ecb55ea" })).toMatchObject({ state: "conflict", prompt: { transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt } });
     store.markPromptObservationDetached("p1", "recovering");
@@ -2176,9 +5760,9 @@ describe("SQLite store", () => {
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     store.acceptModelPreference({ bindingId: "b1", bindingGeneration: 1, model: "GPT-5.4" });
     store.claimNextDispatchablePrompt("b1");
-    store.markModelPromptPrepared({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" });
+    store.recordModelDispatchEvidence({ kind: "prepared", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1" });
     store.markPromptDispatched("p1", "2026-09-05T00:00:01.000Z");
-    store.markModelPromptAccepted({ bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1", turnId: "turn-1" });
+    store.recordModelDispatchEvidence({ kind: "accepted", bindingId: "b1", bindingGeneration: 1, promptId: "p1", revision: 1, operationId: "op1", turnId: "turn-1" });
 
     expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "turn-1", startedAt: "2026-09-05T00:00:01.250Z" })).toMatchObject({
       state: "claimed", prompt: { transcriptTurnId: "turn-1", transcriptTurnStartedAt: "2026-09-05T00:00:01.250Z" }
@@ -2186,19 +5770,161 @@ describe("SQLite store", () => {
     expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "turn-2", startedAt: "2026-09-05T00:00:01.500Z" })).toMatchObject({ state: "conflict" });
   });
 
-  it.each([
-    ["queued", "not_started", 0],
-    ["completed", "completed", 0],
-    ["already detached", "detached", 1]
-  ] as const)("does not make a first transcript claim for a %s prompt", (_label, observationState, wasDetached) => {
+  it("reconciles canonical-start correction onto the same exact Herdr-origin Prompt without rewriting immutable legacy delivery history", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const turnId = "turn-1";
+    const legacyStartedAt = "2026-09-30T00:00:01.000Z";
+    const canonicalStartedAt = "2026-09-30T00:00:01.159Z";
+    const promptId = nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: legacyStartedAt });
+    const canonicalPromptId = nativeTurnPromptId({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: canonicalStartedAt });
+    store.adoptExternalTurn({
+      bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1", expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId, startedAt: legacyStartedAt, requestText: "direct task", externalPromptId: "ignored", externalMessageId: "legacy",
+      externalView: createQueuedRunCard({ promptId: "ignored", bindingId: "b1", title: "Direct", workspaceId: "w1", paneId: "w1:p1", requestText: "direct task", queuePosition: 0, occurredAt: legacyStartedAt }),
+      answerCardFor: renderRequestAnswerCard
+    });
+    const legacyCreate = store.listPendingOutboundReplies()[0]!;
+    expect(legacyCreate).toMatchObject({ promptId, kind: "stream_card_create", state: "pending" });
+    store.markOutboundReplyDelivered(legacyCreate.id, "legacy-answer-0", "legacy-card-0");
+    store.enqueueOutboundReply({
+      id: "legacy-static-0",
+      idempotencyKey: `answer-static:${promptId}:0:legacy-answer-0`,
+      bindingId: "b1",
+      promptId,
+      bindingGeneration: 1,
+      viewVersion: 2,
+      cardRole: "answer",
+      rootMessageId: "legacy-answer-0",
+      kind: "card_update",
+      payload: JSON.stringify({ revision: 1 }),
+      projectionKey: `answer-static:${promptId}:0:legacy-answer-0`,
+      snapshotRevision: 1,
+      streamPageIndex: 0,
+      laneKeyOverride: `answer:${promptId}:0`
+    });
+    store.database.prepare("INSERT INTO answer_delivery_coverage(reply_id, prompt_id, binding_generation, page_index, source_start, source_end, source_hash) VALUES ('legacy-static-0', ?, 1, 0, 0, 12, ?)")
+      .run(promptId, createHash("sha256").update("legacy chunk").digest("hex"));
+    store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'permanent', effect_certainty = 'rejected', error = 'legacy failed', dead_lettered_at = ?, updated_at = ? WHERE id = 'legacy-static-0'")
+      .run("2026-09-30T00:00:01.600Z", "2026-09-30T00:00:01.600Z");
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = 'rebuild_answer', updated_at = ? WHERE failed_reply_id = 'legacy-static-0'")
+      .run("2026-09-30T00:00:01.600Z");
+    store.database.prepare("INSERT INTO answer_recovery_links(failed_reply_id, prompt_id, binding_generation, source_page_index, replacement_page_index, source_start, source_end, source_hash) VALUES ('legacy-static-0', ?, 1, 0, 1, 0, 12, ?)")
+      .run(promptId, createHash("sha256").update("legacy chunk").digest("hex"));
+    store.enqueueOutboundReply({
+      id: "legacy-final-0",
+      idempotencyKey: `answer-final-fold:${promptId}:0:legacy-card-0`,
+      bindingId: "b1",
+      promptId,
+      bindingGeneration: 1,
+      viewVersion: 2,
+      cardRole: "answer",
+      rootMessageId: "legacy-card-0",
+      kind: "card_update",
+      payload: JSON.stringify({ final: true }),
+      streamPageIndex: 0,
+      laneKeyOverride: `answer:${promptId}:0`
+    });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'permanent', effect_certainty = 'rejected', error = 'legacy final failed', dead_lettered_at = ?, updated_at = ? WHERE id = 'legacy-final-0'")
+      .run("2026-09-30T00:00:01.650Z", "2026-09-30T00:00:01.650Z");
+    store.database.prepare("INSERT INTO audit_log(actor_open_id, action, target, outcome, created_at) VALUES ('system:test', 'legacy.answer.audit', ?, 'recorded', '2026-09-30T00:00:01.700Z')")
+      .run(`binding:b1:prompt:${promptId}:reply:legacy-static-0`);
+    store.database.prepare("UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static', updated_at = ? WHERE prompt_id = ? AND page_index = 0")
+      .run("2026-09-30T00:00:01.800Z", promptId);
+
+    expect(store.correctExternalTurnStartedAt({
+      promptId,
+      bindingId: "b1",
+      expectedGeneration: 1,
+      expectedPaneId: "w1:p1",
+      expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
+      turnId,
+      expectedStartedAt: legacyStartedAt,
+      canonicalStartedAt,
+      occurredAt: "2026-09-30T00:00:02.000Z"
+    })).toEqual({ promptId: canonicalPromptId });
+
+    expect(store.getPrompt(promptId)).toBeNull();
+    expect(store.getPrompt(canonicalPromptId)).toMatchObject({
+      id: canonicalPromptId,
+      transcriptTurnId: turnId,
+      transcriptTurnStartedAt: canonicalStartedAt,
+      sourceMessageKey: nativeTurnSourceKey({ bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId, startedAt: canonicalStartedAt })
+    });
+    expect(store.loadRunCard(canonicalPromptId)).toMatchObject({ promptId: canonicalPromptId, phase: "running" });
+    expect(store.loadRunCard(promptId)).toBeNull();
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs WHERE execution_origin = 'herdr'").get()).toEqual({ count: 1 });
+    expect(store.database.prepare("SELECT alias_prompt_id, canonical_prompt_id, legacy_started_at, canonical_started_at FROM prompt_identity_corrections WHERE alias_prompt_id = ?").get(promptId)).toEqual({
+      alias_prompt_id: promptId,
+      canonical_prompt_id: canonicalPromptId,
+      legacy_started_at: legacyStartedAt,
+      canonical_started_at: canonicalStartedAt
+    });
+    expect(store.database.prepare("SELECT prompt_id, binding_generation, page_index, source_start, source_end FROM answer_delivery_coverage WHERE reply_id = 'legacy-static-0'").get()).toEqual({
+      prompt_id: promptId,
+      binding_generation: 1,
+      page_index: 0,
+      source_start: 0,
+      source_end: 12
+    });
+    expect(store.database.prepare("SELECT prompt_id, source_page_index, replacement_page_index, source_start, source_end FROM answer_recovery_links WHERE failed_reply_id = 'legacy-static-0'").get()).toEqual({
+      prompt_id: promptId,
+      source_page_index: 0,
+      replacement_page_index: 1,
+      source_start: 0,
+      source_end: 12
+    });
+    expect(store.database.prepare("SELECT target FROM audit_log WHERE action = 'legacy.answer.audit'").get()).toEqual({
+      target: `binding:b1:prompt:${promptId}:reply:legacy-static-0`
+    });
+    expect(store.reserveClosedAnswerStreamReplacement({
+      promptId: canonicalPromptId,
+      previousPageIndex: 0,
+      nextPageIndex: 1,
+      sourceStart: 0,
+      nextElementId: answerElementId(canonicalPromptId, 1),
+      rootMessageId: "root",
+      viewVersion: 3,
+      card: { replacement: true }
+    })).toBe("reserved");
+    const replacementRecovery = store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'legacy-static-0'").get() as { state: string; action: string; replacement_reply_id: string };
+    expect(replacementRecovery).toEqual({
+      state: "replacement_pending",
+      action: "rebuild_answer",
+      replacement_reply_id: expect.any(String)
+    });
+    expect(store.getOutboundReply(replacementRecovery.replacement_reply_id)).toMatchObject({
+      promptId: canonicalPromptId, kind: "stream_card_create", idempotencyKey: `answer-stream-rebuild:${canonicalPromptId}:1`, state: "dead_letter"
+    });
+    expect(store.getAnswerPageDeliveryFacts(canonicalPromptId, 0)).toMatchObject({
+      latestContent: null,
+      finishPending: false,
+      continuationPending: false,
+      finalUpdateState: "dead_letter"
+    });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 64").get()).toEqual({ version: 64 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 65").get()).toEqual({ version: 65 });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 63").get()).toEqual({ version: 63 });
+  });
+
+  it.each([
+    ["queued", "not_started", 0, "ineligible", null],
+    ["completed", "completed", 0, "ineligible", null],
+    ["recovering", "detached", 1, "claimed", "01a052d3-9c14-70e1-a375-397e2ecb55e9"]
+  ] as const)("handles a first transcript claim for a %s prompt according to lifecycle eligibility", (_label, observationState, wasDetached, expectedOutcome, expectedTurnId) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
-    const state = observationState === "not_started" ? "queued" : observationState === "completed" ? "delivered" : "running";
+    const state = observationState === "not_started" ? "queued" : observationState === "completed" ? "delivered" : "recovering";
     store.database.prepare("UPDATE prompt_jobs SET state = ?, observation_state = ?, was_detached = ?, dispatched_at = ? WHERE id = 'p1'").run(state, observationState, wasDetached, "2026-08-30T00:00:00.000Z");
 
-    expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:00.250Z" })).toMatchObject({ state: "ineligible", prompt: { transcriptTurnId: null } });
+    expect(store.claimPromptTranscriptTurn({ promptId: "p1", bindingId: "b1", turnId: "01a052d3-9c14-70e1-a375-397e2ecb55e9", startedAt: "2026-08-30T00:00:00.250Z" })).toMatchObject({ state: expectedOutcome, prompt: { transcriptTurnId: expectedTurnId } });
   });
 
   it("adds nullable transcript provenance to legacy prompt rows without changing state", () => {
@@ -2206,6 +5932,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     store.database.exec(`
@@ -2223,6 +5950,7 @@ describe("SQLite store", () => {
       ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
       PRAGMA foreign_keys = ON;
     `);
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
     store = undefined;
 
@@ -2266,17 +5994,25 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", projectId: "project-a", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
     store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", generation: 1, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
-    const view = createQueuedRunCard({ promptId: "external", bindingId: "b1", bindingGeneration: 1, title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: "2026-08-30T00:00:00.000Z" });
+    const promptId = nativeTurnPromptId({
+      bindingId: "b1",
+      bindingGeneration: 1,
+      paneId: "w1:p1",
+      nativeSessionId: "session-1",
+      turnId: "turn-1",
+      startedAt: "2026-08-30T00:00:00.000Z"
+    });
+    const view = createQueuedRunCard({ promptId, bindingId: "b1", bindingGeneration: 1, title: "external", workspaceId: "w1", paneId: "w1:p1", requestText: "direct", queuePosition: 0, occurredAt: "2026-08-30T00:00:00.000Z" });
     store.adoptExternalTurn({
       bindingId: "b1", expectedGeneration: 1, expectedPaneId: "w1:p1",
       expectedSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" },
-      turnId: "turn-1", startedAt: "2026-08-30T00:00:00.000Z", requestText: "direct", externalPromptId: "external",
+      turnId: "turn-1", startedAt: "2026-08-30T00:00:00.000Z", requestText: "direct", externalPromptId: promptId,
       externalMessageId: "herdr-turn:session-1:turn-1", externalView: view, answerCardFor: () => ({})
     });
 
-    expect(store.getActiveExternalPrompt("b1", 1)).toMatchObject({ id: "external", executionOrigin: "herdr", transcriptTurnId: "turn-1" });
+    expect(store.getActiveExternalPrompt("b1", 1)).toMatchObject({ id: promptId, executionOrigin: "herdr", transcriptTurnId: "turn-1" });
     expect(store.getActiveExternalPrompt("b1", 2)).toBeNull();
-    store.completeTurn({ promptId: "external", bindingId: "b1", answer: "done", outputFingerprint: "fingerprint", occurredAt: "2026-08-30T00:00:01.000Z" });
+    store.completeTurn({ promptId, bindingId: "b1", answer: "done", outputFingerprint: "fingerprint", occurredAt: "2026-08-30T00:00:01.000Z" });
     expect(store.getActiveExternalPrompt("b1", 1)).toBeNull();
   });
 
@@ -2299,6 +6035,7 @@ describe("SQLite store", () => {
     store.createAgentInstance({ id: "preserved-worker", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "stopped", workspace: { id: "preserved-workspace", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
     store.database.exec("DROP TABLE primary_tool_capabilities; CREATE TABLE primary_tool_capabilities(instance_id TEXT PRIMARY KEY REFERENCES agent_instances(id) ON DELETE CASCADE, instance_generation INTEGER NOT NULL, capability_hash TEXT NOT NULL, created_at TEXT NOT NULL)");
     store.database.prepare("INSERT INTO primary_tool_capabilities VALUES (?, ?, ?, ?)").run("preserved-worker", 1, "ephemeral-secret", "2026-08-30T00:00:00.000Z");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close(); store = undefined;
 
     store = new SqliteBindingStore(path);
@@ -2452,9 +6189,89 @@ describe("SQLite store", () => {
 
     expect(store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 2, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1" })).toBeNull();
     expect(store.getAgentInstance("i1")).toMatchObject({ generation: 1, runtimeRef: null, observedState: "unprovisioned" });
-    expect(store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "s1" })).toMatchObject({
-      generation: 2, observedState: "idle", runtimeRef: { paneId: "w1:p1", generation: 2 }
+    const attached = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", paneToken: "vdfn", nativeSessionId: "s1" });
+    expect(attached).toMatchObject({
+      generation: 2, observedState: "idle", runtimeRef: { paneId: "w1:p1", paneToken: "vdfn", generation: 2 }
     });
+    expect(store.updateAgentInstanceObservation({
+      instanceId: "i1", expectedGeneration: 2, expectedRuntime: attached!.runtimeRef!, expectedParent: attached!.parent,
+      observedState: "working"
+    })).toMatchObject({
+      outcome: "updated", instance: { runtimeRef: { paneId: "w1:p1", paneToken: "vdfn" } }
+    });
+  });
+
+  it("persists Worker runtime observations only when normalized evidence changes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-a", projectId: "project-a", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("binding-a", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:primary" });
+    const created = store.createWorkerAgentInstance({
+      id: "worker-observed", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null,
+      desiredState: "running", parent: { bindingId: "binding-a", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: null },
+      workspace: { id: "worker-observed-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4);
+    expect(created.outcome).toBe("created");
+    if (created.outcome !== "created") throw new Error("expected Worker creation");
+    const attached = store.attachAgentInstanceRuntime({
+      instanceId: created.instance.id, expectedGeneration: created.instance.generation,
+      herdrWorkspaceId: "w1", paneId: "w1:worker", paneToken: "pane-token", nativeSessionId: "session-1"
+    })!;
+    store.database.exec("DELETE FROM card_context_invalidations");
+    store.database.prepare("UPDATE agent_instances SET updated_at='2026-10-18T00:00:00.000Z' WHERE id=?").run(attached.id);
+    const input = {
+      instanceId: attached.id, expectedGeneration: attached.generation,
+      expectedRuntime: attached.runtimeRef!, expectedParent: attached.parent,
+      observedState: "idle" as const, paneToken: "pane-token", lastError: null
+    };
+
+    expect(store.updateAgentInstanceObservation(input)).toMatchObject({ outcome: "unchanged", instance: { id: attached.id } });
+    expect(store.database.prepare("SELECT observed_state,pane_token,last_error,updated_at FROM agent_instances WHERE id=?").get(attached.id)).toEqual({
+      observed_state: "idle", pane_token: "pane-token", last_error: null, updated_at: "2026-10-18T00:00:00.000Z"
+    });
+    expect(store.listPendingCardContextInvalidations()).toEqual([]);
+
+    expect(store.updateAgentInstanceObservation({ ...input, observedState: "working", paneToken: "pane-token-2" })).toMatchObject({
+      outcome: "updated", instance: { observedState: "working", runtimeRef: { paneToken: "pane-token-2" } }
+    });
+    const invalidations = store.listPendingCardContextInvalidations();
+    expect(invalidations.length).toBeGreaterThan(0);
+    expect(invalidations.every(({ reason }) => reason === "worker.runtime-observed")).toBe(true);
+    expect(store.updateAgentInstanceObservation({ ...input, observedState: "working", paneToken: "pane-token-2" })).toMatchObject({ outcome: "unchanged" });
+    expect(store.listPendingCardContextInvalidations()).toEqual(invalidations);
+  });
+
+  it.each([
+    ["runtime generation", "UPDATE agent_instances SET generation=3 WHERE id='worker-stale'"],
+    ["runtime workspace", "UPDATE agent_instances SET herdr_workspace_id='w2' WHERE id='worker-stale'"],
+    ["runtime Pane", "UPDATE agent_instances SET pane_id='w1:replacement' WHERE id='worker-stale'"],
+    ["runtime session", "UPDATE agent_instances SET native_session_id='session-2' WHERE id='worker-stale'"],
+    ["parent owner", "UPDATE agent_instances SET parent_binding_generation=2 WHERE id='worker-stale'"]
+  ])("rejects an observation behind a stale %s fence", (_label, mutate) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "binding-a", projectId: "project-a", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    const created = store.createWorkerAgentInstance({
+      id: "worker-stale", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null,
+      desiredState: "running", parent: { bindingId: "binding-a", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: null },
+      workspace: { id: "worker-stale-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4);
+    expect(created.outcome).toBe("created");
+    if (created.outcome !== "created") throw new Error("expected Worker creation");
+    const attached = store.attachAgentInstanceRuntime({
+      instanceId: created.instance.id, expectedGeneration: created.instance.generation,
+      herdrWorkspaceId: "w1", paneId: "w1:worker", paneToken: "pane-token", nativeSessionId: "session-1"
+    })!;
+    const expectedRuntime = attached.runtimeRef!;
+    const expectedParent = attached.parent;
+    store.database.exec(mutate);
+    store.database.exec("DELETE FROM card_context_invalidations");
+    const before = store.database.prepare("SELECT * FROM agent_instances WHERE id=?").get(attached.id);
+
+    expect(store.updateAgentInstanceObservation({
+      instanceId: attached.id, expectedGeneration: attached.generation, expectedRuntime, expectedParent,
+      observedState: "working", paneToken: "changed", lastError: "changed"
+    })).toEqual({ outcome: "stale" });
+    expect(store.database.prepare("SELECT * FROM agent_instances WHERE id=?").get(attached.id)).toEqual(before);
+    expect(store.listPendingCardContextInvalidations()).toEqual([]);
   });
 
   it("finds eligible pending panes but prefers an attached pane owner", () => {
@@ -2650,13 +6467,12 @@ describe("SQLite store", () => {
 
     expect(converted).toMatchObject({ operation: { state: "delivered" }, prompt: { id: "priority-1", state: "queued", priority: "priority" } });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ idempotencyKey: "run-card:create:priority-1:answer" })]));
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([expect.objectContaining({ idempotencyKey: "run-card:create:priority-1:answer", kind: "stream_card_create", intentKind: "stream-card" })]));
   });
 
   it("atomically projects one durable operation-result card through pending and delivered states", () => {
     store = new SqliteBindingStore(":memory:");
-    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const worker = createParentedTestWorker(store);
     store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
     store.claimNextInstanceTurn(worker.id, worker.generation);
     store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
@@ -2665,13 +6481,15 @@ describe("SQLite store", () => {
 
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "secret steering text", result: { targetMessageId: "root", card: { state: "accepted" } } });
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result", targetRole: "operation_result", kind: "card_reply", payload: JSON.stringify({ state: "accepted" }) })]);
+    const acceptedResult = store.listPendingOutboundReplies()[0]!;
+    expect(store.markOutboundReplyDelivered(acceptedResult.id, "operation-card", "card-id")).toBe(true);
     store.claimTurnControlOperation("control-1");
     store.finishTurnControlOperation({ id: "control-1", state: "delivered", result: { status: "delivered" }, card: { state: "delivered" } });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result", payload: JSON.stringify({ state: "delivered" }) })]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "operation-card", payload: JSON.stringify({ state: "delivered" }) })]);
     expect(store.listPendingOutboundReplies()[0]!.payload).not.toContain("secret steering text");
 
-    const initial = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(initial.id, "operation-card", "card-id");
+    const deliveredUpdate = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyDelivered(deliveredUpdate.id, "operation-card", "card-id");
     store.database.prepare("UPDATE turn_control_operations SET state = 'dispatching' WHERE id = ?").run("control-1");
     store.finishTurnControlOperation({ id: "control-1", state: "uncertain", result: { status: "delivery-uncertain" }, card: { state: "uncertain" } });
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ idempotencyKey: "turn-control:control-1:result:uncertain", kind: "card_update", rootMessageId: "operation-card", payload: JSON.stringify({ state: "uncertain" }) })]);
@@ -2679,25 +6497,25 @@ describe("SQLite store", () => {
 
   it("projects restart uncertainty into the existing operation-result intent", () => {
     store = new SqliteBindingStore(":memory:");
-    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const worker = createParentedTestWorker(store);
     store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
     store.claimNextInstanceTurn(worker.id, worker.generation); store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
     const target = { owner: { kind: "instance" as const, id: worker.id }, projectId: "project-a", paneId: "w1:p1", generation: worker.generation, agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }, logicalTurnId: "logical-1", runtimeTurnId: "runtime-1" };
     store.acceptTurnControlOperation({ id: "control-1", idempotencyKey: "steer-1", kind: "steer", target, actor: { kind: "human", userId: "u1" }, payload: "change", result: { targetMessageId: "root", card: { state: "accepted" } } });
+    const acceptedResult = store.listPendingOutboundReplies()[0]!;
+    expect(store.markOutboundReplyDelivered(acceptedResult.id, "operation-card", "card-id")).toBe(true);
     store.claimTurnControlOperation("control-1");
 
     store.recoverTurnControlOperations((operation) => ({ state: operation.state }));
 
     expect(store.getTurnControlOperation("control-1")).toMatchObject({ state: "uncertain", result: { status: "delivery-uncertain" } });
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ payload: JSON.stringify({ state: "uncertain" }) })]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_update", rootMessageId: "operation-card", payload: JSON.stringify({ state: "uncertain" }) })]);
   });
 
   it("rolls back a turn-control terminal state when its result card cannot be serialized", () => {
     store = new SqliteBindingStore(":memory:");
-    store.createAgentInstance({ id: "i1", projectId: "project-a", name: "worker", role: "worker", agentKind: "traex", model: null, desiredState: "running", workspace: { id: "ws1", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
-    const worker = store.attachAgentInstanceRuntime({ instanceId: "i1", expectedGeneration: 1, herdrWorkspaceId: "w1", paneId: "w1:p1", nativeSessionId: "session-1" })!;
+    const worker = createParentedTestWorker(store);
     store.acceptInstanceTurn({ id: "logical-1", idempotencyKey: "turn-1", actor: { kind: "human", userId: "u1" }, projectId: "project-a", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "work" });
     store.claimNextInstanceTurn(worker.id, worker.generation); store.updateInstanceTurn({ turnId: "logical-1", expectedGeneration: worker.generation, state: "dispatching", eventKind: "turn.dispatching" });
     store.claimInstanceTurnTranscript({ turnId: "logical-1", expectedGeneration: worker.generation, runtimeTurnId: "runtime-1", startedAt: "2026-09-03T00:00:00.000Z" });
@@ -2730,7 +6548,7 @@ describe("SQLite store", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-turn-control-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
-    store.database.exec("DROP TABLE turn_control_operations; DELETE FROM schema_migrations WHERE version = 10");
+    store.database.exec("DROP TABLE turn_control_operations; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 10");
     store.close(); store = undefined;
 
     store = new SqliteBindingStore(path);
@@ -2792,7 +6610,9 @@ describe("SQLite store", () => {
     expect(store.reserveAgentInstanceStop("i1", instance.generation)).toEqual({ outcome: "busy" });
     store.updateInstanceTurn({ turnId: "turn", expectedGeneration: instance.generation, state: "completed", eventKind: "turn.completed" });
     expect(store.reserveAgentInstanceStop("i1", instance.generation)).toMatchObject({ outcome: "reserved", instance: { desiredState: "stopped", runtimeRef: { paneId: "w1:p1" } } });
-    expect(store.updateAgentInstanceObservation({ instanceId: "i1", expectedGeneration: instance.generation, observedState: "idle" })).toMatchObject({ desiredState: "stopped", observedState: "idle" });
+    expect(store.updateAgentInstanceObservation({
+      instanceId: "i1", expectedGeneration: instance.generation, expectedRuntime: instance.runtimeRef!, expectedParent: instance.parent, observedState: "idle"
+    })).toMatchObject({ outcome: "unchanged", instance: { desiredState: "stopped", observedState: "idle" } });
     expect(store.claimNextInstanceTurn("i1", instance.generation)).toBeNull();
     expect(store.finishAgentInstanceStop("i1", instance.generation)).toMatchObject({ desiredState: "stopped", observedState: "stopped", runtimeRef: null });
   });
@@ -2987,7 +6807,10 @@ describe("SQLite store", () => {
     store.updateBinding("b1", { paneId: "w1:p1", generation: 1, state: "active", lifecycle: "active", attachment: "attached" });
     const seed = (promptId: string, phase: "running" | "blocked" | "queued", answerMessageId: string | null) => {
       const queued = createQueuedRunCard({ promptId, bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-08-27T00:00:00.000Z" });
-      store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `${promptId}-message`, actorOpenId: "u1", body: promptId }, view: { ...queued, phase, answerMessageId, viewVersion: phase === "queued" ? 1 : 2 }, rootMessageId: "root", answerCard: {} });
+      const timelineItems = phase === "running"
+        ? [{ kind: "tool" as const, id: "tool:running", sequence: 1, category: "command" as const, label: "npm test", state: "running" as const }]
+        : [];
+      store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `${promptId}-message`, actorOpenId: "u1", body: promptId }, view: { ...queued, phase, answerMessageId, timelineItems, viewVersion: phase === "queued" ? 1 : 2 }, rootMessageId: "root", answerCard: {} });
     };
     seed("running", "running", "answer-running");
     seed("blocked", "blocked", "answer-blocked");
@@ -3000,7 +6823,7 @@ describe("SQLite store", () => {
 
     expect(result).toMatchObject({ outcome: "orphaned", updatedPromptIds: ["blocked", "queued", "running"] });
     expect(store.getBinding("b1")).toMatchObject({ state: "orphaned", attachment: "orphaned" });
-    expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", queuePosition: 0 });
+    expect(store.loadRunCard("running")).toMatchObject({ phase: "failed", queuePosition: 0, timelineItems: [expect.objectContaining({ id: "tool:running", state: "failed" })] });
     expect(store.loadRunCard("blocked")).toMatchObject({ phase: "failed", queuePosition: 0 });
     expect(store.loadRunCard("queued")).toMatchObject({ phase: "failed", queuePosition: 0 });
     expect(store.getPrompt("running")).toMatchObject({ state: "failed", observationState: "completed" });
@@ -3008,7 +6831,7 @@ describe("SQLite store", () => {
     expect(store.getPrompt("queued")).toMatchObject({ state: "cancelled", observationState: "completed" });
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "orphaned" });
     expect(store.listPendingOutboundReplies().filter((reply) => reply.kind === "card_update" && reply.cardRole === "answer")).toHaveLength(2);
-    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "queued" && reply.kind === "stream_card_create")?.payload).toContain('\"phase\":\"failed\"');
+    expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === "queued")).toMatchObject({ kind: "stream_card_create", intentKind: "stream-card", idempotencyKey: "run-card:create:queued:answer" });
 
     expect(store.orphanBindingWithProjection({ bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1, occurredAt: "2026-08-27T00:01:01.000Z", reason: "Herdr pane w1:p1 no longer exists", view, rootMessageId: "root", mainCard: {}, renderRunCard: () => ({}) })).toMatchObject({ outcome: "unchanged" });
     expect(store.listPendingOutboundReplies()).toHaveLength(pendingBeforeOrphan + 3);
@@ -3046,47 +6869,210 @@ describe("SQLite store", () => {
     ]));
   });
 
-  it("detects dangling business references and contradictory outbox lane state without exposing identifiers", () => {
+  it("detects dangling business references without exposing identifiers", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "sensitive-binding", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Secret title" });
-    store.enqueueOutboundReply({ id: "sensitive-reply", idempotencyKey: "integrity-reply", bindingId: "sensitive-binding", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "private-card", kind: "text", payload: "private payload" });
-    store.database.prepare("DELETE FROM outbox_lane_heads").run();
-
+    store.updateBinding("sensitive-binding", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "sensitive-reply", idempotencyKey: "integrity-reply", bindingId: "sensitive-binding", rootMessageId: "private-card", kind: "card_reply", payload: "private payload" });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = 'missing-prompt', selection_id = 'missing-selection' WHERE id = 'sensitive-reply'").run();
     const inspection = store.inspectIntegrity(20);
 
     expect(inspection.quickCheck).toBe("ok");
     expect(inspection.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }),
-      expect.objectContaining({ rule: "outbound_selection_reference", table: "outbound_replies", count: 1 }),
-      expect.objectContaining({ rule: "outbox_lane_missing_head", table: "outbox_lane_heads", count: 1 })
+      expect.objectContaining({ rule: "outbound_selection_reference", table: "outbound_replies", count: 1 })
     ]));
     expect(JSON.stringify(inspection)).not.toMatch(/sensitive|missing-prompt|missing-selection|private/);
   });
 
+  it("ignores terminal outbound audit history after its Prompt is retained away", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    for (const id of ["dismissed-history", "dead-history"]) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, bindingId: "b1", bindingGeneration: 1, promptId: `missing-${id}`, rootMessageId: "root", kind: "card_reply", payload: "{}" });
+    }
+    store.database.prepare("UPDATE outbound_replies SET state='dismissed' WHERE id='dismissed-history'").run();
+    store.database.prepare("UPDATE outbound_replies SET state='dead_letter',failure_class='permanent',effect_certainty='rejected',dead_lettered_at='2026-10-06T00:00:00.000Z' WHERE id='dead-history'").run();
+    store.database.prepare(`UPDATE delivery_recoveries SET
+      state='dismissed',reason='historical',action='manual_dismiss',
+      resolved_at='2026-10-06T00:00:01.000Z',updated_at='2026-10-06T00:00:01.000Z'
+      WHERE failed_reply_id='dead-history'`).run();
+
+    expect(store.inspectIntegrity(20).issues).not.toContainEqual(expect.objectContaining({ rule: "outbound_prompt_reference" }));
+  });
+
+  it("does not treat the Worker progress stream discriminator as a project selection reference", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({
+      id: "worker-progress-reply", idempotencyKey: "worker-progress", selectionId: "worker-progress",
+      rootMessageId: "worker-card", kind: "stream_content", payload: "progress",
+    });
+
+    expect(store.inspectIntegrity(20).issues).not.toContainEqual(expect.objectContaining({ rule: "outbound_selection_reference" }));
+  });
+
+  it("accepts immutable alias-backed prompt history while still reporting true prompt orphans and invalid corrections", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { promptId, canonicalPromptId, canonicalStartedAt } = prepareCorrectedExternalTurn(store);
+    store.enqueueOutboundReply({
+      id: "legacy-history",
+      idempotencyKey: `answer-static:${promptId}:0:answer-1`,
+      bindingId: "b1",
+      promptId,
+      bindingGeneration: 1,
+      viewVersion: 2,
+      cardRole: "answer",
+      rootMessageId: "answer-1",
+      kind: "card_update",
+      payload: JSON.stringify({ revision: 1 }),
+      projectionKey: `answer-static:${promptId}:0:answer-1`,
+      snapshotRevision: 1,
+      streamPageIndex: 0,
+      laneKeyOverride: `answer:${promptId}:0`
+    });
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered', delivered_message_id = 'answer-1', updated_at = '2026-09-30T00:00:03.000Z' WHERE id = 'legacy-history'").run();
+    store.enqueueOutboundReply({ id: "real-orphan", idempotencyKey: "real-orphan", bindingId: "b1", bindingGeneration: 1, promptId: "missing-prompt", rootMessageId: "card-1", kind: "card_reply", payload: "{}" });
+    store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c2", topicId: "t2", rootMessageId: "root-2", title: "Other" });
+    store.database.prepare(`
+      INSERT INTO prompt_identity_corrections(
+        alias_prompt_id, canonical_prompt_id, binding_id, binding_generation, pane_id, native_session_id, turn_id,
+        legacy_started_at, canonical_started_at, reason, created_at
+      ) VALUES (
+        'conflicting-alias', ?, 'b2', 1, 'w2:p2', 'session-2', 'turn-2',
+        '2026-09-30T00:00:04.000Z', ?, 'canonical_start_correction', '2026-09-30T00:00:04.100Z'
+      )
+    `).run(canonicalPromptId, canonicalStartedAt);
+
+    const inspection = store.inspectIntegrity(20);
+
+    expect(inspection.issues.filter((issue) => issue.rule === "outbound_prompt_reference")).toEqual([
+      { rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }
+    ]);
+    expect(inspection.issues.filter((issue) => issue.rule === "prompt_identity_correction_invalid")).toEqual([
+      { rule: "prompt_identity_correction_invalid", table: "prompt_identity_corrections", count: 1 }
+    ]);
+    expect(store.database.prepare("SELECT prompt_id FROM outbound_replies WHERE id = 'legacy-history'").get()).toEqual({ prompt_id: promptId });
+    expect(store.loadRunCard(canonicalPromptId)).toMatchObject({ promptId: canonicalPromptId });
+  });
+
+  it("resolves and lists only validated prompt identity corrections", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { promptId, canonicalPromptId, canonicalStartedAt } = prepareCorrectedExternalTurn(store);
+    const bridgeView = createQueuedRunCard({
+      promptId: "bridge-canonical",
+      bindingId: "b1",
+      title: "Bridge",
+      workspaceId: "w1",
+      paneId: "w1:p1",
+      requestText: "bridge",
+      queuePosition: 1,
+      occurredAt: "2026-09-30T00:00:04.000Z"
+    });
+    store.acceptPrompt({ prompt: { id: "bridge-canonical", bindingId: "b1", larkMessageId: "m-bridge", actorOpenId: "u1", body: "bridge" }, view: bridgeView, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', transcript_turn_id = 'bridge-turn', transcript_turn_started_at = ? WHERE id = 'bridge-canonical'")
+      .run(canonicalStartedAt);
+    store.database.prepare(`
+      INSERT INTO prompt_transcript_turns(prompt_id, binding_id, binding_generation, pane_id, native_session_id, turn_id, started_at, chain_id, parent_turn_id, origin, ordinal, created_at)
+      VALUES ('bridge-canonical', 'b1', 1, 'w1:p1', 'session-1', 'bridge-turn', ?, 'bridge-turn', NULL, 'prompt', 0, '2026-09-30T00:00:04.000Z')
+    `).run(canonicalStartedAt);
+    store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c2", topicId: "t2", rootMessageId: "root-2", title: "Other" });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-missing", canonicalPromptId: "missing-canonical", paneId: "w1:p1" });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-origin", canonicalPromptId: "bridge-canonical", paneId: "w1:p1", turnId: "bridge-turn" });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-generation", canonicalPromptId, bindingGeneration: 2, paneId: "w1:p1" });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-run-card", canonicalPromptId, paneId: "w1:wrong-pane" });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-turn", canonicalPromptId, paneId: "w1:p1", turnId: "other-turn" });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-owner", canonicalPromptId, bindingId: "b2", paneId: "w1:p1" });
+    // The canonical Prompt and every canonical-side tuple field are valid.
+    // Only the alias ID is borrowed from an unrelated, existing Prompt.
+    insertPromptIdentityCorrection(store, { aliasPromptId: "bridge-canonical", canonicalPromptId, paneId: "w1:p1", turnId: "turn-1", legacyStartedAt: "2026-09-30T00:00:01.000Z" });
+    // This alias is deterministic, but for a different legacy timestamp than
+    // the one recorded in the correction row.
+    const wrongLegacyAlias = nativeTurnPromptId({
+      bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "session-1", turnId: "turn-1", startedAt: "2026-09-30T00:00:00.998Z"
+    });
+    insertPromptIdentityCorrection(store, {
+      aliasPromptId: wrongLegacyAlias,
+      canonicalPromptId,
+      paneId: "w1:p1",
+      turnId: "turn-1",
+      legacyStartedAt: "2026-09-30T00:00:00.997Z"
+    });
+    insertPromptIdentityCorrection(store, { aliasPromptId: "not-a-deterministic-prompt-id", canonicalPromptId, paneId: "w1:p1", turnId: "turn-1", legacyStartedAt: "2026-09-30T00:00:01.000Z" });
+
+    const context = promptIdentityContext(store);
+
+    expect(resolveCanonicalPromptId(context, promptId)).toBe(canonicalPromptId);
+    expect(listPromptIdentityPromptIds(context, canonicalPromptId)).toEqual([canonicalPromptId, promptId]);
+    expect(loadPromptIdentityCorrection(context, promptId)).toMatchObject({ aliasPromptId: promptId, canonicalPromptId });
+    for (const alias of ["invalid-missing", "invalid-origin", "invalid-generation", "invalid-run-card", "invalid-turn", "invalid-owner", "bridge-canonical", wrongLegacyAlias, "not-a-deterministic-prompt-id"]) {
+      expect(resolveCanonicalPromptId(context, alias)).toBe(alias);
+      expect(loadPromptIdentityCorrection(context, alias)).toBeNull();
+      expect(listPromptIdentityPromptIds(context, canonicalPromptId)).not.toContain(alias);
+    }
+    // The two central reader primitives back every alias-aware delivery,
+    // recovery, retention, and projection path.  Neither may turn a corrupt
+    // alias into the canonical active prompt.
+    expect(store.database.prepare(`SELECT ${resolvedPromptReferenceSql("?")} AS prompt_id`).get("bridge-canonical", "bridge-canonical")).toEqual({ prompt_id: "bridge-canonical" });
+    store.enqueueOutboundReply({
+      id: "invalid-alias-stream",
+      idempotencyKey: "invalid-alias-stream",
+      bindingId: "b1",
+      promptId: "not-a-deterministic-prompt-id",
+      bindingGeneration: 1,
+      cardRole: "answer",
+      rootMessageId: "answer-1",
+      kind: "stream_content",
+      payload: JSON.stringify({ content: "must not be visible", sequence: 99 }),
+      streamPageIndex: 0
+    });
+    expect(store.getAnswerPageDeliveryFacts(canonicalPromptId, 0).latestContent).toBeNull();
+    expect(store.inspectIntegrity(20).issues).toContainEqual({
+      rule: "prompt_identity_correction_invalid",
+      table: "prompt_identity_corrections",
+      count: 9
+    });
+  });
+
+  it("fails closed when a correction would make the canonical prompt another alias", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { promptId, canonicalPromptId } = prepareCorrectedExternalTurn(store);
+    insertPromptIdentityCorrection(store, { aliasPromptId: canonicalPromptId, canonicalPromptId, paneId: "w1:p1" });
+
+    const context = promptIdentityContext(store);
+
+    expect(resolveCanonicalPromptId(context, promptId)).toBe(promptId);
+    expect(resolveCanonicalPromptId(context, canonicalPromptId)).toBe(canonicalPromptId);
+    expect(listPromptIdentityPromptIds(context, canonicalPromptId)).toEqual([canonicalPromptId]);
+    expect(store.inspectIntegrity(20).issues).toContainEqual({
+      rule: "prompt_identity_correction_invalid",
+      table: "prompt_identity_corrections",
+      count: 2
+    });
+  });
+
   it("caps integrity issue records while preserving a truncated signal", () => {
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "reply", idempotencyKey: "integrity", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "card", kind: "text", payload: "hidden" });
+    store.enqueueOutboundReply({ id: "reply", idempotencyKey: "integrity", promptId: "missing-prompt", selectionId: "missing-selection", rootMessageId: "card", kind: "card_reply", payload: "hidden" });
 
     expect(store.inspectIntegrity(1)).toEqual({ quickCheck: "ok", truncated: true, issues: [
       { rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }
     ] });
   });
 
-  it("detects foreign-key, active-turn, lane-head, and quarantine contradictions", () => {
+  it("detects foreign-key and active-turn contradictions", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "one" });
     store.enqueuePrompt({ id: "p2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "two" });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running'").run();
     store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card", kind: "text", payload: "hidden" });
-    store.database.prepare("UPDATE outbox_lane_heads SET delivery_order = delivery_order + 1").run();
     store.database.exec("PRAGMA foreign_keys = OFF");
     store.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES ('missing-binding', '{}', 'now')").run();
     store.database.exec("PRAGMA foreign_keys = ON");
-    store.database.prepare("INSERT INTO outbox_lane_quarantines(lane_key, failed_reply_id, lane_class, failure_class, state, action, reason, created_at, updated_at) SELECT lane_key, id, 'immutable', 'permanent', 'active', 'blocked', 'hidden', 'now', 'now' FROM outbound_replies WHERE id = 'head'").run();
-
     expect(store.inspectIntegrity(20).issues.map((issue) => issue.rule)).toEqual(expect.arrayContaining([
-      "sqlite_foreign_key", "multiple_running_turns", "outbox_lane_head_mismatch", "quarantined_lane_has_head"
+      "sqlite_foreign_key", "multiple_running_turns"
     ]));
   });
 
@@ -3094,7 +7080,6 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-
     store.createPaneCloseRequest({ id: "r1", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "old-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
     store.createPaneCloseRequest({ id: "r2", bindingId: "b1", paneId: "w1:p1", actorOpenId: "u1", codeHash: "new-hash", expiresAt: "2099-01-01T00:00:00.000Z" });
 
@@ -3215,6 +7200,8 @@ describe("SQLite store", () => {
   it("lists only completed project selections whose deterministic initial prompt is absent", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.createProjectSelection({ id: "s1", commandMessageId: "cmd-1", chatId: "c1", topicId: null, rootMessageId: "root-1", actorOpenId: "u1", requestedTitle: null, initialPromptText: "start", expiresAt: "2099-01-01T00:00:00.000Z", card: {} });
     const reply = store.listPendingOutboundReplies().find((candidate) => candidate.selectionId === "s1")!;
     store.markOutboundReplyDelivered(reply.id, "selector-1");
@@ -3223,15 +7210,34 @@ describe("SQLite store", () => {
     store.completeProjectSelection("s1", "b1");
 
     expect(store.listCompletedProjectSelectionsWithInitialPrompt().map(({ id }) => id)).toEqual(["s1"]);
+    const intent = {
+      submissionId: "submission-other", ingressSource: "other:primary", sourceMessageKey: "cmd-1",
+      actor: { kind: "human" as const, id: "u1", gatewayId: "other:primary", chatId: "c1", topicId: null, rootMessageId: "root-1" },
+      text: "start", owner: { kind: "primary" as const, id: "b1", generation: 1 }, paneId: "w1:p1", terminalId: "terminal-1",
+      expectedAgentKind: "traex" as const, expectedSessionId: null, recordedAt: "2026-10-05T00:00:00.000Z"
+    };
+    store.capabilityModules().agentInputs.admit(intent);
+    expect(store.listCompletedProjectSelectionsWithInitialPrompt().map(({ id }) => id)).toEqual(["s1"]);
+    store.capabilityModules().agentInputs.admit({ ...intent, submissionId: "submission-exact", ingressSource: "feishu:primary", actor: { ...intent.actor, gatewayId: "feishu:primary" } });
+    expect(store.listCompletedProjectSelectionsWithInitialPrompt()).toEqual([]);
+    store.database.prepare("DELETE FROM submission_intents WHERE source_message_key = ?").run("cmd-1");
+    expect(store.listCompletedProjectSelectionsWithInitialPrompt().map(({ id }) => id)).toEqual(["s1"]);
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "cmd-1", actorOpenId: "u1", body: "start" });
     expect(store.listCompletedProjectSelectionsWithInitialPrompt()).toEqual([]);
 
     const plan = store.database.prepare(`EXPLAIN QUERY PLAN
       SELECT selection.* FROM project_selections selection
+      LEFT JOIN bindings binding ON binding.id = selection.binding_id
       WHERE selection.state = 'completed' AND selection.initial_prompt_text IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM prompt_jobs prompt WHERE prompt.lark_message_id = selection.command_message_id)
+        AND NOT EXISTS (
+          SELECT 1 FROM submission_intents input
+          WHERE input.ingress_source = COALESCE(binding.gateway_id, 'feishu:primary')
+            AND input.source_message_key = selection.command_message_id
+        )
       ORDER BY selection.created_at`).all() as Array<{ detail: string }>;
     expect(plan.some(({ detail }) => detail.includes("sqlite_autoindex_prompt_jobs_2"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("sqlite_autoindex_submission_intents_2"))).toBe(true);
   });
 
   it("persists bindings, FIFO jobs, deduplication, and view snapshots", () => {
@@ -3242,7 +7248,7 @@ describe("SQLite store", () => {
     expect(store.findBindingByLarkScope("unknown-thread", "m1")?.id).toBe("b1");
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "first" });
     store.enqueuePrompt({ id: "p2", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "second" });
-    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'not_started', attempt_count = 1 WHERE id = 'p1'").run();
     expect(store.recoverRunningPrompts()).toBe(1);
     expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1", "p2"]);
     expect(store.listQueuedTurnRunCards("b1")).toEqual([]);
@@ -3270,6 +7276,7 @@ describe("SQLite store", () => {
   it("loads queued ordinary-turn cards in durable FIFO order", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const first = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "first", workspaceId: "w1", paneId: "w1:p1", requestText: "first", queuePosition: 1, occurredAt: "2026-01-01T00:00:00.000Z" });
     const second = createQueuedRunCard({ promptId: "p2", bindingId: "b1", title: "second", workspaceId: "w1", paneId: "w1:p1", requestText: "second", queuePosition: 2, occurredAt: "2026-01-01T00:00:01.000Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "first" }, view: first, rootMessageId: "root", answerCard: {} });
@@ -3307,32 +7314,76 @@ describe("SQLite store", () => {
   it("selects only durable actionable Run Cards for startup convergence", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const accept = (promptId: string) => {
       const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: `2026-09-01T00:00:0${promptId.length}.000Z` });
       store!.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
     };
-    for (const id of ["history", "live", "lagging", "streaming", "pending", "missing", "quarantine"]) accept(id);
-    for (const id of ["history", "lagging", "streaming", "pending", "quarantine"]) {
+    for (const id of ["history", "live", "lagging", "streaming", "pending", "missing", "quarantine", "frozen", "message-frozen", "creating-frozen", "older-frozen", "mutable-terminal", "unreserved-recovery", "pending-replacement"]) accept(id);
+    for (const id of ["history", "lagging", "streaming", "pending", "quarantine", "frozen", "message-frozen", "creating-frozen", "older-frozen", "mutable-terminal", "unreserved-recovery", "pending-replacement"]) {
       const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === id)!;
-      store.markOutboundReplyDelivered(create.id, `message-${id}`, `card-${id}`);
+      store.markOutboundReplyDelivered(create.id, `message-${id}`, id === "message-frozen" ? undefined : `card-${id}`);
       store.saveRunCard({ ...store.loadRunCard(id)!, phase: "completed", answer: "done", answerSegments: ["done"], viewVersion: 1, answerDeliveredVersion: 1 });
     }
     store.saveRunCard({ ...store.loadRunCard("missing")!, phase: "completed" });
     store.database.prepare("UPDATE outbound_replies SET state = 'dismissed' WHERE prompt_id = 'missing' AND state = 'pending'").run();
-    store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id IN ('history','lagging','pending','quarantine')").run();
+    store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id IN ('history','lagging','pending','quarantine','frozen','message-frozen','older-frozen','mutable-terminal')").run();
+    store.database.prepare("UPDATE answer_pages SET state = 'frozen' WHERE prompt_id = 'message-frozen'").run();
+    store.database.prepare("UPDATE answer_pages SET state = 'creating' WHERE prompt_id = 'creating-frozen'").run();
     store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static', state = 'active' WHERE prompt_id = 'lagging'").run();
     store.saveRunCard({ ...store.loadRunCard("lagging")!, viewVersion: 3, answerDeliveredVersion: 1 });
     store.enqueueOutboundReply({ id: "pending-update", idempotencyKey: "pending-update", bindingId: "b1", promptId: "pending", viewVersion: 1, cardRole: "answer", rootMessageId: "message-pending", kind: "card_update", payload: "{}" });
     store.enqueueOutboundReply({ id: "uncertain-update", idempotencyKey: "uncertain-update", bindingId: "b1", promptId: "quarantine", viewVersion: 1, cardRole: "answer", rootMessageId: "message-quarantine", kind: "card_update", payload: "{}" });
     store.markOutboundReplyFailedWithQuarantine("uncertain-update", "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+    store.saveRunCard({ ...store.loadRunCard("frozen")!, viewVersion: 3, answerDeliveredVersion: 1 });
+    const frozen = store.enqueueOutboundReply({ id: "frozen-update", idempotencyKey: "frozen-update", bindingId: "b1", promptId: "frozen", viewVersion: 3, cardRole: "answer", rootMessageId: "message-frozen", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine(frozen.id, "expired target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230001" });
+    store.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', released_at = updated_at WHERE failed_reply_id = ?").run(frozen.id);
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved' WHERE failed_reply_id = ?").run(frozen.id);
+    const staleReplacement = store.enqueueOutboundReply({ id: "stale-replacement", idempotencyKey: "stale-replacement", bindingId: "b1", promptId: "frozen", viewVersion: 2, cardRole: "answer", rootMessageId: "message-frozen", kind: "card_update", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter' WHERE id = ?").run(staleReplacement.id);
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'replacement_pending', replacement_reply_id = ? WHERE failed_reply_id = ?").run(staleReplacement.id, frozen.id);
+    store.saveRunCard({ ...store.loadRunCard("message-frozen")!, viewVersion: 3, answerDeliveredVersion: 1 });
+    const messageFrozen = store.enqueueOutboundReply({ id: "message-frozen-update", idempotencyKey: "message-frozen-update", bindingId: "b1", promptId: "message-frozen", viewVersion: 3, cardRole: "answer", rootMessageId: "message-message-frozen", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine(messageFrozen.id, "expired message-only target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230001" });
+    store.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', released_at = updated_at WHERE failed_reply_id = ?").run(messageFrozen.id);
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved' WHERE failed_reply_id = ?").run(messageFrozen.id);
+    store.saveRunCard({ ...store.loadRunCard("creating-frozen")!, viewVersion: 3, answerDeliveredVersion: 1 });
+    const creatingFrozen = store.enqueueOutboundReply({ id: "creating-frozen-update", idempotencyKey: "creating-frozen-update", bindingId: "b1", promptId: "creating-frozen", viewVersion: 3, cardRole: "answer", rootMessageId: "message-creating-frozen", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine(creatingFrozen.id, "expired creating target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230001" });
+    store.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', released_at = updated_at WHERE failed_reply_id = ?").run(creatingFrozen.id);
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved' WHERE failed_reply_id = ?").run(creatingFrozen.id);
+    store.saveRunCard({ ...store.loadRunCard("older-frozen")!, viewVersion: 3, answerDeliveredVersion: 1 });
+    const olderFrozen = store.enqueueOutboundReply({ id: "older-frozen-update", idempotencyKey: "older-frozen-update", bindingId: "b1", promptId: "older-frozen", viewVersion: 2, cardRole: "answer", rootMessageId: "message-older-frozen", kind: "card_update", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine(olderFrozen.id, "expired older target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230001" });
+    store.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', released_at = updated_at WHERE failed_reply_id = ?").run(olderFrozen.id);
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved' WHERE failed_reply_id = ?").run(olderFrozen.id);
+    store.saveRunCard({ ...store.loadRunCard("mutable-terminal")!, viewVersion: 3, answerDeliveredVersion: 1 });
+    const mutableTerminal = store.enqueueOutboundReply({ id: "mutable-terminal-update", idempotencyKey: "mutable-terminal-update", bindingId: "b1", promptId: "mutable-terminal", viewVersion: 3, cardRole: "answer", rootMessageId: "message-mutable-terminal", kind: "card_update", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dismissed' WHERE id = ?").run(mutableTerminal.id);
+    for (const promptId of ["unreserved-recovery", "pending-replacement"]) {
+      store.saveRunCard({ ...store.loadRunCard(promptId)!, viewVersion: 3, answerDeliveredVersion: 1 });
+      const failed = store.enqueueOutboundReply({ id: `${promptId}-failed`, idempotencyKey: `${promptId}-failed`, bindingId: "b1", promptId, viewVersion: 3, cardRole: "answer", rootMessageId: `message-${promptId}`, kind: "card_update", payload: "{}" });
+      store.markOutboundReplyFailedWithQuarantine(failed.id, "expired recovery target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230001" });
+      store.database.prepare("UPDATE outbox_lane_quarantines SET state = 'released', released_at = updated_at WHERE failed_reply_id = ?").run(failed.id);
+      if (promptId === "unreserved-recovery") {
+        store.database.prepare("UPDATE delivery_recoveries SET state = 'replacement_pending', replacement_reply_id = NULL WHERE failed_reply_id = ?").run(failed.id);
+      } else {
+        const replacement = store.enqueueOutboundReply({ id: "pending-replacement-successor", idempotencyKey: "pending-replacement-successor", bindingId: "b1", promptId, viewVersion: 3, cardRole: "answer", rootMessageId: `message-${promptId}`, kind: "card_update", payload: "{}" });
+        store.database.prepare("UPDATE delivery_recoveries SET state = 'replacement_pending', replacement_reply_id = ? WHERE failed_reply_id = ?").run(replacement.id, failed.id);
+      }
+    }
 
-    expect(store.listActionableStartupRunCards("b1").map(({ promptId }) => promptId).sort()).toEqual(["lagging", "live", "missing", "pending", "quarantine", "streaming"]);
+    expect(store.listActionableStartupRunCards("b1").map(({ promptId }) => promptId).sort()).toEqual(["lagging", "live", "missing", "mutable-terminal", "older-frozen", "pending", "pending-replacement", "quarantine", "streaming", "unreserved-recovery"]);
     expect(store.listActionableStartupRunCards("missing")).toEqual([]);
+    store.updateBinding("b1", { generation: 2 });
+    expect(store.listActionableStartupRunCards("b1")).toEqual([]);
   });
 
   it("selects an active Run Card for Main restoration before the latest terminal card", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     for (const [promptId, phase, occurredAt] of [["active", "running", "2026-09-01T00:00:00.000Z"], ["latest", "completed", "2026-09-01T00:01:00.000Z"]] as const) {
       const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 0, occurredAt });
       store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
@@ -3404,17 +7455,17 @@ describe("SQLite store", () => {
 
     const applied = store.applyRuntimeObservation({
       bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 1,
-      pane: { paneId: "w1:p1", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
+      pane: { paneId: "w1:p1", paneToken: "vdfn", terminalId: "term-2", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "working", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }
     });
 
     expect(applied).toMatchObject({ outcome: "applied", terminalIdentityRefreshed: true, nativeSessionMismatch: false });
-    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working", attachment: "attached", degradationCount: 0, agentSessionValue: "session-1" });
+    expect(store.getBinding("b1")).toMatchObject({ paneToken: "vdfn", traexSessionId: "term-2", lastAgentState: "working", attachment: "attached", degradationCount: 0, agentSessionValue: "session-1" });
 
     expect(store.applyRuntimeObservation({
       bindingId: "b1", expectedPaneId: "w1:p1", expectedGeneration: 0,
       pane: { paneId: "w1:p1", terminalId: "term-3", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }
     })).toEqual({ outcome: "stale_binding" });
-    expect(store.getBinding("b1")).toMatchObject({ traexSessionId: "term-2", lastAgentState: "working" });
+    expect(store.getBinding("b1")).toMatchObject({ paneToken: "vdfn", traexSessionId: "term-2", lastAgentState: "working" });
   });
 
   it("rejects native Herdr TraeX observation for a legacy binding session", () => {
@@ -3462,66 +7513,95 @@ describe("SQLite store", () => {
     });
 
     expect(result).toEqual({ cancelledPromptIds: ["pending", "checkpointed", "delivered", "card-target"], outboxReserved: true });
-    expect(store.getPrompt("running")).toMatchObject({ state: "running" });
+    expect(store.getPrompt("running")).toMatchObject({ state: "submitted" });
     for (const id of result.cancelledPromptIds) {
       expect(store.getPrompt(id)).toMatchObject({ state: "cancelled", observationState: "completed", error: "Topic archived", updatedAt: "2026-08-29T01:02:03.000Z" });
       expect(store.loadRunCard(id)).toMatchObject({ phase: "failed", notice: "Topic archived", queuePosition: 0, finishedAt: "2026-08-29T01:02:03.000Z", activityAt: "2026-08-29T01:02:03.000Z", updatedAt: "2026-08-29T01:02:03.000Z" });
     }
     const pendingAfter = store.listPendingOutboundReplies().find((reply) => reply.id === pendingCreate.id)!;
-    expect(pendingAfter).toMatchObject({ idempotencyKey: "run-card:create:pending:answer", kind: "stream_card_create", viewVersion: 2 });
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(pendingAfter.id)).toEqual({ lane_key: "gateway:feishu:primary:answer:pending" });
-    expect(pendingAfter.payload).toBe(JSON.stringify({ phase: "failed", notice: "Topic archived", version: 2 }));
+    expect(pendingAfter).toMatchObject({ idempotencyKey: "run-card:create:pending:answer", kind: "stream_card_create", intentKind: "stream-card", viewVersion: 1 });
+    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = ?").get(pendingAfter.id)).toEqual({ lane_key: "gateway:feishu:primary:answer:pending:0" });
+    expect(pendingAfter.payload).toBe(pendingBefore.payload);
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "pending")).toHaveLength(1);
     expect(store.listPendingOutboundReplies().find((reply) => reply.id === checkpointedCreate.id)).toMatchObject({ payload: checkpointedBefore.payload, viewVersion: checkpointedBefore.viewVersion, cardIdCheckpoint: "card-checkpointed" });
-    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ idempotencyKey: "run-card:update:delivered:answer:2", kind: "card_update", rootMessageId: "answer-delivered" }));
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE idempotency_key = ?").get("run-card:update:delivered:answer:2")).toEqual({ lane_key: "gateway:feishu:primary:primary-answer:delivered:1" });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "delivered")).toEqual([
+      expect.objectContaining({ kind: "card_update", intentKind: "card", viewVersion: 2, rootMessageId: "answer-delivered" })
+    ]);
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "card-target")).toEqual([]);
-    expect(store.getOperationalSummary().prompts.cancelled).toBe(4);
     expect(store.countPendingPrompts("b1")).toBe(1);
     expect(store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "again", occurredAt: "later", rootMessageId: "m1", renderRunCard: () => ({}) })).toEqual({ cancelledPromptIds: [], outboxReserved: false });
     expect(store.loadRunCard("pending")?.viewVersion).toBe(2);
     expect(pendingBefore.id).toBe(pendingAfter.id);
   });
 
-  it("rolls back every queued cancellation when terminal outbox projection fails", () => {
+  it("does not partially mutate pending CardKit creates when cancellation projection fails", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     for (const id of ["p1", "p2"]) {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: id, queuePosition: 1, occurredAt: "start" });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: id }, view, rootMessageId: "m1", answerCard: {} });
     }
     store.database.exec(`CREATE TRIGGER fail_second_cancel_outbox BEFORE UPDATE ON outbound_replies WHEN OLD.prompt_id = 'p2' BEGIN SELECT RAISE(ABORT, 'injected cancellation outbox failure'); END`);
 
-    expect(() => store!.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "archive", occurredAt: "later", rootMessageId: "m1", renderRunCard: (view) => ({ phase: view.phase }) })).toThrow("injected cancellation outbox failure");
+    expect(store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "archive", occurredAt: "later", rootMessageId: "m1", renderRunCard: (view) => ({ phase: view.phase }) })).toMatchObject({ cancelledPromptIds: ["p1", "p2"], outboxReserved: true });
 
     for (const id of ["p1", "p2"]) {
-      expect(store.getPrompt(id)).toMatchObject({ state: "queued", observationState: "not_started", error: null });
-      expect(store.loadRunCard(id)).toMatchObject({ phase: "queued", viewVersion: 1, notice: null });
-      expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === id)).toMatchObject({ viewVersion: 1, payload: "{}" });
+      expect(store.getPrompt(id)).toMatchObject({ state: "cancelled", observationState: "completed", error: "archive" });
+      expect(store.loadRunCard(id)).toMatchObject({ phase: "failed", viewVersion: 2, notice: "archive" });
+      expect(store.listPendingOutboundReplies().find((reply) => reply.promptId === id)).toMatchObject({ viewVersion: 1, kind: "stream_card_create", intentKind: "stream-card" });
     }
   });
 
   it("summarizes durable failures without exposing prompt bodies or outbox payloads", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "private prompt body" });
     store.updatePrompt("p1", "failed", "x".repeat(800));
-    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", promptId: "p1", rootMessageId: "m1", kind: "card_update", payload: "private card payload" });
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "delivery failed " + "y".repeat(800));
+    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", rootMessageId: "m1", kind: "card_update", payload: "private card payload" });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = 'p1' WHERE id = 'o1'").run();
+    for (let attempt = 0; attempt < 3; attempt += 1) store.markOutboundReplyFailed("o1", "delivery failed " + "y".repeat(800));
 
     const summary = store.getOperationalSummary();
     const serialized = JSON.stringify(summary);
     expect(summary).toMatchObject({
-      bindings: { pending: 1 }, prompts: { failed: 1 },
+      bindings: { active: 1 },
       outbound: { dead_letter: 1 }, pendingOutbox: 0, deadLetters: 1,
-      recentFailedPrompt: { promptId: "p1", bindingId: "b1" },
-      recentDeadLetter: { replyId: "o1", bindingId: "b1", promptId: "p1", attemptCount: 5 }
+      recentDeadLetter: { replyId: "o1", bindingId: "b1", promptId: "p1", attemptCount: 3 }
     });
-    expect(summary).toMatchObject({ lifecycle: { provisioning: 1 }, attachment: { unattached: 1 }, recoverableProvisioning: 0, archivedPanesPresent: 0 });
-    expect(summary.recentFailedPrompt?.error.length).toBeLessThanOrEqual(500);
+    expect(summary).toMatchObject({ lifecycle: { active: 1 }, attachment: { attached: 1 }, recoverableProvisioning: 0, archivedPanesPresent: 0 });
     expect(summary.recentDeadLetter?.error.length).toBeLessThanOrEqual(500);
     expect(serialized).not.toContain("private prompt body");
     expect(serialized).not.toContain("private card payload");
+  });
+
+  it("does not expose retired Prompt execution counters", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    for (const id of ["queued", "submitted", "running", "recovering", "uncertain"]) {
+      store.enqueuePrompt({ id, bindingId: "b1", larkMessageId: `message-${id}`, actorOpenId: "u1", body: id });
+    }
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'attached' WHERE id = 'submitted'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached', transcript_turn_id = 'turn-1', transcript_turn_started_at = '2026-10-01T00:00:00.000Z' WHERE id = 'running'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached', updated_at = '2020-01-01T00:00:00.000Z' WHERE id = 'recovering'").run();
+    store.database.prepare("UPDATE prompt_jobs SET state = 'uncertain', observation_state = 'completed' WHERE id = 'uncertain'").run();
+
+    expect(store.getOperationalSummary()).not.toHaveProperty("promptExecution");
+  });
+
+  it("does not expose retired Native Input queue counters", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    store.acceptCollectingNativeInput({
+      input: { id: "input-1", bindingId: "b1", bindingGeneration: 1, ingressSource: "feishu", sourceMessageKey: "message-1", larkMessageId: "message-1", actorOpenId: "u1", body: "next", rootMessageId: "root", parentPromptId: null },
+      batchId: "collecting", occurredAt: "2026-10-02T01:00:00.000Z", windowMs: 2_000, maxQueueDepth: 20
+    });
+    store.database.prepare("INSERT INTO prompt_jobs(id,binding_id,ingress_source,source_message_key,actor_open_id,body,execution_origin,priority,was_detached,state,observation_state,attempt_count,native_submission_id,dispatched_at,created_at,updated_at) VALUES ('native','b1','feishu','feishu-batch:v1:native','u1','batch','bridge','normal',1,'recovering','detached',0,'native','2026-10-02T01:00:00.000Z','2026-10-02T01:00:00.000Z','2026-10-02T01:00:00.000Z')").run();
+    store.database.prepare("INSERT INTO native_input_batches(id,binding_id,binding_generation,state,window_opened_at,drain_due_at,combined_body,execution_prompt_id,formed_at,created_at,updated_at) VALUES ('native','b1',1,'formed','2026-10-02T01:00:00.000Z','2026-10-02T01:00:00.000Z','batch','native','2026-10-02T01:00:00.000Z','2026-10-02T01:00:00.000Z','2026-10-02T01:00:00.000Z')").run();
+
+    expect(store.getOperationalSummary()).not.toHaveProperty("promptExecution");
   });
 
   it("summarizes durable inbound backlog without exposing message payloads", () => {
@@ -3547,9 +7627,10 @@ describe("SQLite store", () => {
     vi.useRealTimers();
   });
 
-  it("summarizes bounded prompt latency without exposing prompt content", () => {
+  it("does not expose retired Prompt latency metrics", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     for (const id of ["completed", "failed", "running"]) {
       const view = createQueuedRunCard({ promptId: id, bindingId: "b1", title: id, workspaceId: "w1", paneId: "w1:p1", requestText: `private ${id}`, queuePosition: 1, occurredAt: "2026-08-28T00:00:00.000Z" });
       store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: `m-${id}`, actorOpenId: "u1", body: `private ${id}` }, view, rootMessageId: "m1", answerCard: {} });
@@ -3565,44 +7646,42 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', created_at = '2026-08-28T00:02:00.000Z' WHERE id = 'running'").run();
     store.database.prepare("UPDATE run_cards SET started_at = '2026-08-28T00:02:01.000Z', finished_at = NULL WHERE prompt_id = 'running'").run();
 
-    const summary = store.getOperationalSummary();
-    expect(summary.promptLatency).toEqual({
-      windowSize: 100, sampleCount: 2,
-      queue: { sampleCount: 2, averageMs: 3000, maxMs: 4000 },
-      execution: { sampleCount: 2, averageMs: 8000, maxMs: 10000 },
-      delivery: { sampleCount: 2, averageMs: 2000, maxMs: 3000 }
-    });
-    expect(JSON.stringify(summary.promptLatency)).not.toContain("private");
+    expect(store.getOperationalSummary()).not.toHaveProperty("promptLatency");
   });
 
-  it("reports empty prompt latency phases without synthetic zero durations", () => {
+  it("does not synthesize retired Prompt latency phases", () => {
     store = new SqliteBindingStore(":memory:");
-    expect(store.getOperationalSummary().promptLatency).toEqual({
-      windowSize: 100, sampleCount: 0,
-      queue: { sampleCount: 0, averageMs: null, maxMs: null },
-      execution: { sampleCount: 0, averageMs: null, maxMs: null },
-      delivery: { sampleCount: 0, averageMs: null, maxMs: null }
-    });
+    expect(store.getOperationalSummary()).not.toHaveProperty("promptLatency");
   });
 
-  it("reports bounded quarantine and stalled-lane diagnostics without payload data", () => {
+  it("reports bounded quarantine and Ring backlog diagnostics without payload data", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-26T00:10:00.000Z"));
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "blocked", idempotencyKey: "blocked", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "private card payload" });
     store.database.prepare("UPDATE outbound_replies SET created_at = ?, next_attempt_at = ? WHERE id = 'blocked'").run("2026-08-26T00:00:00.000Z", "2026-08-26T00:00:00.000Z");
     store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", bindingId: "b1", rootMessageId: "root-2", kind: "card_reply", payload: "another private payload" });
     store.markOutboundReplyFailedWithQuarantine("failed", "invalid target " + "x".repeat(800), { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
+    store.enqueueOutboundReply({ id: "review", idempotencyKey: "review", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "review private payload" });
+    store.database.prepare("UPDATE outbound_replies SET state='delivered' WHERE id='review'").run();
+    store.database.prepare(`UPDATE outbox_lane_quarantines SET phase='conflict_isolated',degraded_at=?,review_reply_id='review',review_requested_at=? WHERE failed_reply_id='failed'`)
+      .run("2026-08-26T00:05:00.000Z", "2026-08-26T00:06:00.000Z");
+    store.enqueueOutboundReply({ id: "bypassed", idempotencyKey: "bypassed", bindingId: "b1", rootMessageId: "root-3", kind: "card_reply", payload: "third private payload" });
+    store.database.prepare("UPDATE outbound_replies SET state='delivered' WHERE id='bypassed'").run();
 
     const summary = store.getOperationalSummary();
-    expect(summary.outboxLanes).toMatchObject({ stalled: 1, oldestStalledAgeSeconds: 600 });
+    expect(summary.deliveryRings).toMatchObject({ pending: 1, panePending: 1, scopes: 1, oldestPendingAgeSeconds: 600,
+      initializedCheckpointScopes: 0, lowestBlockingDeliveryOrder: 1, lowestBlockingAgeSeconds: 600,
+      uncertainBlocked: 0, activeQuarantineBlocked: 1, graceBlockedScopes: 0, isolatedConflicts: 1,
+      isolatedUncertain: 0, bypassedDeliveries: 1, pendingHumanReviews: 1, oldestHumanReviewAgeSeconds: 240 });
     expect(summary.outboxQuarantines).toMatchObject({
       active: 1, released: 0, byLaneClass: { immutable: 1 }, byFailureClass: { permanent: 1 },
       latest: { replyId: "failed", replyKind: "card_reply", laneClass: "immutable", failureClass: "permanent", action: "blocked" }
     });
     expect(summary.outboxQuarantines.latest!.reason.length).toBeLessThanOrEqual(500);
-    expect(JSON.stringify(summary)).not.toMatch(/private card payload|another private payload/);
+    expect(JSON.stringify(summary)).not.toMatch(/private card payload|another private payload|third private payload|review private payload/);
     vi.useRealTimers();
   });
 
@@ -3631,6 +7710,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
     store.saveTopicView({ ...initialTopicView("b1"), title: "Task", workspaceId: "w1", paneId: "w1:p1", phase: "running", activePromptId: "p1" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-24T00:00:00Z" });
@@ -3653,10 +7733,12 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Visible" });
     store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c2", topicId: "t2", rootMessageId: "m2", title: "Hidden" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "p-m1", actorOpenId: "u1", body: "private" });
     store.updatePrompt("p1", "failed", "prompt failed");
-    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", promptId: "p1", rootMessageId: "m1", kind: "card_update", payload: "{}" });
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed");
+    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "o1", bindingId: "b1", rootMessageId: "m1", kind: "card_reply", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = 'p1' WHERE id = 'o1'").run();
+    store.markOutboundReplyDeadLetter("o1", "send rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "rejected" });
 
     expect(store.listSessions("c1").sessions).toHaveLength(1);
     expect(store.listFailures("c1")).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "outbound", id: "o1" }), expect.objectContaining({ kind: "prompt", id: "p1" })]));
@@ -3664,9 +7746,8 @@ describe("SQLite store", () => {
     expect(store.retryDeadLetter("o1", "c1", "u1")).toBe("retried");
     expect(store.retryDeadLetter("o1", "c1", "u1")).toBe("stale");
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "o1" })]);
-    expect(store.getOperationalSummary().prompts.failed).toBe(1);
 
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed again");
+    store.markOutboundReplyDeadLetter("o1", "send rejected again", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "rejected" });
     expect(store.dismissDeadLetter("o1", "c1", "u1")).toBe("dismissed");
     expect(store.listFailures("c1").some((failure) => failure.kind === "outbound")).toBe(false);
     expect(store.getOperationalSummary().outbound.dismissed).toBe(1);
@@ -3696,10 +7777,12 @@ describe("SQLite store", () => {
     expect(plan.some(({ detail }) => detail.includes("TEMP B-TREE"))).toBe(false);
   });
 
-  it("atomically accepts one streaming answer card and claims before its card identity is delivered", () => {
+  it("atomically accepts one CardKit Answer and claims before its message identity is delivered", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    store.database.prepare("UPDATE bindings SET generation = 3 WHERE id = 'b1'").run();
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", bindingGeneration: 3, conversionParentPromptId: "parent-prompt", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "first **request**", queuePosition: 1, occurredAt: "2026-08-22T10:00:00.000Z" });
     const accepted = store.acceptPrompt({
       prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" },
@@ -3707,25 +7790,25 @@ describe("SQLite store", () => {
     });
     const duplicate = store.acceptPrompt({
       prompt: { id: "other", bindingId: "b1", larkMessageId: "user-m1", actorOpenId: "u1", body: "first" },
-      view: { ...view, promptId: "other" }, rootMessageId: "m1", taskCard: {}, answerCard: {}
+      view: { ...view, promptId: "other" }, rootMessageId: "m1", answerCard: {}
     });
 
     expect(accepted.inserted).toBe(true);
     expect(duplicate).toMatchObject({ inserted: false, prompt: { id: "p1" }, view: { promptId: "p1" } });
     expect(store.listPendingOutboundReplies()).toMatchObject([
-      { promptId: "p1", viewVersion: 1, kind: "stream_card_create", cardRole: "answer", payload: JSON.stringify({ card: "answer" }) }
+      { promptId: "p1", viewVersion: 1, kind: "stream_card_create", intentKind: "stream-card", cardRole: "answer" }
     ]);
     expect(store.listQueuedTurnPromptIds("b1")).toEqual(["p1"]);
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     expect(store.listQueuedTurnPromptIds("b1")).toEqual([]);
 
-    const [answerCreate] = store.listPendingOutboundReplies();
-    store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1", "cardkit-1");
+    const answerCreate = store.listPendingOutboundReplies().find(({ cardRole }) => cardRole === "answer");
+    store.markOutboundReplyDelivered(answerCreate!.id, "answer-card-m1");
     expect(store.loadRunCard("p1")).toMatchObject({
-      bindingGeneration: 3, conversionParentPromptId: "parent-prompt", larkMessageId: null, answerMessageId: "answer-card-m1", answerCardId: "cardkit-1", requestText: "first **request**", answerDeliveredVersion: 1
+      bindingGeneration: 3, conversionParentPromptId: "parent-prompt", larkMessageId: "answer-card-m1", answerMessageId: "answer-card-m1", answerCardId: null, requestText: "first **request**", answerDeliveredVersion: 1
     });
     expect(store.listAnswerPages("p1")).toEqual([expect.objectContaining({
-      promptId: "p1", pageIndex: 0, messageId: "answer-card-m1", cardId: "cardkit-1", elementId: answerElementId("p1", 0), sourceStart: 0, sequence: 0, state: "active"
+      promptId: "p1", pageIndex: 0, messageId: "answer-card-m1", cardId: null, deliveryMode: "streaming", elementId: answerElementId("p1", 0), sourceStart: 0, sequence: 0, state: "active"
     })]);
     store.markPromptDispatched("p1");
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false });
@@ -3733,16 +7816,108 @@ describe("SQLite store", () => {
       answer: "First complete\n\nSecond draft", answerSegments: ["First complete"], answerDraft: "Second draft", answerDraftTransient: false
     });
     expect(store.recoverRunningPrompts()).toBe(1);
-    expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "running", observationState: "detached" }]);
-    expect(store.loadRunCard("p1")).toMatchObject({ phase: "running", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求", queuePosition: 0, viewVersion: 2 });
+    expect(store.listDetachedPrompts()).toMatchObject([{ id: "p1", state: "recovering", observationState: "detached" }]);
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "recovering", notice: "Bridge 已重连，正在观察原 TraeX 任务；不会重复发送请求", queuePosition: 0, viewVersion: 3 });
     expect(store.getPrompt("p1")).toMatchObject({ wasDetached: true });
+  });
+
+  it("persists the managed Prompt identity invariant at admission", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+    const view = createQueuedRunCard({ promptId: "managed", bindingId: "b1", title: "Managed", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-30T00:00:00.000Z" });
+
+    const accepted = store.acceptPromptWithEffects({
+      prompt: { id: "managed", bindingId: "b1", larkMessageId: "lark-message-1", actorOpenId: "u1", body: "work" },
+      view, rootMessageId: "m1", answerCard: {}
+    });
+    const duplicate = store.acceptPromptWithEffects({
+      prompt: { id: "duplicate", bindingId: "b1", larkMessageId: "lark-message-1", actorOpenId: "u1", body: "changed payload" },
+      view: { ...view, promptId: "duplicate" }, rootMessageId: "m1", answerCard: {}
+    });
+
+    expect(accepted.result).toMatchObject({ inserted: true, prompt: {
+      id: "managed", ingressSource: "feishu", sourceMessageKey: "lark-message-1", nativeSubmissionId: "managed"
+    } });
+    expect(duplicate.result).toMatchObject({ inserted: false, prompt: {
+      id: "managed", body: "work", ingressSource: "feishu", sourceMessageKey: "lark-message-1", nativeSubmissionId: "managed"
+    } });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'submitted', observation_state = 'not_started' WHERE id = 'managed'").run();
+    expect(store.getActiveBridgePrompt("b1", 1)).toMatchObject({
+      id: "managed", nativeSubmissionId: "managed", transcriptTurnId: null
+    });
+    expect(store.markPromptNativeQueued({ promptId: "managed", bindingId: "b1", submissionId: "managed", dispatchedAt: "2026-09-30T00:00:01.000Z" })).toBe(true);
+    store.database.prepare("UPDATE prompt_jobs SET native_submission_id = 'different-submission' WHERE id = 'managed'").run();
+    expect(() => store!.markPromptNativeQueued({ promptId: "managed", bindingId: "b1", submissionId: "managed", dispatchedAt: "2026-09-30T00:00:02.000Z" })).toThrow("Persisted native submission ID does not match the prompt ID");
+  });
+
+  it("backfills durable Prompt source identity without guessing", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-prompt-source-identity-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      generation: 2, paneId: "w1:p1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    for (const [id, messageId] of [["feishu", "lark-message"], ["exact-herdr", "legacy-external"], ["reset-herdr", "legacy-reset"], ["incomplete-herdr", "legacy-incomplete"]] as const) {
+      const view = createQueuedRunCard({ promptId: id, bindingId: "b1", bindingGeneration: 2, title: id, workspaceId: "w1", paneId: "w1:p1", requestText: "same body", queuePosition: 1, occurredAt: "2026-09-30T00:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id, bindingId: "b1", larkMessageId: messageId, actorOpenId: "u1", body: "same body" }, view, rootMessageId: "root", answerCard: {} });
+    }
+    store.database.exec(`
+      DROP INDEX prompt_jobs_source_identity;
+      DROP TRIGGER prompt_jobs_source_identity_insert;
+      DROP TRIGGER prompt_jobs_source_identity_update;
+      UPDATE prompt_jobs SET ingress_source = NULL, source_message_key = NULL;
+      UPDATE prompt_jobs SET execution_origin = 'herdr', lark_message_id = NULL, transcript_turn_id = 'turn-1', transcript_turn_started_at = '2026-09-30T00:00:01.000Z' WHERE id = 'exact-herdr';
+      INSERT INTO prompt_transcript_turns(
+        prompt_id, binding_id, binding_generation, pane_id, native_session_id, turn_id, started_at,
+        chain_id, parent_turn_id, origin, ordinal, created_at
+      ) VALUES (
+        'exact-herdr', 'b1', 2, 'w1:p1', 'session-1', 'turn-1', '2026-09-30T00:00:01.000Z',
+        'turn-1', NULL, 'prompt', 0, '2026-09-30T00:00:01.000Z'
+      );
+      UPDATE prompt_jobs SET execution_origin = 'herdr', lark_message_id = NULL, transcript_turn_id = 'turn-reset', transcript_turn_started_at = '2026-09-30T00:00:02.000Z' WHERE id = 'reset-herdr';
+      UPDATE prompt_jobs SET execution_origin = 'herdr', lark_message_id = NULL WHERE id = 'incomplete-herdr';
+      UPDATE bindings SET generation = 3, pane_id = 'w1:p2', agent_session_value = 'session-after-reset' WHERE id = 'b1';
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 62;
+    `);
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    expect(store.getPrompt("feishu")).toMatchObject({ ingressSource: "feishu", sourceMessageKey: "lark-message" });
+    expect(store.getPrompt("exact-herdr")).toMatchObject({
+      larkMessageId: null,
+      ingressSource: "herdr",
+      sourceMessageKey: 'herdr-turn:v1:["b1",2,"w1:p1","session-1","turn-1","2026-09-30T00:00:01.000Z"]'
+    });
+    expect(store.getPrompt("reset-herdr")).toMatchObject({
+      larkMessageId: null,
+      ingressSource: "herdr",
+      sourceMessageKey: "legacy:v1:reset-herdr"
+    });
+    expect(store.getPrompt("incomplete-herdr")).toMatchObject({ larkMessageId: null, ingressSource: "herdr", sourceMessageKey: "legacy:v1:incomplete-herdr" });
+    store.enqueuePrompt({ id: "internal", bindingId: "b1", larkMessageId: null, ingressSource: "internal", sourceMessageKey: "maintenance:v1:internal", actorOpenId: "system", body: "internal work" });
+    expect(store.getPrompt("internal")).toMatchObject({ larkMessageId: null, ingressSource: "internal", sourceMessageKey: "maintenance:v1:internal" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version IN (62,63,64) ORDER BY version").all()).toEqual([{ version: 62 }, { version: 63 }, { version: 64 }]);
+    expect(store.database.prepare("PRAGMA index_list(prompt_jobs)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "prompt_jobs_source_identity", unique: 1 })
+    ]));
+    const identities = store.database.prepare("SELECT id, ingress_source, source_message_key FROM prompt_jobs ORDER BY id").all();
+    store.close();
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT id, ingress_source, source_message_key FROM prompt_jobs ORDER BY id").all()).toEqual(identities);
+    expect(store.database.prepare("SELECT version, COUNT(*) AS count FROM schema_migrations WHERE version IN (62,63,64) GROUP BY version ORDER BY version").all()).toEqual([
+      { version: 62, count: 1 }, { version: 63, count: 1 }, { version: 64, count: 1 }
+    ]);
   });
 
   it("returns committed prompt acceptance effects once and none for a duplicate", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-    const view = createQueuedRunCard({ promptId: "p-effects", bindingId: "b1", bindingGeneration: 2, title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-07T00:00:00.000Z" });
+    const view = createQueuedRunCard({ promptId: "p-effects", bindingId: "b1", bindingGeneration: 1, title: "Work", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "2026-09-07T00:00:00.000Z" });
     const input = { prompt: { id: "p-effects", bindingId: "b1", larkMessageId: "m-effects", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} };
 
     const accepted = store.acceptPromptWithEffects(input);
@@ -3759,11 +7934,13 @@ describe("SQLite store", () => {
     expect(duplicate.consumeEffects()).toEqual([]);
   });
 
-  it("durably catches up a queued Answer view advanced while its card create was in flight", () => {
+  it("reserves a CardKit Answer catch-up after create delivery", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-create-catch-up-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "hi", queuePosition: 3, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "hi" }, view: initial, rootMessageId: "root", answerCard: {} });
     const create = store.listPendingOutboundReplies().find((reply) => reply.promptId === "p1")!;
@@ -3773,20 +7950,54 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("p1")).toMatchObject({ answerMessageId: "answer-1", viewVersion: 2, answerDeliveredVersion: 1 });
     expect(store.listPendingCardContextInvalidations()).toContainEqual(expect.objectContaining({ targetKind: "primary-turn", targetId: "p1", targetGeneration: 1, reason: "answer-create.delivered" }));
     store.close(); store = new SqliteBindingStore(path);
+    connectPreparedTestDelivery(store);
 
     const invalidation = store.listPendingCardContextInvalidations().find(({ targetKind, targetId }) => targetKind === "primary-turn" && targetId === "p1")!;
     expect(store.projectCardContext(invalidation, {
       primaryAnswer: (view) => ({ promptId: view.promptId, version: view.viewVersion }),
       primaryMain: () => { throw new Error("not used"); }, workerMain: () => { throw new Error("not used"); }, workerTask: () => { throw new Error("not used"); }
     })).toBe("reserved");
-    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ promptId: "p1", kind: "card_update", viewVersion: 2, rootMessageId: "answer-1" }));
+    expect(store.listPendingOutboundReplies()).toContainEqual(expect.objectContaining({ promptId: "p1", kind: "card_update", intentKind: "card", rootMessageId: "answer-1", viewVersion: 2 }));
     expect(store.markOutboundReplyDelivered(create.id, "duplicate", "duplicate-card")).toBe(false);
   });
 
+  it("preserves Run projection agent kind and Task List across reopen", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-run-projection-context-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    connectPreparedTestDelivery(store);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Session", agentKind: "codex" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const queued = createQueuedRunCard({
+      promptId: "p1", bindingId: "b1", bindingGeneration: 1, title: "Task", sessionTitle: "Session", agentKind: "codex", workspaceId: "w1", spaceName: "herdr-agent-swarm", paneId: "w1:p1", paneToken: "yx0c", requestText: "go", queuePosition: 1, occurredAt: "start"
+    });
+    const projected = reduceRunCard(queued, {
+      type: "output", occurredAt: "later", answerSnapshot: "Working", hasProgressSnapshot: true, progressEvents: [],
+      taskList: [
+        { key: "plan:1", kind: "step", label: "Inspect", state: "done", occurredAt: "later" },
+        { key: "plan:2", kind: "step", label: "Verify", state: "active", occurredAt: "later" }
+      ]
+    });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view: projected, rootMessageId: "root", answerCard: {} });
+    store.close();
+    store = undefined;
 
-  it("projects changed queued run cards in one batch with per-card answer lanes", () => {
+    store = new SqliteBindingStore(path);
+    expect(store.loadRunCard("p1")).toMatchObject({
+      agentKind: "codex", paneToken: "yx0c",
+      taskList: [
+        { key: "plan:1", kind: "step", label: "Inspect", state: "done", occurredAt: "later" },
+        { key: "plan:2", kind: "step", label: "Verify", state: "active", occurredAt: "later" }
+      ]
+    });
+  });
+
+
+  it("projects changed queued run cards into CardKit Answer updates", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const views = ["p1", "p2", "p3"].map((promptId, index) => createQueuedRunCard({
       promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: index + 1, occurredAt: "start"
     }));
@@ -3811,14 +8022,87 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("p2")).toMatchObject({ queuePosition: 2, viewVersion: views[1]!.viewVersion });
     expect(store.loadRunCard("p3")).toMatchObject({ queuePosition: 4, viewVersion: third.viewVersion + 1 });
     expect(store.database.prepare("SELECT idempotency_key, lane_key FROM outbound_replies WHERE kind = 'card_update' ORDER BY prompt_id").all()).toEqual([
-      { idempotency_key: `run-card:update:p1:answer:${first.viewVersion + 1}`, lane_key: "gateway:feishu:primary:primary-answer:p1:1" },
-      { idempotency_key: `run-card:update:p3:answer:${third.viewVersion + 1}`, lane_key: "gateway:feishu:primary:primary-answer:p3:1" }
+      { idempotency_key: `run-card:update:p1:answer:${firstNext.viewVersion}`, lane_key: "gateway:feishu:primary:answer:p1:0" },
+      { idempotency_key: `run-card:update:p3:answer:${thirdNext.viewVersion}`, lane_key: "gateway:feishu:primary:answer:p3:0" }
     ]);
+  });
+
+  it("performs no projection or delivery writes when queue feedback is unchanged", () => {
+    store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    initial.answerMessageId = "answer-p1";
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: initial, rootMessageId: "root", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-p1", "card-p1");
+    store.database.exec("CREATE TEMP TABLE queue_write_audit(kind TEXT); CREATE TEMP TRIGGER audit_queue_update AFTER UPDATE ON run_cards BEGIN INSERT INTO queue_write_audit VALUES ('projection'); END; CREATE TEMP TRIGGER audit_queue_delivery AFTER INSERT ON outbound_replies WHEN NEW.kind = 'card_update' BEGIN INSERT INTO queue_write_audit VALUES ('delivery'); END");
+    const before = store.database.prepare("SELECT view_version, updated_at FROM run_cards WHERE prompt_id = 'p1'").get();
+
+    const result = store.projectQueuedRunCards({ bindingId: "b1", projections: [{ expectedViewVersion: 1, view: { ...initial, viewVersion: 2, updatedAt: "later" }, card: { promptId: "p1" } }] });
+
+    expect(result).toEqual({ projected: [], stalePromptIds: [], outboxReserved: false });
+    expect(store.database.prepare("SELECT kind FROM queue_write_audit").all()).toEqual([]);
+    expect(store.database.prepare("SELECT view_version, updated_at FROM run_cards WHERE prompt_id = 'p1'").get()).toEqual(before);
+  });
+
+  it("loads queued feedback candidates through bounded scalar statements without large projection payloads", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    initial.currentGoal = { goalId: "goal-1", objective: "Preserve this goal", status: "active", blockKind: null, sourceUpdatedAt: 1, occurredAt: "start", sourceId: "source-1", sourceSequence: 1, sourceEventId: "event-1", nativeSessionId: "session-1" };
+    initial.taskList = [{ key: "step-1", kind: "step", label: "Preserve this task", state: "active", occurredAt: "start" }];
+    initial.taskListTitle = "Current plan";
+    initial.workerActivity = [{ workerId: "worker-1", workerSessionGeneration: 1, name: "reviewer", latestPhase: "running", taskCount: 1, latestTaskTitle: "Preserve worker activity", latestTaskCard: { aggregateKind: "worker-turn", aggregateId: "turn-1", generation: 1, messageId: null }, updatedAt: "start" }];
+    initial.workerDependencyRevision = 7;
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: initial, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE run_cards SET answer = ?, progress_events_json = ? WHERE prompt_id = 'p1'")
+      .run("large-answer".repeat(20_000), JSON.stringify([{ label: "large-progress".repeat(20_000) }]));
+    const prepare = vi.spyOn(store.database, "prepare");
+
+    const snapshot = store.loadQueueFeedbackInputs("b1");
+
+    expect(snapshot.queued).toEqual([expect.objectContaining({
+      promptId: "p1", answer: "", progressEvents: [], currentGoal: initial.currentGoal,
+      taskList: initial.taskList, taskListTitle: initial.taskListTitle,
+      workerActivity: initial.workerActivity, workerDependencyRevision: 7
+    })]);
+    expect(renderRequestAnswerCard(snapshot.queued[0]!)).toEqual(renderRequestAnswerCard(initial));
+    expect(prepare).toHaveBeenCalledTimes(3);
+    expect(String(prepare.mock.calls[1]?.[0])).toBe(queuedRunCardSelectionSql);
+    expect(queuedRunCardSelectionSql).not.toMatch(/state_json|card\.answer(?:\s|,)|progress_events_json|answer_timeline_items/);
+    const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${queuedRunCardSelectionSql}`).all("b1") as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("prompt_jobs_priority_queue"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("sqlite_autoindex_run_cards_1"))).toBe(true);
+  });
+
+  it("updates only queue projection columns and reserves one delivery intent", () => {
+    store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    initial.answerMessageId = "answer-p1";
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: initial, rootMessageId: "root", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-p1", "card-p1");
+    store.database.exec("CREATE TEMP TABLE forbidden_queue_writes(value INTEGER); CREATE TEMP TRIGGER forbid_full_queue_update AFTER UPDATE OF phase, answer, answer_segments_json, answer_draft, progress_events_json, task_list_json, current_goal_json, progress_summary_json, notice, worker_activity_json, activity_at ON run_cards BEGIN INSERT INTO forbidden_queue_writes VALUES (1); END");
+    const feedback = { aheadCount: 1, activeElapsedSeconds: 30, elapsedBucket: 0, estimateLowerSeconds: 60, estimateUpperSeconds: 120, sampleCount: 3 };
+    const next = { ...initial, queuePosition: 2, queueFeedback: feedback, viewVersion: 2, updatedAt: "later" };
+
+    expect(store.projectQueuedRunCards({ bindingId: "b1", projections: [{ expectedViewVersion: 1, view: next, card: { promptId: "p1" } }] })).toEqual({ projected: [next], stalePromptIds: [], outboxReserved: true });
+    expect(store.database.prepare("SELECT value FROM forbidden_queue_writes").all()).toEqual([]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE kind = 'card_update' AND prompt_id = 'p1'").get()).toEqual({ count: 1 });
+    expect(store.loadRunCard("p1")).toMatchObject({ queuePosition: 2, queueFeedback: feedback, viewVersion: 2, updatedAt: "later", activityAt: "start", phase: "queued" });
+    expect(store.projectQueuedRunCards({ bindingId: "b1", projections: [{ expectedViewVersion: 1, view: next, card: { promptId: "p1" } }] })).toEqual({ projected: [], stalePromptIds: ["p1"], outboxReserved: false });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE kind = 'card_update' AND prompt_id = 'p1'").get()).toEqual({ count: 1 });
   });
 
   it("constructs prompt lanes from scalar generation state without the Run Card JSON view", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
@@ -3833,7 +8117,9 @@ describe("SQLite store", () => {
 
   it("skips stale queued card projections while committing valid siblings", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const cards = ["stale", "valid"].map((promptId, index) => {
       const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: index + 1, occurredAt: "start" });
       view.answerMessageId = `answer-${promptId}`;
@@ -3851,7 +8137,9 @@ describe("SQLite store", () => {
 
   it("projects a queued card without reserving outbox work when no answer message exists", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const initial = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: initial, rootMessageId: "root", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
@@ -3864,7 +8152,9 @@ describe("SQLite store", () => {
 
   it("rolls back every queued card and outbox intent when one batch insert fails", () => {
     store = new SqliteBindingStore(":memory:");
+    connectPreparedTestDelivery(store);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
     const cards = ["p1", "p2"].map((promptId, index) => {
       const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: index + 1, occurredAt: "start" });
       view.answerMessageId = `answer-${promptId}`;
@@ -3906,10 +8196,12 @@ describe("SQLite store", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-classified-prompt-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task", agentKind: "codex" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "legacy", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "legacy", bindingId: "b1", larkMessageId: "m-legacy", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root", answerCard: {} });
-    store.database.exec("DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at; ALTER TABLE run_cards DROP COLUMN queue_feedback_json;");
+    store.database.exec("DROP VIEW run_cards_view; ALTER TABLE prompt_jobs DROP COLUMN was_detached; ALTER TABLE run_cards DROP COLUMN activity_at; ALTER TABLE run_cards DROP COLUMN queue_feedback_json; ALTER TABLE run_cards DROP COLUMN pane_token; ALTER TABLE run_cards DROP COLUMN agent_kind; ALTER TABLE run_cards DROP COLUMN task_list_json;");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
     store = undefined;
 
@@ -3917,6 +8209,9 @@ describe("SQLite store", () => {
     expect(store.getPrompt("legacy")).toMatchObject({ wasDetached: false });
     expect(store.loadRunCard("legacy")?.activityAt).toBe("2026-08-29T09:00:00.000Z");
     expect(store.loadRunCard("legacy")?.queueFeedback).toBeNull();
+    expect(store.loadRunCard("legacy")?.paneToken).toBeNull();
+    expect(store.loadRunCard("legacy")?.agentKind).toBe("codex");
+    expect(store.loadRunCard("legacy")?.taskList).toEqual([]);
   });
 
   it("derives cumulative progress before trimming legacy run-card history", () => {
@@ -3924,11 +8219,12 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "legacy-progress", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy", queuePosition: 1, occurredAt: "now" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "legacy-progress", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "legacy", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "legacy-progress", bindingId: "b1", larkMessageId: "m-legacy-progress", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root", answerCard: {} });
     const events = Array.from({ length: 10 }, (_, index) => ({ key: `step:${index}`, kind: "step", label: `step ${index}`, state: index < 6 ? "done" : "active", occurredAt: "now" }));
     store.database.prepare("UPDATE run_cards SET progress_events_json = ? WHERE prompt_id = 'legacy-progress'").run(JSON.stringify(events));
-    store.database.exec("DELETE FROM schema_migrations WHERE version = 6; DROP VIEW run_cards_view; ALTER TABLE run_cards DROP COLUMN progress_summary_json");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 6; DROP VIEW run_cards_view; ALTER TABLE run_cards DROP COLUMN progress_summary_json");
     store.close();
     store = undefined;
 
@@ -3963,6 +8259,7 @@ describe("SQLite store", () => {
         'promptId', prompt_id, 'requestText', request_text
       ) AS state_json FROM run_cards;
     `);
+    legacy.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     legacy.close();
 
     expect(() => { store = new SqliteBindingStore(path); }).not.toThrow();
@@ -3975,9 +8272,10 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    const source = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Source", workspaceId: "w1", paneId: null, requestText: "source", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const source = createQueuedRunCard({ promptId: "source", bindingId: "b1", title: "Source", workspaceId: "w1", paneId: "w1:p1", requestText: "source", queuePosition: 1, occurredAt: "2026-08-29T09:00:00.000Z" });
     store.acceptPrompt({ prompt: { id: "source", bindingId: "b1", larkMessageId: "m-source", actorOpenId: "u1", body: "source" }, view: source, rootMessageId: "root", answerCard: {} });
-    const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: null, requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
+    const converted = createQueuedRunCard({ promptId: "converted", bindingId: "b1", title: "Converted", workspaceId: "w1", paneId: "w1:p1", requestText: "converted", queuePosition: 2, occurredAt: "2026-08-29T09:01:00.000Z" });
     store.acceptPrompt({ prompt: { id: "converted", bindingId: "b1", larkMessageId: "m-converted", actorOpenId: "u1", body: "converted", wasDetached: true }, view: converted, rootMessageId: "root", answerCard: {} });
     store.database.prepare("UPDATE prompt_jobs SET dispatched_at = ?, transcript_turn_id = ?, transcript_turn_started_at = ? WHERE id = 'converted'")
       .run("2026-08-29T09:01:01.000Z", "01a052d3-9c14-70e1-a375-397e2ecb55e9", "2026-08-29T09:01:01.250Z");
@@ -3997,6 +8295,7 @@ describe("SQLite store", () => {
       ALTER TABLE prompt_jobs_legacy RENAME TO prompt_jobs;
       PRAGMA foreign_keys = ON;
     `);
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
     store = undefined;
 
@@ -4007,32 +8306,10 @@ describe("SQLite store", () => {
     });
   });
 
-  it("atomically reserves Answer content, continuation, and terminal finish intents", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
-    const elementId = answerElementId("p1", 0);
-
-    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId, content: "page one" })).toBe("reserved");
-    expect(store.getActiveAnswerPage("p1")?.sequence).toBe(1);
-    expect(store.loadRunCard("p1")?.answerSequence).toBe(1);
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "stream_content", viewVersion: 1 })]);
-    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId, content: "page one" })).toBe("waiting");
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "card-1");
-
-    expect(store.reserveAnswerContinuation({ promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", summary: "Continued", finalizedCard: { final: true }, nextPageIndex: 1, nextPageStart: 9_000, nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2, card: {} })).toBe("reserved");
-    expect(store.listAnswerPages("p1")).toEqual([
-      expect.objectContaining({ pageIndex: 0, state: "active", sequence: 2 }),
-      expect.objectContaining({ pageIndex: 1, state: "creating", sequence: 0 })
-    ]);
-    expect(store.listPendingOutboundReplies().map((reply) => reply.kind)).toEqual(["stream_finish", "card_update", "stream_card_create"]);
-  });
-
   it("uses structural stream metadata when reading Answer delivery facts", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
@@ -4048,6 +8325,7 @@ describe("SQLite store", () => {
   it("falls back to legacy Answer payload metadata only when structural metadata is absent", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
@@ -4068,6 +8346,7 @@ describe("SQLite store", () => {
   it("reads Answer delivery facts without mixing unrelated retained history", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
@@ -4086,9 +8365,10 @@ describe("SQLite store", () => {
     for (let index = 0; index < 200; index += 1) {
       const kind = index % 3 === 0 ? "card_update" : index % 3 === 1 ? "stream_finish" : "stream_content";
       store.enqueueOutboundReply({
-        id: `history-${index}`, idempotencyKey: `history-${index}`, bindingId: "b1", promptId: index % 2 === 0 ? "other-prompt" : "p1", viewVersion: 100 + index, cardRole: "answer", rootMessageId: "other-card", kind,
+        id: `history-${index}`, idempotencyKey: `history-${index}`, bindingId: "b1", promptId: "p1", viewVersion: 100 + index, cardRole: "answer", rootMessageId: "other-card", kind,
         payload: JSON.stringify({ pageIndex: 99, elementId: "other-element", content: `history-${index}`, sequence: 100 + index })
       });
+      if (index % 2 === 0) store.database.prepare("UPDATE outbound_replies SET prompt_id = 'other-prompt' WHERE id = ?").run(`history-${index}`);
       store.database.prepare("UPDATE outbound_replies SET state = ? WHERE id = ?").run((["pending", "delivered", "dead_letter", "dismissed"] as const)[index % 4], `history-${index}`);
     }
 
@@ -4098,6 +8378,122 @@ describe("SQLite store", () => {
       continuationPending: true,
       finalUpdateState: "delivered"
     });
+  });
+
+  it("excludes invalid alias corrections from expired targets, delivery facts, and recovery links", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { canonicalPromptId } = prepareCorrectedExternalTurn(store);
+    const invalidView = createQueuedRunCard({
+      promptId: "invalid-alias",
+      bindingId: "b1",
+      title: "Invalid alias",
+      workspaceId: "w1",
+      paneId: "w1:p1",
+      requestText: "invalid",
+      queuePosition: 1,
+      occurredAt: "2026-09-30T00:00:04.000Z"
+    });
+    store.acceptPrompt({ prompt: { id: "invalid-alias", bindingId: "b1", larkMessageId: "m-invalid-alias", actorOpenId: "u1", body: "invalid" }, view: invalidView, rootMessageId: "root", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies().find((reply) => reply.promptId === "invalid-alias")!.id, "answer-invalid", "card-invalid");
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-alias", canonicalPromptId });
+    expectInvalidPromptIdentityCorrectionReported(store);
+
+    store.enqueueOutboundReply({
+      id: "invalid-content",
+      idempotencyKey: "invalid-content",
+      bindingId: "b1",
+      promptId: "invalid-alias",
+      viewVersion: 11,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "stream_content",
+      payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId(canonicalPromptId, 0), content: "wrong-owner", sequence: 11, sourceEnd: 42 })
+    });
+    store.enqueueOutboundReply({
+      id: "invalid-finish",
+      idempotencyKey: "invalid-finish",
+      bindingId: "b1",
+      promptId: "invalid-alias",
+      viewVersion: 12,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "stream_finish",
+      payload: JSON.stringify({ pageIndex: 0, summary: "done", sequence: 12 })
+    });
+    store.enqueueOutboundReply({
+      id: "invalid-continuation",
+      idempotencyKey: "invalid-continuation",
+      bindingId: "b1",
+      promptId: "invalid-alias",
+      viewVersion: 13,
+      cardRole: "answer",
+      rootMessageId: "root",
+      kind: "stream_card_create",
+      payload: JSON.stringify({ stream: { pageIndex: 1, pageStart: 9_000, elementId: answerElementId(canonicalPromptId, 1) }, card: {} })
+    });
+    store.enqueueOutboundReply({
+      id: "invalid-final",
+      idempotencyKey: "answer-final-fold:invalid-alias:0:card-1",
+      bindingId: "b1",
+      promptId: "invalid-alias",
+      viewVersion: 14,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "card_update",
+      payload: "{}"
+    });
+    store.enqueueOutboundReply({
+      id: "invalid-expired",
+      idempotencyKey: "invalid-expired",
+      bindingId: "b1",
+      promptId: "invalid-alias",
+      viewVersion: 15,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "card_update",
+      payload: "{}",
+      streamPageIndex: 0
+    });
+    store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'permanent', effect_certainty = 'rejected', lark_error_code = '230031', error = 'expired target', dead_lettered_at = '2026-09-30T00:00:05.000Z', updated_at = '2026-09-30T00:00:05.000Z' WHERE id = 'invalid-expired'").run();
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = 'expired_view_target', updated_at = '2026-09-30T00:00:05.000Z' WHERE failed_reply_id = 'invalid-expired'").run();
+
+    expect(store.getAnswerPageDeliveryFacts(canonicalPromptId, 0)).toEqual({
+      latestContent: null,
+      finishPending: false,
+      continuationPending: false,
+      finalUpdateState: null
+    });
+    expect(store.hasPendingExpiredAnswerTarget(canonicalPromptId, 0)).toBe(false);
+
+    store.enqueueOutboundReply({
+      id: "invalid-coverage",
+      idempotencyKey: "invalid-coverage",
+      bindingId: "b1",
+      promptId: "invalid-alias",
+      bindingGeneration: 1,
+      viewVersion: 16,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "card_update",
+      payload: "{}"
+    });
+    store.database.prepare("INSERT INTO answer_delivery_coverage(reply_id, prompt_id, binding_generation, page_index, source_start, source_end, source_hash) VALUES ('invalid-coverage', 'invalid-alias', 1, 0, 0, 12, ?)")
+      .run(createHash("sha256").update("legacy chunk").digest("hex"));
+    store.database.prepare("UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'permanent', effect_certainty = 'rejected', error = 'needs rebuild', dead_lettered_at = '2026-09-30T00:00:06.000Z', updated_at = '2026-09-30T00:00:06.000Z' WHERE id = 'invalid-coverage'").run();
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = 'rebuild_answer', updated_at = '2026-09-30T00:00:06.000Z' WHERE failed_reply_id = 'invalid-coverage'").run();
+    store.database.prepare("UPDATE answer_pages SET state = 'frozen', delivery_mode = 'static' WHERE prompt_id = ? AND page_index = 0").run(canonicalPromptId);
+
+    expect(store.reserveClosedAnswerStreamReplacement({
+      promptId: canonicalPromptId,
+      previousPageIndex: 0,
+      nextPageIndex: 1,
+      sourceStart: 0,
+      nextElementId: answerElementId(canonicalPromptId, 1),
+      rootMessageId: "root",
+      viewVersion: 17,
+      card: { replacement: true }
+    })).toBe("stale");
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM answer_recovery_links WHERE prompt_id = 'invalid-alias'").get()).toEqual({ count: 0 });
   });
 
   it("uses the prompt-kind-state index for targeted Answer delivery facts queries", () => {
@@ -4116,52 +8512,10 @@ describe("SQLite store", () => {
     }
   });
 
-  it("rolls back an Answer reservation when its outbox insert fails", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
-    store.database.exec("CREATE TEMP TRIGGER reject_answer_content BEFORE INSERT ON outbound_replies WHEN NEW.kind = 'stream_content' BEGIN SELECT RAISE(ABORT, 'forced_answer_outbox_failure'); END");
-
-    expect(() => store!.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-1", elementId: answerElementId("p1", 0), content: "new" })).toThrow("forced_answer_outbox_failure");
-
-    expect(store.getActiveAnswerPage("p1")?.sequence).toBe(0);
-    expect(store.loadRunCard("p1")?.answerSequence).toBe(0);
-    expect(store.listPendingOutboundReplies()).toEqual([]);
-  });
-
-  it("recovers only queued answer cards dead-lettered by the legacy element id format", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
-    const view = createQueuedRunCard({ promptId: "legacy-id", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({
-      prompt: { id: "legacy-id", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" },
-      view: { ...view, answerElementId: "answer_content_legacy_identifier_that_is_too_long_0" }, rootMessageId: "m1",
-      answerCard: { schema: "2.0", body: { elements: [{ tag: "markdown", element_id: "answer_content_legacy_identifier_that_is_too_long_0", content: "waiting" }] } }
-    });
-    const [legacyReply] = store.listPendingOutboundReplies();
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed(legacyReply!.id, "ElementID answer_content_legacy_identifier_that_is_too_long_0: Code 1002: elementID format error");
-
-    store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", bindingId: "b1", rootMessageId: "m1", kind: "text", payload: "hello" });
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("unrelated", "network unavailable");
-
-    expect(store.recoverLegacyElementIdDeadLetters()).toBe(1);
-    const [recovered] = store.listPendingOutboundReplies();
-    expect(recovered).toMatchObject({ id: legacyReply!.id, state: "pending", attemptCount: 0, error: null });
-    expect(store.loadRunCard("legacy-id")?.answerElementId).toBe(answerElementId("legacy-id", 0));
-    expect(JSON.parse(recovered!.payload)).toMatchObject({ body: { elements: [{ element_id: answerElementId("legacy-id", 0) }] } });
-    expect(store.getOperationalSummary().deadLetters).toBe(1);
-    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("legacy-id");
-
-    store.markOutboundReplyDelivered(legacyReply!.id, "answer-1", "cardkit-1");
-    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
-  });
-
   it("canonicalizes pending continuation metadata with its card payload", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
@@ -4183,6 +8537,7 @@ describe("SQLite store", () => {
   it("finds pending Answer continuations from normalized metadata instead of reparsing payloads", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.enqueueOutboundReply({ id: "continuation", idempotencyKey: "continuation", bindingId: "b1", promptId: "p1", rootMessageId: "root-1", kind: "stream_card_create", payload: JSON.stringify({ stream: { pageIndex: 2, pageStart: 9_000, elementId: answerElementId("p1", 2) }, card: {} }) });
@@ -4199,12 +8554,15 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    const historicalCreate = store.listPendingOutboundReplies()[0]!;
+    mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET gateway_plan_json = NULL, gateway_plan_hash = NULL WHERE id = ?", historicalCreate.id);
     const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
     store.database.prepare("UPDATE run_cards SET answer_element_id = ? WHERE prompt_id = 'p1'").run(legacyId);
     store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE prompt_id = 'p1'").run(JSON.stringify({ body: { elements: [{ element_id: legacyId }] } }));
-    store.database.prepare("DELETE FROM schema_migrations WHERE version = 2").run();
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 2");
     store.close();
 
     store = new SqliteBindingStore(path);
@@ -4216,9 +8574,11 @@ describe("SQLite store", () => {
   it("does not rewrite or replay a claimed legacy Answer payload during startup canonicalization", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "claimed-legacy", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "claimed-legacy", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     const reply = store.listPendingOutboundReplies()[0]!;
+    mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET gateway_plan_json = NULL, gateway_plan_hash = NULL WHERE id = ?", reply.id);
     const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
     const legacyPayload = JSON.stringify({ body: { elements: [{ element_id: legacyId }] } });
     store.database.prepare("UPDATE run_cards SET answer_element_id = ? WHERE prompt_id = 'claimed-legacy'").run(legacyId);
@@ -4232,18 +8592,21 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT first_claimed_at FROM outbound_replies WHERE id = ?").get(reply.id)).toMatchObject({ first_claimed_at: expect.any(String) });
   });
 
-  it("repairs answer payloads when the persisted run-card id is already canonical", () => {
+  it("canonicalizes retained CardKit stream metadata during startup", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-element-payload-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
+    const historicalCreate = store.listPendingOutboundReplies()[0]!;
+    mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET gateway_plan_json = NULL, gateway_plan_hash = NULL WHERE id = ?", historicalCreate.id);
     const canonicalId = store.loadRunCard("p1")!.answerElementId;
     const legacyId = "answer_content_legacy_identifier_that_is_too_long_0";
     store.database.prepare("UPDATE outbound_replies SET payload = ? WHERE prompt_id = 'p1'").run(JSON.stringify({ body: { elements: [{ element_id: legacyId }] }, stream: { pageIndex: 0, pageStart: 0, elementId: legacyId } }));
     store.enqueueOutboundReply({ id: "unrelated", idempotencyKey: "unrelated", rootMessageId: "m1", kind: "text", payload: legacyId });
-    store.database.prepare("DELETE FROM schema_migrations WHERE version = 2").run();
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 2");
     store.close();
 
     store = new SqliteBindingStore(path);
@@ -4302,24 +8665,15 @@ describe("SQLite store", () => {
     expect(columns.map((column) => column.name)).toEqual(["binding_id", "state", "priority", "created_at"]);
   });
 
-  it("repairs a missing prompt priority queue index without changing schema on later reopens", () => {
+  it("fails closed on a missing prompt priority queue index in a metadata-bearing current database", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-prompt-queue-index-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.database.exec("DROP INDEX IF EXISTS prompt_jobs_priority_queue");
     store.close();
 
-    store = new SqliteBindingStore(path);
-    const repaired = store.database.prepare("PRAGMA index_info(prompt_jobs_priority_queue)").all() as Array<{ name: string }>;
-    expect(repaired.map((column) => column.name)).toEqual(["binding_id", "state", "priority", "created_at"]);
-    store.close();
-
-    store = new SqliteBindingStore(path);
-    const before = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
-    store.close();
-    store = new SqliteBindingStore(path);
-    const after = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
-    expect(after.schema_version).toBe(before.schema_version);
+    store = undefined;
+    expect(() => new SqliteBindingStore(path)).toThrow(/schema fingerprint drift/i);
   });
 
   it("uses the priority queue index for prompt hot paths under mixed queue load", () => {
@@ -4392,6 +8746,366 @@ describe("SQLite store", () => {
     expect(after.schema_version).toBe(before.schema_version);
   });
 
+  it("adds durable conversation segment tables in schema revision 95", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 95").get()).toEqual({ version: 95 });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('conversation_segments','conversation_segment_items','conversation_segment_pages') ORDER BY name").all()).toEqual([
+      { name: "conversation_segment_items" },
+      { name: "conversation_segment_pages" },
+      { name: "conversation_segments" }
+    ]);
+
+    expect(store.database.prepare("PRAGMA table_info(conversation_segments)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "id", pk: 1, notnull: 0 }),
+      expect.objectContaining({ name: "producer_key", notnull: 1 }),
+      expect.objectContaining({ name: "owner_kind", notnull: 1 }),
+      expect.objectContaining({ name: "owner_id", notnull: 1 }),
+      expect.objectContaining({ name: "owner_generation", notnull: 1 }),
+      expect.objectContaining({ name: "submission_id", notnull: 0 }),
+      expect.objectContaining({ name: "human_event_id", notnull: 0 }),
+      expect.objectContaining({ name: "agent_kind", notnull: 1 }),
+      expect.objectContaining({ name: "session_id", notnull: 0 }),
+      expect.objectContaining({ name: "request_text", notnull: 1 }),
+      expect.objectContaining({ name: "start_lane_sequence", notnull: 0 }),
+      expect.objectContaining({ name: "start_item_ordinal", notnull: 0 }),
+      expect.objectContaining({ name: "end_lane_sequence", notnull: 0 }),
+      expect.objectContaining({ name: "end_item_ordinal", notnull: 0 }),
+      expect.objectContaining({ name: "state", notnull: 1 }),
+      expect.objectContaining({ name: "view_version", notnull: 1 }),
+      expect.objectContaining({ name: "root_message_id", notnull: 1 }),
+      expect.objectContaining({ name: "created_at", notnull: 1 }),
+      expect.objectContaining({ name: "updated_at", notnull: 1 })
+    ]));
+
+    expect(store.database.prepare("PRAGMA table_info(conversation_segment_items)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "segment_id", pk: 1 }),
+      expect.objectContaining({ name: "item_id", pk: 2 }),
+      expect.objectContaining({ name: "lane_sequence", notnull: 1 }),
+      expect.objectContaining({ name: "item_ordinal", notnull: 1 }),
+      expect.objectContaining({ name: "item_json", notnull: 1 })
+    ]));
+
+    expect(store.database.prepare("PRAGMA table_info(conversation_segment_pages)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "id", pk: 1 }),
+      expect.objectContaining({ name: "segment_id", notnull: 1 }),
+      expect.objectContaining({ name: "page_index", notnull: 1 }),
+      expect.objectContaining({ name: "message_id", notnull: 0 }),
+      expect.objectContaining({ name: "card_id", notnull: 0 }),
+      expect.objectContaining({ name: "element_id", notnull: 1 }),
+      expect.objectContaining({ name: "state", notnull: 1 }),
+      expect.objectContaining({ name: "sequence", notnull: 1 }),
+      expect.objectContaining({ name: "start_cursor_json", notnull: 0 }),
+      expect.objectContaining({ name: "delivered_cursor_json", notnull: 0 }),
+      expect.objectContaining({ name: "pending_reply_id", notnull: 0 }),
+      expect.objectContaining({ name: "created_at", notnull: 1 }),
+      expect.objectContaining({ name: "updated_at", notnull: 1 })
+    ]));
+  });
+
+  it("rejects invalid durable conversation segment bounds at the SQLite schema layer", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    expect(() => store!.database.prepare(`
+      INSERT INTO conversation_segments(
+        id, producer_key, owner_kind, owner_id, owner_generation,
+        submission_id, human_event_id, agent_kind, session_id,
+        request_text, start_lane_sequence, start_item_ordinal,
+        end_lane_sequence, end_item_ordinal, state, view_version,
+        root_message_id, created_at, updated_at
+      ) VALUES (
+        'segment-negative', 'producer-1', 'primary', 'binding-1', 1,
+        NULL, NULL, 'traex', 'session-1',
+        'request', -1, 0,
+        NULL, NULL, 'pending', 1,
+        'root-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run()).toThrow(/constraint/i);
+
+    expect(() => store!.database.prepare(`
+      INSERT INTO conversation_segments(
+        id, producer_key, owner_kind, owner_id, owner_generation,
+        submission_id, human_event_id, agent_kind, session_id,
+        request_text, start_lane_sequence, start_item_ordinal,
+        end_lane_sequence, end_item_ordinal, state, view_version,
+        root_message_id, created_at, updated_at
+      ) VALUES (
+        'segment-backward', 'producer-1', 'primary', 'binding-1', 1,
+        NULL, NULL, 'traex', 'session-1',
+        'request', 12, 0,
+        11, 0, 'closed', 1,
+        'root-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run()).toThrow(/constraint/i);
+
+    expect(() => store!.database.prepare(`
+      INSERT INTO conversation_segments(
+        id, producer_key, owner_kind, owner_id, owner_generation,
+        submission_id, human_event_id, agent_kind, session_id,
+        request_text, start_lane_sequence, start_item_ordinal,
+        end_lane_sequence, end_item_ordinal, state, view_version,
+        root_message_id, created_at, updated_at
+      ) VALUES (
+        'segment-equal', 'producer-1', 'primary', 'binding-1', 1,
+        NULL, NULL, 'traex', 'session-1',
+        'request', 12, 0,
+        12, 0, 'closed', 1,
+        'root-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run()).toThrow(/constraint/i);
+
+    expect(() => store!.database.prepare(`
+      INSERT INTO conversation_segments(
+        id, producer_key, owner_kind, owner_id, owner_generation,
+        submission_id, human_event_id, agent_kind, session_id,
+        request_text, start_lane_sequence, start_item_ordinal,
+        end_lane_sequence, end_item_ordinal, state, view_version,
+        root_message_id, created_at, updated_at
+      ) VALUES (
+        'segment-valid', 'producer-1', 'primary', 'binding-1', 1,
+        NULL, NULL, 'traex', 'session-1',
+        'request', 12, 0,
+        12, 1, 'closed', 1,
+        'root-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run()).not.toThrow();
+  });
+
+  it("fences conversation segment writes with the instance lease", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    const names = store.database.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+        AND name IN ('conversation_segments','conversation_segment_items','conversation_segment_pages')
+      ORDER BY name
+    `).all();
+
+    expect(names).toEqual([
+      { name: "conversation_segment_items" },
+      { name: "conversation_segment_pages" },
+      { name: "conversation_segments" }
+    ]);
+
+    const leaseOwner = "owner-1";
+    const lease = store.acquireInstanceLease(leaseOwner, "2026-10-04T00:00:00.000Z", "2099-01-01T00:00:00.000Z");
+    expect(lease).not.toBeNull();
+    store.activateWriteFence(leaseOwner, lease!.fencingToken);
+    expect(store.database.prepare(`
+      SELECT name
+      FROM sqlite_temp_master
+      WHERE type = 'trigger'
+        AND name IN (
+          'bridge_fence_conversation_segments_insert',
+          'bridge_fence_conversation_segment_items_insert',
+          'bridge_fence_conversation_segment_pages_insert'
+        )
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "bridge_fence_conversation_segment_items_insert" },
+      { name: "bridge_fence_conversation_segment_pages_insert" },
+      { name: "bridge_fence_conversation_segments_insert" }
+    ]);
+
+    expect(() => store!.database.prepare(`
+      INSERT INTO conversation_segments(
+        id, producer_key, owner_kind, owner_id, owner_generation,
+        submission_id, human_event_id, agent_kind, session_id,
+        request_text, start_lane_sequence, start_item_ordinal,
+        end_lane_sequence, end_item_ordinal, state, view_version,
+        root_message_id, created_at, updated_at
+      ) VALUES (
+        'segment-1', 'producer-1', 'primary', 'binding-1', 1,
+        NULL, NULL, 'traex', 'session-1',
+        'request', 10, 0,
+        NULL, NULL, 'pending', 1,
+        'root-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run()).not.toThrow();
+  });
+
+  it("enforces one pending reply per conversation segment page", () => {
+    store = new SqliteBindingStore(":memory:");
+
+    store.enqueueOutboundReply({ id: "reply-1", idempotencyKey: "reply-1", rootMessageId: "root-1", kind: "card_update", payload: "{}" });
+    store.database.prepare(`
+      INSERT INTO conversation_segments(
+        id, producer_key, owner_kind, owner_id, owner_generation,
+        submission_id, human_event_id, agent_kind, session_id,
+        request_text, start_lane_sequence, start_item_ordinal,
+        end_lane_sequence, end_item_ordinal, state, view_version,
+        root_message_id, created_at, updated_at
+      ) VALUES (
+        'segment-1', 'producer-1', 'primary', 'binding-1', 1,
+        NULL, NULL, 'traex', 'session-1',
+        'request', 12, 0,
+        NULL, NULL, 'working', 1,
+        'root-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run();
+    store.database.prepare(`
+      INSERT INTO conversation_segment_pages(
+        id, segment_id, page_index, message_id, card_id, element_id,
+        state, sequence, start_cursor_json, delivered_cursor_json,
+        pending_reply_id, created_at, updated_at
+      ) VALUES (
+        'page-1', 'segment-1', 0, NULL, NULL, 'element-1',
+        'creating', 0, NULL, NULL,
+        'reply-1', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z'
+      )
+    `).run();
+
+    expect(() => store!.database.prepare(`
+      INSERT INTO conversation_segment_pages(
+        id, segment_id, page_index, message_id, card_id, element_id,
+        state, sequence, start_cursor_json, delivered_cursor_json,
+        pending_reply_id, created_at, updated_at
+      ) VALUES (
+        'page-2', 'segment-1', 1, NULL, NULL, 'element-2',
+        'creating', 0, NULL, NULL,
+        'reply-1', '2026-10-04T00:00:01.000Z', '2026-10-04T00:00:01.000Z'
+      )
+    `).run()).toThrow(/constraint/i);
+
+    expect(store.database.prepare(`
+      SELECT pending_reply_id
+      FROM conversation_segment_pages
+      WHERE pending_reply_id IS NOT NULL
+    `).all()).toEqual([{ pending_reply_id: "reply-1" }]);
+  });
+
+  it("reopens the conversation segment migration idempotently", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-conversation-segment-schema-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const before = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
+    store.close();
+    store = new SqliteBindingStore(path);
+    const after = store.database.prepare("PRAGMA schema_version").get() as { schema_version: number };
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 95").get()).toEqual({ version: 95 });
+    expect(after.schema_version).toBe(before.schema_version);
+  });
+
+  it("adds migration 108 current Goal storage to an existing conversation segment schema", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-current-goal-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.database.exec("ALTER TABLE conversation_segments DROP COLUMN current_goal_json; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 108");
+    store.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 108").get()).toEqual({ version: 108 });
+    expect(store.database.prepare("PRAGMA table_info(conversation_segments)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "current_goal_json", notnull: 0 })
+    ]));
+    store.database.prepare(`INSERT INTO conversation_segments(
+      id,producer_key,owner_kind,owner_id,owner_generation,agent_kind,request_text,state,view_version,root_message_id,current_goal_json,created_at,updated_at
+    ) VALUES ('migration-108-segment','lane:test','primary','binding-1',1,'traex','request','working',1,'root','{"objective":"Ship","status":"active"}','now','now')`).run();
+    expect(store.database.prepare("SELECT current_goal_json FROM conversation_segments WHERE id='migration-108-segment'").get())
+      .toEqual({ current_goal_json: '{"objective":"Ship","status":"active"}' });
+    expect(() => store!.database.prepare("UPDATE conversation_segments SET current_goal_json='not-json'").run()).toThrow(/constraint/i);
+  });
+
+  it("adds completion notification obligations without backfilling historical completed Prompts", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-completion-obligation-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "historical", projectId: "p1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Historical", creatorOpenId: "ou_creator" });
+    store.updateBinding("historical", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const queued = createQueuedRunCard({ promptId: "completed-before-v73", bindingId: "historical", bindingGeneration: 1, title: "Historical", workspaceId: "w1", paneId: "w1:p1", requestText: "old request", queuePosition: 0, occurredAt: "2026-09-30T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: queued.promptId, bindingId: queued.bindingId, larkMessageId: "old-message", actorOpenId: "ou_actor", body: queued.requestText }, view: queued, rootMessageId: "root", answerCard: {} });
+    store.updatePrompt(queued.promptId, "delivered");
+    store.saveRunCard({ ...store.loadRunCard(queued.promptId)!, phase: "completed", answer: "historical answer", answerSegments: ["historical answer"], viewVersion: 2, answerDeliveredVersion: 2 });
+    store.database.exec("DROP TABLE completion_notification_obligations; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 73");
+    store.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 73").get()).toEqual({ version: 73 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM completion_notification_obligations").get()).toEqual({ count: 0 });
+    expect(store.getPrompt(queued.promptId)).toMatchObject({ state: "delivered" });
+    expect(store.loadRunCard(queued.promptId)).toMatchObject({ phase: "completed", answerDeliveredVersion: 2 });
+  });
+
+  it("migrates requester-owned Segment notices while preserving legacy completion owners", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-segment-completion-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "completion-migration", projectId: "p1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Migration" });
+    store.database.exec(`
+      DROP INDEX completion_notification_obligations_waiting;
+      DROP TABLE completion_notification_obligations;
+      CREATE TABLE completion_notification_obligations(
+        owner_kind TEXT NOT NULL CHECK(owner_kind IN ('primary-prompt','worker-turn')),
+        owner_id TEXT NOT NULL, owner_generation INTEGER NOT NULL CHECK(owner_generation >= 1),
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE,
+        binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+        required_view_version INTEGER NOT NULL CHECK(required_view_version >= 1),
+        state TEXT NOT NULL CHECK(state IN ('waiting_for_answer','missing_mention_target','released','suppressed')),
+        notification_reply_id TEXT REFERENCES outbound_replies(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, released_at TEXT,
+        PRIMARY KEY(owner_kind, owner_id, owner_generation)
+      );
+      INSERT INTO completion_notification_obligations VALUES
+        ('primary-prompt','legacy-prompt',1,'completion-migration',1,1,'waiting_for_answer',NULL,'now','now',NULL),
+        ('worker-turn','legacy-worker',1,'completion-migration',1,1,'suppressed',NULL,'now','now',NULL);
+      DELETE FROM schema_migrations WHERE version=124;
+      UPDATE schema_metadata SET epoch='2026-10-09.4' WHERE singleton_id=1;
+    `);
+    store.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version=124").get()).toEqual({ version: 124 });
+    expect(store.database.prepare("SELECT owner_kind,owner_id,notice_kind,state FROM completion_notification_obligations ORDER BY owner_kind").all()).toEqual([
+      { owner_kind: "primary-prompt", owner_id: "legacy-prompt", notice_kind: "choice", state: "waiting_for_answer" },
+      { owner_kind: "worker-turn", owner_id: "legacy-worker", notice_kind: "choice", state: "suppressed" }
+    ]);
+    expect((store.database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='completion_notification_obligations'").get() as { sql: string }).sql).toContain("'primary-segment'");
+    expect((store.database.prepare("PRAGMA table_info(completion_action_sets)").all() as Array<{ name: string }>).map(({ name }) => name)).toEqual(expect.arrayContaining([
+      "presentation_kind", "presentation_generation", "presentation_reply_id", "presentation_message_id", "presentation_card_id"
+    ]));
+    store.database.exec(`
+      DROP INDEX completion_action_sets_presentation_reply;
+      DROP INDEX completion_action_sets_owner_state;
+      ALTER TABLE completion_action_sets RENAME TO completion_action_sets_expanded;
+      CREATE TABLE completion_action_sets(
+        id TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL CHECK(owner_kind IN ('primary-prompt','worker-turn','primary-segment')),
+        owner_id TEXT NOT NULL,owner_generation INTEGER NOT NULL CHECK(owner_generation>=1),
+        binding_id TEXT NOT NULL REFERENCES bindings(id) ON DELETE CASCADE,binding_generation INTEGER NOT NULL CHECK(binding_generation>=1),
+        page_index INTEGER NOT NULL CHECK(page_index>=0),card_id TEXT NOT NULL,card_message_id TEXT NOT NULL,mention_open_id TEXT,
+        state TEXT NOT NULL CHECK(state IN ('available','consumed','superseded','unavailable')),
+        selected_action TEXT CHECK(selected_action IN ('default','approve','continue','reject')),
+        result_source_key TEXT,reason TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,decided_at TEXT,
+        choice_specification_id TEXT REFERENCES completion_choice_specifications(id),selected_choice_option_id TEXT,
+        UNIQUE(owner_kind,owner_id,owner_generation)
+      );
+      INSERT INTO completion_action_sets(
+        id,owner_kind,owner_id,owner_generation,binding_id,binding_generation,page_index,card_id,card_message_id,
+        mention_open_id,state,selected_action,result_source_key,reason,created_at,updated_at,decided_at,
+        choice_specification_id,selected_choice_option_id
+      ) SELECT
+        id,owner_kind,owner_id,owner_generation,binding_id,binding_generation,page_index,card_id,card_message_id,
+        mention_open_id,state,selected_action,result_source_key,reason,created_at,updated_at,decided_at,
+        choice_specification_id,selected_choice_option_id
+      FROM completion_action_sets_expanded;
+      DROP TABLE completion_action_sets_expanded;
+      CREATE INDEX completion_action_sets_available
+        ON completion_action_sets(state,owner_kind,binding_id,binding_generation,updated_at,owner_id);
+      DELETE FROM schema_migrations WHERE version=124;
+      UPDATE schema_metadata SET epoch='2026-10-09.4' WHERE singleton_id=1;
+    `);
+    store.close();
+    store = new SqliteBindingStore(path);
+    expect((store.database.prepare("PRAGMA table_info(completion_action_sets)").all() as Array<{ name: string }>).map(({ name }) => name)).toEqual(expect.arrayContaining([
+      "presentation_kind", "presentation_generation", "presentation_reply_id", "presentation_message_id", "presentation_card_id"
+    ]));
+  });
+
   it("removes obsolete bridge-reported session columns without losing bindings", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-session-column-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
@@ -4400,6 +9114,7 @@ describe("SQLite store", () => {
     store.database.exec("ALTER TABLE bindings ADD COLUMN reported_traex_session_id TEXT");
     store.database.exec("ALTER TABLE bindings ADD COLUMN reported_traex_session_at TEXT");
     store.database.prepare("UPDATE bindings SET reported_traex_session_id = ?, reported_traex_session_at = ? WHERE id = ?").run("legacy-session", "2026-08-27T12:00:00.000Z", "b1");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112");
     store.close();
 
     store = new SqliteBindingStore(path);
@@ -4413,6 +9128,7 @@ describe("SQLite store", () => {
   it("atomically persists a Main Card view with one versioned delivery intent", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = { ...initialTopicView("b1"), title: "Visible", viewVersion: 1 };
 
     expect(store.reserveMainCard(view, "root-1", { version: 1 })).toBe("reserved");
@@ -4421,23 +9137,28 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ kind: "card_reply", bindingId: "b1", viewVersion: 1, targetRole: "session_status" })]);
   });
 
-  it("replaces an unclaimed history Main Card snapshot with the latest live snapshot", () => {
+  it("preserves a prepared history Main Card snapshot and appends the latest live snapshot", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { statusMessageId: "main-1" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
 
     expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "History", viewVersion: 1 }, "root-1", { version: 1 }, "history")).toBe("reserved");
     expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "Live", viewVersion: 2 }, "root-1", { version: 2 }, "live")).toBe("reserved");
 
-    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
-      targetRole: "session_status", workClass: "live", viewVersion: 2, cardSequence: 1, payload: JSON.stringify({ version: 2 })
-    })]);
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ targetRole: "session_status", workClass: "history", viewVersion: 1, cardSequence: 1, payload: JSON.stringify({ version: 1 }) }),
+      expect.objectContaining({ targetRole: "session_status", workClass: "live", viewVersion: 2, cardSequence: 2, payload: JSON.stringify({ version: 2 }) })
+    ]);
+    expect(store.database.prepare("SELECT id, state FROM outbound_replies WHERE target_role = 'session_status' ORDER BY delivery_order").all()).toEqual([
+      { id: expect.any(String), state: "pending" },
+      { id: expect.any(String), state: "pending" }
+    ]);
   });
 
-  it("keeps a claimed Main Card snapshot and coalesces its successors to one contiguous sequence", () => {
+  it("keeps a claimed Main Card snapshot and appends immutable successors in one contiguous sequence", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { statusMessageId: "main-1" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
     expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "First", viewVersion: 1 }, "root-1", { version: 1 })).toBe("reserved");
     const first = store.listPendingOutboundReplies()[0]!;
     expect(store.claimOutboundReply(first.id, null)).not.toBeNull();
@@ -4447,13 +9168,15 @@ describe("SQLite store", () => {
 
     expect(store.listPendingOutboundReplies()).toEqual([
       expect.objectContaining({ id: first.id, viewVersion: 1, cardSequence: 1 }),
-      expect.objectContaining({ viewVersion: 3, cardSequence: 2, payload: JSON.stringify({ version: 3 }) })
+      expect.objectContaining({ viewVersion: 2, cardSequence: 2, payload: JSON.stringify({ version: 2 }) }),
+      expect.objectContaining({ viewVersion: 3, cardSequence: 3, payload: JSON.stringify({ version: 3 }) })
     ]);
   });
 
   it("rolls back a Main Card projection when its outbox reservation fails", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.database.exec("CREATE TEMP TRIGGER reject_main_card BEFORE INSERT ON outbound_replies WHEN NEW.target_role = 'session_status' BEGIN SELECT RAISE(ABORT, 'forced_main_card_failure'); END");
 
     expect(() => store!.reserveMainCard({ ...initialTopicView("b1"), title: "Never committed", viewVersion: 1 }, "root-1", {})).toThrow("forced_main_card_failure");
@@ -4477,7 +9200,7 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
-  it("isolates an uncertain Pane Entry update from the canonical Main lane", () => {
+  it("keeps an uncertain Pane Entry update blocking its canonical Primary Pane Ring", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-1", state: "active", lifecycle: "active", attachment: "attached" });
@@ -4490,13 +9213,15 @@ describe("SQLite store", () => {
 
     store.markOutboundReplyFailedWithQuarantine(alias.id, "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
 
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toContain(canonical.id);
+    expect(store.getOutboundReply(canonical.id)).toMatchObject({ state: "pending", deliveryScope: alias.deliveryScope });
+    expect(store.claimOutboundReply(canonical.id, null)).toBeNull();
     expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(alias.id)).toEqual({ state: "active" });
   });
 
   it("does not recreate or wake a dead-lettered Main Card version", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = { ...initialTopicView("b1"), title: "Visible", viewVersion: 1 };
     expect(store.reserveMainCard(view, "root-1", { version: 1 })).toBe("reserved");
     const [reply] = store.listPendingOutboundReplies();
@@ -4510,6 +9235,7 @@ describe("SQLite store", () => {
   it("normalizes legacy Main Card versions and checkpoints delivery monotonically", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const legacy = initialTopicView("b1") as Partial<ReturnType<typeof initialTopicView>>;
     delete legacy.worktreeName; delete legacy.recentProgress; delete legacy.liveStatus; delete legacy.viewVersion; delete legacy.deliveredVersion;
     store.database.prepare("INSERT INTO topic_views(binding_id, state_json, updated_at) VALUES (?, ?, ?)").run("b1", JSON.stringify(legacy), "now");
@@ -4542,6 +9268,7 @@ describe("SQLite store", () => {
     const databasePath = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(databasePath);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     const [create] = store.listPendingOutboundReplies();
@@ -4552,7 +9279,7 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE answer_pages SET state = 'active' WHERE prompt_id = 'p1' AND page_index = 0").run();
     store.enqueueOutboundReply({ id: "late-content", idempotencyKey: "late-content", bindingId: "b1", promptId: "p1", viewVersion: 8, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "done", sequence: 8 }) });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("late-content", "legacy page rejected");
-    store.database.prepare("DELETE FROM schema_migrations WHERE version = 3").run();
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 3");
     store.close();
 
     store = new SqliteBindingStore(databasePath);
@@ -4567,13 +9294,14 @@ describe("SQLite store", () => {
     const databasePath = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(databasePath);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "First", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
     store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'p1' AND page_index = 0").run();
     store.enqueueOutboundReply({ id: "late-content", idempotencyKey: "late-content", bindingId: "b1", promptId: "p1", viewVersion: 8, cardRole: "answer", rootMessageId: "card-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "done", sequence: 8 }) });
     for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("late-content", "legacy page rejected");
-    store.database.prepare("DELETE FROM schema_migrations WHERE version = 4").run();
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 4");
     store.close();
 
     store = new SqliteBindingStore(databasePath);
@@ -4585,6 +9313,7 @@ describe("SQLite store", () => {
   it("does not let a late continuation delivery roll the active page backward", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "m1", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
@@ -4607,8 +9336,9 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: null, requestText: "legacy **request**", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy **request**" }, view, rootMessageId: "m1", taskCard: {}, answerCard: {} });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "legacy **request**", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy **request**" }, view, rootMessageId: "m1", answerCard: {} });
     store.saveRunCard({ ...store.loadRunCard("p1")!, answer: "legacy answer", answerSegments: ["legacy answer"] });
     store.close();
     store = undefined;
@@ -4619,19 +9349,116 @@ describe("SQLite store", () => {
       ALTER TABLE run_cards DROP COLUMN answer_draft_transient;
       ALTER TABLE run_cards DROP COLUMN answer_draft;
       ALTER TABLE run_cards DROP COLUMN answer_segments_json;
+      ALTER TABLE run_cards DROP COLUMN reply_context;
       ALTER TABLE run_cards DROP COLUMN request_text;
       ALTER TABLE run_cards DROP COLUMN conversion_parent_prompt_id;
       ALTER TABLE run_cards DROP COLUMN binding_generation;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 83;
     `);
     legacy.close();
 
     store = new SqliteBindingStore(path);
     expect(store.loadRunCard("p1")).toMatchObject({
-      bindingGeneration: 1, conversionParentPromptId: null, requestText: "legacy **request**", answer: "legacy answer", answerSegments: ["legacy answer"], answerDraft: "", answerDraftTransient: false
+      bindingGeneration: 1, conversionParentPromptId: null, requestText: "legacy **request**", replyContext: null,
+      answer: "legacy answer", answerSegments: ["legacy answer"], answerDraft: "", answerDraftTransient: false
+    });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 83").get()).toEqual({ version: 83 });
+  });
+
+  it("creates human review candidates independently of the historical Orchestrator migration", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-human-review-candidate-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      DROP TABLE human_review_candidates;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 84;
+    `);
+    expect(legacy.prepare("SELECT version FROM schema_migrations WHERE version = 78").get()).toEqual({ version: 78 });
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'human_review_candidates'").get()).toEqual({ name: "human_review_candidates" });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 84").get()).toEqual({ version: 84 });
+  });
+
+  it("adds mutable Primary Human Review surface fields without adopting historical episodes", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-primary-human-review-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Review", workspaceId: "w1", paneId: "w1:p1", requestText: "review", queuePosition: 1, occurredAt: "2026-10-03T00:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "review" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare(`INSERT INTO primary_human_review_episodes(
+      id, binding_id, binding_generation, pane_id, prompt_id, state, notice, requested_at, resolved_at
+    ) VALUES ('legacy-review', 'b1', 1, 'w1:p1', 'p1', 'open', 'legacy', '2026-10-03T00:00:01.000Z', NULL)`).run();
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      ALTER TABLE primary_human_review_episodes DROP COLUMN updated_at;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN card_json;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN card_id;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN message_id;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN create_reply_id;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN delivered_version;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN view_version;
+      ALTER TABLE primary_human_review_episodes DROP COLUMN surface_generation;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 85;
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 85").get()).toEqual({ version: 85 });
+    expect(store.database.prepare(`SELECT surface_generation, view_version, delivered_version, create_reply_id,
+      message_id, card_id, card_json, updated_at FROM primary_human_review_episodes WHERE id = 'legacy-review'`).get()).toEqual({
+      surface_generation: 0, view_version: 0, delivered_version: 0, create_reply_id: null,
+      message_id: null, card_id: null, card_json: null, updated_at: null
     });
   });
 
-  it("migrates an outbox whose optional columns were appended in legacy order", () => {
+  it("creates Worker Human Review episode storage through migration 86", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-human-review-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      DROP TABLE worker_human_review_episodes;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 86;
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 86").get()).toEqual({ version: 86 });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worker_human_review_episodes'").get()).toEqual({ name: "worker_human_review_episodes" });
+    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'worker_human_review_open'").get()).toEqual({ name: "worker_human_review_open" });
+  });
+
+  it("adds Completion Choice question metadata through migration 87", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-completion-choice-question-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE completion_choice_specifications DROP COLUMN question; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 87");
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 87").get()).toEqual({ version: 87 });
+    expect((store.database.prepare("PRAGMA table_info(completion_choice_specifications)").all() as Array<{ name: string }>).map(({ name }) => name)).toContain("question");
+  });
+
+  it("refuses contraction of an actionable unscoped outbox with legacy optional-column order", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-outbox-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
@@ -4642,7 +9469,7 @@ describe("SQLite store", () => {
       DROP TABLE answer_recovery_candidates;
       DROP TABLE answer_recovery_links;
       DROP TABLE answer_delivery_coverage;
-      DELETE FROM schema_migrations WHERE version = 32;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version >= 32;
       DROP TABLE outbound_replies;
       CREATE TABLE outbound_replies(
         id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL, binding_id TEXT, root_message_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL,
@@ -4653,21 +9480,42 @@ describe("SQLite store", () => {
     `);
     database.close();
 
+    expect(() => { store = new SqliteBindingStore(path); }).toThrow("delivery_contraction_blocked legacy=1 unscoped=1");
+    store = undefined;
+  });
+
+  it("adds message deletion without losing legacy outbox rows, indexes, or typed-intent triggers", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-message-delete-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
-    expect(store.getOperationalSummary().outbound).toMatchObject({ dead_letter: 1, dismissed: 0 });
-    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ delivery_order: 1, lane_key: "gateway:feishu:primary:reply:o1" });
-    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 32").get()).toEqual({ version: 32 });
-    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 33").get()).toEqual({ version: 33 });
-    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 34").get()).toEqual({ version: 34 });
-    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 35").get()).toEqual({ version: 35 });
-    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 36").get()).toEqual({ version: 36 });
-    expect(store.database.prepare("SELECT work_class FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ work_class: "history" });
-    expect(store.database.prepare("SELECT target_chat_id, thread_alias_id, worker_thread_id FROM outbound_replies WHERE id = 'o1'").get()).toEqual({ target_chat_id: null, thread_alias_id: null, worker_thread_id: null });
-    expect(store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'answer_delivery_coverage_before_claim'").get()).toEqual({ name: "answer_delivery_coverage_before_claim" });
+    store.enqueueOutboundReply({ id: "legacy-card", idempotencyKey: "legacy-card", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.close();
+    store = undefined;
+
+    const database = new DatabaseSync(path);
+    const schema = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_replies'").get() as { sql: string };
+    const columns = (database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => `"${name}"`).join(", ");
+    const previousKinds = "('text','card_reply','card_update','group_card_create','stream_card_create','stream_content','stream_finish')";
+    const currentKinds = `${previousKinds.slice(0, -1)},'message_delete')`;
+    const previousSchema = schema.sql.replace(currentKinds, previousKinds);
+    const artifacts = database.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'outbound_replies' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type, name").all() as Array<{ type: string; name: string; sql: string }>;
+    database.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON; BEGIN IMMEDIATE");
+    database.exec(`ALTER TABLE outbound_replies RENAME TO outbound_replies_current; ${previousSchema}; INSERT INTO outbound_replies(${columns}) SELECT ${columns} FROM outbound_replies_current; DROP TABLE outbound_replies_current;`);
+    for (const artifact of artifacts) database.exec(artifact.sql.replaceAll(" WHEN 'message_delete' THEN 'message-delete'", ""));
+    database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 79; COMMIT; PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON");
+    database.close();
+
+    store = new SqliteBindingStore(path);
+    const migratedSchema = String((store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'outbound_replies'").get() as { sql: string }).sql);
+    const typedTrigger = String((store.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'outbound_replies_typed_intent_insert'").get() as { sql: string }).sql);
+    expect(migratedSchema).toContain("'message_delete'");
+    for (const kind of ["text", "card_reply", "card_update", "group_card_create", "stream_card_create", "stream_content", "stream_finish"]) expect(migratedSchema).toContain(`'${kind}'`);
+    expect(store.getOutboundReply("legacy-card")).toMatchObject({ kind: "card_reply", payload: "{}", state: "pending" });
+    expect(typedTrigger).toContain("WHEN 'message_delete' THEN 'message-delete'");
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 79").get()).toEqual({ version: 79 });
     expect(store.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-    store.enqueueOutboundReply({ id: "o2", idempotencyKey: "key-2", rootMessageId: "root-2", kind: "card_reply", payload: "{}" });
-    expect(store.database.prepare("SELECT delivery_order, lane_key FROM outbound_replies WHERE id = 'o2'").get()).toEqual({ delivery_order: 2, lane_key: "gateway:feishu:primary:reply:o2" });
-    expect(store.getOutboundReply("o2")).toMatchObject({ workClass: "live" });
+    store.enqueueOutboundReply({ id: "delete-1", idempotencyKey: "delete-1", rootMessageId: "answer-message-1", kind: "message_delete", payload: "" });
+    expect(store.getOutboundReply("delete-1")).toMatchObject({ kind: "message_delete", intentKind: "message-delete", payload: "" });
   });
 
   it("adds streaming run-card columns before rebuilding a legacy outbox", () => {
@@ -4682,7 +9530,7 @@ describe("SQLite store", () => {
       DROP TABLE answer_recovery_candidates;
       DROP TABLE answer_recovery_links;
       DROP TABLE answer_delivery_coverage;
-      DELETE FROM schema_migrations WHERE version = 32;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version >= 32;
       DROP VIEW run_cards_view;
       ALTER TABLE run_cards DROP COLUMN answer_page_start;
       ALTER TABLE run_cards DROP COLUMN answer_page_index;
@@ -4706,17 +9554,17 @@ describe("SQLite store", () => {
     expect(store!.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
-  it("does not duplicate the single answer-card create operation", () => {
+  it("does not duplicate the single CardKit Answer create operation", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Legacy", workspaceId: "w1", paneId: "w1:p1", requestText: "legacy", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root-1", taskCard: {}, answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m2", actorOpenId: "u1", body: "legacy" }, view, rootMessageId: "root-1", answerCard: {} });
     store.ensureAnswerCard("p1", "root-1", { card: "answer" });
     store.ensureAnswerCard("p1", "root-1", { card: "duplicate" });
 
     expect(store.listPendingOutboundReplies()).toMatchObject([{
-      promptId: "p1", cardRole: "answer", kind: "stream_card_create", payload: JSON.stringify({})
+      promptId: "p1", cardRole: "answer", kind: "stream_card_create", intentKind: "stream-card", idempotencyKey: "run-card:create:p1:answer"
     }]);
     expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
     const answerCreate = store.listPendingOutboundReplies()[0]!;
@@ -4724,72 +9572,124 @@ describe("SQLite store", () => {
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
   });
 
-  it("selects bounded durable lane heads without letting later rows bypass backoff", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+  it("keeps a rejected Answer page blocking later work in the Primary Pane Ring", () => {
     store = new SqliteBindingStore(":memory:");
-    for (let index = 0; index < 8; index += 1) {
-      store.enqueueOutboundReply({ id: `head-${index}`, idempotencyKey: `head-${index}`, rootMessageId: `card-${index}`, kind: "card_update", payload: "{}" });
-    }
-    store.enqueueOutboundReply({ id: "same-lane-later", idempotencyKey: "same-lane-later", rootMessageId: "card-0", kind: "card_update", payload: "{}" });
-    store.markOutboundReplyFailed("head-0", "temporary", 60_000);
-
-    expect(store.listOutboundLaneHeads(4, new Date().toISOString()).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
-    expect(store.listOutboundLaneHeads(4, null).map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
-    expect(store.listOutboundLaneHeads(4, null, ["gateway:feishu:primary:message:card-0"]).map((reply) => reply.id)).toEqual(["head-1", "head-2", "head-3", "head-4"]);
-    vi.setSystemTime(new Date("2026-08-24T00:00:10.500Z"));
-    expect(store.getOperationalSummary().outboxLanes).toEqual({
-      pending: 8, eligible: 7, blocked: 1,
-      nextAttemptAt: "2026-08-24T00:01:00.000Z",
-      oldestHeadAt: "2026-08-24T00:00:00.000Z", oldestHeadAgeSeconds: 10,
-      stalled: 0, oldestStalledAgeSeconds: null
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    const page0 = store.listPendingOutboundReplies()[0]!;
+    const page1 = store.enqueueOutboundReply({
+      id: "page-1", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2,
+      cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create",
+      payload: JSON.stringify({ card: {}, stream: { pageIndex: 1, pageStart: 9_000, elementId: answerElementId("p1", 1) } })
     });
-    expect(store.getNextOutboundLaneHeadAttemptAt()).toBe(store.listPendingOutboundReplies()[1]!.nextAttemptAt);
-    expect(store.listOutboundLaneHeads(4, null, [], "history")).toEqual([]);
-    store.enqueueOutboundReply({ id: "history", idempotencyKey: "history", workClass: "history", rootMessageId: "history-card", kind: "card_update", payload: "{}" });
-    expect(store.listOutboundLaneHeads(4, null, [], "history").map((reply) => reply.id)).toEqual(["history"]);
-    expect(store.listOutboundLaneHeads(4, null, [], "live").map((reply) => reply.id)).toEqual(["head-0", "head-1", "head-2", "head-3"]);
-    vi.useRealTimers();
+
+    expect(page0.laneKey).toBe("gateway:feishu:primary:answer:p1:0");
+    expect(page1.laneKey).toBe("gateway:feishu:primary:answer:p1:1");
+    expect(store.markOutboundReplyFailedWithQuarantine(page0.id, "page rejected", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099"
+    })).toMatchObject({ state: "dead_letter", action: "blocked" });
+    expect(store.getOutboundReply(page1.id)).toMatchObject({ state: "pending", deliveryScope: page0.deliveryScope });
+    expect(store.claimOutboundReply(page1.id, null)).toBeNull();
   });
 
-  it("drives work-class lane selection from the bounded lane-head index", () => {
+  it("keeps an Answer delivery gap open until an exact-page catch-up snapshot is delivered", () => {
     store = new SqliteBindingStore(":memory:");
-    const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${outboundLaneHeadSelectionSql({
-      excludedLaneCount: 0, dueAt: true, workClass: true
-    })}`).all("2026-08-24T00:00:00.000Z", "live", 1) as Array<{ detail: string }>;
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
 
-    expect(plan.map(({ detail }) => detail)).toEqual(expect.arrayContaining([
-      expect.stringMatching(/SCAN h USING INDEX outbox_lane_heads_delivery_order/)
-    ]));
-    expect(plan.some(({ detail }) => detail.includes("USE TEMP B-TREE FOR ORDER BY"))).toBe(false);
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "first snapshot" } })).toBe("reserved");
+    const failed = store.listPendingOutboundReplies()[0]!;
+    expect(store.markOutboundReplyFailedWithQuarantine(failed.id, "provider rejected snapshot", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099"
+    })).toMatchObject({ state: "dead_letter", action: "blocked" });
+    expect(store.getProjectionGapSummary({ bindingId: "b1", promptId: "p1", pageIndex: 0 })).toMatchObject({
+      openProjection: 0, openDelivery: 1, compensated: 0
+    });
+    expect(store.getOperationalSummary().projectionGaps).toMatchObject({
+      open: 1, compensated: 0, affectedOwners: 1, byStage: { answer_delivery: 1 }
+    });
+
+    const current = store.loadRunCard("p1")!;
+    store.saveRunCard({ ...current, answer: "canonical latest answer", answerSegments: ["canonical latest answer"], viewVersion: current.viewVersion + 1 });
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "catch-up snapshot" } })).toBe("reserved");
+    const catchUp = store.listPendingOutboundReplies()[0]!;
+    expect(store.getProjectionGapSummary({ bindingId: "b1", promptId: "p1", pageIndex: 0 }).openDelivery).toBe(1);
+
+    expect(store.markOutboundReplyDelivered(catchUp.id, "answer-1")).toBe(true);
+    expect(store.getProjectionGapSummary({ bindingId: "b1", promptId: "p1", pageIndex: 0 })).toMatchObject({
+      openProjection: 0, openDelivery: 0, compensated: 1
+    });
+    expect(store.database.prepare("SELECT state, compensated_by_version FROM projection_gaps WHERE source_item_id = ?").get(failed.id)).toEqual({
+      state: "compensated", compensated_by_version: catchUp.viewVersion
+    });
+    expect(store.getOperationalSummary().projectionGaps).toMatchObject({ open: 0, compensated: 1, affectedOwners: 0, oldestOpenAt: null });
   });
 
-  it("maintains lane heads across coalescing, delivery, retry, dismissal, and dead-letter recovery", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+  it("atomically supersedes a confirmed-not-applied mutable snapshot retry", () => {
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", rootMessageId: "card-1", kind: "card_update", payload: "head" });
-    store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", rootMessageId: "card-1", kind: "card_update", payload: "later" });
-    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["head"]);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
 
-    store.markOutboundReplyFailed("head", "temporary", 60_000);
-    expect(store.listOutboundLaneHeads(1, new Date().toISOString())).toEqual([]);
-    expect(store.getNextOutboundLaneHeadAttemptAt()).toBe("2026-08-24T00:01:00.000Z");
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "older" } })).toBe("reserved");
+    const older = store.listPendingOutboundReplies()[0]!;
+    expect(store.markOutboundReplyFailed(older.id, "gateway unavailable", 60_000, {
+      failureClass: "transient", effectCertainty: "not-started", httpStatus: 503, larkErrorCode: null
+    })).toMatchObject({ state: "pending", attemptCount: 1, effectCertainty: "not-started" });
 
-    store.markOutboundReplyDeadLetter("head", "permanent");
-    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["later"]);
-    store.markOutboundReplyDeadLetter("later", "temporary", { failureClass: "transient" });
-    expect(store.listOutboundLaneHeads(1, null)).toEqual([]);
+    const current = store.loadRunCard("p1")!;
+    store.saveRunCard({ ...current, answer: "newer", answerSegments: ["newer"], viewVersion: current.viewVersion + 1 });
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "newer" } })).toBe("reserved");
 
-    vi.setSystemTime(new Date("2026-08-24T00:06:00.000Z"));
-    expect(store.recoverEligibleDeadLetters("2026-08-24T00:05:00.000Z", 1).map((reply) => reply.id)).toEqual(["later"]);
-    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["later"]);
-    vi.useRealTimers();
+    expect(store.getOutboundReply(older.id)).toMatchObject({
+      state: "dismissed", error: "Superseded by a newer authoritative snapshot after confirmed non-application"
+    });
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ promptId: "p1", state: "pending", payload: JSON.stringify({ content: "newer" }) })
+    ]);
+    expect(store.database.prepare("SELECT snapshot_revision FROM outbound_replies WHERE projection_key = ? AND state = 'pending'").get("answer-static:p1:0:answer-1")).toEqual({ snapshot_revision: 2 });
+  });
+
+  it("rolls back a delivery checkpoint when projection-gap compensation fails", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "failed" } })).toBe("reserved");
+    const failed = store.listPendingOutboundReplies()[0]!;
+    store.markOutboundReplyFailedWithQuarantine(failed.id, "provider rejected snapshot", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099"
+    });
+    const current = store.loadRunCard("p1")!;
+    store.saveRunCard({ ...current, answer: "catch-up", answerSegments: ["catch-up"], viewVersion: current.viewVersion + 1 });
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "catch-up" } })).toBe("reserved");
+    const catchUp = store.listPendingOutboundReplies()[0]!;
+    store.database.exec(`CREATE TEMP TRIGGER reject_gap_compensation BEFORE UPDATE ON projection_gaps
+      WHEN NEW.state = 'compensated' BEGIN SELECT RAISE(ABORT, 'forced_gap_compensation_failure'); END`);
+
+    expect(() => store.markOutboundReplyDelivered(catchUp.id, "answer-1")).toThrow("forced_gap_compensation_failure");
+    expect(store.getOutboundReply(catchUp.id)).toMatchObject({ state: "pending", deliveredMessageId: null });
+    expect(store.database.prepare("SELECT state, compensated_by_version FROM projection_gaps WHERE source_item_id = ?").get(failed.id)).toEqual({
+      state: "open", compensated_by_version: null
+    });
   });
 
   it("quarantines a failed Answer sequence without letting later stream work bypass it", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const [create] = store.listPendingOutboundReplies();
@@ -4804,7 +9704,7 @@ describe("SQLite store", () => {
     const transition = store.markOutboundReplyFailedWithQuarantine("content-2", "invalid sequence", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "200740" });
 
     expect(transition).toMatchObject({ state: "dead_letter", action: "blocked", laneClass: "answer_stream", promptId: "p1" });
-    expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([]);
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([]);
     expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0, byLaneClass: { answer_stream: 1 } } });
   });
@@ -4812,11 +9712,12 @@ describe("SQLite store", () => {
   it("keeps an exhausted unknown Answer content failure quarantined without automatic recovery", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "cardkit-1");
     store.enqueueOutboundReply({ id: "content", idempotencyKey: "content", bindingId: "b1", promptId: "p1", viewVersion: 1, cardRole: "answer", rootMessageId: "cardkit-1", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId("p1", 0), content: "snapshot", sequence: 1 }) });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       store.markOutboundReplyFailedWithQuarantine("content", "unclassified rejection", { failureClass: "unknown", httpStatus: 400, larkErrorCode: null });
     }
 
@@ -4825,11 +9726,243 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
+  it("automatically dismisses an orphaned uncertain Turn Card update without a quarantine decision", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({
+      id: "historical-turn-update", idempotencyKey: "historical-turn-update", rootMessageId: "turn-card-root",
+      kind: "card_update", projectionKey: "turn-card:segment:page:0", payload: "{}"
+    });
+    store.markOutboundReplyFailedWithQuarantine("historical-turn-update", "CardKit 500", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: 500, larkErrorCode: "2200"
+    });
+    store.database.prepare(`INSERT INTO outbox_lane_quarantines(
+      lane_key,failed_reply_id,lane_class,failure_class,state,action,reason,created_at,updated_at,
+      conflict_key,phase,first_failed_at,grace_deadline_at,budget_attempt_limit,budget_duration_ms
+    ) VALUES ('orphan-quarantine','historical-turn-update','immutable','unknown','active','blocked','CardKit 500',
+      '2026-10-16T00:00:00.000Z','2026-10-16T00:00:00.000Z','orphan-conflict','grace_blocking',
+      '2026-10-16T00:00:00.000Z','2026-10-17T00:00:00.000Z',3,600000)`).run();
+    store.database.prepare("UPDATE outbound_replies SET dead_lettered_at='2026-10-16T00:00:00.000Z' WHERE id='historical-turn-update'").run();
+    store.database.prepare(`INSERT INTO conversation_segments(
+      id,producer_key,owner_kind,owner_id,owner_generation,submission_id,human_event_id,agent_kind,session_id,
+      request_text,start_lane_sequence,start_item_ordinal,state,view_version,root_message_id,created_at,updated_at
+    ) VALUES ('existing-segment','lane:existing','primary','binding-1',1,NULL,NULL,'traex','session-1','request',1,0,'completed',1,'root-1','now','now')`).run();
+    store.enqueueOutboundReply({
+      id: "existing-turn-update", idempotencyKey: "existing-turn-update", rootMessageId: "turn-card-root",
+      kind: "card_update", projectionKey: "turn-card:existing-segment:page:0", payload: "{}"
+    });
+    store.markOutboundReplyFailedWithQuarantine("existing-turn-update", "CardKit 500", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: 500, larkErrorCode: "2200"
+    });
+    store.database.prepare(`INSERT INTO outbox_lane_quarantines(
+      lane_key,failed_reply_id,lane_class,failure_class,state,action,reason,created_at,updated_at,
+      conflict_key,phase,first_failed_at,grace_deadline_at,budget_attempt_limit,budget_duration_ms
+    ) VALUES ('existing-quarantine','existing-turn-update','immutable','unknown','active','blocked','CardKit 500',
+      '2026-10-16T00:00:00.000Z','2026-10-16T00:00:00.000Z','existing-conflict','grace_blocking',
+      '2026-10-16T00:00:00.000Z','2026-10-17T00:00:00.000Z',3,600000)`).run();
+    store.database.prepare("UPDATE outbound_replies SET dead_lettered_at='2026-10-16T00:00:00.000Z' WHERE id='existing-turn-update'").run();
+
+    store.recoverStaleOutboxQuarantines();
+
+    expect(store.getOutboundReply("historical-turn-update")).toMatchObject({ state: "dismissed", attemptCount: 1, effectCertainty: "uncertain" });
+    expect(store.database.prepare("SELECT state,action FROM delivery_recoveries WHERE failed_reply_id='historical-turn-update'").get()).toEqual({ state: "dismissed", action: "dismiss_orphaned_uncertain" });
+    expect(store.database.prepare("SELECT state,action FROM outbox_lane_quarantines WHERE failed_reply_id='historical-turn-update'").get()).toEqual({ state: "released", action: "dismiss_orphaned_uncertain" });
+    expect(store.getOutboundReply("existing-turn-update")).toMatchObject({ state: "dead_letter", effectCertainty: "uncertain" });
+    expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id='existing-turn-update'").get()).toEqual({ state: "active" });
+  });
+
+  it("classifies old unresolved delivery debt without hiding current failures or changing source state", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const id of ["old", "current"]) {
+      store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: `${id}-card`, kind: "card_reply", payload: "{}" });
+      store.markOutboundReplyFailedWithQuarantine(id, "unknown outcome", {
+        failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null
+      });
+    }
+    store.database.prepare("UPDATE delivery_recoveries SET created_at = '2026-08-01T00:00:00.000Z', updated_at = '2026-08-01T00:00:00.000Z' WHERE failed_reply_id = 'old'").run();
+    store.database.prepare("UPDATE outbox_lane_quarantines SET created_at = '2026-08-01T00:00:00.000Z', updated_at = '2026-08-01T00:00:00.000Z' WHERE failed_reply_id = 'old'").run();
+    store.database.prepare(`INSERT INTO projection_gaps(stage,owner_kind,owner_id,source_item_id,failure_class,failure_code,required_version,first_failed_at,last_failed_at)
+      VALUES ('turn_recovery','prompt','old-prompt','old-gap','unknown','turn_not_found',NULL,'2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z'),
+             ('turn_recovery','prompt','current-prompt','current-gap','unknown','turn_not_found',NULL,'2026-09-30T00:00:00.000Z','2026-09-30T00:00:00.000Z')`).run();
+
+    expect(store.classifyHistoricalDeliveryDebt!("2026-09-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 0, releasedQuarantines: 0, classifiedDeliveryRecoveries: 1, classifiedProjectionGaps: 1
+    });
+
+    expect(store.database.prepare("SELECT state FROM delivery_recoveries WHERE failed_reply_id = 'old'").get()).toEqual({ state: "unresolved" });
+    expect(store.database.prepare("SELECT state FROM projection_gaps WHERE source_item_id = 'old-gap'").get()).toEqual({ state: "open" });
+    expect(store.database.prepare("SELECT debt_kind, debt_id, reason FROM delivery_debt_classifications ORDER BY debt_kind, debt_id").all()).toEqual([
+      { debt_kind: "delivery_recovery", debt_id: "old", reason: "retention_window_elapsed_without_resolution_proof" },
+      { debt_kind: "projection_gap", debt_id: "1", reason: "retention_window_elapsed_without_resolution_proof" }
+    ]);
+    expect(store.getOperationalSummary()).toMatchObject({
+      outboxQuarantines: { active: 2, current: 1, historical: 1 },
+      projectionGaps: { open: 2, current: 1, historical: 1 }
+    });
+  });
+
+  it("classifies retired conversation-turn lanes without aging or hiding unrelated prompt orphans", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const promptId = "conversation-turn:v1:retired";
+    const projectionKey = `conversation-turn:${promptId}:answer`;
+    const laneKey = `gateway:feishu:primary:${projectionKey}`;
+    store.enqueueOutboundReply({ id: "retired-failed", idempotencyKey: "retired-failed", bindingId: "b1", cardRole: "answer", rootMessageId: "card-1", kind: "card_update", payload: "failed", projectionKey, laneKeyOverride: laneKey });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id=? WHERE id='retired-failed'").run(promptId);
+    store.markOutboundReplyFailedWithQuarantine("retired-failed", "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id=NULL WHERE id='retired-failed'").run();
+    store.enqueueOutboundReply({ id: "retired-pending", idempotencyKey: "retired-pending", bindingId: "b1", cardRole: "answer", rootMessageId: "card-1", kind: "card_update", payload: "pending", projectionKey, laneKeyOverride: laneKey });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id=? WHERE id='retired-pending'").run(promptId);
+    store.enqueueOutboundReply({ id: "current-orphan", idempotencyKey: "current-orphan", bindingId: "b1", cardRole: "answer", rootMessageId: "card-2", kind: "card_update", payload: "current" });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id='missing-current' WHERE id='current-orphan'").run();
+
+    expect(store.classifyHistoricalDeliveryDebt!("1970-01-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 0, releasedQuarantines: 0, classifiedDeliveryRecoveries: 1, classifiedProjectionGaps: 0
+    });
+    expect(store.database.prepare("SELECT scope,reason FROM delivery_debt_classifications WHERE debt_kind='delivery_recovery' AND debt_id='retired-failed'").get()).toEqual({
+      scope: "historical", reason: "retired_conversation_turn_projection"
+    });
+    expect(store.database.prepare("SELECT id,state FROM outbound_replies WHERE id IN ('retired-failed','retired-pending') ORDER BY id").all()).toEqual([
+      { id: "retired-failed", state: "dead_letter" }, { id: "retired-pending", state: "pending" }
+    ]);
+    expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id='retired-failed'").get()).toEqual({ state: "active" });
+    expect(store.inspectIntegrity(20).issues.filter((issue) => issue.rule === "outbound_prompt_reference")).toEqual([
+      { rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }
+    ]);
+
+    store.database.prepare("UPDATE outbound_replies SET updated_at='2099-01-01T00:00:00.000Z' WHERE id='retired-pending'").run();
+    expect(store.inspectIntegrity(20).issues.filter((issue) => issue.rule === "outbound_prompt_reference")).toEqual([
+      { rule: "outbound_prompt_reference", table: "outbound_replies", count: 2 }
+    ]);
+    expect(store.classifyHistoricalDeliveryDebt!("1970-01-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 0, releasedQuarantines: 0, classifiedDeliveryRecoveries: 1, classifiedProjectionGaps: 0
+    });
+    expect(store.database.prepare("SELECT scope,source_updated_at FROM delivery_debt_classifications WHERE debt_kind='delivery_recovery' AND debt_id='retired-failed'").get()).toEqual({
+      scope: "historical", source_updated_at: "2099-01-01T00:00:00.000Z"
+    });
+    expect(store.inspectIntegrity(20).issues.filter((issue) => issue.rule === "outbound_prompt_reference")).toEqual([
+      { rule: "outbound_prompt_reference", table: "outbound_replies", count: 1 }
+    ]);
+    expect(store.database.prepare("SELECT id,state FROM outbound_replies WHERE id IN ('retired-failed','retired-pending') ORDER BY id").all()).toEqual([
+      { id: "retired-failed", state: "dead_letter" }, { id: "retired-pending", state: "pending" }
+    ]);
+    expect(store.database.prepare("SELECT state FROM delivery_recoveries WHERE failed_reply_id='retired-failed'").get()).toEqual({ state: "unresolved" });
+    expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id='retired-failed'").get()).toEqual({ state: "active" });
+  });
+
+  it("keeps a nullable non-retired classification current when its lane receives a newer reply", () => {
+    store = new SqliteBindingStore(":memory:");
+    const laneKey = "gateway:feishu:primary:nullable-non-retired";
+    store.enqueueOutboundReply({
+      id: "nullable-failed", idempotencyKey: "nullable-failed", rootMessageId: "card-1",
+      kind: "card_update", payload: "failed", laneKeyOverride: laneKey
+    });
+    store.markOutboundReplyFailedWithQuarantine("nullable-failed", "unknown outcome", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null
+    });
+    store.database.prepare("UPDATE delivery_recoveries SET created_at='2026-08-01T00:00:00.000Z',updated_at='2026-08-01T00:00:00.000Z' WHERE failed_reply_id='nullable-failed'").run();
+    store.database.prepare("UPDATE outbox_lane_quarantines SET created_at='2026-08-01T00:00:00.000Z',updated_at='2026-08-01T00:00:00.000Z' WHERE failed_reply_id='nullable-failed'").run();
+
+    expect(store.classifyHistoricalDeliveryDebt!("2026-09-01T00:00:00.000Z", 10)).toMatchObject({ classifiedDeliveryRecoveries: 1 });
+    store.enqueueOutboundReply({
+      id: "nullable-newer", idempotencyKey: "nullable-newer", rootMessageId: "card-1",
+      kind: "card_reply", payload: "newer", laneKeyOverride: laneKey
+    });
+
+    expect(store.classifyHistoricalDeliveryDebt!("2026-09-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 0, releasedQuarantines: 0, classifiedDeliveryRecoveries: 0, classifiedProjectionGaps: 0
+    });
+    expect(store.database.prepare("SELECT state FROM delivery_recoveries WHERE failed_reply_id='nullable-failed'").get()).toEqual({ state: "unresolved" });
+    expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id='nullable-failed'").get()).toEqual({ state: "active" });
+  });
+
+  it("classifies alias-backed delivery debt from canonical terminal ownership without aging immutable history", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { promptId, canonicalPromptId } = prepareCorrectedExternalTurn(store);
+    store.enqueueOutboundReply({ id: "alias-history", idempotencyKey: "alias-history", bindingId: "b1", promptId: canonicalPromptId, rootMessageId: "answer-1", kind: "card_reply", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = ? WHERE id = 'alias-history'").run(promptId);
+    store.markOutboundReplyFailedWithQuarantine("alias-history", "unknown outcome", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null
+    });
+    store.database.prepare(`INSERT INTO projection_gaps(stage, owner_kind, owner_id, source_item_id, failure_class, failure_code, required_version, first_failed_at, last_failed_at)
+      VALUES ('answer_delivery', 'prompt', ?, 'alias-history', 'unknown', 'delivery_failed', NULL, '2026-09-30T00:00:03.000Z', '2026-09-30T00:00:03.000Z')`).run(promptId);
+    store.updatePrompt(canonicalPromptId, "delivered");
+    store.database.prepare("UPDATE prompt_jobs SET observation_state = 'completed' WHERE id = ?").run(canonicalPromptId);
+    store.saveRunCard({ ...store.loadRunCard(canonicalPromptId)!, phase: "completed", answer: "done", answerSegments: ["done"] });
+
+    expect(store.classifyHistoricalDeliveryDebt!("1970-01-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 0, releasedQuarantines: 0, classifiedDeliveryRecoveries: 1, classifiedProjectionGaps: 1
+    });
+    expect(store.database.prepare("SELECT scope, reason FROM delivery_debt_classifications WHERE debt_kind = 'delivery_recovery' AND debt_id = 'alias-history'").get()).toEqual({
+      scope: "historical", reason: "owner_terminal_without_resolution_proof"
+    });
+    expect(store.database.prepare("SELECT scope, reason FROM delivery_debt_classifications WHERE debt_kind = 'projection_gap'").get()).toEqual({
+      scope: "historical", reason: "owner_terminal_without_resolution_proof"
+    });
+    expect(store.database.prepare("SELECT prompt_id FROM outbound_replies WHERE id = 'alias-history'").get()).toEqual({ prompt_id: promptId });
+    expect(store.database.prepare("SELECT state FROM delivery_recoveries WHERE failed_reply_id = 'alias-history'").get()).toEqual({ state: "unresolved" });
+  });
+
+  it("does not classify invalid-alias delivery debt as canonical terminal ownership", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { canonicalPromptId } = prepareCorrectedExternalTurn(store);
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-history", canonicalPromptId });
+    store.enqueueOutboundReply({ id: "invalid-history-reply", idempotencyKey: "invalid-history-reply", bindingId: "b1", promptId: canonicalPromptId, rootMessageId: "answer-1", kind: "card_reply", payload: "{}" });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = 'invalid-history' WHERE id = 'invalid-history-reply'").run();
+    store.markOutboundReplyFailedWithQuarantine("invalid-history-reply", "unknown outcome", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null
+    });
+    store.database.prepare(`INSERT INTO projection_gaps(stage, owner_kind, owner_id, source_item_id, failure_class, failure_code, required_version, first_failed_at, last_failed_at)
+      VALUES ('answer_delivery', 'prompt', 'invalid-history', 'invalid-history-reply', 'unknown', 'delivery_failed', NULL, '2026-09-30T00:00:03.000Z', '2026-09-30T00:00:03.000Z')`).run();
+    store.updatePrompt(canonicalPromptId, "delivered");
+    store.database.prepare("UPDATE prompt_jobs SET observation_state = 'completed' WHERE id = ?").run(canonicalPromptId);
+    store.saveRunCard({ ...store.loadRunCard(canonicalPromptId)!, phase: "completed", answer: "done", answerSegments: ["done"] });
+
+    expectInvalidPromptIdentityCorrectionReported(store);
+    expect(store.classifyHistoricalDeliveryDebt!("1970-01-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 0, releasedQuarantines: 0, classifiedDeliveryRecoveries: 0, classifiedProjectionGaps: 0
+    });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM delivery_debt_classifications").get()).toEqual({ count: 0 });
+    expect(store.database.prepare("SELECT state FROM delivery_recoveries WHERE failed_reply_id = 'invalid-history-reply'").get()).toEqual({ state: "unresolved" });
+  });
+
+  it("settles historical gaps and releases a lane only from an exact delivered replacement", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", bindingId: "b1", viewVersion: 1, rootMessageId: "card-1", kind: "card_update", payload: "old" });
+    store.markOutboundReplyFailedWithQuarantine("failed", "unknown outcome", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null
+    });
+    store.enqueueOutboundReply({ id: "replacement", idempotencyKey: "replacement", bindingId: "b1", viewVersion: 2, rootMessageId: "card-1", kind: "card_update", payload: "new" });
+    store.database.prepare(`UPDATE outbound_replies SET state='delivered',delivered_message_id='card-1',updated_at='2026-08-02T00:00:00.000Z'
+      WHERE id='replacement'`).run();
+    store.database.prepare(`UPDATE delivery_recoveries SET state='replacement_pending',action='released_newer_snapshot',replacement_reply_id='replacement',
+      created_at='2026-08-01T00:00:00.000Z',updated_at='2026-08-01T00:00:00.000Z' WHERE failed_reply_id='failed'`).run();
+    store.database.prepare("UPDATE outbox_lane_quarantines SET created_at='2026-08-01T00:00:00.000Z',updated_at='2026-08-01T00:00:00.000Z' WHERE failed_reply_id='failed'").run();
+    store.database.prepare(`INSERT INTO projection_gaps(stage,owner_kind,owner_id,source_item_id,failure_class,failure_code,required_version,first_failed_at,last_failed_at)
+      VALUES ('main_delivery','binding','b1','failed','unknown','delivery_failed',1,'2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z')`).run();
+
+    expect(store.classifyHistoricalDeliveryDebt!("2026-09-01T00:00:00.000Z", 10)).toEqual({
+      settledProjectionGaps: 1, releasedQuarantines: 1, classifiedDeliveryRecoveries: 0, classifiedProjectionGaps: 0
+    });
+    expect(store.database.prepare("SELECT state,resolved_by_reply_id FROM delivery_recoveries WHERE failed_reply_id='failed'").get()).toEqual({
+      state: "recovered", resolved_by_reply_id: "replacement"
+    });
+    expect(store.database.prepare("SELECT state,action FROM outbox_lane_quarantines WHERE failed_reply_id='failed'").get()).toEqual({
+      state: "released", action: "maintenance_confirmed_recovery"
+    });
+    expect(store.database.prepare("SELECT state,compensated_by_version FROM projection_gaps WHERE source_item_id='failed'").get()).toEqual({
+      state: "compensated", compensated_by_version: 2
+    });
+  });
+
   it("releases only terminal Answer quarantines whose lanes have no pending work", () => {
     store = new SqliteBindingStore(":memory:");
     for (const promptId of ["terminal", "running", "pending-lane"]) {
       const bindingId = `binding-${promptId}`;
       store.createPendingBinding({ id: bindingId, workspaceId: "w1", chatId: "c1", topicId: `topic-${promptId}`, rootMessageId: `root-${promptId}`, title: "Task" });
+      store.updateBinding(bindingId, { paneId: `w1:${promptId}`, state: "active", lifecycle: "active", attachment: "attached" });
       const view = createQueuedRunCard({ promptId, bindingId, title: "Answer", workspaceId: "w1", paneId: `w1:${promptId}`, requestText: "go", queuePosition: 1, occurredAt: "now" });
       store.acceptPrompt({ prompt: { id: promptId, bindingId, larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: "go" }, view, rootMessageId: `root-${promptId}`, answerCard: {} });
       store.markOutboundReplyDelivered(store.listPendingOutboundReplies().find((reply) => reply.promptId === promptId)!.id, `answer-${promptId}`, `card-${promptId}`);
@@ -4838,7 +9971,7 @@ describe("SQLite store", () => {
         rootMessageId: `card-${promptId}`, kind: "stream_content",
         payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId(promptId, 0), content: "snapshot", sequence: 1 })
       });
-      for (let attempt = 0; attempt < 5; attempt += 1) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
         store.markOutboundReplyFailedWithQuarantine(`content-${promptId}`, "unclassified rejection", { failureClass: "unknown", httpStatus: 400, larkErrorCode: null });
       }
     }
@@ -4871,42 +10004,477 @@ describe("SQLite store", () => {
     });
   });
 
+  it("terminalizes alias-backed Answer quarantines through the canonical prompt after correction", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { promptId, canonicalPromptId } = prepareCorrectedExternalTurn(store);
+    store.enqueueOutboundReply({
+      id: "alias-content",
+      idempotencyKey: "alias-content",
+      bindingId: "b1",
+      promptId: canonicalPromptId,
+      viewVersion: 1,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "stream_content",
+      payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId(canonicalPromptId, 0), content: "snapshot", sequence: 1 })
+    });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = ? WHERE id = 'alias-content'").run(promptId);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine("alias-content", "unclassified rejection", { failureClass: "unknown", httpStatus: 400, larkErrorCode: null });
+    }
+    store.updatePrompt(canonicalPromptId, "delivered");
+    store.database.prepare("UPDATE prompt_jobs SET observation_state = 'completed' WHERE id = ?").run(canonicalPromptId);
+    store.saveRunCard({ ...store.loadRunCard(canonicalPromptId)!, phase: "completed", answer: "done", answerSegments: ["done"] });
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({
+      retriedAnswerPromptIds: [],
+      rolledBackAnswerPromptIds: [],
+      dismissedNotices: 0,
+      dismissedRejectedImmutableEffects: 0,
+      resolvedSupersededAnswerTargets: 0,
+      releasedSupersededWorkerMainUpdates: 0,
+      terminalizedQuarantines: 1
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'alias-content'").get()).toEqual({
+      state: "released", action: "startup_terminalized"
+    });
+    expect(store.database.prepare("SELECT prompt_id, state FROM outbound_replies WHERE id = 'alias-content'").get()).toEqual({
+      prompt_id: promptId, state: "dead_letter"
+    });
+  });
+
+  it("does not terminalize invalid-alias Answer quarantines through canonical startup recovery", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { canonicalPromptId } = prepareCorrectedExternalTurn(store);
+    insertPromptIdentityCorrection(store, { aliasPromptId: "invalid-content-owner", canonicalPromptId });
+    store.enqueueOutboundReply({
+      id: "invalid-content-owner-reply",
+      idempotencyKey: "invalid-content-owner-reply",
+      bindingId: "b1",
+      promptId: canonicalPromptId,
+      viewVersion: 1,
+      cardRole: "answer",
+      rootMessageId: "card-1",
+      kind: "stream_content",
+      payload: JSON.stringify({ pageIndex: 0, elementId: answerElementId(canonicalPromptId, 0), content: "snapshot", sequence: 1 })
+    });
+    store.database.prepare("UPDATE outbound_replies SET prompt_id = 'invalid-content-owner' WHERE id = 'invalid-content-owner-reply'").run();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      store.markOutboundReplyFailedWithQuarantine("invalid-content-owner-reply", "unclassified rejection", { failureClass: "unknown", httpStatus: 400, larkErrorCode: null });
+    }
+    store.updatePrompt(canonicalPromptId, "delivered");
+    store.database.prepare("UPDATE prompt_jobs SET observation_state = 'completed' WHERE id = ?").run(canonicalPromptId);
+    store.saveRunCard({ ...store.loadRunCard(canonicalPromptId)!, phase: "completed", answer: "done", answerSegments: ["done"] });
+
+    expectInvalidPromptIdentityCorrectionReported(store);
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({
+      retriedAnswerPromptIds: [],
+      rolledBackAnswerPromptIds: [],
+      dismissedNotices: 0,
+      dismissedRejectedImmutableEffects: 0,
+      resolvedSupersededAnswerTargets: 0,
+      releasedSupersededWorkerMainUpdates: 0,
+      terminalizedQuarantines: 0
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'invalid-content-owner-reply'").get()).toEqual({
+      state: "active", action: "blocked"
+    });
+  });
+
   it("keeps an immutable failed reply quarantined without blocking independent successors", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
 
     expect(store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({ action: "blocked", laneClass: "immutable" });
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["later"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["later"]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0 } });
 
     expect(store.retryDeadLetter("create", "c1", "u1")).toBe("retried");
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["create", "later"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["create", "later"]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, latest: { action: "manual_retry" } } });
   });
 
-  it("dismisses a rejected immutable quarantine with no pending lane work at startup", () => {
+  it("immediately dismisses a provider-confirmed defunct immutable target with no pending lane work", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "rejected", idempotencyKey: "rejected", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
-    store.markOutboundReplyFailedWithQuarantine("rejected", "target rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
+    expect(store.markOutboundReplyFailedWithQuarantine("rejected", "target withdrawn", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230011", recoveryKind: "defunct_target" })).toMatchObject({ action: "dismiss_defunct_target", reply: { state: "dismissed" } });
 
-    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedRejectedImmutableEffects: 1 });
     expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = 'rejected'").get()).toEqual({
-      state: "dismissed", error: "Dismissed after durable Gateway rejection"
+      state: "dismissed", error: "Dismissed after provider confirmed the delivery target no longer exists"
     });
     expect(store.database.prepare("SELECT state, action, resolved_at FROM delivery_recoveries WHERE failed_reply_id = 'rejected'").get()).toMatchObject({
-      state: "dismissed", action: "startup_dismiss_rejected", resolved_at: expect.any(String)
+      state: "dismissed", action: "dismiss_defunct_target", resolved_at: expect.any(String)
     });
     expect(store.database.prepare("SELECT state, action, released_at FROM outbox_lane_quarantines WHERE failed_reply_id = 'rejected'").get()).toMatchObject({
-      state: "released", action: "startup_dismiss_rejected", released_at: expect.any(String)
+      state: "released", action: "dismiss_defunct_target", released_at: expect.any(String)
     });
   });
 
-  it("releases an uncertain old Answer target after its exact replacement is delivered", () => {
+  it("closes a historic provider-confirmed defunct immutable target at startup", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "rejected", idempotencyKey: "rejected", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine("rejected", "content rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230028" });
+    store.database.prepare("UPDATE outbound_replies SET lark_error_code = '230019' WHERE id = 'rejected'").run();
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedDefunctTargets: 1, dismissedRejectedImmutableEffects: 0 });
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'rejected'").get()).toEqual({ state: "dismissed" });
+  });
+
+  it("retains a non-defunct immutable provider rejection at startup", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "rejected", idempotencyKey: "rejected", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
+    store.markOutboundReplyFailedWithQuarantine("rejected", "content rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230028" });
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedRejectedImmutableEffects: 0 });
+    expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'rejected'").get()).toEqual({ state: "dead_letter" });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'rejected'").get()).toEqual({ state: "active", action: "blocked" });
+  });
+
+  it.each([
+    ["Worker Main", prepareDirectExpiredWorkerMainTarget, "failed-worker-main", "pending-worker-main", "uncertain-worker-main", "gateway:feishu:primary:worker-main:reviewer:1", WORKER_EXPIRED_TARGET_PROOFS.workerMainUpdateCard],
+    ["Worker Turn", prepareDirectExpiredWorkerTurnTarget, "failed-worker-turn", "pending-worker-turn", "uncertain-worker-turn", "gateway:feishu:primary:worker-turn:turn-1:0", WORKER_EXPIRED_TARGET_PROOFS.workerTurnUpdateCard]
+  ] as const)("replaces an exact %s expired target with a replacement create and keeps the failed row for audit", (_label, arrange, failedId, pendingId, uncertainId, _laneKey, proof) => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedClaim } = arrange(store);
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failedClaim, "message expired", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031",
+      recoveryKind: "expired_worker_view_target", providerOperation: "update_card"
+    })).toMatchObject({ action: "replace_expired_worker_target", reply: { state: "dead_letter" } });
+    expect(store.getOutboundReply(failedId)).toMatchObject({ state: "dead_letter", error: "message expired", larkErrorCode: "230031" });
+    expect(store.getOutboundReply(pendingId)).toMatchObject({ state: "dismissed", error: "Dismissed after Gateway rejected the expired Worker target" });
+    expect(store.getOutboundReply(uncertainId)).toMatchObject({ state: "pending", effectCertainty: "uncertain" });
+    const recovery = store.database.prepare("SELECT state, action, semantic_recovery_proof, replacement_reply_id, resolved_at FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId) as {
+      state: string; action: string; semantic_recovery_proof: string; replacement_reply_id: string | null; resolved_at: string | null;
+    };
+    expect(recovery).toMatchObject({
+      state: "replacement_pending", action: "replace_expired_worker_target", semantic_recovery_proof: proof, replacement_reply_id: expect.any(String), resolved_at: null
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "released", action: "replace_expired_worker_target"
+    });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM projection_gaps WHERE source_item_id = ?").get(failedId)).toEqual({
+      count: failedId === "failed-worker-turn" ? 1 : 0
+    });
+    const replacement = store.getOutboundReply(recovery.replacement_reply_id!);
+    expect(replacement).toMatchObject({
+      state: "pending",
+      kind: "group_card_create",
+      workerThreadId: "thread-reviewer-1",
+      rootMessageId: null
+    });
+    expect(replacement?.payload).toContain("🕰️ 原卡片已过期 · 已恢复到此卡");
+    const failedScope = store.database.prepare("SELECT scope_key FROM outbound_replies WHERE id = ?").get(failedId) as { scope_key: string };
+    expect(store.database.prepare("SELECT state, scope_key FROM outbound_replies WHERE id = ?").get(uncertainId)).toEqual({ state: "pending", scope_key: failedScope.scope_key });
+    expect(store.database.prepare("SELECT state, resolved_by_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "replacement_pending", resolved_by_reply_id: null
+    });
+
+    store.markOutboundReplyDelivered(replacement!.id, `${failedId}-replacement`);
+
+    expect(store.database.prepare("SELECT state, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "recovered",
+      resolved_by_reply_id: replacement!.id,
+      resolved_message_id: `${failedId}-replacement`
+    });
+  });
+
+  it("uses current settled metadata rather than stale prior-attempt uncertainty for an exact worker expired target", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedClaim, failedId } = prepareDirectExpiredWorkerMainTarget(store);
+    store.database.prepare("UPDATE outbound_replies SET effect_certainty = 'uncertain', failure_class = 'unknown', lark_error_code = NULL WHERE id = ?").run(failedId);
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failedClaim, "message expired", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031",
+      recoveryKind: "expired_worker_view_target", providerOperation: "update_card"
+    })).toMatchObject({ action: "replace_expired_worker_target", reply: { state: "dead_letter" } });
+    expect(store.database.prepare("SELECT state, action, semantic_recovery_proof FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "replacement_pending", action: "replace_expired_worker_target", semantic_recovery_proof: WORKER_EXPIRED_TARGET_PROOFS.workerMainUpdateCard
+    });
+  });
+
+  it.each([
+    ["primary main", () => {
+      store!.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Primary" });
+      store!.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+      store!.enqueueOutboundReply({ id: "primary-main", idempotencyKey: "primary-main", bindingId: "b1", rootMessageId: "main-card", targetRole: "session_status", kind: "card_update", payload: "{}" });
+      return "primary-main";
+    }],
+    ["answer update", () => {
+      store!.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store!.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+      const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+      store!.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+      store!.markOutboundReplyDelivered(store!.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+      store!.enqueueOutboundReply({ id: "answer-update", idempotencyKey: "answer-update", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "answer-1", kind: "card_update", payload: "{}" });
+      return "answer-update";
+    }],
+    ["worker non-update", () => {
+      store!.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store!.updateBinding("b1", { paneId: "w1:primary", state: "active", lifecycle: "active", attachment: "attached" });
+      const worker = store!.createWorkerAgentInstance({
+        id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+        parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+        workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+      }, 4);
+      if (worker.outcome !== "created") throw new Error("expected Worker");
+      store!.attachAgentInstanceRuntime({ instanceId: worker.instance.id, expectedGeneration: worker.instance.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" });
+      store!.enqueueOutboundReply({ id: "worker-reply", idempotencyKey: "worker-reply", bindingId: "b1", workerId: "reviewer", workerSessionGeneration: 1, rootMessageId: "worker-main", kind: "card_reply", payload: "{}" });
+      return "worker-reply";
+    }]
+  ] as const)("keeps %s blocked when expired-worker dismissal shape does not match", (_label, arrange) => {
+    store = new SqliteBindingStore(":memory:");
+    const failedId = arrange();
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failedId, "message expired", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031", recoveryKind: "expired_worker_view_target"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter" } });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "unresolved", action: "blocked" });
+  });
+
+  it("keeps an uncertain worker update blocked even when the worker expired-target recovery kind is present", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedClaim, failedId } = prepareDirectExpiredWorkerMainTarget(store);
+
+    expect(store.markOutboundReplyFailedWithQuarantine(failedClaim, "message expired", {
+      failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: "230031", recoveryKind: "expired_worker_view_target"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter", effectCertainty: "uncertain" } });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "unresolved", action: "blocked" });
+  });
+
+  it("replaces historical exact worker-main 230031 debt at startup and is idempotent", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId, pendingId, claimedId, uncertainId } = prepareHistoricalExpiredWorkerMainTarget(store);
+    store.database.prepare("UPDATE delivery_recoveries SET semantic_recovery_proof = ? WHERE failed_reply_id = ?").run(
+      WORKER_EXPIRED_TARGET_PROOFS.workerMainUpdateCard,
+      failedId
+    );
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedExpiredWorkerTargets: 1 });
+    const recovery = store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId) as {
+      state: string; action: string; replacement_reply_id: string | null;
+    };
+    expect(recovery).toEqual({
+      state: "replacement_pending", action: "startup_replace_expired_worker_target", replacement_reply_id: expect.any(String)
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "released", action: "startup_replace_expired_worker_target"
+    });
+    expect(store.getOutboundReply(failedId)).toMatchObject({ state: "dead_letter" });
+    expect(store.getOutboundReply(pendingId)).toMatchObject({ state: "dismissed" });
+    expect(store.getOutboundReply(claimedId)).toMatchObject({ state: "pending" });
+    expect(store.getOutboundReply(uncertainId)).toMatchObject({ state: "pending", effectCertainty: "uncertain" });
+    expect(store.getOutboundReply(recovery.replacement_reply_id!)?.payload).toContain("🕰️ 原卡片已过期 · 已恢复到此卡");
+    expect(store.getOutboundReply(recovery.replacement_reply_id!)).toMatchObject({
+      kind: "group_card_create",
+      workerThreadId: "thread-reviewer-1",
+      rootMessageId: null
+    });
+
+    store.markOutboundReplyDelivered(recovery.replacement_reply_id!, "startup-main-replacement");
+
+    expect(store.database.prepare("SELECT state, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "recovered",
+      resolved_by_reply_id: recovery.replacement_reply_id,
+      resolved_message_id: "startup-main-replacement"
+    });
+
+    expect(store.recoverStaleOutboxQuarantines()).not.toHaveProperty("dismissedExpiredWorkerTargets");
+  });
+
+  it("replaces historical exact worker-turn 230031 debt at startup without a quarantine row", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId, pendingId } = prepareHistoricalExpiredWorkerTurnTarget(store);
+    store.database.prepare("UPDATE delivery_recoveries SET semantic_recovery_proof = ? WHERE failed_reply_id = ?").run(
+      WORKER_EXPIRED_TARGET_PROOFS.workerTurnUpdateCard,
+      failedId
+    );
+    store.database.prepare("DELETE FROM outbox_lane_quarantines WHERE failed_reply_id = ?").run(failedId);
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedExpiredWorkerTargets: 1 });
+    const recovery = store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId) as {
+      state: string; action: string; replacement_reply_id: string | null;
+    };
+    expect(recovery).toEqual({
+      state: "replacement_pending", action: "startup_replace_expired_worker_target", replacement_reply_id: expect.any(String)
+    });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({ count: 0 });
+    expect(store.getOutboundReply(failedId)).toMatchObject({ state: "dead_letter" });
+    expect(store.getOutboundReply(pendingId)).toMatchObject({ state: "dismissed" });
+    expect(store.getOutboundReply(recovery.replacement_reply_id!)).toMatchObject({
+      kind: "group_card_create",
+      workerThreadId: "thread-reviewer-1",
+      rootMessageId: null
+    });
+    expect(store.getOutboundReply(recovery.replacement_reply_id!)?.payload).toContain("🕰️ 原卡片已过期 · 已恢复到此卡");
+
+    store.markOutboundReplyDelivered(recovery.replacement_reply_id!, "startup-turn-replacement");
+
+    expect(store.database.prepare("SELECT state, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "recovered",
+      resolved_by_reply_id: recovery.replacement_reply_id,
+      resolved_message_id: "startup-turn-replacement"
+    });
+  });
+
+  it("replaces old exact worker 230031 debt without stealing a newer lane quarantine pointer", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId } = prepareHistoricalExpiredWorkerMainTarget(store);
+    store.database.prepare("UPDATE delivery_recoveries SET semantic_recovery_proof = ? WHERE failed_reply_id = ?").run(
+      WORKER_EXPIRED_TARGET_PROOFS.workerMainUpdateCard,
+      failedId
+    );
+    store.enqueueOutboundReply({ id: "newer-failure", idempotencyKey: "newer-failure", bindingId: "b1", workerId: "reviewer", workerSessionGeneration: 1, viewVersion: 8, rootMessageId: "worker-main", kind: "card_update", payload: "{\"version\":8}" });
+    expect(store.markOutboundReplyFailedWithQuarantine("newer-failure", "different rejection", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230028"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter" } });
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedExpiredWorkerTargets: 1 });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "replacement_pending", action: "startup_replace_expired_worker_target"
+    });
+    expect(store.database.prepare("SELECT failed_reply_id, state, action FROM outbox_lane_quarantines WHERE lane_key = 'gateway:feishu:primary:worker-main:reviewer:1'").get()).toEqual({
+      failed_reply_id: "newer-failure", state: "active", action: "blocked"
+    });
+  });
+
+  it("keeps historical worker 230031 debt blocked at startup without the persisted exact worker proof", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId } = prepareHistoricalExpiredWorkerMainTarget(store);
+
+    expect(store.recoverStaleOutboxQuarantines()).not.toHaveProperty("dismissedExpiredWorkerTargets");
+    expect(store.database.prepare("SELECT state, action, semantic_recovery_proof FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "unresolved", action: "blocked", semantic_recovery_proof: null
+    });
+    expect(store.getOutboundReply(failedId)).toMatchObject({ state: "dead_letter" });
+  });
+
+  it.each([
+    ["Worker Main", prepareHistoricalExpiredWorkerMainTarget, LEGACY_WORKER_MAIN_SURFACE_REPLACE_PROOF],
+    ["Worker Turn", prepareHistoricalExpiredWorkerTurnTarget, LEGACY_WORKER_TURN_SURFACE_REPLACE_PROOF]
+  ] as const)("migration 67 backfills an exact legacy %s surface-replace proof", (_label, arrange, expectedProof) => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-expired-proof-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const { failedId } = arrange(store);
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 67");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT semantic_recovery_proof FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      semantic_recovery_proof: expectedProof
+    });
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 67").get()).toEqual({ version: 67 });
+  });
+
+  it.each([
+    ["Primary row", "UPDATE outbound_replies SET worker_id = NULL, worker_session_generation = NULL, binding_id = 'b1', target_role = 'session_status' WHERE id = ?"],
+    ["operation-result row", "UPDATE outbound_replies SET target_role = 'operation_result' WHERE id = ?"],
+    ["uncertain effect", "UPDATE outbound_replies SET effect_certainty = 'uncertain' WHERE id = ?"],
+    ["another Lark code", "UPDATE outbound_replies SET lark_error_code = '230028' WHERE id = ?"],
+    ["another Gateway", "UPDATE outbound_replies SET gateway_id = 'feishu:secondary' WHERE id = ?"],
+    ["resolved recovery", "UPDATE delivery_recoveries SET state = 'dismissed' WHERE failed_reply_id = ?"]
+  ] as const)("migration 67 does not backfill %s", (_label, mutate) => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-worker-expired-proof-negative-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    const { failedId } = prepareHistoricalExpiredWorkerMainTarget(store);
+    if (mutate.startsWith("UPDATE outbound_replies")) mutateHistoricalOutboundReply(store, mutate, failedId);
+    else store.database.prepare(mutate).run(failedId);
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 67");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.database.prepare("SELECT semantic_recovery_proof FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      semantic_recovery_proof: null
+    });
+  });
+
+  it.each([
+    ["Worker Main", prepareHistoricalExpiredWorkerMainTarget, LEGACY_WORKER_MAIN_SURFACE_REPLACE_PROOF],
+    ["Worker Turn", prepareHistoricalExpiredWorkerTurnTarget, LEGACY_WORKER_TURN_SURFACE_REPLACE_PROOF]
+  ] as const)("replaces an exact legacy %s surface-replace proof at startup", (_label, arrange, proof) => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId, pendingId } = arrange(store);
+    store.database.prepare("UPDATE delivery_recoveries SET semantic_recovery_proof = ? WHERE failed_reply_id = ?").run(proof, failedId);
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedExpiredWorkerTargets: 1 });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "replacement_pending", action: "startup_replace_expired_worker_target"
+    });
+    expect(store.getOutboundReply(pendingId)).toMatchObject({ state: "dismissed" });
+  });
+
+  it.each([
+    ["Gateway", "UPDATE outbound_replies SET gateway_id = 'feishu:secondary' WHERE id = ?"],
+    ["kind", "UPDATE outbound_replies SET kind = 'card_reply' WHERE id = ?"],
+    ["Worker shape", "UPDATE outbound_replies SET target_role = 'operation_result' WHERE id = ?"],
+    ["effect certainty", "UPDATE outbound_replies SET effect_certainty = 'uncertain' WHERE id = ?"],
+    ["Lark code", "UPDATE outbound_replies SET lark_error_code = '230028' WHERE id = ?"]
+  ] as const)("revalidates legacy proof %s at startup", (_label, mutate) => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId, pendingId } = prepareHistoricalExpiredWorkerMainTarget(store);
+    store.database.prepare("UPDATE delivery_recoveries SET semantic_recovery_proof = ? WHERE failed_reply_id = ?").run(LEGACY_WORKER_MAIN_SURFACE_REPLACE_PROOF, failedId);
+    mutateHistoricalOutboundReply(store, mutate, failedId);
+
+    expect(store.recoverStaleOutboxQuarantines()).not.toHaveProperty("dismissedExpiredWorkerTargets");
+    expect(store.database.prepare("SELECT state FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "unresolved" });
+    expect(store.getOutboundReply(pendingId)).toMatchObject({ state: "pending" });
+  });
+
+  it("keeps historical worker 230031 debt blocked at startup when the gateway identity does not match the persisted exact worker proof", () => {
+    store = new SqliteBindingStore(":memory:");
+    prepareExpiredWorkerMainTarget(store);
+    store.enqueueOutboundReply({
+      id: "failed-worker-main-secondary",
+      idempotencyKey: "failed-worker-main-secondary",
+      gatewayId: "feishu:secondary",
+      workerId: "reviewer",
+      workerSessionGeneration: 1,
+      viewVersion: 4,
+      rootMessageId: "worker-main",
+      kind: "card_update",
+      payload: "{\"version\":4}"
+    });
+    const failedClaim = store.claimOutboundReply("failed-worker-main-secondary", null);
+    if (!failedClaim) throw new Error("expected claimed secondary Worker Main failure");
+    expect(store.markOutboundReplyFailedWithQuarantine(failedClaim, "message expired", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter" } });
+    store.enqueueOutboundReply({
+      id: "pending-worker-main-secondary",
+      idempotencyKey: "pending-worker-main-secondary",
+      gatewayId: "feishu:secondary",
+      workerId: "reviewer",
+      workerSessionGeneration: 1,
+      viewVersion: 5,
+      rootMessageId: "worker-main",
+      kind: "card_update",
+      payload: "{\"version\":5}"
+    });
+    store.database.prepare("UPDATE delivery_recoveries SET semantic_recovery_proof = ? WHERE failed_reply_id = ?").run(
+      WORKER_EXPIRED_TARGET_PROOFS.workerMainUpdateCard,
+      "failed-worker-main-secondary"
+    );
+
+    expect(store.recoverStaleOutboxQuarantines()).not.toHaveProperty("dismissedExpiredWorkerTargets");
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = ?").get("failed-worker-main-secondary")).toEqual({
+      state: "unresolved", action: "blocked"
+    });
+    expect(store.getOutboundReply("failed-worker-main-secondary")).toMatchObject({ state: "dead_letter", gatewayId: "feishu:secondary" });
+  });
+
+  it("keeps an uncertain old Answer target blocking automatic replacement delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-old", "card-old");
@@ -4918,28 +10486,30 @@ describe("SQLite store", () => {
       promptId: "p1", previousPageIndex: 0, nextPageIndex: 1, sourceStart: 0, nextElementId: answerElementId("p1", 1),
       rootMessageId: "root-1", viewVersion: 3, card: {}
     })).toBe("reserved");
-    const replacement = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
-    store.checkpointOutboundReplyCard(replacement.id, "card-new");
-    store.markOutboundReplyDelivered(replacement.id, "answer-new", "card-new");
-    for (const revision of [1, 2, 3]) {
-      expect(store.reserveStaticAnswerCardUpdate({
-        promptId: "p1", pageIndex: 1, messageId: "answer-new", card: { revision }
-      })).toBe("reserved");
-    }
-
-    expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([]);
-    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 1 });
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1")).toEqual([]);
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.getOutboundReply("old-update")).toMatchObject({ state: "dead_letter", effectCertainty: "uncertain" });
-    expect(store.database.prepare("SELECT state, action, replacement_reply_id, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({
-      state: "recovered", action: "startup_superseded_answer", replacement_reply_id: replacement.id, resolved_by_reply_id: replacement.id, resolved_message_id: "answer-new"
-    });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({
-      state: "released", action: "startup_superseded_answer"
+      state: "active", action: "blocked"
     });
-    expect(store.database.prepare("SELECT snapshot_revision, state FROM outbound_replies WHERE projection_key = ? ORDER BY snapshot_revision").all("answer-static:p1:1:answer-new")).toEqual([{ snapshot_revision: 3, state: "pending" }]);
-    expect(store.listOutboundLaneHeads(10, null).filter((reply) => reply.promptId === "p1")).toEqual([
-      expect.objectContaining({ idempotencyKey: "answer-static:p1:1:answer-new:revision:3", rootMessageId: "answer-new" })
-    ]);
+  });
+
+  it("persists a static Answer replacement page as static before delivery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+
+    store.enqueueOutboundReply({
+      id: "static-replacement", idempotencyKey: "answer-static-rebuild:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2,
+      cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create",
+      payload: JSON.stringify({ card: {}, stream: { pageIndex: 1, pageStart: 0, elementId: answerElementId("p1", 1), deliveryMode: "static" } })
+    });
+
+    expect(store.getAnswerPage("p1", 1)).toMatchObject({ state: "creating", deliveryMode: "static" });
   });
 
   it("keeps a superseded Answer quarantine blocked when replacement identity disagrees", () => {
@@ -4950,7 +10520,7 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
-    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all("answer-static:p1:1:answer-new")).toEqual([{ state: "pending", count: 1 }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state ORDER BY state").all("answer-static:p1:1:answer-new")).toEqual([]);
   });
 
   it("keeps a superseded Answer quarantine blocked when a pending snapshot was claimed", () => {
@@ -4961,29 +10531,409 @@ describe("SQLite store", () => {
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
     expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "unresolved", action: "blocked" });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
-    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state").all(projectionKey)).toEqual([{ state: "pending", count: 1 }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE projection_key = ? GROUP BY state ORDER BY state").all(projectionKey)).toEqual([]);
   });
 
-  it("releases an uncertain Worker Main update only to its newest unclaimed authoritative snapshot", () => {
+  it("keeps an uncertain Worker Main update blocked despite a newer authoritative snapshot", () => {
     store = new SqliteBindingStore(":memory:");
     const { failedId, successorId } = prepareSupersededWorkerMainCandidate(store);
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 0 });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "active", action: "blocked" });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "unresolved", action: "blocked", replacement_reply_id: null });
+    expect(store.getOutboundReply(failedId)).toMatchObject({ state: "dead_letter", effectCertainty: "uncertain", autoRecoveryCount: 0 });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: successorId, viewVersion: 3 })]);
+  });
+
+  it("releases a rejected Worker Main update once to its newest unclaimed authoritative snapshot", () => {
+    store = new SqliteBindingStore(":memory:");
+    const { failedId, successorId } = prepareSupersededWorkerMainCandidate(store);
+    store.enqueueOutboundReply({ id: "worker-dependent", idempotencyKey: "worker-dependent", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
+    store.preparedDeliveries.addPrerequisite({ dependentReplyId: "worker-dependent", prerequisiteReplyId: failedId, requiredState: "delivered" });
+    store.database.prepare("UPDATE outbound_replies SET failure_class='permanent',effect_certainty='rejected' WHERE id=?").run(failedId);
 
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 1 });
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "released", action: "released_newer_snapshot" });
     expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "replacement_pending", action: "released_newer_snapshot", replacement_reply_id: successorId });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ id: successorId, viewVersion: 3 })]);
+    expect(store.getOutboundReply(failedId)).toMatchObject({ state: "dismissed", effectCertainty: "rejected", autoRecoveryCount: 1 });
+    expect(store.database.prepare("SELECT prerequisite_reply_id,required_state FROM outbound_reply_prerequisites WHERE dependent_reply_id='worker-dependent'").get()).toEqual({
+      prerequisite_reply_id: successorId, required_state: "delivered"
+    });
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: successorId, viewVersion: 3 }),
+      expect.objectContaining({ id: "worker-dependent" })
+    ]));
+    expect(store.database.prepare("SELECT state, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "replacement_pending", resolved_by_reply_id: null, resolved_message_id: null });
+  });
 
-    expect(store.markOutboundReplyDelivered(store.claimOutboundReply(successorId, null)!, "worker-main")).toBe(true);
-    expect(store.database.prepare("SELECT state, resolved_by_reply_id, resolved_message_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({ state: "recovered", resolved_by_reply_id: successorId, resolved_message_id: "worker-main" });
+  it.each([
+    ["Primary Main", "primary-main:b1:1", "session_status", "main-card:update:b1"],
+    ["Pane Entry", "pane-entry:alias-1", null, "pane-entry:update:alias-1"]
+  ] as const)("releases a legacy immutable %s update only to the current authoritative snapshot", (_label, logicalLane, targetRole, keyPrefix) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.saveTopicView({ ...initialTopicView("b1"), viewVersion: 3, deliveredVersion: 1 });
+    const laneKey = `gateway:feishu:primary:${logicalLane}`;
+    store.enqueueOutboundReply({ id: "old-update", idempotencyKey: `${keyPrefix}:2`, bindingId: "b1", viewVersion: 2, targetRole, rootMessageId: "main-card", kind: "card_update", payload: "{}", laneKeyOverride: logicalLane });
+    const claim = store.claimOutboundReply("old-update", null)!;
+    store.markOutboundReplyFailedWithQuarantine(claim, "owner rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" });
+    store.database.prepare("UPDATE outbox_lane_quarantines SET lane_class = 'immutable' WHERE failed_reply_id = 'old-update'").run();
+    store.enqueueOutboundReply({ id: "current-update", idempotencyKey: `${keyPrefix}:3`, bindingId: "b1", viewVersion: 3, targetRole, rootMessageId: "main-card", kind: "card_update", payload: "{\"version\":3}", laneKeyOverride: logicalLane });
+
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "current-update", viewVersion: 3 })]);
+    const recovered = store.recoverStaleOutboxQuarantines();
+    expect(recovered).toMatchObject(targetRole === "session_status"
+      ? { releasedSupersededPrimaryMainUpdates: 1 }
+      : { releasedSupersededPaneEntryUpdates: 1 });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE lane_key = ?").get(laneKey)).toEqual({ state: "released", action: "released_newer_snapshot" });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "replacement_pending", action: "released_newer_snapshot", replacement_reply_id: "current-update" });
+    expect(store.getOutboundReply("old-update")).toMatchObject({ state: "dismissed", effectCertainty: "rejected", autoRecoveryCount: 1 });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "current-update", viewVersion: 3 })]);
+  });
+
+  it("keeps a legacy immutable Primary Main update blocked when the pending snapshot is not authoritative", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.saveTopicView({ ...initialTopicView("b1"), viewVersion: 4, deliveredVersion: 1 });
+    store.enqueueOutboundReply({ id: "old-update", idempotencyKey: "main-card:update:b1:2", bindingId: "b1", viewVersion: 2, targetRole: "session_status", rootMessageId: "main-card", kind: "card_update", payload: "{}", laneKeyOverride: "primary-main:b1:1" });
+    const claim = store.claimOutboundReply("old-update", null)!;
+    store.markOutboundReplyFailedWithQuarantine(claim, "owner lost", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
+    store.database.prepare("UPDATE outbox_lane_quarantines SET lane_class = 'immutable' WHERE failed_reply_id = 'old-update'").run();
+    store.enqueueOutboundReply({ id: "stale-update", idempotencyKey: "main-card:update:b1:3", bindingId: "b1", viewVersion: 3, targetRole: "session_status", rootMessageId: "main-card", kind: "card_update", payload: "{}", laneKeyOverride: "primary-main:b1:1" });
+
+    expect(store.recoverStaleOutboxQuarantines()).not.toHaveProperty("releasedSupersededPrimaryMainUpdates");
+    expect(store.database.prepare("SELECT state FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active" });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "stale-update", viewVersion: 3 })]);
+  });
+
+  it("retries uncertain Worker content three times then keeps its Pane Ring blocked for recovery", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:primary", statusMessageId: "primary-root" });
+    const createdWorker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: createdWorker.id, expectedGeneration: createdWorker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-30T10:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-1")!;
+    store.checkpointOutboundReplyCard(create.id, "worker-card");
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.database.prepare("UPDATE worker_turn_cards SET phase = 'completed', answer = 'durable result', view_version = 5 WHERE turn_id = 'turn-1'").run();
+    store.enqueueOutboundReply({ id: "failed-content", idempotencyKey: "worker-turn:stream:turn-1:0:2", workerTurnId: "turn-1", viewVersion: 2, streamPageIndex: 0, rootMessageId: "worker-card", kind: "stream_content", payload: JSON.stringify({ pageIndex: 0, elementId: "worker", content: "partial", sequence: 2 }), laneKeyOverride: "worker-turn:turn-1" });
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const claim = store.claimOutboundReply("failed-content", null)!;
+      const transition = store.markOutboundReplyFailedWithQuarantine(claim, "delivery ownership lost", {
+        failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null
+      });
+      expect(transition).toMatchObject(attempt < 3
+        ? { state: "pending", action: "retry" }
+        : { state: "dead_letter", action: "rebuild_worker_task" });
+      if (attempt < 3) store.database.prepare("UPDATE outbound_replies SET next_attempt_at = 'now' WHERE id = 'failed-content'").run();
+    }
+
+    const recovery = {
+      turnId: "turn-1", previousPageIndex: 0, nextPageIndex: 1, pageStart: 0,
+      nextElementId: workerTurnElementId("turn-1", 1), rootMessageId: "worker-root", viewVersion: 5,
+      card: { durable: "result" }
+    };
+    store.database.prepare("UPDATE agent_instances SET generation = generation + 1 WHERE id = ?").run(worker.id);
+    expect(store.listRecoverableWorkerTurnIds(10)).toEqual([]);
+    expect(store.reserveWorkerTurnRecovery(recovery)).toBe("stale");
+    store.database.prepare("UPDATE agent_instances SET generation = generation - 1 WHERE id = ?").run(worker.id);
+    expect(store.listRecoverableWorkerTurnIds(10)).toEqual(["turn-1"]);
+    expect(store.listRecoverableWorkerTurnIdsForBinding("b1", 10)).toEqual(["turn-1"]);
+    expect(store.listRecoverableWorkerTurnIdsForBinding("another-binding", 10)).toEqual([]);
+    expect(store.database.prepare("SELECT state FROM worker_turn_card_pages WHERE turn_id = 'turn-1' AND page_index = 0").get()).toEqual({ state: "frozen" });
+    expect(store.reserveWorkerTurnRecovery(recovery)).toBe("reserved");
+    expect(store.reserveWorkerTurnRecovery(recovery)).toBe("stale");
+    const blockedRecovery = store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'failed-content'").get() as { state: string; action: string; replacement_reply_id: string };
+    expect(blockedRecovery).toEqual({ state: "replacement_pending", action: "rebuild_worker_task", replacement_reply_id: expect.any(String) });
+    expect(store.getOutboundReply(blockedRecovery.replacement_reply_id)).toMatchObject({ state: "dead_letter", kind: "stream_card_create" });
+    expect(store.listPendingOutboundReplies().find(({ idempotencyKey }) => idempotencyKey === "worker-turn:recovery:turn-1:1")).toBeUndefined();
+    expect(store.listWorkerTurnCardPages("turn-1")).toEqual([
+      expect.objectContaining({ pageIndex: 0, state: "frozen" }),
+      expect.objectContaining({ pageIndex: 1, state: "creating", messageId: null, cardId: null })
+    ]);
+  });
+
+  it("selects recoverable Primary Answer debt only for the requested binding", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const bindingId of ["b1", "b2"]) {
+      store.createPendingBinding({ id: bindingId, workspaceId: "w1", chatId: "chat", topicId: `topic-${bindingId}`, rootMessageId: `root-${bindingId}`, title: bindingId });
+      store.updateBinding(bindingId, { paneId: `w1:${bindingId}`, state: "active", lifecycle: "active", attachment: "attached" });
+      store.enqueueOutboundReply({
+        id: `failed-${bindingId}`, idempotencyKey: `failed-${bindingId}`, bindingId,
+        cardRole: "answer", rootMessageId: `answer-${bindingId}`,
+        kind: "card_update", payload: "{}"
+      });
+      store.database.prepare("UPDATE outbound_replies SET prompt_id = ? WHERE id = ?").run(`prompt-${bindingId}`, `failed-${bindingId}`);
+      store.markOutboundReplyDeadLetter(`failed-${bindingId}`, "target unavailable", {
+        failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400,
+        larkErrorCode: "230011", recoveryKind: "defunct_target"
+      });
+      store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = 'rebuild_answer' WHERE failed_reply_id = ?").run(`failed-${bindingId}`);
+    }
+
+    expect(store.listRecoverablePrimaryAnswerPromptIdsForBinding("b1", 10)).toEqual(["prompt-b1"]);
+    expect(store.listRecoverablePrimaryAnswerPromptIdsForBinding("b2", 10)).toEqual(["prompt-b2"]);
+    expect(store.listRecoverablePrimaryAnswerPromptIdsForBinding("missing", 10)).toEqual([]);
+  });
+
+  it("keeps binding-authoritative needs-human state visible beyond the global 20-item diagnostic cap", () => {
+    store = new SqliteBindingStore(":memory:");
+    const addDebt = (bindingId: string, action: "rebuild_answer" | "blocked", updatedAt: string) => {
+      store!.createPendingBinding({ id: bindingId, workspaceId: "w1", chatId: "chat", topicId: `topic-${bindingId}`, rootMessageId: `root-${bindingId}`, title: bindingId });
+      store!.updateBinding(bindingId, { paneId: `w1:${bindingId}`, state: "active", lifecycle: "active", attachment: "attached" });
+      store!.enqueueOutboundReply({ id: `failed-${bindingId}`, idempotencyKey: `failed-${bindingId}`, bindingId, cardRole: "answer", rootMessageId: `answer-${bindingId}`, kind: "card_update", payload: "{}" });
+      store!.database.prepare("UPDATE outbound_replies SET prompt_id = ? WHERE id = ?").run(`prompt-${bindingId}`, `failed-${bindingId}`);
+      store!.markOutboundReplyDeadLetter(`failed-${bindingId}`, "target unavailable", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230011", recoveryKind: "defunct_target" });
+      store!.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = ?, updated_at = ? WHERE failed_reply_id = ?")
+        .run(action, updatedAt, `failed-${bindingId}`);
+    };
+    for (let index = 0; index < 21; index += 1) addDebt(`older-${index}`, "rebuild_answer", `2026-10-01T00:00:${String(index).padStart(2, "0")}.000Z`);
+    addDebt("target", "blocked", "2026-10-02T00:00:00.000Z");
+
+    expect(store.getRecoveryDurableEvidence().items).toHaveLength(20);
+    expect(store.getRecoveryDurableEvidence().items.some((item) => item.bindingId === "target")).toBe(false);
+    expect(store.getRecoveryStageForBinding("target")).toBe("needs_human");
+  });
+
+  it("reports actionable completed Primary Answer view debt without replaying its Prompt", () => {
+    store = new SqliteBindingStore(":memory:");
+    preparePrimaryCompletionActions(store, false);
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered' WHERE prompt_id = ? AND state = 'pending'").run("completed-native-actions");
+    store.database.prepare("UPDATE run_cards SET view_version = answer_delivered_version + 1, updated_at = ? WHERE prompt_id = ?")
+      .run("2026-10-02T03:59:00.000Z", "completed-native-actions");
+    const promptBeforeDiagnostics = store.getPrompt("completed-native-actions");
+
+    const evidence = store.getRecoveryDurableEvidence();
+
+    expect(evidence).toMatchObject({
+      rebuildingProjection: 1,
+      delivering: 0,
+      awaitingAck: 0,
+      oldestPendingAt: "2026-10-02T03:59:00.000Z"
+    });
+    expect(evidence.items).toContainEqual({
+      kind: "primary_answer",
+      stage: "rebuilding_projection",
+      bindingId: "binding-native-actions",
+      promptId: "completed-native-actions",
+      workerId: null,
+      workerTurnId: null,
+      updatedAt: "2026-10-02T03:59:00.000Z"
+    });
+    expect(evidence.items).toHaveLength(1);
+    expect(JSON.stringify(evidence)).not.toMatch(/done|first|ou_actor/);
+    expect(store.getPrompt("completed-native-actions")).toEqual(promptBeforeDiagnostics);
+  });
+
+  it("does not double count actionable Primary Answer debt represented by outbox or recovery work", () => {
+    store = new SqliteBindingStore(":memory:");
+    preparePrimaryCompletionActions(store, false);
+    store.database.prepare("UPDATE outbound_replies SET state = 'delivered' WHERE prompt_id = ? AND state = 'pending'").run("completed-native-actions");
+    store.database.prepare("UPDATE run_cards SET view_version = answer_delivered_version + 1, updated_at = ? WHERE prompt_id = ?")
+      .run("2026-10-02T03:59:00.000Z", "completed-native-actions");
+    store.enqueueOutboundReply({
+      id: "pending-answer-debt", idempotencyKey: "pending-answer-debt",
+      bindingId: "binding-native-actions", promptId: "completed-native-actions",
+      cardRole: "answer", rootMessageId: "answer-message", kind: "card_update", payload: "{}"
+    });
+
+    const pendingEvidence = store.getRecoveryDurableEvidence();
+    expect(pendingEvidence).toMatchObject({ rebuildingProjection: 0, delivering: 1, awaitingAck: 0 });
+    expect(pendingEvidence.items.filter(({ promptId }) => promptId === "completed-native-actions")).toEqual([
+      expect.objectContaining({ kind: "primary_answer", stage: "delivering" })
+    ]);
+
+    store.markOutboundReplyDeadLetter("pending-answer-debt", "target unavailable", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400,
+      larkErrorCode: "230011", recoveryKind: "defunct_target"
+    });
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = 'rebuild_answer' WHERE failed_reply_id = ?")
+      .run("pending-answer-debt");
+
+    const recoveryEvidence = store.getRecoveryDurableEvidence();
+    expect(recoveryEvidence).toMatchObject({ rebuildingProjection: 1, delivering: 0, awaitingAck: 0 });
+    expect(recoveryEvidence.items.filter(({ promptId }) => promptId === "completed-native-actions")).toEqual([
+      expect.objectContaining({ kind: "primary_answer", stage: "rebuilding_projection" })
+    ]);
+    expect(recoveryEvidence.items).toHaveLength(1);
+  });
+
+  it("reports ordinary Answer outbox delivery and acknowledgement stages without a delivery-recovery row", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "ordinary-answer", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("ordinary-answer", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "ordinary-prompt", bindingId: "ordinary-answer", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "2026-10-02T04:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: view.promptId, bindingId: view.bindingId, larkMessageId: "m1", actorOpenId: "u1", body: view.requestText }, view, rootMessageId: "root", answerCard: {} });
+    const pending = store.listPendingOutboundReplies().find((reply) => reply.promptId === view.promptId)!;
+
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM delivery_recoveries").get()).toEqual({ count: 0 });
+    expect(store.getRecoveryStageForBinding("ordinary-answer")).toBe("delivering");
+    expect(store.getRecoveryDurableEvidence()).toMatchObject({ delivering: 1, awaitingAck: 0, items: [expect.objectContaining({ kind: "primary_answer", stage: "delivering", bindingId: "ordinary-answer", promptId: "ordinary-prompt" })] });
+    expect(store.claimOutboundReply(pending.id, null)).not.toBeNull();
+    expect(store.getRecoveryStageForBinding("ordinary-answer")).toBe("awaiting_ack");
+    expect(store.getRecoveryDurableEvidence()).toMatchObject({ delivering: 0, awaitingAck: 1, items: [expect.objectContaining({ kind: "primary_answer", stage: "awaiting_ack", bindingId: "ordinary-answer", promptId: "ordinary-prompt" })] });
+  });
+
+  it.each([
+    ["delivering", false],
+    ["awaiting_ack", true]
+  ] as const)("reports uncertain execution before mixed %s delivery debt", (deliveryStage, claimed) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "mixed-recovery", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("mixed-recovery", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const uncertain = createQueuedRunCard({ promptId: "uncertain-prompt", bindingId: "mixed-recovery", title: "Uncertain", workspaceId: "w1", paneId: "w1:p1", requestText: "request", queuePosition: 1, occurredAt: "2026-10-02T04:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: uncertain.promptId, bindingId: uncertain.bindingId, larkMessageId: "m1", actorOpenId: "u1", body: uncertain.requestText }, view: uncertain, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'uncertain', observation_state = 'completed' WHERE id = ?").run(uncertain.promptId);
+    const pending = store.listPendingOutboundReplies().find((reply) => reply.promptId === uncertain.promptId)!;
+    if (claimed) expect(store.claimOutboundReply(pending.id, null)).not.toBeNull();
+
+    expect(store.getRecoveryStageForBinding("mixed-recovery"), `uncertain execution must outrank ${deliveryStage}`).toBe("needs_human");
+
+    store.database.prepare("UPDATE prompt_jobs SET state = 'recovering', observation_state = 'detached' WHERE id = ?").run(uncertain.promptId);
+    expect(store.getRecoveryStageForBinding("mixed-recovery")).toBe("observing_execution");
+  });
+
+  it("derives normalized recovery evidence without exposing recovery payloads", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "uncertain", bindingId: "b1", title: "Prompt", workspaceId: "w1", paneId: "w1:p1", requestText: "sensitive prompt", queuePosition: 1, occurredAt: "2026-10-02T04:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "uncertain", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "sensitive prompt" }, view, rootMessageId: "root", answerCard: {} });
+    store.database.prepare("UPDATE prompt_jobs SET state = 'uncertain', observation_state = 'completed', updated_at = '2026-10-02T04:01:00.000Z' WHERE id = 'uncertain'").run();
+    store.enqueueOutboundReply({ id: "failed-rebuild", idempotencyKey: "failed-rebuild", bindingId: "b1", promptId: "uncertain", cardRole: "answer", rootMessageId: "answer", kind: "card_update", payload: "{\"secret\":true}" });
+    store.markOutboundReplyDeadLetter("failed-rebuild", "target unavailable", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230011", recoveryKind: "defunct_target" });
+    store.database.prepare("UPDATE delivery_recoveries SET state = 'unresolved', action = 'rebuild_answer' WHERE failed_reply_id = 'failed-rebuild'").run();
+
+    const evidence = store.getRecoveryDurableEvidence();
+    expect(evidence).toMatchObject({ uncertainExecution: 1, rebuildingProjection: 1, delivering: 1, awaitingAck: 0, needsHumanDelivery: 0 });
+    expect(evidence.oldestPendingAt).toBe("2026-10-02T04:01:00.000Z");
+    expect(evidence.items).toEqual([
+      { kind: "uncertain_prompt", stage: "needs_human", bindingId: "b1", promptId: "uncertain", workerId: null, workerTurnId: null, updatedAt: "2026-10-02T04:01:00.000Z" },
+      { kind: "primary_answer", stage: "rebuilding_projection", bindingId: "b1", promptId: "uncertain", workerId: null, workerTurnId: null, updatedAt: expect.any(String) },
+      { kind: "primary_answer", stage: "delivering", bindingId: "b1", promptId: "uncertain", workerId: null, workerTurnId: null, updatedAt: expect.any(String) }
+    ]);
+    expect(evidence.items.length).toBeLessThanOrEqual(20);
+    expect(JSON.stringify(evidence)).not.toMatch(/sensitive prompt|secret/);
+  });
+
+  it("allocates a Worker Task replacement sequence after stream finish", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary-pane", lastAgentState: "idle" });
+    const createdWorker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "primary-pane", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: createdWorker.id, expectedGeneration: createdWorker.generation, herdrWorkspaceId: "w1", paneId: "worker-pane", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "now" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === view.turnId)!;
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+
+    const items = [{ kind: "agent_message" as const, id: "message:one", sequence: 1, markdown: "Visible result" }];
+    expect(store.reserveWorkerAnswerTimelineCard({ turnId: view.turnId, pageIndex: 0, messageId: "worker-message", card: { timeline: true }, cursor: null, items })).toBe("reserved");
+    const timeline = store.listPendingOutboundReplies()[0]!;
+    expect(timeline).toMatchObject({ kind: "card_update", cardSequence: 1 });
+    store.markOutboundReplyDelivered(timeline.id, "worker-message");
+    store.database.prepare("UPDATE worker_turn_cards SET phase = 'completed', view_version = 2 WHERE turn_id = ?").run(view.turnId);
+
+    expect(store.reserveWorkerTurnFinish({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", summary: "Completed" })).toBe("reserved");
+    const finish = store.listPendingOutboundReplies()[0]!;
+    expect(finish).toMatchObject({ kind: "stream_finish", viewVersion: 2, cardSequence: 2 });
+    store.markOutboundReplyDelivered(finish.id, "worker-card");
+
+    expect(store.reserveWorkerTurnCardHydration({ turnId: view.turnId, pageIndex: 0, cardId: "worker-card", messageId: "worker-message", card: { durable: "result" } })).toBe("reserved");
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ kind: "card_update", workerTurnId: view.turnId, cardSequence: 3 })
+    ]);
+    expect(store.listWorkerTurnCardPages(view.turnId)[0]).toMatchObject({ sequence: 3 });
+  });
+
+  it("releases a rejected legacy Worker finish to an unclaimed authoritative card snapshot", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:primary", state: "active", lifecycle: "active", attachment: "attached" });
+    const createdWorker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: createdWorker.id, expectedGeneration: createdWorker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-30T10:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-1")!;
+    store.checkpointOutboundReplyCard(create.id, "worker-card");
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.database.prepare("UPDATE worker_turn_cards SET phase = 'completed', view_version = 5 WHERE turn_id = 'turn-1'").run();
+    store.enqueueOutboundReply({ id: "failed-finish", idempotencyKey: "worker-turn:finish:turn-1:0:2", workerTurnId: "turn-1", viewVersion: 2, streamPageIndex: 0, rootMessageId: "worker-card", kind: "stream_finish", payload: "{}", laneKeyOverride: "worker-turn:turn-1:0" });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const claim = store.claimOutboundReply("failed-finish", null)!;
+      store.markOutboundReplyFailedWithQuarantine(claim, "invalid finish payload", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "300307" });
+      if (attempt < 2) store.database.prepare("UPDATE outbound_replies SET next_attempt_at = 'now' WHERE id = 'failed-finish'").run();
+    }
+    store.enqueueOutboundReply({ id: "current-card", idempotencyKey: "worker-turn:hydrate:turn-1:0:5", workerTurnId: "turn-1", viewVersion: 5, streamPageIndex: 0, rootMessageId: "worker-message", kind: "card_update", payload: "{\"version\":5}", laneKeyOverride: "worker-turn:turn-1:0" });
+    store.enqueueOutboundReply({ id: "obsolete-finish", idempotencyKey: "worker-turn:finish:turn-1:0:3", workerTurnId: "turn-1", viewVersion: 3, streamPageIndex: 0, rootMessageId: "worker-card", kind: "stream_finish", payload: "{}", laneKeyOverride: "worker-turn:turn-1:0" });
+
+    expect(store.listPendingOutboundReplies()).toEqual([
+      expect.objectContaining({ id: "current-card", viewVersion: 5 }),
+      expect.objectContaining({ id: "obsolete-finish", viewVersion: 3 })
+    ]);
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedRejectedWorkerTurnFinalizers: 1 });
+    expect(store.getOutboundReply("obsolete-finish")).toMatchObject({ state: "dismissed" });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "current-card", viewVersion: 5 })]);
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'failed-finish'").get()).toEqual({ state: "replacement_pending", action: "released_worker_turn_snapshot", replacement_reply_id: "current-card" });
+
+    expect(store.database.prepare("SELECT state, resolved_by_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'failed-finish'").get()).toEqual({ state: "replacement_pending", resolved_by_reply_id: null });
+  });
+
+  it("dismisses rejected legacy Worker finalizers after the authoritative card view is already delivered", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", projectId: "p1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "primary-root", title: "Primary" });
+    store.updateBinding("b1", { paneId: "w1:primary", state: "active", lifecycle: "active", attachment: "attached" });
+    const createdWorker = store.createWorkerAgentInstance({
+      id: "reviewer", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({ instanceId: createdWorker.id, expectedGeneration: createdWorker.generation, herdrWorkspaceId: "w1", paneId: "w1:worker", nativeSessionId: "worker-session" })!;
+    const view = createQueuedWorkerTurnCard({ turnId: "turn-1", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: 1, workerName: worker.name, parentTurnId: null, rootMessageId: "worker-root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-30T10:00:00.000Z" });
+    store.acceptInstanceTurnWithCard({ id: view.turnId, idempotencyKey: view.turnId, actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: view.requestText, parentTurnId: null, sourceMessageId: "m1", view, render: renderWorkerTurnCard });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId }) => workerTurnId === "turn-1")!;
+    store.checkpointOutboundReplyCard(create.id, "worker-card");
+    store.markOutboundReplyDelivered(create.id, "worker-message", "worker-card");
+    store.database.prepare("UPDATE worker_turn_cards SET phase = 'failed', view_version = 5, delivered_version = 5 WHERE turn_id = 'turn-1'").run();
+    store.enqueueOutboundReply({ id: "failed-finish", idempotencyKey: "worker-turn:finish:turn-1:0:2", workerTurnId: "turn-1", viewVersion: 2, streamPageIndex: 0, rootMessageId: "worker-card", kind: "stream_finish", payload: "{}", laneKeyOverride: "worker-turn:turn-1:0" });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const claim = store.claimOutboundReply("failed-finish", null)!;
+      store.markOutboundReplyFailedWithQuarantine(claim, "invalid finish payload", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "300307" });
+      if (attempt < 2) store.database.prepare("UPDATE outbound_replies SET next_attempt_at = 'now' WHERE id = 'failed-finish'").run();
+    }
+    store.enqueueOutboundReply({ id: "obsolete-finish", idempotencyKey: "worker-turn:finish:turn-1:0:3", workerTurnId: "turn-1", viewVersion: 3, streamPageIndex: 0, rootMessageId: "worker-card", kind: "stream_finish", payload: "{}", laneKeyOverride: "worker-turn:turn-1:0" });
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ dismissedRejectedImmutableEffects: 1 });
+    expect(store.getOutboundReply("obsolete-finish")).toMatchObject({ state: "dismissed" });
+    expect(store.database.prepare("SELECT state, action FROM delivery_recoveries WHERE failed_reply_id = 'failed-finish'").get()).toEqual({ state: "dismissed", action: "startup_terminalized" });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'failed-finish'").get()).toEqual({ state: "released", action: "startup_terminalized" });
+    expect(store.database.prepare("SELECT state FROM worker_turn_card_pages WHERE turn_id = 'turn-1' AND page_index = 0").get()).toEqual({ state: "finished" });
+    expect(store.listPendingOutboundReplies()).toEqual([]);
   });
 
   it("keeps an uncertain Worker Main update blocked when its successor identity disagrees", () => {
     store = new SqliteBindingStore(":memory:");
     const { successorId } = prepareSupersededWorkerMainCandidate(store);
-    store.database.prepare("UPDATE outbound_replies SET prompt_id = 'foreign-prompt' WHERE id = ?").run(successorId);
+    mutateHistoricalOutboundReply(store, "UPDATE outbound_replies SET prompt_id = 'foreign-prompt' WHERE id = ?", successorId);
 
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 0 });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: successorId })]);
   });
 
   it("keeps an uncertain Worker Main update blocked when its successor was previously claimed", () => {
@@ -4992,16 +10942,16 @@ describe("SQLite store", () => {
     store.database.prepare("UPDATE outbound_replies SET first_claimed_at = '2026-09-19T00:02:00.000Z' WHERE id = ?").run(successorId);
 
     expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 0 });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: successorId })]);
   });
 
-  it("accepts a legacy immutable lane class when exact Answer replacement proof exists", () => {
+  it("keeps a legacy immutable lane class blocked without delivered Answer replacement proof", () => {
     store = new SqliteBindingStore(":memory:");
     prepareSupersededAnswerCandidate(store);
     store.database.prepare("UPDATE outbox_lane_quarantines SET lane_class = 'immutable' WHERE failed_reply_id = 'old-update'").run();
 
-    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 1 });
-    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "released", action: "startup_superseded_answer" });
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ resolvedSupersededAnswerTargets: 0 });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'old-update'").get()).toEqual({ state: "active", action: "blocked" });
   });
 
   it("isolates independent replies to the same root message", () => {
@@ -5015,17 +10965,17 @@ describe("SQLite store", () => {
       { id: "first", lane_key: "gateway:feishu:primary:reply:first" },
       { id: "second", lane_key: "gateway:feishu:primary:reply:second" }
     ]);
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["second"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["second"]);
   });
 
-  it("migrates legacy shared reply lanes without losing quarantine audit history", () => {
+  it("normalizes legacy shared reply lanes without losing quarantine audit history", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-independent-reply-lanes-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     store.database.exec(`
-      DELETE FROM schema_migrations WHERE version = 7;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 7;
       UPDATE outbound_replies SET lane_key = 'message:root-1' WHERE id IN ('failed', 'later');
     `);
     store.markOutboundReplyFailedWithQuarantine("failed", "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "230099" });
@@ -5035,13 +10985,13 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT id, lane_key, state FROM outbound_replies WHERE id IN ('failed', 'later') ORDER BY delivery_order").all()).toEqual([
-      { id: "failed", lane_key: "gateway:feishu:primary:reply:failed", state: "dead_letter" },
-      { id: "later", lane_key: "gateway:feishu:primary:reply:later", state: "pending" }
+      { id: "failed", lane_key: "reply:failed", state: "dead_letter" },
+      { id: "later", lane_key: "reply:later", state: "pending" }
     ]);
     expect(store.database.prepare("SELECT lane_key, failed_reply_id, state FROM outbox_lane_quarantines WHERE failed_reply_id = 'failed'").get()).toEqual({
-      lane_key: "gateway:feishu:primary:reply:failed", failed_reply_id: "failed", state: "active"
+      lane_key: "reply:failed", failed_reply_id: "failed", state: "active"
     });
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toContain("later");
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toContain("later");
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 7").get()).toEqual({ version: 7 });
   });
 
@@ -5051,6 +11001,7 @@ describe("SQLite store", () => {
   ])("keeps $id classified as immutable card creation", ({ id, cardRole, targetRole, kind }) => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     let replyId = id;
     if (cardRole) {
       const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
@@ -5069,6 +11020,7 @@ describe("SQLite store", () => {
   it("keeps a repeated failure callback idempotent after quarantine", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     const metadata = { failureClass: "permanent" as const, httpStatus: 400, larkErrorCode: null };
 
@@ -5077,9 +11029,10 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbox_lane_quarantines").get()).toEqual({ count: 1 });
   });
 
-  it("releases only a strictly newer Main Card snapshot after a permanent failure", () => {
+  it("keeps a failed Main Card lane blocked when the newer snapshot was created after the failure", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const first = { ...initialTopicView("b1"), title: "First", viewVersion: 1 };
     expect(store.reserveMainCard(first, "root-1", { version: 1 })).toBe("reserved");
     const [create] = store.listPendingOutboundReplies();
@@ -5089,20 +11042,20 @@ describe("SQLite store", () => {
     const [failed] = store.listPendingOutboundReplies();
 
     expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: "bad_card" })).toMatchObject({
-      action: "released_newer_snapshot", laneClass: "main_card"
+      action: "blocked", laneClass: "main_card"
     });
     expect(store.reserveMainCard(second, "root-1", { version: 2 })).toBe("waiting");
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
 
     const third = { ...second, title: "Third", viewVersion: 3 };
     expect(store.reserveMainCard(third, "root-1", { version: 3 })).toBe("reserved");
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([expect.objectContaining({ targetRole: "session_status", viewVersion: 3 })]);
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ targetRole: "session_status", viewVersion: 3 })]);
   });
 
   it("rolls a locked Main Card over to the newest snapshot without clearing its current pointer early", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { statusMessageId: "locked-main" });
+    store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "locked-main", state: "active", lifecycle: "active", attachment: "attached" });
     const second = { ...initialTopicView("b1"), title: "Second", viewVersion: 2, deliveredVersion: 1 };
     expect(store.reserveMainCard(second, "root-1", { version: 2 })).toBe("reserved");
     const [failed] = store.listPendingOutboundReplies();
@@ -5114,94 +11067,227 @@ describe("SQLite store", () => {
       action: "rebuild_main", laneClass: "main_card", reply: { attemptCount: 1, state: "dead_letter" }
     });
     expect(store.getBinding("b1")?.statusMessageId).toBe("locked-main");
+    expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE id = ?").get(failed!.id)).toEqual({
+      state: "dead_letter", error: "card action is lock"
+    });
     expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({
       kind: "card_reply", targetRole: "session_status", rootMessageId: "root-1", viewVersion: 3, payload: JSON.stringify({ version: 3 })
     })]);
+    expect(store.database.prepare("SELECT state, error FROM outbound_replies WHERE view_version = 3 AND kind = 'card_update'").get()).toEqual({
+      state: "dismissed", error: "Coalesced unclaimed stale-main snapshot before rebuild"
+    });
     expect(store.reserveMainCard({ ...third, title: "Fourth", viewVersion: 4 }, "root-1", { version: 4 })).toBe("waiting");
   });
 
-  it("does not infer Main Card recovery from a raw Lark code", () => {
+  it.each([
+    ["main card", () => {
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "locked-main", state: "active", lifecycle: "active", attachment: "attached" });
+      expect(store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 })).toBe("reserved");
+      const [failed] = store.listPendingOutboundReplies();
+      return { failedId: failed!.id, expectedLaneClass: "main_card" as const, laneKey: failed!.laneKey };
+    }],
+    ["replaceable card", () => {
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+      store.enqueueOutboundReply({ id: "replaceable", idempotencyKey: "replaceable", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "{}", viewVersion: 1 });
+      return { failedId: "replaceable", expectedLaneClass: "replaceable_card" as const, laneKey: "gateway:feishu:primary:reply:card-1" };
+    }]
+  ])("keeps a rejected %s blocked without an exact newer durable successor", (_label, arrange) => {
     store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { statusMessageId: "locked-main" });
-    expect(store.reserveMainCard({ ...initialTopicView("b1"), viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 })).toBe("reserved");
-    const [failed] = store.listPendingOutboundReplies();
+    const { failedId, expectedLaneClass, laneKey } = arrange();
 
-    expect(store.markOutboundReplyFailedWithQuarantine(failed!.id, "card action is lock", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" })).toMatchObject({
-      action: "released_newer_snapshot", laneClass: "main_card"
+    expect(store.markOutboundReplyFailedWithQuarantine(failedId, "card action is lock", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" })).toMatchObject({
+      action: "blocked", laneClass: expectedLaneClass, reply: { state: "dead_letter" }
+    });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "unresolved", action: "blocked", replacement_reply_id: null
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "active", action: "blocked"
     });
     expect(store.listPendingOutboundReplies()).toEqual([]);
-    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE kind = 'card_reply' AND state = 'pending'").get()).toEqual({ count: 0 });
-    expect(store.getBinding("b1")?.statusMessageId).toBe("locked-main");
   });
+
+  it.each([
+    ["main card", () => {
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "main-card-1", state: "active", lifecycle: "active", attachment: "attached" });
+      expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "Second", viewVersion: 2, deliveredVersion: 1 }, "root-1", { version: 2 })).toBe("reserved");
+      const failed = store.listPendingOutboundReplies()[0]!;
+      const claim = store.claimOutboundReply(failed.id, null)!;
+      expect(store.reserveMainCard({ ...initialTopicView("b1"), title: "Third", viewVersion: 3, deliveredVersion: 1 }, "root-1", { version: 3 })).toBe("reserved");
+      const successor = store.listPendingOutboundReplies().find((reply) => reply.id !== failed.id)!;
+      return { claim, failedId: failed.id, successorId: successor.id, expectedLaneClass: "main_card" as const };
+    }],
+    ["replaceable card", () => {
+      store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+      store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head", viewVersion: 1 });
+      const claim = store.claimOutboundReply("head", null)!;
+      store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "successor", viewVersion: 2 });
+      return { claim, failedId: "head", successorId: "successor", expectedLaneClass: "replaceable_card" as const };
+    }]
+  ])("releases a rejected %s only when an exact newer pending successor is already durable", (_label, arrange) => {
+    store = new SqliteBindingStore(":memory:");
+    const { claim, failedId, successorId, expectedLaneClass } = arrange();
+    store.enqueueOutboundReply({ id: `dependent-${failedId}`, idempotencyKey: `dependent-${failedId}`, bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
+    store.preparedDeliveries.addPrerequisite({ dependentReplyId: `dependent-${failedId}`, prerequisiteReplyId: failedId, requiredState: "delivered" });
+
+    expect(store.markOutboundReplyFailedWithQuarantine(claim, "rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" })).toMatchObject({
+      action: "released_newer_snapshot", laneClass: expectedLaneClass, reply: { state: "dismissed", effectCertainty: "rejected", autoRecoveryCount: 1 }
+    });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "replacement_pending", action: "released_newer_snapshot", replacement_reply_id: successorId
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failedId)).toEqual({
+      state: "released", action: "released_newer_snapshot"
+    });
+    expect(store.database.prepare("SELECT prerequisite_reply_id,required_state FROM outbound_reply_prerequisites WHERE dependent_reply_id=?").get(`dependent-${failedId}`)).toEqual({
+      prerequisite_reply_id: successorId, required_state: "delivered"
+    });
+    expect(store.listPendingOutboundReplies()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: successorId }),
+      expect.objectContaining({ id: `dependent-${failedId}` })
+    ]));
+  });
+
+  it("keeps immediate safe supersession blocked after the Primary owner generation changes", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head", viewVersion: 1 });
+    const claim = store.claimOutboundReply("head", null)!;
+    store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "successor", viewVersion: 2 });
+    store.database.prepare("UPDATE bindings SET generation=2 WHERE id='b1'").run();
+
+    expect(store.markOutboundReplyFailedWithQuarantine(claim, "rejected", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter", effectCertainty: "rejected" } });
+    expect(store.database.prepare("SELECT state,action FROM outbox_lane_quarantines WHERE failed_reply_id='head'").get()).toEqual({
+      state: "active", action: "blocked"
+    });
+  });
+
+  it("does not release a rejected replaceable Card update after its automatic replacement generation was consumed", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head", viewVersion: 1 });
+    store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "successor", viewVersion: 2 });
+    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count=1 WHERE id='head'").run();
+
+    expect(store.markOutboundReplyFailedWithQuarantine("head", "rejected", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099"
+    })).toMatchObject({ action: "blocked", reply: { state: "dead_letter", effectCertainty: "rejected", autoRecoveryCount: 1 } });
+    expect(store.database.prepare("SELECT state,action,replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id='head'").get()).toEqual({
+      state: "unresolved", action: "blocked", replacement_reply_id: null
+    });
+    expect(store.database.prepare("SELECT state,action FROM outbox_lane_quarantines WHERE failed_reply_id='head'").get()).toEqual({
+      state: "active", action: "blocked"
+    });
+    expect(store.getOutboundReply("successor")).toMatchObject({ state: "pending" });
+  });
+
+  it("repairs an old released_newer_snapshot tuple with no replacement on startup when an exact successor exists", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head", viewVersion: 1 });
+    store.markOutboundReplyFailedWithQuarantine("head", "rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" });
+    store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "successor", viewVersion: 2 });
+    store.database.prepare(`UPDATE delivery_recoveries
+      SET state = 'unresolved', action = 'released_newer_snapshot', replacement_reply_id = NULL,
+          resolved_by_reply_id = NULL, resolved_message_id = NULL, resolved_at = NULL,
+          created_at = '2026-08-01T00:00:00.000Z', updated_at = '2026-08-01T00:00:00.000Z'
+      WHERE failed_reply_id = 'head'`).run();
+    store.database.prepare(`UPDATE outbox_lane_quarantines
+      SET state = 'released', action = 'released_newer_snapshot', released_at = '2026-08-01T00:00:00.000Z',
+          created_at = '2026-08-01T00:00:00.000Z', updated_at = '2026-08-01T00:00:00.000Z'
+      WHERE failed_reply_id = 'head'`).run();
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 0 });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'head'").get()).toEqual({
+      state: "replacement_pending", action: "released_newer_snapshot", replacement_reply_id: "successor"
+    });
+    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'head'").get()).toEqual({
+      state: "released", action: "released_newer_snapshot"
+    });
+    expect(store.listPendingOutboundReplies()).toEqual([expect.objectContaining({ id: "successor" })]);
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 0 });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'head'").get()).toEqual({
+      state: "replacement_pending", action: "released_newer_snapshot", replacement_reply_id: "successor"
+    });
+  });
+
+  it("does not broadly reactivate an old released_newer_snapshot tuple without safe successor proof", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head", viewVersion: 1 });
+    store.markOutboundReplyFailedWithQuarantine("head", "rejected", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230099" });
+    store.database.prepare(`UPDATE delivery_recoveries
+      SET state = 'unresolved', action = 'released_newer_snapshot', replacement_reply_id = NULL,
+          resolved_by_reply_id = NULL, resolved_message_id = NULL, resolved_at = NULL,
+          created_at = '2026-08-01T00:00:00.000Z', updated_at = '2026-08-01T00:00:00.000Z'
+      WHERE failed_reply_id = 'head'`).run();
+    store.database.prepare(`UPDATE outbox_lane_quarantines
+      SET state = 'released', action = 'released_newer_snapshot', released_at = '2026-08-01T00:00:00.000Z',
+          created_at = '2026-08-01T00:00:00.000Z', updated_at = '2026-08-01T00:00:00.000Z'
+      WHERE failed_reply_id = 'head'`).run();
+
+    expect(store.recoverStaleOutboxQuarantines()).toMatchObject({ releasedSupersededWorkerMainUpdates: 0 });
+    expect(store.database.prepare("SELECT state, action, replacement_reply_id FROM delivery_recoveries WHERE failed_reply_id = 'head'").get()).toEqual({
+      state: "unresolved", action: "released_newer_snapshot", replacement_reply_id: null
+    });
+    expect(store.database.prepare("SELECT state, action, released_at FROM outbox_lane_quarantines WHERE failed_reply_id = 'head'").get()).toEqual({
+      state: "released", action: "released_newer_snapshot", released_at: "2026-08-01T00:00:00.000Z"
+    });
+  });
+
 
   it("releases only the newest coalesced replaceable-card successor", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head" });
     store.enqueueOutboundReply({ id: "middle", idempotencyKey: "middle", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "middle" });
     store.enqueueOutboundReply({ id: "latest", idempotencyKey: "latest", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "latest" });
 
     expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["head", "latest"]);
+    expect(store.database.prepare("SELECT id, state FROM outbound_replies WHERE root_message_id = 'card-1' ORDER BY delivery_order").all()).toEqual([
+      { id: "head", state: "pending" },
+      { id: "middle", state: "dismissed" },
+      { id: "latest", state: "pending" }
+    ]);
     expect(store.markOutboundReplyFailedWithQuarantine("head", "invalid card", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null })).toMatchObject({
       action: "released_newer_snapshot", laneClass: "replaceable_card"
     });
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["latest"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["latest"]);
   });
 
-  it("allows one cooled transient recovery but never bypasses the resulting immutable quarantine", () => {
+  it("dismisses a transient immutable delivery after the bounded attempt budget", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       store.markOutboundReplyFailedWithQuarantine("create", "unavailable", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
     }
 
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0 } });
-    expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toMatchObject([{ id: "create", state: "pending", autoRecoveryCount: 1 }]);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      store.markOutboundReplyFailedWithQuarantine("create", "still unavailable", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
-    }
-    expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1 } });
     expect(store.recoverEligibleDeadLetters("2099-01-01T00:00:00.000Z", 10)).toEqual([]);
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.listPendingOutboundReplies()).toEqual([]);
+    expect(store.getOutboundReply("create")).toMatchObject({ state: "dismissed", attemptCount: 3, failureClass: "transient" });
     vi.useRealTimers();
-  });
-
-  it("reopens a quarantined Answer card creation once more while preserving its failure history", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    const initialCreate = store.listPendingOutboundReplies()[0]!;
-    store.markOutboundReplyDelivered(initialCreate.id, "answer-1", "card-1");
-    expect(store.reserveAnswerContinuation({
-      promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", summary: "continued", finalizedCard: {}, nextPageIndex: 1, nextPageStart: 1,
-      nextElementId: answerElementId("p1", 1), rootMessageId: "root-1", viewVersion: 2,
-      card: { body: { elements: [{ tag: "markdown", element_id: answerElementId("p1", 1), content: "x".repeat(10_000) }] } }
-    })).toBe("reserved");
-    const create = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
-    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(create.id);
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine(create.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
-
-    expect(store.getOperationalSummary().outboxQuarantines.active).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
-    expect(store.database.prepare("SELECT state, attempt_count, auto_recovery_count FROM outbound_replies WHERE id = ?").get(create.id)).toEqual({ state: "dead_letter", attempt_count: 5, auto_recovery_count: 1 });
-    const replacement = store.listPendingOutboundReplies().find((reply) => reply.kind === "stream_card_create")!;
-    expect(replacement.idempotencyKey).toBe(`startup-lite:${create.id}`);
-    expect(replacement.autoRecoveryCount).toBe(2);
-    expect(replacement.payload.length).toBeLessThan(create.payload.length);
-    expect(replacement.payload).toContain("正在恢复本页内容");
-    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(create.id)).toEqual({ state: "released", action: "startup_rebuild" });
-    expect(store.getOperationalSummary().deadLetters).toBe(1);
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
   });
 
   it("rolls back an invalid recovery page reserved across dead-lettered canonical content", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
@@ -5230,33 +11316,12 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = 'rebuild-14'").get()).toEqual({ state: "released", action: "startup_rollback" });
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(0);
     expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
-  });
 
-  it("replaces an exhausted active-page content update with one bounded canonical chunk", () => {
-    store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
-    const canonicalAnswer = "x".repeat(12_000);
-    store.saveRunCard({ ...store.loadRunCard("p1")!, phase: "completed", answer: canonicalAnswer, answerSegments: [canonicalAnswer], viewVersion: 3 });
-    expect(store.reserveAnswerContent({ promptId: "p1", pageIndex: 0, cardId: "card-0", elementId: answerElementId("p1", 0), content: canonicalAnswer })).toBe("reserved");
-    const failed = store.listPendingOutboundReplies()[0]!;
-    store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = ?").run(failed.id);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      store.markOutboundReplyFailedWithQuarantine(failed.id, "timeout", { failureClass: "transient", httpStatus: 504, larkErrorCode: "2200" });
-    }
-
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: ["p1"], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
-    const replacement = store.listPendingOutboundReplies()[0]!;
-    const payload = JSON.parse(replacement.payload) as { content: string; sourceEnd: number; sequence: number };
-    expect(replacement).toMatchObject({ idempotencyKey: `startup-lite-content:${failed.id}`, kind: "stream_content", autoRecoveryCount: 2 });
-    expect(payload.content.length).toBeLessThanOrEqual(4_000);
-    expect(payload.sourceEnd).toBeGreaterThan(0);
-    expect(payload.sourceEnd).toBeLessThan(canonicalAnswer.length);
-    expect(payload.sequence).toBe(2);
-    expect(store.database.prepare("SELECT state, action FROM outbox_lane_quarantines WHERE failed_reply_id = ?").get(failed.id)).toEqual({ state: "released", action: "startup_rebuild" });
+    store.markOutboundReplyDeadLetter(replacement!.id, "replacement failed", {
+      failureClass: "transient", effectCertainty: "not-started", httpStatus: 503, larkErrorCode: null
+    });
     expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
+    expect(store.listPendingOutboundReplies().some((reply) => reply.idempotencyKey === `startup-lite-content:${replacement!.id}`)).toBe(false);
   });
 
   it("dismisses stale disconnected-topic notices but preserves uncertain immutable quarantines", () => {
@@ -5264,10 +11329,10 @@ describe("SQLite store", () => {
     store.enqueueOutboundReply({ id: "notice", idempotencyKey: "disconnected-topic:message-1", rootMessageId: "message-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "other", idempotencyKey: "important:message-2", rootMessageId: "message-2", kind: "card_reply", payload: "{}" });
     store.database.prepare("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = 'notice'").run();
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine("notice", "unavailable", { failureClass: "transient", httpStatus: 500, larkErrorCode: "2200" });
+    for (let attempt = 0; attempt < 3; attempt += 1) store.markOutboundReplyFailedWithQuarantine("notice", "unavailable", { failureClass: "transient", httpStatus: 500, larkErrorCode: "2200" });
     store.markOutboundReplyFailedWithQuarantine("other", "unknown outcome", { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: null, larkErrorCode: null });
 
-    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 1, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
+    expect(store.recoverStaleOutboxQuarantines()).toEqual({ retriedAnswerPromptIds: [], rolledBackAnswerPromptIds: [], dismissedNotices: 0, dismissedRejectedImmutableEffects: 0, resolvedSupersededAnswerTargets: 0, releasedSupersededWorkerMainUpdates: 0, terminalizedQuarantines: 0 });
     expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'notice'").get()).toEqual({ state: "dismissed" });
     expect(store.database.prepare("SELECT state FROM outbound_replies WHERE id = 'other'").get()).toEqual({ state: "dead_letter" });
     expect(store.getOperationalSummary().outboxQuarantines.active).toBe(1);
@@ -5277,12 +11342,13 @@ describe("SQLite store", () => {
   it("atomically releases an immutable quarantine when the failed head is dismissed", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
     store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
 
     expect(store.dismissDeadLetter("create", "c1", "u1")).toBe("dismissed");
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["later"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["later"]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 0, released: 1, latest: { action: "manual_dismiss" } } });
     expect(store.dismissDeadLetter("create", "c1", "u1")).toBe("stale");
   });
@@ -5292,6 +11358,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "create", idempotencyKey: "create", bindingId: "b1", rootMessageId: "root-1", kind: "card_reply", payload: "{}" });
     store.enqueueOutboundReply({ id: "later", idempotencyKey: "later", bindingId: "b1", rootMessageId: "root-1", kind: "text", payload: "later" });
     store.markOutboundReplyFailedWithQuarantine("create", "invalid target", { failureClass: "permanent", httpStatus: 400, larkErrorCode: null });
@@ -5300,12 +11367,13 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 5").all()).toEqual([{ version: 5 }]);
     expect(store.getOperationalSummary()).toMatchObject({ outboxQuarantines: { active: 1, released: 0 } });
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["later"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["later"]);
   });
 
   it("coalesces pending binding status-card snapshots behind the in-flight-safe lane head", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
 
     store.enqueueOutboundReply({ id: "working", idempotencyKey: "status:working", bindingId: "b1", rootMessageId: "status-card", kind: "card_update", payload: "working" });
     store.enqueueOutboundReply({ id: "progress", idempotencyKey: "status:progress", bindingId: "b1", rootMessageId: "status-card", kind: "card_update", payload: "progress" });
@@ -5315,16 +11383,44 @@ describe("SQLite store", () => {
       { id: "working", payload: "working" },
       { id: "done", payload: "done" }
     ]);
-    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["working"]);
+    expect(store.database.prepare("SELECT id, state FROM outbound_replies WHERE binding_id = 'b1' ORDER BY delivery_order").all()).toEqual([
+      { id: "working", state: "pending" },
+      { id: "progress", state: "dismissed" },
+      { id: "done", state: "pending" }
+    ]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["working", "done"]);
 
     store.markOutboundReplyDelivered("working", "status-card");
-    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["done"]);
+    expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["done"]);
+  });
+
+  it("keeps a superseded pending Answer static update as a dismissed tombstone", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    store.database.prepare("UPDATE answer_pages SET delivery_mode = 'static' WHERE prompt_id = 'p1' AND page_index = 0").run();
+
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "older" } })).toBe("reserved");
+    const current = store.loadRunCard("p1")!;
+    store.saveRunCard({ ...current, answer: "newer", answerSegments: ["newer"], viewVersion: current.viewVersion + 1 });
+    expect(store.reserveStaticAnswerCardUpdate({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { content: "newer" } })).toBe("reserved");
+
+    expect(store.listPendingOutboundReplies().map((reply) => JSON.parse(reply.payload))).toEqual([{ content: "newer" }]);
+    expect(store.database.prepare("SELECT state, COUNT(*) AS count FROM outbound_replies WHERE prompt_id = 'p1' AND kind = 'card_update' GROUP BY state ORDER BY state").all()).toEqual([
+      { state: "dismissed", count: 1 },
+      { state: "pending", count: 1 }
+    ]);
   });
 
   it("keeps status-card coalescing isolated by binding, target, and lane", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "One" });
     store.createPendingBinding({ id: "b2", workspaceId: "w2", chatId: "c1", topicId: "t2", rootMessageId: "root-2", title: "Two" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.updateBinding("b2", { paneId: "w2:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "b1-head", idempotencyKey: "b1-head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head" });
     store.enqueueOutboundReply({ id: "b1-next", idempotencyKey: "b1-next", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "next" });
     store.enqueueOutboundReply({ id: "b2-head", idempotencyKey: "b2-head", bindingId: "b2", rootMessageId: "card-1", kind: "card_update", payload: "other binding" });
@@ -5337,6 +11433,7 @@ describe("SQLite store", () => {
   it("preserves every pending Answer stream sequence", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const [answerCreate] = store.listPendingOutboundReplies();
@@ -5357,6 +11454,7 @@ describe("SQLite store", () => {
   it("rolls back status-card pruning when insertion fails", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     store.enqueueOutboundReply({ id: "head", idempotencyKey: "head", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "head" });
     store.enqueueOutboundReply({ id: "successor", idempotencyKey: "successor", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "successor" });
 
@@ -5364,84 +11462,85 @@ describe("SQLite store", () => {
     expect(store.listPendingOutboundReplies().map((reply) => reply.id)).toEqual(["head", "successor"]);
   });
 
-  it("reports an empty durable outbox lane summary without identifiers", () => {
+  it("reports an empty durable delivery Ring summary without identifiers", () => {
     store = new SqliteBindingStore(":memory:");
 
-    expect(store.getOperationalSummary().outboxLanes).toEqual({
-      pending: 0, eligible: 0, blocked: 0, nextAttemptAt: null,
-      oldestHeadAt: null, oldestHeadAgeSeconds: null, stalled: 0, oldestStalledAgeSeconds: null
-    });
-    expect(store.getOperationalSummary().outboxWork).toEqual({
-      ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0,
-      oldestInFlightAt: null, oldestInFlightAgeSeconds: null
+    expect(store.getOperationalSummary().deliveryRings).toEqual({
+      pending: 0, panePending: 0, globalPending: 0, durableBytes: 0, scopes: 0,
+      primaryPaneScopes: 0, workerPaneScopes: 0, legacyWorkerScopeDebt: 0,
+      ready: 0, retryWait: 0, activeClaims: 0, waitingBehindScope: 0,
+      oldestPendingAt: null, oldestPendingAgeSeconds: null,
+      initializedCheckpointScopes: 0, lowestBlockingDeliveryOrder: null,
+      lowestBlockingAgeSeconds: null, uncertainBlocked: 0, activeQuarantineBlocked: 0,
+      graceBlockedScopes: 0, isolatedConflicts: 0, isolatedUncertain: 0,
+      bypassedDeliveries: 0, pendingHumanReviews: 0, oldestHumanReviewAgeSeconds: null
     });
   });
 
-  it("partitions pending outbox work into exclusive durable classes", () => {
+  it("partitions pending delivery Ring work into exclusive durable classes", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-12T00:10:00.000Z"));
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "ready", idempotencyKey: "ready", rootMessageId: "ready-card", kind: "card_update", payload: "{}" });
-    store.enqueueOutboundReply({ id: "claimed", idempotencyKey: "claimed", rootMessageId: "claimed-card", kind: "card_update", payload: "{}" });
-    store.enqueueOutboundReply({ id: "retry", idempotencyKey: "retry", rootMessageId: "retry-card", kind: "card_update", payload: "{}" });
-    store.enqueueOutboundReply({ id: "retry-successor", idempotencyKey: "retry-successor", rootMessageId: "retry-card", kind: "card_update", payload: "{}" });
+    for (const id of ["ready", "claimed", "retry"]) {
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { paneId: `w1:${id}`, state: "active", lifecycle: "active", attachment: "attached" });
+    }
+    store.enqueueOutboundReply({ id: "ready", idempotencyKey: "ready", bindingId: "ready", rootMessageId: "ready-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "claimed", idempotencyKey: "claimed", bindingId: "claimed", rootMessageId: "claimed-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "retry", idempotencyKey: "retry", bindingId: "retry", rootMessageId: "retry-card", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "retry-successor", idempotencyKey: "retry-successor", bindingId: "retry", rootMessageId: "retry-card", kind: "card_update", payload: "{}" });
     vi.setSystemTime(new Date("2026-09-12T00:09:50.000Z"));
     const claim = store.claimOutboundReply("claimed", null)!;
     vi.setSystemTime(new Date("2026-09-12T00:10:00.000Z"));
     store.database.prepare("UPDATE outbound_replies SET next_attempt_at = ? WHERE id = 'retry'").run("2026-09-12T00:11:00.000Z");
 
     const summary = store.getOperationalSummary();
-    expect(summary.outboxWork).toEqual({
-      ready: 1, inFlight: 1, retryWait: 1, cooldownWait: 0, waitingBehindLane: 1,
-      oldestInFlightAt: "2026-09-12T00:09:50.000Z", oldestInFlightAgeSeconds: 10
-    });
-    expect(Object.values(summary.outboxWork).slice(0, 5).reduce((total, count) => total + Number(count), 0)).toBe(summary.pendingOutbox);
+    expect(summary.deliveryRings).toMatchObject({ pending: 4, panePending: 4, scopes: 3, ready: 0, activeClaims: 1, retryWait: 1, waitingBehindScope: 2 });
     expect(store.markOutboundReplyDelivered(claim, "message")).toBe(true);
-    expect(store.getOperationalSummary().outboxWork).toMatchObject({ inFlight: 0, ready: 1, retryWait: 1, waitingBehindLane: 1 });
+    expect(store.getOperationalSummary().deliveryRings).toMatchObject({ pending: 3, activeClaims: 0, ready: 0, retryWait: 1, waitingBehindScope: 2 });
     vi.useRealTimers();
   });
 
   it("retains a malformed legacy claim timestamp without throwing or inventing an age", () => {
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "claimed", idempotencyKey: "claimed", rootMessageId: "card", kind: "card_update", payload: "{}" });
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "claimed", idempotencyKey: "claimed", bindingId: "b1", rootMessageId: "card", kind: "card_update", payload: "{}" });
     expect(store.claimOutboundReply("claimed", null)).not.toBeNull();
     store.database.prepare("UPDATE outbound_replies SET claimed_at = 'legacy-invalid' WHERE id = 'claimed'").run();
 
-    expect(store.getOperationalSummary().outboxWork).toMatchObject({
-      inFlight: 1, oldestInFlightAt: "legacy-invalid", oldestInFlightAgeSeconds: null
-    });
+    expect(store.getOperationalSummary().deliveryRings).toMatchObject({ activeClaims: 1 });
   });
 
-  it("distinguishes row retry wait from app cooldown wait and restores ready work at expiry", () => {
+  it("reports Ring retry wait and restores ready scopes at app cooldown expiry", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
     store = new SqliteBindingStore(":memory:");
-    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", rootMessageId: "limited-card", kind: "card_update", payload: "{}" });
-    store.enqueueOutboundReply({ id: "due", idempotencyKey: "due", rootMessageId: "due-card", kind: "card_update", payload: "{}" });
-    store.enqueueOutboundReply({ id: "backoff", idempotencyKey: "backoff", rootMessageId: "backoff-card", kind: "card_update", payload: "{}" });
+    for (const id of ["limited", "due", "backoff"]) {
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { paneId: `w1:${id}`, state: "active", lifecycle: "active", attachment: "attached" });
+      store.enqueueOutboundReply({ id, idempotencyKey: id, bindingId: id, rootMessageId: `${id}-card`, kind: "card_update", payload: "{}" });
+    }
     const limited = store.claimOutboundReply("limited", null)!;
     store.markOutboundReplyFailedWithQuarantine(limited, "rate limited", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: null }, 5_000);
     store.database.prepare("UPDATE outbound_replies SET next_attempt_at = ? WHERE id = 'backoff'").run("2026-09-12T00:00:10.000Z");
 
     let summary = store.getOperationalSummary();
-    expect(summary.outboxWork).toEqual({
-      ready: 0, inFlight: 0, retryWait: 2, cooldownWait: 1, waitingBehindLane: 0, oldestInFlightAt: null, oldestInFlightAgeSeconds: null
-    });
-    expect(summary.outboxWork.ready + summary.outboxWork.inFlight + summary.outboxWork.retryWait + summary.outboxWork.cooldownWait + summary.outboxWork.waitingBehindLane).toBe(summary.pendingOutbox);
+    expect(summary.deliveryRings).toMatchObject({ pending: 3, ready: 0, activeClaims: 0, retryWait: 2, waitingBehindScope: 1 });
 
     vi.setSystemTime(new Date("2026-09-12T00:00:05.000Z"));
     summary = store.getOperationalSummary();
-    expect(summary.outboxWork).toMatchObject({ ready: 2, inFlight: 0, retryWait: 1, cooldownWait: 0, waitingBehindLane: 0 });
-    expect(summary.outboxWork.ready + summary.outboxWork.inFlight + summary.outboxWork.retryWait + summary.outboxWork.cooldownWait + summary.outboxWork.waitingBehindLane).toBe(summary.pendingOutbox);
+    expect(summary.deliveryRings).toMatchObject({ pending: 3, ready: 0, activeClaims: 0, retryWait: 1, waitingBehindScope: 2 });
     vi.useRealTimers();
   });
 
-  it("preserves Answer lane insertion order across reopen and VACUUM", () => {
+  it("preserves Answer Ring insertion order across reopen and VACUUM", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-outbox-order-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: null, requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "card-1");
     store.enqueueOutboundReply({ id: "first", idempotencyKey: "first", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "root", kind: "card_update", payload: "{}" });
@@ -5451,7 +11550,7 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(path);
     store.database.exec("VACUUM");
 
-    expect(store.listOutboundLaneHeads(1, null).map((reply) => reply.id)).toEqual(["first"]);
+    expect(store.listPendingOutboundReplies().filter((reply) => reply.id === "first" || reply.id === "second").map((reply) => reply.id)).toEqual(["first", "second"]);
   });
 
   it("jitters exponential retries and honors an explicit retry delay", () => {
@@ -5469,14 +11568,18 @@ describe("SQLite store", () => {
     vi.useRealTimers();
   });
 
-  it("persists an app-wide 429 cooldown across lanes and restart", () => {
+  it("persists an app-wide 429 cooldown across Rings and restart", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-lark-cooldown-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
-    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
-    store.enqueueOutboundReply({ id: "independent", idempotencyKey: "independent", rootMessageId: "card-2", kind: "card_update", payload: "{}" });
+    for (const id of ["limited", "independent"]) {
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { paneId: `w1:${id}`, state: "active", lifecycle: "active", attachment: "attached" });
+    }
+    store.enqueueOutboundReply({ id: "limited", idempotencyKey: "limited", bindingId: "limited", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
+    store.enqueueOutboundReply({ id: "independent", idempotencyKey: "independent", bindingId: "independent", rootMessageId: "card-2", kind: "card_update", payload: "{}" });
     const claim = store.claimOutboundReply("limited", null)!;
 
     expect(store.markOutboundReplyFailedWithQuarantine(claim, "rate limited Authorization: Bearer top-secret", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, larkErrorCode: "99991400" }, 7_000)).toMatchObject({
@@ -5485,18 +11588,16 @@ describe("SQLite store", () => {
     expect(store.database.prepare("SELECT scope, blocked_until, trigger_count, last_http_status, last_lark_error_code, last_reason FROM lark_delivery_cooldowns").get()).toEqual({
       scope: "app", blocked_until: "2026-09-12T00:00:07.000Z", trigger_count: 1, last_http_status: 429, last_lark_error_code: "99991400", last_reason: "rate limited Authorization: Bearer [REDACTED]"
     });
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
     expect(store.claimOutboundReply("independent", null)).toBeNull();
-    expect(store.getNextOutboundLaneHeadAttemptAt()).toBe("2026-09-12T00:00:07.000Z");
     expect(store.getOperationalSummary()).toMatchObject({
       larkDeliveryCooldown: { active: true, blockedUntil: "2026-09-12T00:00:07.000Z", remainingMs: 7_000, triggerCount: 1, lastHttpStatus: 429, lastLarkErrorCode: "99991400", lastReason: "rate limited Authorization: Bearer [REDACTED]" },
-      outboxLanes: { pending: 2, eligible: 0, blocked: 2, nextAttemptAt: "2026-09-12T00:00:07.000Z", stalled: 0, oldestStalledAgeSeconds: null }
+      deliveryRings: { pending: 2, ready: 0, retryWait: 1, activeClaims: 0, waitingBehindScope: 1 }
     });
     store.close(); store = new SqliteBindingStore(path);
-    expect(store.listOutboundLaneHeads(10, null)).toEqual([]);
+    expect(store.getOperationalSummary().deliveryRings).toMatchObject({ pending: 2, ready: 0 });
 
     vi.setSystemTime(new Date("2026-09-12T00:00:07.000Z"));
-    expect(store.listOutboundLaneHeads(10, null).map((reply) => reply.id)).toEqual(["limited", "independent"]);
+    expect(store.getOperationalSummary().deliveryRings).toMatchObject({ pending: 2, ready: 0, retryWait: 0, waitingBehindScope: 2 });
     expect(store.getOperationalSummary().larkDeliveryCooldown).toMatchObject({ active: false, remainingMs: 0, triggerCount: 1 });
     expect(store.claimOutboundReply("independent", null)).not.toBeNull();
     vi.useRealTimers();
@@ -5506,7 +11607,11 @@ describe("SQLite store", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
     store = new SqliteBindingStore(":memory:");
-    for (const id of ["first", "second", "stale"]) store.enqueueOutboundReply({ id, idempotencyKey: id, rootMessageId: `card-${id}`, kind: "card_update", payload: "{}" });
+    for (const id of ["first", "second", "stale"]) {
+      store.createPendingBinding({ id, workspaceId: "w1", chatId: "c1", topicId: id, rootMessageId: `root-${id}`, title: id });
+      store.updateBinding(id, { paneId: `w1:${id}`, state: "active", lifecycle: "active", attachment: "attached" });
+      store.enqueueOutboundReply({ id, idempotencyKey: id, bindingId: id, rootMessageId: `card-${id}`, kind: "card_update", payload: "{}" });
+    }
     const first = store.claimOutboundReply("first", null)!;
     const second = store.claimOutboundReply("second", null)!;
     const stale = store.claimOutboundReply("stale", null)!;
@@ -5544,7 +11649,7 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.enqueueOutboundReply({ id: "pending", idempotencyKey: "pending", rootMessageId: "card", kind: "card_update", payload: "{}" });
-    store.database.exec("DROP TABLE lark_delivery_cooldowns; DELETE FROM schema_migrations WHERE version = 38");
+    store.database.exec("DROP TABLE lark_delivery_cooldowns; DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 38");
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 38").get()).toEqual({ version: 38 });
@@ -5561,10 +11666,10 @@ describe("SQLite store", () => {
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Task" });
     store.recordInboundMessage({ eventId: "event-1", messageId: "message-1", chatId: "chat", topicId: "topic", rootMessageId: "root", parentMessageId: null, actorOpenId: "actor", text: "hello", mentionsBot: true, isRootMessage: false });
     store.enqueueOutboundReply({ id: "out-1", idempotencyKey: "out-1", rootMessageId: "root", kind: "card_update", payload: '{"legacy":true}' });
-    store.database.exec("DROP TRIGGER outbound_replies_immutable_claim; DROP INDEX bindings_gateway_route; DROP INDEX inbound_messages_gateway_event; DROP INDEX outbound_replies_gateway_state");
+    store.database.exec("DROP TRIGGER outbound_replies_immutable_claim; DROP INDEX bindings_active_orchestrator; DROP INDEX bindings_gateway_route; DROP INDEX inbound_messages_gateway_event; DROP INDEX outbound_replies_gateway_state");
     for (const table of ["bindings", "inbound_messages"]) store.database.exec(`ALTER TABLE ${table} DROP COLUMN gateway_id`);
     for (const column of ["gateway_checkpoint_json", "gateway_plan_hash", "gateway_plan_json", "gateway_profile_id", "gateway_id"]) store.database.exec(`ALTER TABLE outbound_replies DROP COLUMN ${column}`);
-    store.database.exec("DELETE FROM schema_migrations WHERE version = 39");
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 39");
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT gateway_id FROM bindings WHERE id = 'b1'").get()).toEqual({ gateway_id: "feishu:primary" });
@@ -5579,36 +11684,22 @@ describe("SQLite store", () => {
     expect(store.markOutboundReplyDelivered(claim, "root")).toBe(true);
   });
 
-  it("scopes legacy outbox lanes and quarantines by Gateway identity", () => {
-    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-gateway-lane-migration-"));
-    const path = join(temporaryDirectory, "bridge.db");
-    store = new SqliteBindingStore(path);
-    store.enqueueOutboundReply({ id: "failed", idempotencyKey: "failed", rootMessageId: "root", kind: "card_reply", payload: "{}" });
-    const claim = store.claimOutboundReply("failed", null)!;
-    store.markOutboundReplyFailedWithQuarantine(claim, "bad target", { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: null });
-    store.database.exec("DROP TRIGGER outbound_replies_immutable_claim; DELETE FROM outbox_lane_heads; UPDATE outbox_lane_quarantines SET lane_key = 'reply:failed'; UPDATE outbound_replies SET lane_key = 'reply:failed'; DELETE FROM schema_migrations WHERE version = 40");
-    store.close(); store = new SqliteBindingStore(path);
-
-    expect(store.database.prepare("SELECT lane_key FROM outbound_replies WHERE id = 'failed'").get()).toEqual({ lane_key: "gateway:feishu:primary:reply:failed" });
-    expect(store.database.prepare("SELECT lane_key, state FROM outbox_lane_quarantines WHERE failed_reply_id = 'failed'").get()).toEqual({ lane_key: "gateway:feishu:primary:reply:failed", state: "active" });
-    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 40").get()).toEqual({ version: 40 });
-  });
-
   it("migrates precise legacy Feishu expired Answer targets into terminal projection evidence", () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-expired-answer-target-migration-"));
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
     store.database.prepare("UPDATE answer_pages SET state = 'finished' WHERE prompt_id = 'p1'").run();
     expect(store.reserveFinalAnswerCardUpdate({ promptId: "p1", pageIndex: 0, cardId: "card-1", messageId: "answer-1", card: { content: "final" } })).toBe("reserved");
     const expired = store.listPendingOutboundReplies()[0]!;
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(expired.id, null)!, "message expired", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
+    for (let attempt = 0; attempt < 3; attempt += 1) store.markOutboundReplyFailedWithQuarantine(store.claimOutboundReply(expired.id, null)!, "message expired", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
     store.enqueueOutboundReply({ id: "unscoped", idempotencyKey: "unscoped", bindingId: "b1", promptId: "p1", cardRole: "answer", rootMessageId: "answer-1", kind: "card_update", payload: "{}" });
     store.markOutboundReplyDeadLetter("unscoped", "message expired", { failureClass: "unknown", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "230031" });
-    store.database.prepare("DELETE FROM schema_migrations WHERE version = 41").run();
+    store.database.exec("DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 41");
     store.close(); store = new SqliteBindingStore(path);
 
     expect(store.database.prepare("SELECT state, action, failure_class FROM delivery_recoveries WHERE failed_reply_id = ?").get(expired.id)).toEqual({ state: "dismissed", action: "expired_view_target", failure_class: "permanent" });
@@ -5656,7 +11747,7 @@ describe("SQLite store", () => {
     store.database.exec(`
       UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'unknown', effect_certainty = NULL, http_status = 400 WHERE id = 'response';
       UPDATE outbound_replies SET state = 'dead_letter', failure_class = 'unknown', effect_certainty = NULL, http_status = NULL, lark_error_code = NULL WHERE id = 'transport';
-      DELETE FROM schema_migrations WHERE version = 37;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 37;
     `);
     store.close(); store = new SqliteBindingStore(path);
 
@@ -5689,6 +11780,41 @@ describe("SQLite store", () => {
     ]);
   });
 
+  it("prunes only old compensated projection gaps in bounded batches", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.database.exec(`
+      INSERT INTO projection_gaps(stage,owner_kind,owner_id,source_item_id,failure_class,failure_code,state,compensated_by_version,first_failed_at,last_failed_at,compensated_at)
+      VALUES
+        ('answer_delivery','answer_page','p1:0','old-1','permanent','rejected','compensated',2,'2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z','2026-08-02T00:00:00.000Z'),
+        ('answer_delivery','answer_page','p1:0','old-2','permanent','rejected','compensated',3,'2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z','2026-08-03T00:00:00.000Z'),
+        ('answer_delivery','answer_page','p1:0','new','permanent','rejected','compensated',4,'2026-08-20T00:00:00.000Z','2026-08-20T00:00:00.000Z','2026-08-21T00:00:00.000Z'),
+        ('core_projection','binding','b1','open','projection','reducer_failed','open',NULL,'2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z',NULL);
+    `);
+
+    expect(store.pruneCompensatedProjectionGaps?.("2026-08-12T00:00:00.000Z", 1)).toBe(1);
+    expect(store.pruneCompensatedProjectionGaps?.("2026-08-12T00:00:00.000Z", 10)).toBe(1);
+    expect(store.database.prepare("SELECT source_item_id, state FROM projection_gaps ORDER BY source_item_id").all()).toEqual([
+      { source_item_id: "new", state: "compensated" },
+      { source_item_id: "open", state: "open" }
+    ]);
+  });
+
+  it("retains delivered semantic evidence while its settlement gap is open", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.enqueueOutboundReply({ id:"semantic-old",idempotencyKey:"semantic-old",rootMessageId:"root",kind:"card_update",payload:"{}",projectionKey:"turn-card:segment:page:0",snapshotRevision:1 });
+    store.enqueueOutboundReply({ id:"semantic-new",idempotencyKey:"semantic-new",rootMessageId:"root",kind:"card_update",payload:"{}",projectionKey:"turn-card:segment:page:0",snapshotRevision:2 });
+    store.database.exec(`
+      UPDATE outbound_replies SET state='delivered',updated_at='2026-08-01T00:00:00.000Z' WHERE id='semantic-old';
+      UPDATE outbound_replies SET state='delivered',updated_at='2026-08-20T00:00:00.000Z' WHERE id='semantic-new';
+      INSERT INTO projection_gaps(stage,owner_kind,owner_id,source_item_id,failure_class,failure_code,state,first_failed_at,last_failed_at)
+      VALUES('turn_recovery','turn_card','segment:page:0','semantic-old','permanent','semantic_subject_settlement_mismatch','open','2026-08-01T00:00:00.000Z','2026-08-01T00:00:00.000Z');
+    `);
+
+    expect(store.pruneDeliveredOutboundReplies("2026-08-12T00:00:00.000Z",10)).toBe(0);
+    store.database.prepare("UPDATE projection_gaps SET state='compensated',compensated_by_version=2,compensated_at='2026-08-21T00:00:00.000Z' WHERE source_item_id='semantic-old'").run();
+    expect(store.pruneDeliveredOutboundReplies("2026-08-12T00:00:00.000Z",10)).toBe(1);
+  });
+
   it("keeps both sides of active delivery recovery out of retention", () => {
     store = new SqliteBindingStore(":memory:");
     for (const id of ["failed-pending", "replacement-pending", "failed-unresolved", "replacement-unresolved", "prunable"]) {
@@ -5711,11 +11837,17 @@ describe("SQLite store", () => {
     ]);
     const plan = store.database.prepare(`EXPLAIN QUERY PLAN ${outboundRetentionCandidateSelectionSql}`).all("2026-08-12T00:00:00.000Z", 10) as Array<{ id: number; parent: number; detail: string }>;
     const correlatedSubqueries = plan.filter(({ detail }) => detail.includes("CORRELATED SCALAR SUBQUERY"));
-    expect(correlatedSubqueries).toHaveLength(3);
+    // The eighth correlated check preserves the live fresh Completion Review
+    // presentation link; it must be retained alongside active recovery evidence.
+    expect(correlatedSubqueries).toHaveLength(8);
     const failedRecoveryLookup = plan.find(({ detail }) => detail.includes("sqlite_autoindex_delivery_recoveries_1"));
-    const replacementRecoveryLookup = plan.find(({ detail }) => detail.includes("delivery_recoveries_state"));
+    const replacementRecoveryLookup = plan.find(({ detail }) => detail.includes("delivery_recoveries_replacement"));
     expect(failedRecoveryLookup).toBeDefined();
     expect(replacementRecoveryLookup).toBeDefined();
+    expect(plan.some(({ detail }) => detail.includes("projection_gaps_open_source_item"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("conversation_segment_page_recoveries"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("conversation_segment_page_recovery_parts"))).toBe(true);
+    expect(plan.some(({ detail }) => detail.includes("conversation_segment_late_recoveries"))).toBe(true);
     expect(correlatedSubqueries.some(({ id }) => id === failedRecoveryLookup?.parent)).toBe(true);
     expect(correlatedSubqueries.some(({ id }) => id === replacementRecoveryLookup?.parent)).toBe(true);
     expect(failedRecoveryLookup?.parent).not.toBe(replacementRecoveryLookup?.parent);
@@ -5742,15 +11874,16 @@ describe("SQLite store", () => {
     ]);
   });
 
-  it("does not reset the automatic recovery budget during a manual retry", () => {
+  it("refuses manual retry after the automatic recovery generation is consumed", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.enqueueOutboundReply({ id: "manual", idempotencyKey: "manual", bindingId: "b1", rootMessageId: "card-1", kind: "card_update", payload: "{}" });
-    store.markOutboundReplyDeadLetter("manual", "unavailable", { failureClass: "transient", httpStatus: 503, larkErrorCode: null });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    store.enqueueOutboundReply({ id: "manual", idempotencyKey: "manual", bindingId: "b1", rootMessageId: "card-1", kind: "card_reply", payload: "{}" });
+    store.markOutboundReplyDeadLetter("manual", "rejected", { failureClass: "transient", effectCertainty: "rejected", httpStatus: 503, larkErrorCode: null });
     store.database.exec("UPDATE outbound_replies SET auto_recovery_count = 1 WHERE id = 'manual'");
 
-    expect(store.retryDeadLetter("manual", "c1", "u1")).toBe("retried");
-    expect(store.database.prepare("SELECT state, attempt_count, auto_recovery_count FROM outbound_replies WHERE id = 'manual'").get()).toEqual({ state: "pending", attempt_count: 0, auto_recovery_count: 1 });
+    expect(store.retryDeadLetter("manual", "c1", "u1")).toBe("unsafe");
+    expect(store.database.prepare("SELECT state, auto_recovery_count FROM outbound_replies WHERE id = 'manual'").get()).toEqual({ state: "dead_letter", auto_recovery_count: 1 });
   });
 
   it("atomically claims a prompt only while its binding is dispatchable", () => {
@@ -5769,10 +11902,105 @@ describe("SQLite store", () => {
 
     store.updateBinding("b1", { lastAgentState: "idle" });
     expect(store.claimNextDispatchablePrompt("b1")).toMatchObject({
-      prompt: { id: "p1", state: "running", attemptCount: 1 },
+      prompt: { id: "p1", state: "submitted", attemptCount: 1 },
       binding: { id: "b1", paneId: "w1:p1", lastAgentState: "idle" }
     });
     expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+  });
+
+  it("keeps the next ordinary prompt queued while the agent is working", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "working"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "next", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "next" }, view, rootMessageId: "root-1", answerCard: {} });
+
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.getPrompt("p1")).toMatchObject({ state: "queued", observationState: "not_started", attemptCount: 0 });
+  });
+
+  it("persists a native submission attempt fence before settling the Core receipt", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "next", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "next" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.claimNextDispatchablePrompt("b1");
+
+    const dispatchedAt = "2026-09-28T15:00:00.000Z";
+    expect(store.fencePromptNativeSubmission({
+      promptId: "p1",
+      bindingId: "b1",
+      submissionId: "p1",
+      dispatchedAt
+    })).toBe(true);
+    expect(store.getPrompt("p1")).toMatchObject({
+      state: "submitted",
+      observationState: "detached",
+      wasDetached: true,
+      dispatchedAt,
+      nativeSubmissionId: "p1",
+      error: "Native submission call started; awaiting an exact outcome"
+    });
+    expect(store.listStaleUndispatchedPromptClaims("2026-09-28T15:00:01.000Z", 10)).toEqual([]);
+
+    expect(store.markPromptNativeQueued({
+      promptId: "p1",
+      bindingId: "b1",
+      submissionId: "p1",
+      dispatchedAt
+    })).toBe(true);
+    expect(store.getPrompt("p1")).toMatchObject({
+      id: "p1",
+      state: "submitted",
+      observationState: "detached",
+      wasDetached: true,
+      dispatchedAt: "2026-09-28T15:00:00.000Z",
+      nativeSubmissionId: "p1",
+      transcriptTurnId: null
+    });
+  });
+
+  it("restores only the exact native submission fence after a confirmed rejection", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "next", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "next" }, view, rootMessageId: "root-1", answerCard: {} });
+    store.claimNextDispatchablePrompt("b1");
+    const dispatchedAt = "2026-09-28T15:00:00.000Z";
+    expect(store.fencePromptNativeSubmission({ promptId: "p1", bindingId: "b1", submissionId: "p1", dispatchedAt })).toBe(true);
+
+    expect(store.releaseRejectedNativeSubmission({ promptId: "p1", bindingId: "b1", submissionId: "p1", dispatchedAt: "2026-09-28T15:00:00.001Z" })).toBe(false);
+    expect(store.releaseRejectedNativeSubmission({ promptId: "p1", bindingId: "b1", submissionId: "p1", dispatchedAt })).toBe(true);
+    expect(store.getPrompt("p1")).toMatchObject({
+      state: "queued", observationState: "not_started", wasDetached: false,
+      dispatchedAt: null, nativeSubmissionId: "p1", error: null
+    });
+  });
+
+  it("keeps later FIFO prompts queued after the head is accepted by Herdr", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", provisioningCheckpoint: "activated", lastAgentState: "idle"
+    });
+    for (const [promptId, messageId] of [["p1", "m1"], ["p2", "m2"]] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "now" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: messageId, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root-1", answerCard: {} });
+    }
+
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("p1");
+    expect(store.markPromptNativeQueued({ promptId: "p1", bindingId: "b1", submissionId: "p1", dispatchedAt: "2026-09-28T15:00:00.000Z" })).toBe(true);
+    expect(store.claimNextDispatchablePrompt("b1")).toBeNull();
+    expect(store.getPrompt("p2")).toMatchObject({ state: "queued", observationState: "not_started", attemptCount: 0 });
+    expect(store.inspectIntegrity(20).issues).not.toContainEqual(expect.objectContaining({ rule: "multiple_running_turns" }));
   });
 
   it("atomically cancels terminal backlog and returns identity-only durable work hints", () => {
@@ -5796,13 +12024,26 @@ describe("SQLite store", () => {
       failedDetached: 0,
       hints: [{ kind: "prompt-ready", bindingId: "active" }]
     });
-    expect(store.getOperationalSummary().prompts).toMatchObject({ queued: 2, cancelled: 2 });
-    expect(store.claimNextDispatchablePrompt("active")).toMatchObject({ prompt: { id: "private-turn", state: "running" } });
+    expect(store.claimNextDispatchablePrompt("active")).toMatchObject({ prompt: { id: "private-turn", state: "submitted" } });
     expect(store.listFailures("c1").filter((failure) => failure.kind === "prompt").map((failure) => failure.error)).toEqual([
       "Session can no longer dispatch queued work",
       "Session can no longer dispatch queued work"
     ]);
     expect(JSON.stringify(store.scanDurablePromptWork())).not.toMatch(/private-turn|private-message|private prompt body/);
+  });
+
+  it("keeps queued work discoverable behind accepted-but-unbound native submissions", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", lastAgentState: "working" });
+    for (const promptId of ["accepted", "queued"] as const) {
+      const view = createQueuedRunCard({ promptId, bindingId: "b1", title: promptId, workspaceId: "w1", paneId: "w1:p1", requestText: promptId, queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+      store.acceptPrompt({ prompt: { id: promptId, bindingId: "b1", larkMessageId: `m-${promptId}`, actorOpenId: "u1", body: promptId }, view, rootMessageId: "root", answerCard: {} });
+    }
+    store.claimNextDispatchablePrompt("b1");
+    store.markPromptNativeQueued({ promptId: "accepted", bindingId: "b1", submissionId: "accepted", dispatchedAt: "2026-09-28T15:00:01.000Z" });
+
+    expect(store.scanDurablePromptWork().hints).toContainEqual({ kind: "prompt-ready", bindingId: "b1" });
   });
 
   it("terminalizes detached running turns owned by terminal bindings", () => {
@@ -5868,11 +12109,12 @@ describe("SQLite store", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "active", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
     store.updateBinding("active", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
-    for (const promptId of ["identityless", "identified"]) {
+    for (const promptId of ["identityless", "identified", "external-identified"]) {
       store.enqueuePrompt({ id: promptId, bindingId: "active", larkMessageId: `message-${promptId}`, actorOpenId: "u1", body: promptId });
       store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'detached', was_detached = 1 WHERE id = ?").run(promptId);
     }
     store.database.prepare("UPDATE prompt_jobs SET transcript_turn_id = 'turn-1', transcript_turn_started_at = '2026-08-29T01:00:01.000Z' WHERE id = 'identified'").run();
+    store.database.prepare("UPDATE prompt_jobs SET execution_origin = 'herdr', transcript_turn_id = 'turn-external', transcript_turn_started_at = '2026-08-29T01:00:02.000Z' WHERE id = 'external-identified'").run();
 
     expect(store.scanDurablePromptWork()).toEqual({
       cancelled: 0,
@@ -5880,6 +12122,7 @@ describe("SQLite store", () => {
       hints: [{ kind: "detached-observer-ready", bindingId: "active", promptId: "identified" }]
     });
     expect(store.getPrompt("identityless")).toMatchObject({ state: "running", observationState: "detached", transcriptTurnId: null });
+    expect(store.getPrompt("external-identified")).toMatchObject({ executionOrigin: "herdr", state: "running", observationState: "detached", transcriptTurnId: "turn-external" });
   });
 
   it("rolls back detached Run Card convergence when the prompt transition fails", () => {
@@ -5903,7 +12146,7 @@ describe("SQLite store", () => {
     expect(store.loadRunCard("prompt-archived")).toMatchObject({ phase: "running", notice: null, finishedAt: null, viewVersion: 1 });
   });
 
-  it("does not report an ordinary queued turn while its binding already has a running prompt", () => {
+  it("reports ordinary queued work behind a running turn for native queue dispatch", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "working" });
@@ -5911,7 +12154,7 @@ describe("SQLite store", () => {
     store.enqueuePrompt({ id: "later", bindingId: "b1", larkMessageId: "m3", actorOpenId: "u1", body: "later" });
     store.database.prepare("UPDATE prompt_jobs SET state = 'running', observation_state = 'attached' WHERE id = 'running'").run();
 
-    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, failedDetached: 0, hints: [] });
+    expect(store.scanDurablePromptWork()).toEqual({ cancelled: 0, failedDetached: 0, hints: [{ kind: "prompt-ready", bindingId: "b1" }] });
   });
 
   it("atomically requeues only a stale pre-dispatch claim with no delivery evidence", () => {
@@ -6014,6 +12257,7 @@ describe("SQLite store", () => {
   it("atomically checkpoints a delivered session-status card and its binding target", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const reply = store.enqueueOutboundReply({
       id: "status-1", idempotencyKey: "status-card:b1", bindingId: "b1", targetRole: "session_status",
       rootMessageId: "m1", kind: "card_reply", payload: "{}"
@@ -6028,6 +12272,7 @@ describe("SQLite store", () => {
   it("rolls back a status-card delivery checkpoint when its binding target cannot be updated", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const reply = store.enqueueOutboundReply({
       id: "status-1", idempotencyKey: "status-card:b1", bindingId: "b1", targetRole: "session_status",
       rootMessageId: "m1", kind: "card_reply", payload: "{}"
@@ -6063,10 +12308,12 @@ describe("SQLite store", () => {
     const path = join(temporaryDirectory, "bridge.db");
     store = new SqliteBindingStore(path);
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
-    const running = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", state: "running" }] });
-    const done = reduceRunCard(running, { type: "output", occurredAt: "latest", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }] });
+    const withThinking = reduceRunCard(queued, { type: "output", occurredAt: "thinking", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "thinking", id: "thinking:1", sequence: 1, label: "Inspecting tests" }] });
+    const running = reduceRunCard(withThinking, { type: "output", occurredAt: "later", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", state: "running" }] });
+    const done = reduceRunCard(running, { type: "output", occurredAt: "latest", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }] });
     store.saveRunCard(done);
     store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
     expect(store.reserveAnswerTimelineCard({
@@ -6075,12 +12322,18 @@ describe("SQLite store", () => {
     const timelineReplyId = store.listPendingOutboundReplies()[0]!.id;
     store.close(); store = new SqliteBindingStore(path);
 
-    expect(store.loadRunCard("p1")?.timelineItems).toEqual([{ kind: "tool", id: "tool:1", sequence: 1, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }]);
+    expect(store.loadRunCard("p1")?.timelineItems).toEqual([
+      { kind: "thinking", id: "thinking:1", sequence: 1, label: "Inspecting tests" },
+      { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }
+    ]);
     expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({ deliveredCursor: null, pending: true });
     store.markOutboundReplyDelivered(timelineReplyId, "answer-1");
     store.close(); store = new SqliteBindingStore(path);
     expect(store.getAnswerTimelinePage("p1", 0)).toMatchObject({
-      deliveredCursor: null, pending: false, deliveredItems: [expect.objectContaining({ id: "tool:1" })]
+      deliveredCursor: null, pending: false, deliveredItems: [
+        expect.objectContaining({ id: "thinking:1" }),
+        expect.objectContaining({ id: "tool:1" })
+      ]
     });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 50").get()).toEqual({ version: 50 });
     expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 51").get()).toEqual({ version: 51 });
@@ -6100,9 +12353,370 @@ describe("SQLite store", () => {
     expect(store.loadWorkerTurnCard("turn-1")?.timelineItems).toEqual([{ kind: "agent_message", id: "message:1", sequence: 1, markdown: "Inspecting" }]);
   });
 
+  it("reopens complete Tool results and section-aware Answer cursors", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-tool-result-cursor-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
+    const result = "safe output\n".repeat(2_000);
+    const done = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "", progressEvents: [], timelineDeltas: [{ kind: "tool", id: "tool:1", sequence: 1, category: "command", label: "build", command: "npm run build", result, parentToolId: "tool:outer", state: "succeeded" }] });
+    store.saveRunCard(done);
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-1", "card-1");
+    const cursor = { itemIndex: 0, markdownOffset: 0, section: "result" as const, offset: 4_321 };
+    expect(store.reserveAnswerTimelineCard({ promptId: "p1", pageIndex: 0, messageId: "answer-1", card: { schema: "2.0" }, cursor, items: done.timelineItems })).toBe("reserved");
+    const replyId = store.listPendingOutboundReplies()[0]!.id;
+    store.markOutboundReplyDelivered(replyId, "answer-1");
+    store.close(); store = new SqliteBindingStore(path);
+
+    expect(store.loadRunCard("p1")?.timelineItems).toContainEqual(expect.objectContaining({ id: "tool:1", result, parentToolId: "tool:outer" }));
+    expect(store.getAnswerTimelinePage("p1", 0).deliveredCursor).toEqual(cursor);
+  });
+
+  it("creates segment zero rows for new Primary and Worker Answer surfaces", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const primary = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "initial request", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "initial request" }, view: primary, rootMessageId: "root", answerCard: {} });
+
+    const createdWorker = store.createWorkerAgentInstance({
+      id: "reviewer",
+      projectId: "p1",
+      name: "reviewer",
+      role: "worker",
+      agentKind: "traex",
+      model: null,
+      desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const worker = store.attachAgentInstanceRuntime({
+      instanceId: createdWorker.id,
+      expectedGeneration: createdWorker.generation,
+      herdrWorkspaceId: "w1",
+      paneId: "w1:worker",
+      nativeSessionId: "worker-session"
+    })!;
+    const workerView = createQueuedWorkerTurnCard({
+      turnId: "turn-1",
+      instanceId: worker.id,
+      instanceGeneration: worker.generation,
+      workerName: worker.name,
+      parentTurnId: null,
+      rootMessageId: "worker-root",
+      requestText: "review this",
+      queuePosition: 1,
+      occurredAt: "now"
+    });
+    store.acceptInstanceTurnWithCard({
+      id: "turn-1",
+      idempotencyKey: "turn-1",
+      actor: { kind: "human", userId: "u1" },
+      projectId: "p1",
+      instanceId: worker.id,
+      instanceGeneration: worker.generation,
+      kind: "turn",
+      text: "review this",
+      parentTurnId: null,
+      sourceMessageId: "worker-m1",
+      view: workerView,
+      render: renderWorkerTurnCard
+    });
+
+    expect(store.listAnswerSegments("primary-run", "p1")).toEqual([
+      expect.objectContaining({
+        aggregateKind: "primary-run",
+        aggregateId: "p1",
+        segmentIndex: 0,
+        sourceHumanItemId: null,
+        requestText: "initial request",
+        startAfterSequence: 0,
+        endBeforeSequence: null,
+        endBeforeItemId: null,
+        state: "open"
+      })
+    ]);
+    expect(store.listAnswerSegments("worker-turn", "turn-1")).toEqual([
+      expect.objectContaining({
+        aggregateKind: "worker-turn",
+        aggregateId: "turn-1",
+        segmentIndex: 0,
+        sourceHumanItemId: null,
+        requestText: "review this",
+        startAfterSequence: 0,
+        endBeforeSequence: null,
+        endBeforeItemId: null,
+        state: "open"
+      })
+    ]);
+    expect(store.database.prepare("SELECT segment_index FROM answer_pages WHERE prompt_id = 'p1' AND page_index = 0").get()).toEqual({ segment_index: 0 });
+    expect(store.database.prepare("SELECT segment_index FROM worker_turn_card_pages WHERE turn_id = 'turn-1' AND page_index = 0").get()).toEqual({ segment_index: 0 });
+  });
+
+  it("atomically reserves ordered Human Message boundary segments for Primary answers", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "initial request", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "initial request" }, view: queued, rootMessageId: "root", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+
+    const first = store.reserveHumanMessageAnswerSegments({
+      aggregateKind: "primary-run",
+      aggregateId: "p1",
+      expectedGeneration: 1,
+      rootMessageId: "root",
+      previousFinalizedCard: { revision: "page-0-final" },
+      nextCards: [
+        { revision: "page-1-accepted" },
+        { revision: "page-2-accepted" }
+      ],
+      boundaries: [
+        { sourceHumanItemId: "human-1", requestText: "continue", sequence: 5 },
+        { sourceHumanItemId: "human-2", requestText: "and then this", sequence: 6 }
+      ]
+    });
+
+    expect(first).toMatchObject({ created: 2 });
+    expect(store.listAnswerSegments("primary-run", "p1")).toEqual([
+      expect.objectContaining({ segmentIndex: 0, sourceHumanItemId: null, endBeforeSequence: 5, endBeforeItemId: "human-1", state: "closed" }),
+      expect.objectContaining({ segmentIndex: 1, sourceHumanItemId: "human-1", requestText: "continue", startAfterSequence: 5, endBeforeSequence: 6, endBeforeItemId: "human-2", state: "closed" }),
+      expect.objectContaining({ segmentIndex: 2, sourceHumanItemId: "human-2", requestText: "and then this", startAfterSequence: 6, endBeforeSequence: null, endBeforeItemId: null, state: "open" })
+    ]);
+    expect(store.database.prepare("SELECT page_index, segment_index, state FROM answer_pages WHERE prompt_id = 'p1' ORDER BY page_index").all()).toEqual([
+      { page_index: 0, segment_index: 0, state: "frozen" },
+      { page_index: 1, segment_index: 1, state: "creating" },
+      { page_index: 2, segment_index: 2, state: "creating" }
+    ]);
+    expect(first.replyIds.map((replyId) => store!.getOutboundReply(replyId)!).filter((reply) => reply.kind === "stream_card_create").map((reply) => ({
+      idempotencyKey: reply.idempotencyKey,
+      streamPageIndex: reply.streamPageIndex,
+      deliveryOrder: store.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = ?").get(reply.id) as { delivery_order: number }
+    }))).toEqual([
+      expect.objectContaining({ idempotencyKey: "answer-segment:create:p1:1", streamPageIndex: 1 }),
+      expect.objectContaining({ idempotencyKey: "answer-segment:create:p1:2", streamPageIndex: 2 })
+    ]);
+    expect(store.database.prepare("SELECT payload FROM outbound_replies WHERE idempotency_key = 'answer-segment:create:p1:1'").get()).toEqual({
+      payload: JSON.stringify({
+        card: { revision: "page-1-accepted" },
+        stream: { pageIndex: 1, pageStart: 5, elementId: answerElementId("p1", 1) }
+      })
+    });
+    expect(store.database.prepare("SELECT card_sequence FROM outbound_replies WHERE idempotency_key = 'answer-final-fold:p1:0:answer-0'").get()).toEqual({ card_sequence: 1 });
+
+    const duplicate = store.reserveHumanMessageAnswerSegments({
+      aggregateKind: "primary-run",
+      aggregateId: "p1",
+      expectedGeneration: 1,
+      rootMessageId: "root",
+      previousFinalizedCard: { revision: "ignored" },
+      nextCards: [{ revision: "ignored" }, { revision: "ignored-2" }],
+      boundaries: [
+        { sourceHumanItemId: "human-1", requestText: "continue", sequence: 5 },
+        { sourceHumanItemId: "human-2", requestText: "and then this", sequence: 6 }
+      ]
+    });
+    expect(duplicate).toEqual({ created: 0, replyIds: [] });
+  });
+
+  it("atomically reserves ordered Human Message boundary segments for Worker answers", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.database.prepare("UPDATE bindings SET pane_id = 'w1:primary', state = 'active', lifecycle = 'active', attachment = 'attached' WHERE id = 'b1'").run();
+    const worker = store.createWorkerAgentInstance({
+      id: "reviewer",
+      projectId: "p1",
+      name: "reviewer",
+      role: "worker",
+      agentKind: "traex",
+      model: null,
+      desiredState: "running",
+      parent: { bindingId: "b1", bindingGeneration: 1, paneId: "w1:primary", nativeSessionId: "primary-session" },
+      workspace: { id: "ws-reviewer", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+    }, 4).instance;
+    const attachedWorker = store.attachAgentInstanceRuntime({
+      instanceId: worker.id,
+      expectedGeneration: worker.generation,
+      herdrWorkspaceId: "w1",
+      paneId: "w1:worker",
+      nativeSessionId: "worker-session"
+    })!;
+    const workerView = createQueuedWorkerTurnCard({
+      turnId: "turn-1",
+      instanceId: attachedWorker.id,
+      instanceGeneration: attachedWorker.generation,
+      workerName: attachedWorker.name,
+      parentTurnId: null,
+      rootMessageId: "worker-root",
+      requestText: "review this",
+      queuePosition: 1,
+      occurredAt: "now"
+    });
+    store.acceptInstanceTurnWithCard({
+      id: "turn-1",
+      idempotencyKey: "turn-1",
+      actor: { kind: "human", userId: "u1" },
+      projectId: "p1",
+      instanceId: attachedWorker.id,
+      instanceGeneration: attachedWorker.generation,
+      kind: "turn",
+      text: "review this",
+      parentTurnId: null,
+      sourceMessageId: "worker-m1",
+      view: workerView,
+      render: renderWorkerTurnCard
+    });
+    const create = store.listPendingOutboundReplies().find(({ workerTurnId, kind }) => workerTurnId === "turn-1" && kind === "stream_card_create")!;
+    store.markOutboundReplyDelivered(create.id, "worker-message-0", "worker-card-0");
+
+    const first = store.reserveHumanMessageAnswerSegments({
+      aggregateKind: "worker-turn",
+      aggregateId: "turn-1",
+      expectedGeneration: attachedWorker.generation,
+      rootMessageId: "worker-root",
+      previousFinalizedCard: { revision: "worker-page-0-final" },
+      nextCards: [{ revision: "worker-page-1-accepted" }],
+      boundaries: [{ sourceHumanItemId: "worker-human-1", requestText: "continue worker", sequence: 4 }]
+    });
+
+    expect(first).toMatchObject({ created: 1 });
+    expect(store.listAnswerSegments("worker-turn", "turn-1")).toEqual([
+      expect.objectContaining({
+        segmentIndex: 0,
+        sourceHumanItemId: null,
+        endBeforeSequence: 4,
+        endBeforeItemId: "worker-human-1",
+        state: "closed"
+      }),
+      expect.objectContaining({
+        segmentIndex: 1,
+        sourceHumanItemId: "worker-human-1",
+        requestText: "continue worker",
+        startAfterSequence: 4,
+        endBeforeSequence: null,
+        endBeforeItemId: null,
+        state: "open"
+      })
+    ]);
+    expect(store.database.prepare("SELECT page_index, segment_index, state FROM worker_turn_card_pages WHERE turn_id = 'turn-1' ORDER BY page_index").all()).toEqual([
+      { page_index: 0, segment_index: 0, state: "frozen" },
+      { page_index: 1, segment_index: 1, state: "creating" }
+    ]);
+    expect(first.replyIds.map((replyId) => store!.getOutboundReply(replyId)!).map((reply) => ({
+      idempotencyKey: reply.idempotencyKey,
+      kind: reply.kind,
+      streamPageIndex: reply.streamPageIndex,
+      deliveryOrder: (store.database.prepare("SELECT delivery_order FROM outbound_replies WHERE id = ?").get(reply.id) as { delivery_order: number }).delivery_order
+    }))).toEqual([
+      expect.objectContaining({ idempotencyKey: "worker-answer-segment:close:turn-1:0:worker-message-0", kind: "card_update", streamPageIndex: 0 }),
+      expect.objectContaining({ idempotencyKey: "worker-answer-segment:create:turn-1:1", kind: "stream_card_create", streamPageIndex: 1 })
+    ]);
+    expect(store.database.prepare("SELECT payload FROM outbound_replies WHERE idempotency_key = 'worker-answer-segment:close:turn-1:0:worker-message-0'").get()).toEqual({
+      payload: JSON.stringify({ revision: "worker-page-0-final" })
+    });
+    expect(store.database.prepare("SELECT card_sequence FROM outbound_replies WHERE idempotency_key = 'worker-answer-segment:close:turn-1:0:worker-message-0'").get()).toEqual({ card_sequence: 1 });
+    expect(store.database.prepare("SELECT payload FROM outbound_replies WHERE idempotency_key = 'worker-answer-segment:create:turn-1:1'").get()).toEqual({
+      payload: JSON.stringify({
+        card: { revision: "worker-page-1-accepted" },
+        stream: { pageIndex: 1, pageStart: 4, elementId: "worker_turn_turn_1_1" }
+      })
+    });
+  });
+
+  it("rolls back boundary reservations when a downstream SQLite write aborts", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "initial request", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "initial request" }, view: queued, rootMessageId: "root", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+    const beforeReplies = store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get();
+    const beforePages = store.database.prepare("SELECT COUNT(*) AS count FROM answer_pages").get();
+    store.database.exec("CREATE TRIGGER reject_answer_segment_create BEFORE INSERT ON outbound_replies WHEN NEW.idempotency_key = 'answer-segment:create:p1:1' BEGIN SELECT RAISE(ABORT, 'reject boundary create'); END");
+
+    expect(() => store!.reserveHumanMessageAnswerSegments({
+      aggregateKind: "primary-run",
+      aggregateId: "p1",
+      expectedGeneration: 1,
+      rootMessageId: "root",
+      previousFinalizedCard: { revision: "page-0-final" },
+      nextCards: [{ revision: "page-1-accepted" }],
+      boundaries: [{ sourceHumanItemId: "human-1", requestText: "continue", sequence: 5 }]
+    })).toThrow(/reject boundary create/);
+
+    expect(store.listAnswerSegments("primary-run", "p1")).toEqual([
+      expect.objectContaining({ segmentIndex: 0, sourceHumanItemId: null, state: "open", endBeforeSequence: null })
+    ]);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get()).toEqual(beforeReplies);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM answer_pages").get()).toEqual(beforePages);
+  });
+
+  it("persists answer segments across reopen and migrates legacy pages into segment zero without outbox work", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-answer-segment-migration-"));
+    const path = join(temporaryDirectory, "bridge.db");
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+    const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "initial request", queuePosition: 1, occurredAt: "now" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "initial request" }, view: queued, rootMessageId: "root", answerCard: {} });
+    store.markOutboundReplyDelivered(store.listPendingOutboundReplies()[0]!.id, "answer-0", "card-0");
+    store.saveRunCard(reduceRunCard(queued, {
+      type: "output",
+      occurredAt: "later",
+      answerSnapshot: "visible",
+      progressEvents: [],
+      timelineDeltas: [
+        { kind: "agent_message", id: "message-1", sequence: 1, markdown: "visible" },
+        { kind: "human_message", id: "human-legacy", sequence: 2, markdown: "already consumed" }
+      ]
+    }));
+    const pendingBefore = store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'pending'").get();
+    store.close();
+    store = undefined;
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      DROP TABLE answer_segments;
+      DROP TABLE IF EXISTS schema_metadata; DELETE FROM schema_migrations WHERE version >= 112; DELETE FROM schema_migrations WHERE version = 68;
+      DROP VIEW run_cards_view;
+      CREATE TABLE answer_pages_legacy(
+        prompt_id TEXT NOT NULL REFERENCES prompt_jobs(id), page_index INTEGER NOT NULL, message_id TEXT, card_id TEXT, element_id TEXT NOT NULL,
+        source_start INTEGER NOT NULL, sequence INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming','static')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(prompt_id, page_index)
+      );
+      INSERT INTO answer_pages_legacy(prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at)
+      SELECT prompt_id, page_index, message_id, card_id, element_id, source_start, sequence, state, delivery_mode, created_at, updated_at FROM answer_pages;
+      DROP TABLE answer_pages;
+      ALTER TABLE answer_pages_legacy RENAME TO answer_pages;
+      CREATE UNIQUE INDEX answer_pages_active ON answer_pages(prompt_id) WHERE state = 'active';
+    `);
+    legacy.close();
+
+    store = new SqliteBindingStore(path);
+
+    expect(store.listAnswerSegments("primary-run", "p1")).toEqual([
+      expect.objectContaining({
+        segmentIndex: 0,
+        sourceHumanItemId: null,
+        requestText: "initial request",
+        startAfterSequence: 2,
+        endBeforeSequence: null,
+        endBeforeItemId: null,
+        state: "open"
+      })
+    ]);
+    expect(store.database.prepare("SELECT segment_index FROM answer_pages WHERE prompt_id = 'p1' AND page_index = 0").get()).toEqual({ segment_index: 0 });
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies WHERE state = 'pending'").get()).toEqual(pendingBefore);
+    expect(store.database.prepare("SELECT version FROM schema_migrations WHERE version = 68").get()).toEqual({ version: 68 });
+  });
+
   it("rolls back a Primary view when its timeline rows cannot be persisted", () => {
     store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "now" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "go" }, view: queued, rootMessageId: "root", answerCard: {} });
     const next = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "visible", progressEvents: [], timelineDeltas: [{ kind: "agent_message", id: "message:1", sequence: 1, markdown: "visible" }] });
@@ -6111,4 +12725,298 @@ describe("SQLite store", () => {
     expect(() => store!.saveRunCard(next)).toThrow(/reject timeline/);
     expect(store.loadRunCard("p1")).toMatchObject({ answer: "", timelineItems: [], viewVersion: 1 });
   });
+
+  it("persists one current RuntimeIdentityClaim and rolls a losing Binding projection back", () => {
+    const claims = () => store as RuntimeIdentityClaimTestStore;
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "claim-winner", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Winner" });
+    store.createPendingBinding({ id: "claim-loser", workspaceId: "w1", chatId: "c1", topicId: "t2", rootMessageId: "root-2", title: "Loser" });
+    store.updateBinding("claim-winner", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:winner" });
+    store.updateBinding("claim-loser", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:loser", paneToken: "loser-token", traexSessionId: "loser-terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "loser-session" });
+
+    const winner = currentRuntimeIdentityClaim("claim-winner", 1, 1, "shared-session", "w1:winner");
+    expect(claims().claimCurrentRuntimeIdentity({ claim: winner, paneToken: "winner-token" })).toMatchObject({ outcome: "claimed", claim: winner });
+    expect(claims().loadRuntimeIdentityClaim(winner.owner)).toMatchObject(winner);
+    expect(store.getBinding("claim-winner")).toMatchObject({ paneId: "w1:winner", paneToken: "winner-token", traexSessionId: "w1:winner:terminal", agentSessionValue: "shared-session", attachment: "attached" });
+
+    store.updateBinding("claim-winner", { traexSessionId: "drifted-terminal", agentSessionValue: "drifted-session" });
+    expect(claims().claimCurrentRuntimeIdentity({ claim: winner, paneToken: "repair-token" })).toMatchObject({ outcome: "claimed", claim: winner });
+    expect(store.getBinding("claim-winner")).toMatchObject({ paneId: "w1:winner", paneToken: "repair-token", traexSessionId: "w1:winner:terminal", agentSessionValue: "shared-session" });
+
+    const beforeLoser = store.getBinding("claim-loser");
+    const loser = currentRuntimeIdentityClaim("claim-loser", 1, 1, "shared-session", "w1:loser");
+    expect(claims().claimCurrentRuntimeIdentity({ claim: loser, paneToken: "replacement-token" })).toMatchObject({ outcome: "conflict", claim: null });
+    expect(claims().loadRuntimeIdentityClaim(loser.owner)).toBeNull();
+    expect(store.getBinding("claim-loser")).toEqual(beforeLoser);
+  });
+
+  it("keeps one current owner across reopened competing SQLite handles", () => {
+    temporaryDirectory = mkdtempSync(join(tmpdir(), "herdr-runtime-identity-claim-"));
+    const path = join(temporaryDirectory, "state.sqlite");
+    const claims = () => store as RuntimeIdentityClaimTestStore;
+    store = new SqliteBindingStore(path);
+    store.createPendingBinding({ id: "first-owner", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "First" });
+    store.createPendingBinding({ id: "second-owner", workspaceId: "w1", chatId: "c1", topicId: "t2", rootMessageId: "root-2", title: "Second" });
+    const second = new SqliteBindingStore(path) as RuntimeIdentityClaimTestStore;
+    const firstClaim = currentRuntimeIdentityClaim("first-owner", 1, 1, "reopened-session", "w1:first");
+    const secondClaim = currentRuntimeIdentityClaim("second-owner", 1, 1, "reopened-session", "w1:second");
+
+    expect(claims().claimCurrentRuntimeIdentity({ claim: firstClaim, paneToken: "first-token" })).toMatchObject({ outcome: "claimed" });
+    expect(store.getBinding("first-owner")).toMatchObject({ attachment: "attached" });
+    expect(second.claimCurrentRuntimeIdentity({ claim: secondClaim, paneToken: "second-token" })).toMatchObject({ outcome: "conflict", claim: null });
+    second.close();
+    store.close();
+    store = new SqliteBindingStore(path);
+
+    expect(claims().loadRuntimeIdentityClaim(firstClaim.owner)).toMatchObject(firstClaim);
+    expect(claims().loadRuntimeIdentityClaim(secondClaim.owner)).toBeNull();
+    expect(claims().claimCurrentRuntimeIdentity({ claim: firstClaim, paneToken: "ignored-for-unchanged" })).toMatchObject({ outcome: "unchanged", claim: firstClaim });
+  });
+
+  it("rolls orphan recovery and its projection back when the current-session claim conflicts", () => {
+    const claims = () => store as RuntimeIdentityClaimTestStore;
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "recovery-winner", workspaceId: "w1", chatId: "c1", topicId: "winner-topic", rootMessageId: "winner-root", title: "Winner" });
+    store.createPendingBinding({ id: "recovery-loser", workspaceId: "w1", chatId: "c1", topicId: "loser-topic", rootMessageId: "loser-root", title: "Loser" });
+    store.updateBinding("recovery-winner", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:winner" });
+    store.updateBinding("recovery-loser", {
+      state: "orphaned", lifecycle: "active", attachment: "orphaned", paneId: "w1:loser", paneToken: "loser-token",
+      traexSessionId: "loser-terminal", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "shared-recovery-session"
+    });
+    expect(claims().claimCurrentRuntimeIdentity({
+      claim: currentRuntimeIdentityClaim("recovery-winner", 1, 1, "shared-recovery-session", "w1:winner"),
+      paneToken: "winner-token"
+    })).toMatchObject({ outcome: "claimed" });
+
+    const beforeBinding = store.getBinding("recovery-loser");
+    const beforeView = store.loadTopicView("recovery-loser");
+    const beforeOutbox = store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get();
+    const pane = {
+      workspaceId: "w1", paneId: "w1:loser", paneToken: "loser-token", terminalId: "loser-terminal", agentKind: "traex", agentState: "idle",
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "shared-recovery-session" }, foregroundExecutables: ["traex"]
+    } as HerdrPane;
+    const event = createBridgeEvent("recovery-loser", "BindingActivated", "herdr", { paneId: pane.paneId, paneToken: pane.paneToken, paneName: null, tabId: null, topicId: "loser-topic" });
+    const view = reduceTopicView(initialTopicView("recovery-loser"), event);
+
+    expect(claims().reconcileRuntimeIdentity({
+      bindingId: "recovery-loser", expectedPaneId: pane.paneId, expectedGeneration: 1, expectedSessionEpoch: 1, pane, decide: () => ({ outcome: "orphan_recovery" }),
+      recovery: { event, view, rootMessageId: "loser-root", mainCard: {}, paneEntryCard: {} }
+    })).toEqual({ outcome: "conflict" });
+    expect(store.getBinding("recovery-loser")).toEqual(beforeBinding);
+    expect(claims().loadRuntimeIdentityClaim({ bindingId: "recovery-loser", bindingGeneration: 1, sessionEpoch: 1 })).toBeNull();
+    expect(store.loadTopicView("recovery-loser")).toEqual(beforeView);
+    expect(store.database.prepare("SELECT COUNT(*) AS count FROM outbound_replies").get()).toEqual(beforeOutbox);
+  });
+
+  it("rejects an automatic runtime observation captured before the owner session epoch rotates", () => {
+    const claims = () => store as RuntimeIdentityClaimTestStore;
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "epoch-fenced", workspaceId: "w1", chatId: "c1", topicId: "topic", rootMessageId: "root", title: "Epoch fenced" });
+    store.updateBinding("epoch-fenced", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    expect(claims().claimCurrentRuntimeIdentity({ claim: { ...currentRuntimeIdentityClaim("epoch-fenced", 1, 1, "session-1", "w1:p1"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1" } }, paneToken: null })).toMatchObject({ outcome: "claimed" });
+    store.updateBinding("epoch-fenced", { sessionEpoch: 2, agentSessionValue: "session-2" });
+    expect(claims().claimCurrentRuntimeIdentity({ claim: { ...currentRuntimeIdentityClaim("epoch-fenced", 1, 2, "session-2", "w1:p1"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1" } }, paneToken: null })).toMatchObject({ outcome: "claimed" });
+    const currentOwner = { bindingId: "epoch-fenced", bindingGeneration: 1, sessionEpoch: 2 };
+    const beforeBinding = store.getBinding("epoch-fenced");
+    const beforeClaim = claims().loadRuntimeIdentityClaim(currentOwner);
+    const pane = {
+      workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1", agentKind: "traex", agentState: "idle",
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, foregroundExecutables: ["traex"]
+    } as HerdrPane;
+
+    expect(claims().reconcileRuntimeIdentity({
+      bindingId: "epoch-fenced", expectedPaneId: "w1:p1", expectedGeneration: 1, expectedSessionEpoch: 1,
+      pane, decide: decideRuntimeIdentityReconciliation
+    })).toEqual({ outcome: "stale" });
+    expect(store.getBinding("epoch-fenced")).toEqual(beforeBinding);
+    expect(claims().loadRuntimeIdentityClaim(currentOwner)).toEqual(beforeClaim);
+  });
+
+  it("transfers one attached native session between exact Binding owners atomically", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "attach-source", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "old-topic", rootMessageId: "old-root", title: "Source" });
+    store.createPendingBinding({ id: "attach-target", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "new-topic", rootMessageId: "new-root", title: "Target" });
+    store.updateBinding("attach-source", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", paneToken: "old-token", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "native-session-1"
+    });
+    store.updateBinding("attach-target", {
+      state: "pending", lifecycle: "provisioning", attachment: "attached", provisioningCheckpoint: "thread_created", paneId: null,
+      paneToken: "new-token", traexSessionId: "terminal-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "native-session-1"
+    });
+    const source = store.getBinding("attach-source")!;
+    const target = store.getBinding("attach-target")!;
+    expect((store as RuntimeIdentityClaimTestStore).claimCurrentRuntimeIdentity({
+      claim: { ...currentRuntimeIdentityClaim(source.id, source.generation, source.sessionEpoch, "native-session-1", "w1:p1"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1" } },
+      paneToken: source.paneToken
+    })).toMatchObject({ outcome: "claimed" });
+    const transition = store as unknown as { applyRuntimeIdentityTransition(input: unknown): {
+      outcome: "attached_thread_cutover";
+      previous: typeof source;
+      replacement: typeof target;
+    } };
+
+    const result = transition.applyRuntimeIdentityTransition({
+      kind: "cutover_attached_pane_thread",
+      actorOpenId: "actor",
+      expectedPrevious: runtimeIdentityFence(source),
+      expectedReplacement: runtimeIdentityFence(target)
+    });
+
+    expect(result).toMatchObject({ outcome: "attached_thread_cutover", previous: { paneId: null, lifecycle: "archived" }, replacement: { paneId: "w1:p1", lifecycle: "active" } });
+    expect((store as RuntimeIdentityClaimTestStore).loadRuntimeIdentityClaim({ bindingId: source.id, bindingGeneration: source.generation, sessionEpoch: source.sessionEpoch })).toMatchObject({ state: "released", nativeIdentity: { value: "native-session-1" } });
+    expect((store as RuntimeIdentityClaimTestStore).loadRuntimeIdentityClaim({ bindingId: target.id, bindingGeneration: target.generation, sessionEpoch: target.sessionEpoch })).toMatchObject({
+      state: "current", nativeIdentity: { value: "native-session-1" }, attachment: { paneId: "w1:p1", terminalId: "terminal-1" }
+    });
+  });
+
+  it("resolves a complete exact-fenced conflicted claim through an explicit transition", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "conflicted-transition", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Conflicted" });
+    store.updateBinding("conflicted-transition", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", paneToken: "pane-token", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const claims = store as RuntimeIdentityClaimTestStore;
+    expect(claims.claimCurrentRuntimeIdentity({
+      claim: { ...currentRuntimeIdentityClaim("conflicted-transition", 1, 1, "session-1", "w1:p1"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1" } },
+      paneToken: "pane-token"
+    })).toMatchObject({ outcome: "claimed" });
+    store.database.prepare("UPDATE runtime_identity_claims SET state='conflicted' WHERE binding_id='conflicted-transition'").run();
+    const expected = runtimeIdentityFence(store.getBinding("conflicted-transition")!);
+    const pane = {
+      workspaceId: "w1", paneId: "w1:p1", paneToken: "pane-token", terminalId: "terminal-1", agentKind: "traex", agentState: "idle",
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, foregroundExecutables: ["traex"]
+    } as HerdrPane;
+    const transition = store as unknown as { applyRuntimeIdentityTransition(input: unknown): { outcome: string } };
+
+    expect(transition.applyRuntimeIdentityTransition({ kind: "observe_binding_pane", expected, pane, transition: { type: "pane_observed", runtime: "idle" } })).toMatchObject({ outcome: "binding_updated" });
+    expect(claims.loadRuntimeIdentityClaim({ bindingId: "conflicted-transition", bindingGeneration: 1, sessionEpoch: 1 })).toMatchObject({
+      state: "current", nativeIdentity: { value: "session-1" }, attachment: { state: "attached", paneId: "w1:p1", terminalId: "terminal-1" }
+    });
+  });
+
+  it.each([
+    ["released claim", "state='released'"],
+    ["incomplete conflicted claim", "state='conflicted',native_session_source=NULL,native_session_agent=NULL,native_session_kind=NULL,native_session_value=NULL,attachment_state=NULL,workspace_id=NULL,pane_id=NULL,terminal_id=NULL"],
+    ["mismatched conflicted claim", "state='conflicted',native_session_value='different-session'"]
+  ])("rejects an explicit transition for a %s", (_scenario, mutation) => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "rejected-transition", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "topic", rootMessageId: "root", title: "Rejected" });
+    store.updateBinding("rejected-transition", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", paneToken: "pane-token", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const claims = store as RuntimeIdentityClaimTestStore;
+    expect(claims.claimCurrentRuntimeIdentity({
+      claim: { ...currentRuntimeIdentityClaim("rejected-transition", 1, 1, "session-1", "w1:p1"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1" } },
+      paneToken: "pane-token"
+    })).toMatchObject({ outcome: "claimed" });
+    store.database.prepare(`UPDATE runtime_identity_claims SET ${mutation} WHERE binding_id='rejected-transition'`).run();
+    const expected = runtimeIdentityFence(store.getBinding("rejected-transition")!);
+    const beforeBinding = store.getBinding("rejected-transition");
+    const beforeClaim = claims.loadRuntimeIdentityClaim({ bindingId: "rejected-transition", bindingGeneration: 1, sessionEpoch: 1 });
+    const pane = {
+      workspaceId: "w1", paneId: "w1:p1", paneToken: "pane-token", terminalId: "terminal-1", agentKind: "traex", agentState: "idle",
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" }, foregroundExecutables: ["traex"]
+    } as HerdrPane;
+    const transition = store as unknown as { applyRuntimeIdentityTransition(input: unknown): unknown };
+
+    expect(() => transition.applyRuntimeIdentityTransition({ kind: "observe_binding_pane", expected, pane, transition: { type: "pane_observed", runtime: "idle" } })).toThrow("Runtime identity transition stale");
+    expect(store.getBinding("rejected-transition")).toEqual(beforeBinding);
+    expect(claims.loadRuntimeIdentityClaim({ bindingId: "rejected-transition", bindingGeneration: 1, sessionEpoch: 1 })).toEqual(beforeClaim);
+  });
+
+  it("rolls an attached-thread cutover back when its target native session already has an owner", () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const [id, topic] of [["conflict-source", "old-topic"], ["conflict-target", "new-topic"], ["conflict-winner", "winner-topic"]] as const) {
+      store.createPendingBinding({ id, projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: topic, rootMessageId: `${id}-root`, title: id });
+    }
+    store.updateBinding("conflict-source", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p1", traexSessionId: "terminal-1",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "source-session"
+    });
+    store.updateBinding("conflict-target", {
+      state: "pending", lifecycle: "provisioning", attachment: "attached", provisioningCheckpoint: "thread_created", paneId: null,
+      traexSessionId: "terminal-1", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "claimed-session"
+    });
+    store.updateBinding("conflict-winner", {
+      state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:p2", traexSessionId: "terminal-2",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "claimed-session"
+    });
+    const claims = store as RuntimeIdentityClaimTestStore;
+    const source = store.getBinding("conflict-source")!;
+    const target = store.getBinding("conflict-target")!;
+    const winner = store.getBinding("conflict-winner")!;
+    expect(claims.claimCurrentRuntimeIdentity({ claim: { ...currentRuntimeIdentityClaim(source.id, 1, 1, "source-session", "w1:p1"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p1", terminalId: "terminal-1" } }, paneToken: null })).toMatchObject({ outcome: "claimed" });
+    expect(claims.claimCurrentRuntimeIdentity({ claim: { ...currentRuntimeIdentityClaim(winner.id, 1, 1, "claimed-session", "w1:p2"), attachment: { state: "attached", workspaceId: "w1", paneId: "w1:p2", terminalId: "terminal-2" } }, paneToken: null })).toMatchObject({ outcome: "claimed" });
+    const beforeSource = store.getBinding(source.id);
+    const beforeTarget = store.getBinding(target.id);
+    const transition = store as unknown as { applyRuntimeIdentityTransition(input: unknown): unknown };
+
+    expect(() => transition.applyRuntimeIdentityTransition({
+      kind: "cutover_attached_pane_thread", actorOpenId: "actor",
+      expectedPrevious: runtimeIdentityFence(store.getBinding(source.id)!), expectedReplacement: runtimeIdentityFence(target)
+    })).toThrow("Runtime identity transition conflict");
+
+    expect(store.getBinding(source.id)).toEqual(beforeSource);
+    expect(store.getBinding(target.id)).toEqual(beforeTarget);
+    expect(claims.loadRuntimeIdentityClaim({ bindingId: source.id, bindingGeneration: 1, sessionEpoch: 1 })).toMatchObject({ state: "current", nativeIdentity: { value: "source-session" } });
+    expect(claims.loadRuntimeIdentityClaim({ bindingId: target.id, bindingGeneration: 1, sessionEpoch: 1 })).toBeNull();
+    expect(claims.loadRuntimeIdentityClaim({ bindingId: winner.id, bindingGeneration: 1, sessionEpoch: 1 })).toMatchObject({ state: "current", nativeIdentity: { value: "claimed-session" } });
+  });
+
+  it("rejects a stale explicit pane transition before changing its Binding or claim", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "stale-transition", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Stale" });
+    const expected = runtimeIdentityFence(store.getBinding("stale-transition")!);
+    store.updateBinding("stale-transition", { generation: 2 });
+    const before = store.getBinding("stale-transition");
+    const pane = { workspaceId: "w1", paneId: "w1:new", terminalId: "terminal-new", agentKind: "traex", agentState: "idle", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-new" }, foregroundExecutables: ["traex"] } as HerdrPane;
+    const transition = store as unknown as { applyRuntimeIdentityTransition(input: unknown): unknown };
+
+    expect(() => transition.applyRuntimeIdentityTransition({ kind: "observe_binding_pane", expected, pane, transition: { type: "pane_created" } })).toThrow("Runtime identity transition stale");
+
+    expect(store.getBinding("stale-transition")).toEqual(before);
+    expect((store as RuntimeIdentityClaimTestStore).loadRuntimeIdentityClaim({ bindingId: "stale-transition", bindingGeneration: 2, sessionEpoch: 1 })).toBeNull();
+  });
+
+  it("rejects an explicit transition when an unattached Binding still has a current claim", () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "unattached-transition", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: null, rootMessageId: null, title: "Unattached" });
+    store.updateBinding("unattached-transition", {
+      paneId: "w1:old", traexSessionId: "terminal-old", agentSessionSource: "herdr:traex", agentSessionAgent: "traex",
+      agentSessionKind: "id", agentSessionValue: "session-old", attachment: "attached"
+    });
+    const claims = store as RuntimeIdentityClaimTestStore;
+    expect(claims.claimCurrentRuntimeIdentity({ claim: currentRuntimeIdentityClaim("unattached-transition", 1, 1, "session-old", "w1:old"), paneToken: null })).toMatchObject({ outcome: "claimed" });
+    store.updateBinding("unattached-transition", { attachment: "unattached" });
+    const expected = runtimeIdentityFence(store.getBinding("unattached-transition")!);
+    const before = store.getBinding("unattached-transition");
+    const beforeClaim = claims.loadRuntimeIdentityClaim({ bindingId: "unattached-transition", bindingGeneration: 1, sessionEpoch: 1 });
+    const pane = { workspaceId: "w1", paneId: "w1:new", terminalId: "terminal-new", agentKind: "traex", agentState: "idle", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-new" }, foregroundExecutables: ["traex"] } as HerdrPane;
+    const transition = store as unknown as { applyRuntimeIdentityTransition(input: unknown): unknown };
+
+    expect(() => transition.applyRuntimeIdentityTransition({ kind: "observe_binding_pane", expected, pane, transition: { type: "pane_created" } })).toThrow("Runtime identity transition stale");
+
+    expect(store.getBinding("unattached-transition")).toEqual(before);
+    expect(claims.loadRuntimeIdentityClaim({ bindingId: "unattached-transition", bindingGeneration: 1, sessionEpoch: 1 })).toEqual(beforeClaim);
+  });
 });
+
+function runtimeIdentityFence(binding: NonNullable<ReturnType<SqliteBindingStore["getBinding"]>>) {
+  return {
+    owner: { bindingId: binding.id, bindingGeneration: binding.generation, sessionEpoch: binding.sessionEpoch },
+    workspaceId: binding.workspaceId,
+    paneId: binding.paneId,
+    terminalId: binding.traexSessionId,
+    attachment: binding.attachment,
+    nativeIdentity: binding.agentSessionSource && binding.agentSessionAgent && binding.agentSessionKind && binding.agentSessionValue
+      ? { source: binding.agentSessionSource, agent: binding.agentSessionAgent, kind: binding.agentSessionKind, value: binding.agentSessionValue }
+      : null
+  };
+}

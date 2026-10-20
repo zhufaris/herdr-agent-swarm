@@ -38,7 +38,7 @@ Each seam must satisfy all of the following before it is marked complete:
 | 4 | Primary execution and observation | Prompt rows, binding generation, native session, and exact transcript identity | `PromptRunWorkflow` lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver` | Complete | The facade owns scheduling, safety, process-local exclusion, recovery controls, and shutdown. `drain(bindingId)` hides durable FIFO claim, fresh-pane preflight, fenced release, execution, and archive policy; `observe(prompt)` hides exact-turn reopening, ownership, polling, settlement, and uncertain no-replay recovery. |
 | 5 | Worker lifecycle, execution, and observation | Agent instance generation, Worker turn rows, and exact transcript identity | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` behind dispatch and observation ports | Complete | Durable FIFO execution now lives in coordinator rather than events and consumes `WorkerTurnDispatchStore`. Exact live/restart observation stays behind `WorkerTurnObservationPort`; process-local single flight and watches remain non-durable hints while uncertain delivery never replays. |
 | 6 | Card projection and convergence | Durable Run Card, Worker Turn Card, Main Card, page, and delivery-version state | Pure view reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` | Complete | Primary and Worker continuation share one handoff policy; frozen-page offsets, checkpoint-gated Main Card retargeting, direct-Herdr pagination, duplicate convergence, stale targets, and startup recovery are covered through domain, workflow, SQLite, renderer, and context-rebuild tests. |
-| 7 | Durable outbound delivery | SQLite outbox rows, lane heads, claims, and delivery checkpoints | `GatewayOutboxDispatcher` lifecycle facade over `OutboundLaneDrain`, `OutboundDeliveryExecutor`, and `GatewayDeliveryPort` | Complete | The facade owns notifier subscription, safety/retry timers, dead-letter recovery, diagnostics, and shutdown. The drain engine owns bounded 3:1 lane scheduling, per-scan exclusion, same-reply protection, and fatal checkpoint convergence through `OutboundScanStore`; the executor owns one frozen claim-to-checkpoint attempt through `OutboundDeliveryStore`. |
+| 7 | Durable outbound delivery | SQLite scoped outbox rows, frozen prepared plans, claims, and delivery checkpoints | `RingDeliveryEngine` over `PreparedDeliveryStore`, `GatewayDeliveryPort`, and `DeliveryCheckpointBus` | Complete | One full-data Ring per Primary Pane plus one Global Ring owns serial scope execution; Worker effects use the parent Primary Ring. Commit effects feed the hot path, scope-indexed discovery repairs cold state, and atomic claim/checkpoint/settlement preserves retry, quarantine, and uncertain-effect safety. Schema v109 removes the retired lane scheduler and compatibility tables. |
 | 8 | Herdr runtime reconciliation | Fresh Herdr snapshot plus generation/session-fenced SQLite transitions | `HerdrRuntimeReconciler` lifecycle facade over `BindingReconciliationPass` and `BindingRuntimeConverger` | Complete | The facade owns cooldown, priority coalescing, periodic lifecycle, diagnostics, and shutdown. The pass owns targeted/full authoritative observation, classification, discovery, failure isolation, and pruning; the converger retains generation-fenced per-Binding transitions and downstream effects. |
 | 9 | Command and control | Durable command intent and status view, with immutable resolved context | `SwarmCommandRuntime` over admission, durable observation, and `CommandIntentDispatcher` | Complete | Literal, CardKit, Primary Tool, and natural-language entry paths share typed admission. Mutation acceptance atomically persists intent/status/outbox and returns before the effect; intent-only hints plus SQLite scans drive execution. Worker results reconstruct from durable operation identity, and only destructive natural-language commands require confirmation. |
 | 10 | Runtime lifecycle, health, and operations | User systemd plus fenced SQLite lease; health is observation only | `ManagedBridgeRuntime`, `RuntimeLifecycleLedger`, `BridgeRuntimeShutdown`, and `HealthSnapshotCollector` | Complete | Possibly started resources register cleanup before or with start; write-capable shutdown failures retain the fence, lease, and store. The collector owns coherent fail-closed readiness, isolated bounded diagnostics, degradation policy, and single-flight caches, while the HTTP adapter owns only transport. Lifecycle and health tests cover partial startup, ordering, lease loss, stuck writers, provider failure, redaction, and cache behavior. |
@@ -137,26 +137,33 @@ full repository suite.
 
 ## Durable outbound delivery completion evidence
 
-The outbound pass is complete because `GatewayOutboxDispatcher` is now a
-lifecycle facade rather than the owner of lane scheduling and single-reply
-delivery. `OutboundLaneDrain` hides the four-slot work-conserving scan, live to
-history 3:1 selection, lane exclusion, same-reply suppression, wake revision,
-batch bound, and fatal checkpoint settlement behind `notifyRequest()` and
-`drain(...)`. `OutboundDeliveryExecutor` remains the sole owner of frozen plan
-preparation, exact claim, external execution, checkpoint, failure classification,
-and durable settlement.
+The outbound pass is complete because `RingDeliveryEngine` owns one bounded,
+full-data Ring per Primary Pane and one Global Ring. Primary and Worker producers
+freeze a complete immutable `PreparedDelivery` in the same durable reservation
+transition; Worker items retain their own and the parent Primary generation
+fences while entering the parent Primary Ring. A missing or stale Pane route
+fails closed rather than becoming Global work.
 
-SQLite remains the delivery authority through separate `OutboundScanStore` and
-`OutboundDeliveryStore` capabilities. Process-local sets, counters, timers, and
-wake revisions affect only when eligible durable work is inspected. A failed
-lane is blocked only for the current scan, a checkpoint failure stops new claims
-while already active deliveries settle, and restart recovery continues from
-durable rows without repeating the corresponding Agent turn.
+SQLite remains the delivery authority through `PreparedDeliveryStore` and its
+scope-indexed cold-discovery capability. Post-commit values enter the hot path
+without reload. Startup, retry timers, overflow repair, and safety scans recover
+the oldest nonterminal item per scope. One effect may run per Ring and up to four
+Rings may run concurrently with live/history fairness. Uncertain effects remain
+blocking; only durably proven terminal, stale, superseded, or replaced heads may
+advance automatically. `DeliveryCheckpointBus` performs isolated process-local
+fanout only after durable acknowledgement.
 
-Verification on 2026-09-24 covers independent-lane concurrency, current-scan
-failure isolation, 3:1 work-class fairness, claim and checkpoint fencing, retry
-and dead-letter behavior, shutdown settlement, composition, and architecture
-dependency direction.
+Schema migration 109 refuses contraction while pending legacy-owned or unscoped
+work exists, then removes scheduler control, lane-head maintenance, and scheduler
+ownership while preserving scope, order, prepared plans, idempotency,
+checkpoints, quarantine, and recovery history. The retired rollback command is
+not an operator surface after contraction.
+
+Verification covers per-Pane and Global isolation, Worker-to-parent routing,
+scope ordering and cross-scope concurrency, live/history fairness, hot-path
+no-reload, cold recovery, lost wake-up safety scans, claim/checkpoint fencing,
+retry and dead-letter behavior, uncertain quarantine, schema contraction,
+shutdown settlement, composition, and architecture dependency direction.
 
 ## Herdr runtime reconciliation completion evidence
 
@@ -218,7 +225,7 @@ requirement to current artifacts and executable evidence.
 | Primary execution and observation | `PromptRunWorkflow` is a lifecycle facade over `PrimaryPromptDispatcher`, `PromptTurnExecutor`, and `DetachedPromptObserver`. | Primary dispatcher, observer, safety-scan, turn-supervisor, and concurrency suites verify FIFO, exact observation, detachment, recovery, and no replay. |
 | Worker execution and observation | `WorkerTurnDispatcher`, `WorkerTurnObserver`, and `InstanceTurnSupervisor` expose consumer-shaped dispatch and observation seams. | Worker dispatcher/observer/supervisor and instance integration suites verify FIFO, identity fencing, uncertain delivery, recovery, and shutdown. |
 | Card projection and convergence | Pure reducers plus `AnswerPageWorkflow`, `MainCardWorkflow`, and `WorkerTurnCardWorkflow` converge durable card state. | Card, page, context-rebuild, startup-view, and event integration tests cover continuation, frozen pages, checkpoints, duplication, and recovery. |
-| Durable outbound delivery | `GatewayOutboxDispatcher` delegates scan scheduling to `OutboundLaneDrain` and one attempt to `OutboundDeliveryExecutor`. | Outbound drain/dispatcher/store tests cover lane ordering, bounded concurrency, retries, dead letters, checkpoints, failure isolation, and shutdown. |
+| Durable outbound delivery | `RingDeliveryEngine` executes complete prepared values through one Primary-Pane Ring or the Global Ring; `DeliveryCheckpointBus` fans out only after durable acknowledgement. | Ring engine, prepared-delivery store, contraction migration, CardKit, and recovery tests cover scope order, bounded cross-scope concurrency, retries, dead letters, checkpoints, quarantine, cold recovery, failure isolation, and shutdown. |
 | Herdr runtime reconciliation | `HerdrRuntimeReconciler` delegates authoritative passes to `BindingReconciliationPass` and fenced transitions to `BindingRuntimeConverger`. | Reconciliation pass, reconciler, snapshot, discovery, and event tests cover targeted/full convergence, ambiguity, failures, pruning, and shutdown. |
 | Command and control | `SwarmCommandRuntime` owns typed context/query/admission/observation; `CommandIntentDispatcher` owns durable lane execution, revalidation, recovery, and settlement. | Runtime, dispatcher, observer, natural-language, Card action, and Primary Tool tests cover source equivalence, risk admission, FIFO, idempotency, restart-safe results, stale context, uncertain no-replay recovery, and shutdown. |
 | Runtime lifecycle, health, and operations | `ManagedBridgeRuntime`, `RuntimeLifecycleLedger`, and `BridgeRuntimeShutdown` own fenced lifecycle; `HealthSnapshotCollector` owns readiness/status policy behind a transport-only server. | Lifecycle, shutdown, health collector/server, service lifecycle, and architecture tests cover partial startup, writer settlement, lease loss, redaction, fail-closed readiness, caching, and diagnostics. |

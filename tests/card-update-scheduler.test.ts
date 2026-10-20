@@ -1,9 +1,107 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import pino from "pino";
 import { CardUpdateScheduler } from "../src/events/card-update-scheduler.js";
+import { ConversationViewProjector } from "../src/events/conversation-view-projector.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("card update scheduler", () => {
+  it("does not replace ConversationViewProjector subscriptions when started twice", async () => {
+    const onBridgeEvent = vi.fn(() => vi.fn());
+    const answerCheckpoint = vi.fn(() => vi.fn());
+    const mainCheckpoint = vi.fn(() => vi.fn());
+    const projector = new ConversationViewProjector(
+      { onBridgeEvent } as never,
+      {} as never,
+      {} as never,
+      { onAnswerCheckpoint: answerCheckpoint, onMainCardCheckpoint: mainCheckpoint } as never,
+      pino({ enabled: false }), {} as never,
+      { converge: async () => undefined }, { converge: async () => undefined }
+    );
+
+    const firstStop = projector.start();
+    const secondStop = projector.start();
+    expect(secondStop).toBe(firstStop);
+    expect(onBridgeEvent).toHaveBeenCalledOnce();
+    expect(answerCheckpoint).toHaveBeenCalledOnce();
+    expect(mainCheckpoint).toHaveBeenCalledOnce();
+    firstStop();
+    await projector.stop();
+  });
+
+  it("uses a true trailing window for ordinary updates", async () => {
+    vi.useFakeTimers();
+    const delivered: number[] = [];
+    const scheduler = new CardUpdateScheduler(async (_cardKey, version) => { delivered.push(version); }, 250);
+
+    scheduler.schedule("segment:s1", 1);
+    await vi.advanceTimersByTimeAsync(200);
+    scheduler.schedule("segment:s1", 2);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(delivered).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(delivered).toEqual([2]);
+    await scheduler.stop();
+  });
+
+  it("keeps trailing windows independent across card keys", async () => {
+    vi.useFakeTimers();
+    const delivered: Array<[string, number]> = [];
+    const scheduler = new CardUpdateScheduler(async (cardKey, version) => { delivered.push([cardKey, version]); }, 250);
+
+    scheduler.schedule("segment:first", 1);
+    scheduler.schedule("segment:second", 1);
+    await vi.advanceTimersByTimeAsync(200);
+    scheduler.schedule("segment:first", 2);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(delivered).toEqual([["segment:second", 1]]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(delivered).toEqual([["segment:second", 1], ["segment:first", 2]]);
+    await scheduler.stop();
+  });
+
+  it("schedules Conversation Segments and legacy Answer cards through one keyed scheduler", async () => {
+    vi.useFakeTimers();
+    let answerCheckpoint!: (promptId: string, viewVersion: number) => void;
+    const answerConverge = vi.fn(async () => undefined);
+    const segmentConverge = vi.fn(async () => undefined);
+    const projector = new ConversationViewProjector(
+      { onBridgeEvent: () => () => {} } as never,
+      { loadRunCard: () => null } as never,
+      {} as never,
+      { onAnswerCheckpoint(listener: typeof answerCheckpoint) { answerCheckpoint = listener; return () => {}; } } as never,
+      pino({ enabled: false }),
+      {} as never,
+      { converge: answerConverge },
+      { converge: async () => undefined } as never,
+      { cardUpdateDebounceMs: 250, turnCards: { converge: segmentConverge } }
+    );
+    projector.start();
+
+    projector.scheduleTurnCard({ segmentId: "segment-1", viewVersion: 2, urgency: "trailing" });
+    answerCheckpoint("prompt-1", 3);
+    await Promise.resolve();
+    expect(answerConverge).toHaveBeenCalledWith("prompt-1");
+    expect(segmentConverge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(segmentConverge).toHaveBeenCalledWith("segment-1");
+
+    await projector.stop();
+  });
+
+  it("flushes interactive Answer updates on the low-latency path", async () => {
+    vi.useFakeTimers();
+    const delivered: number[] = [];
+    const scheduler = new CardUpdateScheduler(async (_cardKey, version) => { delivered.push(version); }, 250);
+    scheduler.schedule("answer:p1", 1, { priority: "interactive", delayMs: 120 });
+    await vi.advanceTimersByTimeAsync(119);
+    expect(delivered).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(delivered).toEqual([1]);
+    scheduler.stop();
+  });
+
   it("coalesces ordinary updates briefly and flushes terminal updates immediately", async () => {
     vi.useFakeTimers();
     const delivered: number[] = [];
@@ -71,6 +169,25 @@ describe("card update scheduler", () => {
     release();
 
     await vi.waitFor(() => expect(delivered).toEqual([3, 3]));
+    scheduler.stop();
+  });
+
+  it("coalesces an ordinary same-version request during an in-flight delivery", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const delivered: number[] = [];
+    const scheduler = new CardUpdateScheduler(async (_cardKey, version) => {
+      delivered.push(version);
+      await gate;
+    }, 100);
+
+    scheduler.schedule("main:b1", 3, true);
+    await vi.waitFor(() => expect(delivered).toEqual([3]));
+    scheduler.schedule("main:b1", 3, false);
+    release();
+    await vi.waitFor(() => expect(scheduler.diagnostics().pending).toBe(0));
+
+    expect(delivered).toEqual([3]);
     scheduler.stop();
   });
 

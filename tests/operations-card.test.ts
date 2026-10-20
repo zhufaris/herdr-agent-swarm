@@ -1,8 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { renderFailureCards, renderSessionCards } from "../src/cards/operations-card.js";
+import { renderFailureCards, renderSemanticDeliveryRolloutCard, renderSessionCards } from "../src/cards/operations-card.js";
+import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { MAX_CARD_SERIALIZED_LENGTH } from "../src/cards/card-payload.js";
 
 describe("operations cards", () => {
+  it("presents bounded rollout refusal and version diagnostics", () => {
+    const store = new SqliteBindingStore(":memory:");
+    const summary = store.getOperationalSummary().semanticDeliveryRollout;
+    const card = renderSemanticDeliveryRolloutCard({ ...summary, phase:"shadow", shadowMatches:7, shadowMismatches:1,
+      cutoverAllowed:false, contractionAllowed:false, unsupportedVersions:2,
+      ambiguousActionableRows:11,unresolvedSettlementGaps:12,retentionBlockers:13,
+      shadowEpoch:4,shadowStartedAt:"2026-10-10T00:00:00.000Z",oldestUnpreparedSemanticAgeSeconds:61,preparationCasFailures:3,
+      unmetPrerequisiteCount:2,oldestUnmetPrerequisiteAgeSeconds:3_601,checkpointBackwardRebases:5,
+      versions:[{ snapshotSchemaVersion:2,plannerPolicyVersion:1,rendererPolicyVersion:1,gatewayProfileVersion:1,rows:2,supported:false }],
+      blockers:Array.from({ length:20 },(_,index)=>`blocker-${index}`) as never });
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain("cutover 拒绝");
+    expect(serialized).toContain("snapshot=2");
+    expect(serialized).toContain("epoch 4");
+    expect(serialized).toContain("CAS failures 3");
+    expect(serialized).toContain("lag 2");
+    expect(serialized).toContain("backward rebases 5");
+    expect(serialized).toContain("ambiguous 11");
+    expect(serialized).toContain("settlement gaps 12");
+    expect(serialized).toContain("retention 13");
+    expect(serialized).not.toContain("blocker-19");
+    expect(serialized.length).toBeLessThan(12_000);
+    store.close();
+  });
   it("shows topic navigation for sessions", () => {
     const serialized = JSON.stringify(renderSessionCards([{ queueDepth: 2, binding: binding() }]));
     expect(serialized).toContain("Herdr Sessions");
@@ -19,7 +44,7 @@ describe("operations cards", () => {
 
   it("only gives outbound failures retry and dismiss controls", () => {
     const serialized = JSON.stringify(renderFailureCards([
-      { kind: "outbound", id: "outbound-reply-123456789", bindingId: "b1", attemptCount: 5, updatedAt: "now", error: "send", spaceName: "datasage", paneId: "w1:p1" },
+      { kind: "outbound", id: "outbound-reply-123456789", bindingId: "b1", attemptCount: 5, retryAllowed: true, updatedAt: "now", error: "send", spaceName: "datasage", paneId: "w1:p1" },
       { kind: "prompt", id: "p1", bindingId: "b1", updatedAt: "now", error: "run" }
     ]));
     expect(serialized.match(/retry_dead_letter/g)).toHaveLength(1);
@@ -41,7 +66,7 @@ describe("operations cards", () => {
       binding: { ...binding(), id: `binding-${index}`, title: `session-${"t".repeat(500)}-${index}`, paneId: `pane-${"p".repeat(500)}-${index}` }
     }));
     const failures = Array.from({ length: 20 }, (_, index) => ({
-      kind: "outbound" as const, id: `outbound-${index}`, bindingId: `binding-${index}`, attemptCount: 5, updatedAt: "now",
+      kind: "outbound" as const, id: `outbound-${index}`, bindingId: `binding-${index}`, attemptCount: 5, retryAllowed: true, updatedAt: "now",
       error: `error-${"e".repeat(500)}-${index}`, title: `title-${"t".repeat(500)}-${index}`,
       spaceName: `space-${"s".repeat(500)}-${index}`, paneId: `pane-${"p".repeat(500)}-${index}`
     }));

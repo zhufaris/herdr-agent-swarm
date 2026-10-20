@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports/external.js";
-import type { AgentState, HerdrCircuitBreakerStatus, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
+import type { AgentState, HerdrActiveTurn, HerdrCircuitBreakerStatus, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "../domain/types.js";
 import { CommandError } from "../infra/command-runner.js";
 import { safeLogError } from "./safe-error.js";
 
@@ -46,25 +46,73 @@ export class HerdrCircuitBreaker implements HerdrPort {
   async assertWorkspace(workspaceId: string, expectedSpaceName?: string): Promise<void> {
     await this.call("probe", () => expectedSpaceName === undefined ? this.delegate.assertWorkspace(workspaceId) : this.delegate.assertWorkspace(workspaceId, expectedSpaceName));
   }
+  async listWorkspaces(): Promise<Awaited<ReturnType<NonNullable<HerdrPort["listWorkspaces"]>>>> {
+    if (!this.delegate.listWorkspaces) throw new Error("Herdr adapter does not support Workspace discovery");
+    return this.call("probe", () => this.delegate.listWorkspaces!());
+  }
   async listAllPanes(): Promise<HerdrPane[]> {
     if (!this.delegate.listAllPanes) throw new Error("Herdr adapter does not support an all-workspace snapshot");
     return this.call("probe", () => this.delegate.listAllPanes!());
   }
   async listPanes(workspaceId: string, options?: { forceRefresh?: boolean; skipAllWorkspaceSnapshot?: boolean }): Promise<HerdrPane[]> { return this.call("probe", () => this.delegate.listPanes(workspaceId, options)); }
   async getPane(paneId: string): Promise<HerdrPane | null> { return this.call("probe", () => this.delegate.getPane(paneId)); }
+  async getActiveTurn(paneId: string): Promise<HerdrActiveTurn | null> {
+    if (!this.delegate.getActiveTurn) return null;
+    return this.call("probe", () => this.delegate.getActiveTurn!(paneId));
+  }
   async observeRuntime(paneId: string): Promise<RuntimeObservation> { return this.call("probe", () => this.delegate.observeRuntime(paneId)); }
   async waitForRuntimeChange(paneId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     if (!this.delegate.waitForRuntimeChange) return;
     await this.delegate.waitForRuntimeChange(paneId, timeoutMs, signal);
   }
   async createPane(workspaceId: string, cwd: string, options?: HerdrPaneCreationOptions): Promise<HerdrPane> { return this.call("command", () => this.delegate.createPane(workspaceId, cwd, options)); }
+  async supportsPaneCreationV2(): Promise<boolean> {
+    if (!this.delegate.supportsPaneCreationV2) return false;
+    return this.call("probe", () => this.delegate.supportsPaneCreationV2!());
+  }
+  async createPaneV2(input: Parameters<NonNullable<HerdrPort["createPaneV2"]>>[0]): Promise<Awaited<ReturnType<NonNullable<HerdrPort["createPaneV2"]>>>> {
+    if (!this.delegate.createPaneV2) return { outcome: "capability-unavailable", capability: "tab.create.v2", reason: "Herdr adapter does not support tab.create.v2" };
+    return this.call("command", () => this.delegate.createPaneV2!(input));
+  }
+  async supportsPaneIdentityReconcileV1(): Promise<boolean> {
+    if (!this.delegate.supportsPaneIdentityReconcileV1) return false;
+    return this.call("probe", () => this.delegate.supportsPaneIdentityReconcileV1!());
+  }
+  async reconcilePaneIdentityV1(input: Parameters<NonNullable<HerdrPort["reconcilePaneIdentityV1"]>>[0]): Promise<Awaited<ReturnType<NonNullable<HerdrPort["reconcilePaneIdentityV1"]>>>> {
+    if (!this.delegate.reconcilePaneIdentityV1) return { outcome: "capability-unavailable", capability: "pane.identity_reconcile.v1", reason: "Herdr adapter does not support pane.identity_reconcile.v1" };
+    return this.call("command", () => this.delegate.reconcilePaneIdentityV1!(input));
+  }
   async startTraex(paneId: string, executable: string, args?: string[]): Promise<void> { await this.call("command", () => this.delegate.startTraex(paneId, executable, args)); }
-  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[]; useConfiguredPermissionMode?: boolean }): Promise<void> {
+  async startAgent(paneId: string, input: { name: string; kind: "pi" | "claude" | "codex" | "traex"; executable: string; args?: string[]; useConfiguredPermissionMode?: boolean; rotatable?: boolean }): Promise<void> {
     if (!this.delegate.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
     await this.call("command", () => this.delegate.startAgent!(paneId, input));
   }
   async runPrompt(paneId: string, text: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal, onDispatched?: () => void | Promise<void>): Promise<AgentState> {
     return this.call("command", () => this.delegate.runPrompt(paneId, text, timeoutMs, onObservation, signal, onDispatched));
+  }
+  async supportsPromptQueue(): Promise<boolean> {
+    if (!this.delegate.supportsPromptQueue) return false;
+    return this.call("probe", () => this.delegate.supportsPromptQueue!());
+  }
+  async queuePrompt(paneId: string, text: string, input: { submissionId: string; expectedSessionId: string }, signal?: AbortSignal): Promise<{ submissionId: string }> {
+    if (!this.delegate.queuePrompt) throw new Error("Herdr adapter does not support native prompt queueing");
+    return this.call("command", () => this.delegate.queuePrompt!(paneId, text, input, signal));
+  }
+  async supportsModelPrompt(): Promise<boolean> {
+    if (!this.delegate.supportsModelPrompt) return false;
+    return this.call("probe", () => this.delegate.supportsModelPrompt!());
+  }
+  async supportsSessionRotation(): Promise<boolean> {
+    if (!this.delegate.supportsSessionRotation) return false;
+    return this.call("probe", () => this.delegate.supportsSessionRotation!());
+  }
+  async rotateSession(input: import("../domain/orchestrator-clear.js").SessionRotationRequest): Promise<import("../domain/orchestrator-clear.js").SessionRotationResult> {
+    if (!this.delegate.rotateSession) throw new Error("Herdr adapter does not support session rotation");
+    return this.call("command", () => this.delegate.rotateSession!(input));
+  }
+  async queueModelPrompt(paneId: string, text: string, input: { model: string; submissionId: string; expectedSessionId: string }, signal?: AbortSignal): Promise<{ submissionId: string }> {
+    if (!this.delegate.queueModelPrompt) throw new Error("Herdr adapter does not support native model prompt queueing");
+    return this.call("command", () => this.delegate.queueModelPrompt!(paneId, text, input, signal));
   }
   async waitForAgent(paneId: string, timeoutMs: number, onObservation?: (observation: RuntimeTurnObservation) => void | Promise<void>, signal?: AbortSignal): Promise<AgentState> {
     if (!this.delegate.waitForAgent) throw new Error("Herdr adapter does not support native Agent wait");

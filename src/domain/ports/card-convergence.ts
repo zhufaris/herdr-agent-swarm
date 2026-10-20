@@ -12,4 +12,5 @@ export interface MainCardConvergencePort {
 
 export interface WorkerTurnCardConvergencePort {
   converge(turnId: string): Promise<void>;
+  convergeActionable(): Promise<readonly string[]>;
 }

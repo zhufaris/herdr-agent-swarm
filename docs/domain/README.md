@@ -8,11 +8,11 @@ modules. For full lifecycle and dependency rules, see the
 
 | Context | Owns | Does not own |
 | --- | --- | --- |
-| [Primary Session](primary-session/CONTEXT.md) | Topic-to-Primary binding, generation, provisioning, and live-runtime evidence | Prompt execution or visible card state |
-| [Prompt Execution](prompt-execution/CONTEXT.md) | Ordinary prompt FIFO, steering, dispatch evidence, and attached or detached observation | Pane authority or Lark delivery |
+| [Primary Session](primary-session/CONTEXT.md) | Topic-to-Primary binding, generation, provisioning, and live-runtime evidence | Agent Input effect certainty or visible card state |
+| [Agent Input](agent-input/CONTEXT.md) | Immutable Submission Intent, Core receipt convergence, and no-resubmit certainty | Conversation order, Turn lifecycle, or Lark delivery |
 | [Worker Runtime](worker-runtime/CONTEXT.md) | Worker ownership, generations, sessions, and delegated tasks | Primary conversation binding |
-| [Conversation Projection](conversation-projection/CONTEXT.md) | User-visible topic, run, Worker, answer-page, and card-context read models | Execution state |
-| [Delivery and Operations](delivery-operations/CONTEXT.md) | Delivery intents, lanes, outbox attempts, checkpoints, dead letters, and instance lease | Agent execution or card-derived workflow truth |
+| [Conversation Projection](conversation-projection/CONTEXT.md) | User-visible topic, Turn, Worker, answer-page, and card-context read models derived from Core JSONL | Input submission state |
+| [Delivery and Operations](delivery-operations/CONTEXT.md) | Delivery intents, Primary-Pane/Global scopes and Rings, prepared effects, outbox attempts, checkpoints, dead letters, and instance lease | Agent execution or card-derived workflow truth |
 
 When a feature crosses contexts, keep the transition in an application workflow
 and depend on consumer-shaped domain ports. Do not make a projection, adapter, or

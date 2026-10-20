@@ -31,6 +31,8 @@ export function parseCommand(text: string): BridgeCommand | null {
       return parseNewCommand(argument) ?? { kind: "help" };
     case "reset":
       return { kind: "reset", title: argument || null };
+    case "clear":
+      return argument ? { kind: "help" } : { kind: "clear" };
     case "projects":
       return { kind: "projects" };
     case "spaces":
@@ -45,6 +47,7 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "status" };
     case "attach": {
       const parts = argument.split(/\s+/).filter(Boolean);
+      if (parts.length === 1) return { kind: "attach", spaceName: null, paneId: parts[0]! };
       return parts.length === 2 ? { kind: "attach", spaceName: parts[0]!, paneId: parts[1]! } : { kind: "help" };
     }
     case "rename":
@@ -68,8 +71,6 @@ export function parseCommand(text: string): BridgeCommand | null {
       return { kind: "resume" };
     case "awake":
       return argument ? { kind: "help" } : { kind: "awake" };
-    case "skip":
-      return argument ? { kind: "help" } : { kind: "skip" };
     case "worker":
       return parseWorkerCommand(argument) ?? { kind: "help" };
     case "help":

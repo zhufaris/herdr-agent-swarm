@@ -3,11 +3,13 @@ import type { OutboundWorkClass } from "../domain/types.js";
 import { planAnswerPage, type AnswerPagePlanningPort } from "../domain/answer-page-plan.js";
 import { answerElementId } from "../domain/run-card-view.js";
 import type { AnswerPageStore } from "../domain/ports/projection.js";
-import type { PrimaryPresentation } from "../domain/ports/presentation.js";
+import type { ApplicationPresentation, PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageConvergencePort } from "../domain/ports/card-convergence.js";
 import type { AnswerTimelineCursor } from "../domain/delivery.js";
 import { continuationSummary } from "../domain/card-page-handoff.js";
 import { lateAnswerTimelineResults } from "../domain/answer-timeline-late-results.js";
+import { ANSWER_STREAM_PAGE_LIMIT } from "../runtime/answer-stream.js";
+import { projectionGapWarning } from "../domain/projection-gap.js";
 
 export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   private readonly tails = new Map<string, Promise<void>>();
@@ -15,10 +17,10 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   constructor(
     private readonly store: AnswerPageStore,
     private readonly wakeOutbound: () => void,
-    private readonly presentation: Pick<PrimaryPresentation, "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage" | "answerTimelinePage">,
+    private readonly presentation: Pick<PrimaryPresentation, "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage" | "answerTimelinePage"> & Partial<Pick<ApplicationPresentation, "completionReview">>,
     private readonly logger?: Logger,
     planning?: AnswerPagePlanningPort
-  ) { this.planning = planning ?? { pageLimit: 9_000, answerStreamContent: presentation.answerStreamContent, renderAnswerStreamPage: presentation.answerStreamPage }; }
+  ) { this.planning = planning ?? { pageLimit: ANSWER_STREAM_PAGE_LIMIT, answerStreamContent: presentation.answerStreamContent, renderAnswerStreamPage: presentation.answerStreamPage }; }
 
   converge(promptId: string, workClass?: OutboundWorkClass): Promise<void> {
     const previous = this.tails.get(promptId) ?? Promise.resolve();
@@ -32,42 +34,50 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
   private async convergeOnce(promptId: string, workClass?: OutboundWorkClass): Promise<void> {
     const view = this.store.loadRunCard(promptId);
     const page = this.store.getActiveAnswerPage(promptId);
-    if (!view?.answerCardId) return;
+    if (!view) return;
     if (!page) {
       const pages = this.store.listAnswerPages(view.promptId);
       const latest = pages.at(-1);
-      const previous = latest?.state === "creating" && latest.deliveryMode === "static" ? pages.at(-2) : latest;
-      if (previous?.state === "frozen" && previous.deliveryMode === "static") this.reserveStaticAnswerReplacement(view, workClass);
+      const previous = latest?.state === "creating" ? pages.at(-2) : latest;
+      if (previous?.state === "frozen" && previous.deliveryMode === "static") {
+        if (this.store.hasPendingExpiredAnswerTarget(view.promptId, previous.pageIndex)) {
+          this.reserveStaticAnswerReplacement(view, previous, workClass);
+        } else {
+          this.reserveClosedAnswerStreamReplacement(view, workClass);
+        }
+      }
       else this.reserveFinalFoldedCard(view, workClass);
       return;
     }
+    if (!view.answerCardId) return;
+    if (page.deliveryMode === "static") { this.reserveStaticAnswerCard(view, page, workClass); return; }
     if (!page.cardId) { this.reserveClosedAnswerCard(view, workClass); return; }
     if (view.timelineItems.length > 0 && page.messageId) {
       this.convergeTimeline(view, page, workClass);
       return;
     }
-    if (page.deliveryMode === "static") { this.reserveStaticAnswerCard(view, page, workClass); return; }
     const facts = this.store.getAnswerPageDeliveryFacts(promptId, page.pageIndex);
     if (facts.finalUpdateState === "pending") return;
     if (facts.finalUpdateState === "dead_letter" || facts.finalUpdateState === "dismissed") { this.reserveFinalizedPageCard(view, page, workClass); return; }
     const plan = planAnswerPage(view, page, facts, this.planning);
+    const gapWarning = this.gapWarning(view, page.pageIndex);
     let outcome: "reserved" | "waiting" | "stale" = "waiting";
     if (plan.type === "stream-content") {
       outcome = this.store.reserveAnswerContent({ promptId, pageIndex: page.pageIndex, cardId: page.cardId, elementId: page.elementId, content: plan.content, source: plan.source, workClass });
     }
     else if (plan.type === "finish-terminal") outcome = this.store.reserveAnswerFinish({
       promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId!, summary: plan.summary,
-      finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart).page })!, workClass
+      finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart).page, gapWarning, completionActions: this.primaryCompletionActions(view, page) })!, workClass
     });
     else if (plan.type === "continue") {
       const binding = this.store.getBinding(view.bindingId);
       if (!binding?.rootMessageId) return;
       outcome = this.store.reserveAnswerContinuation({
         promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId!, summary: plan.currentSummary,
-        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart, plan.nextPageStart).page })!,
+        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart, plan.nextPageStart).page, gapWarning })!,
         nextPageIndex: plan.nextPageIndex, nextPageStart: plan.nextPageStart, nextElementId: plan.nextElementId,
         rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion,
-        card: this.presentation.answerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true }), workClass
+        card: this.presentation.answerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true, gapWarning: this.gapWarning(view, plan.nextPageIndex) }), workClass
       });
     } else if (plan.type === "rebuild") {
       const binding = this.store.getBinding(view.bindingId);
@@ -75,7 +85,7 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       outcome = this.store.reserveAnswerRebuild({
         promptId, pageIndex: page.pageIndex, nextPageIndex: plan.nextPageIndex, sourceStart: plan.nextPageStart, nextElementId: plan.nextElementId,
         rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion,
-        card: this.presentation.answerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true }), workClass
+        card: this.presentation.answerCard({ ...view, answerElementId: plan.nextElementId }, { pageNumber: plan.nextPageIndex + 1, initialContent: plan.initialContent, streaming: true, gapWarning: this.gapWarning(view, plan.nextPageIndex) }), workClass
       });
     }
     if (outcome === "reserved") this.wakeOutbound();
@@ -85,10 +95,12 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
 
   private convergeTimeline(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>, workClass?: OutboundWorkClass): void {
     const checkpoint = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
-    const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenAnswerTimelineItems(view.promptId, page.pageIndex), page.pageIndex);
+    const lateResults = lateAnswerTimelineResults(view.timelineItems, this.store.listFrozenAnswerTimelineItems(view.promptId, page.pageIndex));
     const plan = this.presentation.answerTimelinePage(view.timelineItems, checkpoint.startCursor, this.planning.pageLimit, lateResults);
-    const card = this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, streaming: view.phase !== "completed", timelineItems: plan.items });
-    const outcome = this.store.reserveAnswerTimelineCard({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId!, card, cursor: plan.nextCursor, items: plan.items, ...(workClass ? { workClass } : {}) });
+    const gapWarning = this.gapWarning(view, page.pageIndex);
+    const card = this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, streaming: view.phase !== "completed", timelineItems: plan.items, gapWarning });
+    const source = this.presentation.answerStreamContent(view);
+    const outcome = this.store.reserveAnswerTimelineCard({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId!, card, cursor: plan.nextCursor, items: plan.items, source: source.slice(page.sourceStart), ...(workClass ? { workClass } : {}) });
     if (outcome === "reserved") { this.wakeOutbound(); return; }
     const delivered = this.store.getAnswerTimelinePage(view.promptId, page.pageIndex);
     if (delivered.pending || !sameCursor(delivered.deliveredCursor, plan.nextCursor)) return;
@@ -100,15 +112,15 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
       const next = this.presentation.answerTimelinePage(view.timelineItems, plan.nextCursor, this.planning.pageLimit);
       const continuation = this.store.reserveAnswerContinuation({
         promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId!, messageId: page.messageId!, summary: continuationSummary(nextPageIndex),
-        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items })!,
+        finalizedCard: this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items, gapWarning })!,
         nextPageIndex, nextPageStart: nextPageIndex, nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, timelineStartCursor: plan.nextCursor, timelineEndCursor: next.nextCursor, timelineItems: next.items,
-        card: this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, streaming: true, timelineItems: next.items }), workClass
+        card: this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, streaming: true, timelineItems: next.items, gapWarning: this.gapWarning(view, nextPageIndex) }), workClass
       });
       if (continuation === "reserved") this.wakeOutbound();
       return;
     }
     if (view.phase === "completed") {
-      const finalized = this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items });
+      const finalized = this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: "", timelineItems: plan.items, gapWarning, completionActions: this.primaryCompletionActions(view, page) });
       if (finalized && this.store.reserveAnswerFinish({ promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId!, messageId: page.messageId!, summary: "Completed", finalizedCard: finalized, workClass }) === "reserved") this.wakeOutbound();
     }
   }
@@ -120,8 +132,8 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const rendered = this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), finished.sourceStart).page;
     const latestContent = this.store.getAnswerPageDeliveryFacts(view.promptId, finished.pageIndex).latestContent;
     const content = rendered || (latestContent?.state === "delivered" ? latestContent.content : "");
-    const card = this.presentation.finalAnswer(view, { pageNumber: finished.pageIndex + 1, initialContent: content });
-    if (card && this.store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: finished.pageIndex, cardId: finished.cardId, messageId: finished.messageId, card, workClass }) === "reserved") this.wakeOutbound();
+    const card = this.presentation.finalAnswer(view, { pageNumber: finished.pageIndex + 1, initialContent: content, gapWarning: this.gapWarning(view, finished.pageIndex), completionActions: this.primaryCompletionActions(view, finished) });
+    if (card && this.store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: finished.pageIndex, cardId: finished.cardId, messageId: finished.messageId, card, source: content, workClass }) === "reserved") this.wakeOutbound();
   }
 
   private reserveFinalizedPageCard(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: ReturnType<AnswerPageStore["listAnswerPages"]>[number], workClass?: OutboundWorkClass): void {
@@ -129,8 +141,8 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const pages = this.store.listAnswerPages(view.promptId);
     const next = pages.find(({ pageIndex }) => pageIndex === page.pageIndex + 1);
     const content = this.presentation.finalAnswerPage(this.presentation.answerStreamContent(view), page.sourceStart, next?.sourceStart).page;
-    const card = this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: content });
-    if (card && this.store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId, card, workClass }) === "reserved") this.wakeOutbound();
+    const card = this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: content, gapWarning: this.gapWarning(view, page.pageIndex) });
+    if (card && this.store.reserveFinalAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId, card, source: content, workClass }) === "reserved") this.wakeOutbound();
   }
 
   private reserveClosedAnswerCard(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, workClass?: OutboundWorkClass): void {
@@ -140,9 +152,9 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const latestContent = this.store.getAnswerPageDeliveryFacts(view.promptId, page.pageIndex).latestContent;
     const content = rendered || (latestContent?.state === "delivered" ? latestContent.content : "");
     const card = view.phase === "completed"
-      ? this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: content })
-      : this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, initialContent: content, streaming: false });
-    if (card && this.store.reserveClosedAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, card, workClass }) === "reserved") this.wakeOutbound();
+      ? this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: content, gapWarning: this.gapWarning(view, page.pageIndex), completionActions: this.primaryCompletionActions(view, page) })
+      : this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, initialContent: content, streaming: false, gapWarning: this.gapWarning(view, page.pageIndex) });
+    if (card && this.store.reserveClosedAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, card, source: content, workClass }) === "reserved") this.wakeOutbound();
   }
 
   private reserveStaticAnswerCard(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, page: NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>, workClass?: OutboundWorkClass): void {
@@ -150,27 +162,64 @@ export class AnswerPageWorkflow implements AnswerPageConvergencePort {
     const source = this.presentation.answerStreamContent(view);
     const rendered = this.presentation.answerStreamPage(source, page.sourceStart);
     const card = view.phase === "completed"
-      ? this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: rendered.page })
-      : this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, initialContent: rendered.page, streaming: false });
+      ? this.presentation.finalAnswer(view, { pageNumber: page.pageIndex + 1, initialContent: rendered.page, gapWarning: this.gapWarning(view, page.pageIndex), completionActions: this.primaryCompletionActions(view, page) })
+      : this.presentation.answerCard(view, { pageNumber: page.pageIndex + 1, initialContent: rendered.page, streaming: false, gapWarning: this.gapWarning(view, page.pageIndex) });
     if (card && this.store.reserveStaticAnswerCardUpdate({ promptId: view.promptId, pageIndex: page.pageIndex, messageId: page.messageId, card, source: source.slice(page.sourceStart, rendered.nextPageStart ?? source.length), workClass }) === "reserved") this.wakeOutbound();
   }
 
-  private reserveStaticAnswerReplacement(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, workClass?: OutboundWorkClass): void {
+  private reserveClosedAnswerStreamReplacement(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, workClass?: OutboundWorkClass): void {
     const pages = this.store.listAnswerPages(view.promptId);
     const latest = pages.at(-1);
-    const previous = latest?.state === "creating" && latest.deliveryMode === "static" ? pages.at(-2) : latest;
+    const previous = latest?.state === "creating" ? pages.at(-2) : latest;
     const binding = this.store.getBinding(view.bindingId);
     if (!previous || previous.state !== "frozen" || previous.deliveryMode !== "static" || !binding?.rootMessageId) return;
-    const nextPageIndex = latest?.state === "creating" && latest.deliveryMode === "static" ? latest.pageIndex : previous.pageIndex + 1;
+    const nextPageIndex = latest?.state === "creating" ? latest.pageIndex : previous.pageIndex + 1;
     const nextElementId = answerElementId(view.promptId, nextPageIndex);
-    const content = this.presentation.answerStreamPage(this.presentation.answerStreamContent(view), previous.sourceStart).page;
+    const source = this.presentation.answerStreamContent(view);
+    const rendered = this.presentation.answerStreamPage(source, previous.sourceStart);
+    const content = rendered.page;
+    const card = this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, initialContent: content, streaming: false, gapWarning: this.gapWarning(view, nextPageIndex) });
+    if (card && this.store.reserveClosedAnswerStreamReplacement({ promptId: view.promptId, previousPageIndex: previous.pageIndex, nextPageIndex, sourceStart: previous.sourceStart, source: source.slice(previous.sourceStart, rendered.nextPageStart ?? source.length), nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, card, workClass }) === "reserved") this.wakeOutbound();
+  }
+
+  private reserveStaticAnswerReplacement(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, previous: ReturnType<AnswerPageStore["listAnswerPages"]>[number], workClass?: OutboundWorkClass): "reserved" | "waiting" | "stale" {
+    const binding = this.store.getBinding(view.bindingId);
+    if (!binding?.rootMessageId) return "stale";
+    const nextPageIndex = previous.pageIndex + 1;
+    const nextElementId = answerElementId(view.promptId, nextPageIndex);
+    const source = this.presentation.answerStreamContent(view);
+    const rendered = this.presentation.answerStreamPage(source, previous.sourceStart);
+    const content = rendered.page;
     const card = view.phase === "completed"
-      ? this.presentation.finalAnswer(view, { pageNumber: nextPageIndex + 1, initialContent: content, answerElementId: nextElementId })
-      : this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, initialContent: content, streaming: false });
-    if (card && this.store.reserveStaticAnswerReplacement({ promptId: view.promptId, previousPageIndex: previous.pageIndex, nextPageIndex, sourceStart: previous.sourceStart, nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, card, workClass }) === "reserved") this.wakeOutbound();
+      ? this.presentation.finalAnswer(view, { pageNumber: nextPageIndex + 1, initialContent: content, gapWarning: this.gapWarning(view, nextPageIndex) })
+      : this.presentation.answerCard({ ...view, answerElementId: nextElementId }, { pageNumber: nextPageIndex + 1, initialContent: content, streaming: false, gapWarning: this.gapWarning(view, nextPageIndex) });
+    if (!card) return "stale";
+    const outcome = this.store.reserveStaticAnswerReplacement({ promptId: view.promptId, previousPageIndex: previous.pageIndex, nextPageIndex, sourceStart: previous.sourceStart, source: source.slice(previous.sourceStart, rendered.nextPageStart ?? source.length), nextElementId, rootMessageId: binding.rootMessageId, viewVersion: view.viewVersion, card, workClass });
+    if (outcome === "reserved") this.wakeOutbound();
+    return outcome;
+  }
+
+  private gapWarning(view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>, pageIndex: number): string | null {
+    const summary = this.store.getProjectionGapSummary?.({ bindingId: view.bindingId, promptId: view.promptId, pageIndex });
+    return projectionGapWarning(summary);
+  }
+
+  private primaryCompletionActions(
+    view: NonNullable<ReturnType<AnswerPageStore["loadRunCard"]>>,
+    page: Pick<NonNullable<ReturnType<AnswerPageStore["getActiveAnswerPage"]>>, "pageIndex" | "cardId" | "messageId">
+  ) {
+    if (view.phase !== "completed" || !page.cardId || !page.messageId) return null;
+    const renderCompletionReview = this.presentation.completionReview;
+    if (!renderCompletionReview) return null;
+    return this.store.preparePrimaryCompletionActionSet?.({
+      promptId: view.promptId, pageIndex: page.pageIndex, cardId: page.cardId, messageId: page.messageId,
+      card: ({ actionSetId, mentionOpenId, choiceSpecification }) => renderCompletionReview({
+        actionSetId, mentionOpenId, choiceSpecification
+      })
+    }) ?? null;
   }
 }
 
 function sameCursor(left: AnswerTimelineCursor | null, right: AnswerTimelineCursor | null): boolean {
-  return left?.itemIndex === right?.itemIndex && left?.markdownOffset === right?.markdownOffset || left === null && right === null;
+  return left?.itemIndex === right?.itemIndex && left?.markdownOffset === right?.markdownOffset && left?.section === right?.section && left?.offset === right?.offset || left === null && right === null;
 }

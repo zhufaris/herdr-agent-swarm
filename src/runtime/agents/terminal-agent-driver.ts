@@ -2,7 +2,9 @@ import type { AgentKind, AgentRuntimeRef } from "../../domain/agent-instance.js"
 import type { AgentCapabilities, AgentDispatchHooks, AgentRuntimeDriver, DispatchReceipt, InterruptReceipt, SteerReceipt } from "../../domain/agent-runtime.js";
 import type { HerdrPort } from "../../domain/ports/external.js";
 import { safeLogError } from "../safe-error.js";
-import { managedAgentName, primaryToolMcpArguments } from "./agent-startup.js";
+import { managedAgentName, normalizeManagedAgentName } from "../../domain/managed-agent-name.js";
+import { primaryToolMcpArguments } from "./agent-startup.js";
+import { classifyPromptSubmissionFailure } from "../../domain/prompt-submission.js";
 
 export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
   abstract readonly kind: AgentKind;
@@ -11,22 +13,41 @@ export abstract class TerminalAgentDriver implements AgentRuntimeDriver {
   constructor(protected readonly herdr: HerdrPort, protected readonly executable: string, protected readonly turnTimeoutMs: number, protected readonly available: boolean) {}
   abstract describe(): AgentCapabilities;
 
-  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
+  async start(runtime: AgentRuntimeRef, options?: { projectId?: string; name: string; managedName?: string; model: string | null; transcriptOwnerId?: string; primaryTools?: { command: string; args: string[]; agentArgs?: string[] } }): Promise<void> {
     if (!this.available) throw new Error(`Agent adapter is unavailable: ${this.kind}`);
     if (!this.herdr.startAgent) throw new Error("Herdr adapter does not support managed agent startup");
     const args = options?.model && this.describe().modelSelection !== "unsupported" ? ["--model", options.model] : [];
+    await this.extendStartupArgs(args, runtime, options);
     if (options?.primaryTools && this.kind === "codex") args.push(...(options.primaryTools.agentArgs ?? []), ...primaryToolMcpArguments(options.primaryTools));
-    await this.herdr.startAgent(runtime.paneId, { name: managedAgentName(options?.managedName ?? options?.projectId, options?.managedName ? "" : options?.name ?? this.kind), kind: this.herdrKind, executable: this.executable, args });
+    const name = options?.managedName ? normalizeManagedAgentName(options.managedName) : managedAgentName(options?.projectId, options?.name ?? this.kind);
+    await this.herdr.startAgent(runtime.paneId, { name, kind: this.herdrKind, executable: this.executable, args });
   }
+
+  protected async extendStartupArgs(_args: string[], _runtime: AgentRuntimeRef, _options?: { transcriptOwnerId?: string }): Promise<void> {}
 
   async submit(runtime: AgentRuntimeRef, text: string, hooks?: AgentDispatchHooks, signal?: AbortSignal): Promise<DispatchReceipt> {
     if (!this.available) return { status: "not-delivered", reason: `Agent adapter is unavailable: ${this.kind}` };
     let dispatched = false;
     try {
+      if (hooks?.submissionId && this.kind === "pi") {
+        if (!runtime.nativeSessionId || !this.herdr.queuePrompt) return { status: "not-delivered", reason: "Native Worker submission identity is unavailable" };
+        const result = await this.herdr.queuePrompt(runtime.paneId, text, { submissionId: hooks.submissionId, expectedSessionId: runtime.nativeSessionId }, signal);
+        if (result.submissionId !== hooks.submissionId) return { status: "delivery-uncertain", reason: "Native Worker submission receipt identity mismatch" };
+        if (result.receipt?.state === "rejected") return { status: "not-delivered", reason: "Native Worker submission was rejected" };
+        if (result.receipt?.state === "uncertain") return { status: "delivery-uncertain", reason: "Native Worker submission receipt is uncertain" };
+        dispatched = true;
+        await hooks.onDispatched?.();
+        return { status: "confirmed-delivered" };
+      }
       await this.herdr.runPrompt(runtime.paneId, text, this.turnTimeoutMs, hooks?.onObservation, signal, async () => { dispatched = true; await hooks?.onDispatched?.(); });
       return { status: "confirmed-delivered" };
     } catch (error) {
       const reason = safeLogError(error).message;
+      if (hooks?.submissionId && this.kind === "pi") {
+        const outcome = classifyPromptSubmissionFailure(error);
+        if (outcome?.kind === "not_started" || outcome?.kind === "rejected") return { status: "not-delivered", reason };
+        return { status: "delivery-uncertain", reason };
+      }
       return dispatched ? { status: "delivery-uncertain", reason } : { status: "not-delivered", reason };
     }
   }

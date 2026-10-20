@@ -19,7 +19,7 @@ export class ExecFileCommandRunner implements CommandRunner {
           if (!cause) { resolve({ stdout, stderr }); return; }
           const error = cause as NodeJS.ErrnoException & { stdout?: string; stderr?: string; killed?: boolean };
           const detail = [error.message, error.stderr?.trim()].filter(Boolean).join(": " );
-          reject(new CommandError(executable, args, detail, error.killed === true, cause));
+          reject(new CommandError(executable, args, detail, error.killed === true));
         };
         if (startReceipt) void startReceipt.then(finish, () => undefined);
         else finish();
@@ -55,7 +55,11 @@ export class CommandError extends Error {
 
 function redactCommandArgs(args: string[]): string[] {
   const safe = [...args];
-  if (safe[0] === "agent" && safe[1] === "prompt" && safe.length > 3) safe[3] = "[REDACTED]";
+  if (isAgentTextCommand(safe) && safe.length > 3) safe[3] = "[REDACTED]";
+  const launchSeparator = managedAgentLaunchSeparator(args);
+  if (launchSeparator >= 0) {
+    for (let index = launchSeparator + 1; index < safe.length; index += 1) safe[index] = "[REDACTED]";
+  }
   for (let index = 0; index < safe.length - 1; index += 1) {
     if (safe[index] !== "--env") continue;
     const secret = /^(SWARM_PRIMARY_CAPABILITY)=/.exec(safe[index + 1]!);
@@ -66,13 +70,24 @@ function redactCommandArgs(args: string[]): string[] {
 
 function sensitiveCommandArgValues(args: string[]): string[] {
   const values: string[] = [];
-  if (args[0] === "agent" && args[1] === "prompt" && args.length > 3) values.push(args[3]!);
+  if (isAgentTextCommand(args) && args.length > 3) values.push(args[3]!);
+  const launchSeparator = managedAgentLaunchSeparator(args);
+  if (launchSeparator >= 0) values.push(...args.slice(launchSeparator + 1));
   for (let index = 0; index < args.length - 1; index += 1) {
     if (args[index] !== "--env") continue;
     const match = /^SWARM_PRIMARY_CAPABILITY=(.*)$/.exec(args[index + 1]!);
     if (match) values.push(args[index + 1]!, match[1]!);
   }
   return values;
+}
+
+function isAgentTextCommand(args: string[]): boolean {
+  return args[0] === "agent" && (args[1] === "prompt" || args[1] === "input" || args[1] === "input-v4");
+}
+
+function managedAgentLaunchSeparator(args: string[]): number {
+  if (args[0] !== "agent" || (args[1] !== "start" && args[1] !== "session-rotate")) return -1;
+  return args.indexOf("--", 2);
 }
 
 function redactKnownValues(message: string, values: string[]): string {

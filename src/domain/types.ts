@@ -2,14 +2,19 @@ import type { HerdrPane } from "./runtime-observation.js";
 import type { DeliveryFailureClass, OutboundReplyKind, OutboundReplyState, OutboxLaneClass } from "./delivery.js";
 import type { Binding, BindingState } from "./binding.js";
 import type { PromptState } from "./prompt.js";
-export type { Binding, BindingMetadataPatch, BindingState } from "./binding.js";
-export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptJob, PromptObservationState, PromptState, PromptWorkHint, StalePromptClaim, TranscriptTurnClaimOutcome, TurnPriority, UndispatchedPromptClaimFence } from "./prompt.js";
-export type { AgentState, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
-export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, AnswerTimelineCursor, AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint, BindingThreadAlias, DeadLetterActionOutcome, DeliveryEffectCertainty, DeliveryFailureClass, DeliveryFailureMetadata, GatewayRecoveryKind, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboundWorkClass, OutboxLaneClass, OutboxQuarantineAction, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
+export type { Binding, BindingKind, BindingMetadataPatch, BindingState } from "./binding.js";
+export type { ConflictedRuntimeIdentityClaim, CurrentRuntimeIdentityClaim, NativeRuntimeIdentity, ReleasedRuntimeIdentityClaim, RuntimeIdentityAttachment, RuntimeIdentityAttachmentState, RuntimeIdentityClaim, RuntimeIdentityClaimState, RuntimeIdentityEvidence, RuntimeIdentityOwner, UnclaimedRuntimeIdentityClaim } from "./runtime-identity-claim.js";
+export type { DurablePromptWorkScan, ExternalTurnAdoption, ExternalTurnSupersessionFence, PromptIngressSource, PromptJob, PromptObservationState, PromptState, PromptTranscriptTurn, PromptWorkHint, StalePromptClaim, TranscriptTurnAdoptionOutcome, TranscriptTurnClaimOutcome, TurnPriority, UndispatchedPromptClaimFence } from "./prompt.js";
+export type { AgentState, HerdrActiveTurn, HerdrAgentSession, HerdrPane, HerdrPaneCreationOptions, RuntimeObservation, RuntimeTurnObservation } from "./runtime-observation.js";
+export type { AnswerPage, AnswerPageDeliveryFacts, AnswerPageDeliveryMode, AnswerPageReservationOutcome, AnswerPageState, AnswerTimelineCursor, AnswerTimelineFrozenItem, AnswerTimelinePageCheckpoint, BindingThreadAlias, DeadLetterActionOutcome, DeliveryEffectCertainty, DeliveryFailureClass, DeliveryFailureMetadata, GatewayRecoveryKind, MainCardReservationOutcome, OutboundFailureTransition, OutboundReply, OutboundReplyKind, OutboundReplyState, OutboundTargetRole, OutboundWorkClass, OutboxLaneClass, OutboxQuarantineAction, PreparedDelivery, RequestCardRole, StaleOutboxQuarantineRecovery } from "./delivery.js";
+export type { DeliveryOwnerFence, DeliveryScope } from "./delivery-scope.js";
+export type { ConsumerCheckpoint, CoreLaneIdentity, DeliveryRingCheckpoint } from "./checkpoint.js";
 export type { ProjectSelection, ProjectSelectionClaim, ProjectSelectionState } from "./project-selection.js";
-export type { InboundDispatcherDiagnostics, InstanceWorkerDiagnostics, OutboxDispatcherDiagnostics, PromptWorkerDiagnostics, ReconciliationDiagnostics, ReconciliationFailure, ReconciliationPassResult, SessionOperationDispatcherDiagnostics, StartupRecoveryDiagnostics } from "./diagnostics.js";
+export type { InboundDispatcherDiagnostics, InstanceWorkerDiagnostics, PromptWorkerDiagnostics, ReconciliationDiagnostics, ReconciliationFailure, ReconciliationPassResult, SessionOperationDispatcherDiagnostics, StartupRecoveryDiagnostics } from "./diagnostics.js";
 export type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "./inbound.js";
 export type { WorkerSessionThread, WorkerSessionThreadMode, WorkerSessionThreadState } from "./worker-session-thread.js";
+export type { AcceptOrchestratorClearOperationInput, OrchestratorClearOperation, OrchestratorClearState, SessionRotationReceipt, SessionRotationRequest, SessionRotationResult } from "./orchestrator-clear.js";
+export type { AcceptOrchestratorIdentityMigrationInput, OrchestratorIdentityMigration, OrchestratorIdentityMigrationState } from "./orchestrator-identity.js";
 
 export type EventOrigin = "lark" | "herdr" | "bridge";
 export type PaneCloseOperationState = "executing" | "uncertain";
@@ -85,9 +90,9 @@ export interface SessionSummary {
 export interface SessionPage { sessions: SessionSummary[]; nextCursor: string | null; }
 
 export type FailureSummary =
-  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
-  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string }
-  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; title?: string };
+  | { kind: "outbound"; id: string; bindingId: string | null; attemptCount: number; retryAllowed: boolean; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; paneToken?: string | null; title?: string }
+  | { kind: "prompt"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; paneToken?: string | null; title?: string }
+  | { kind: "session"; id: string; bindingId: string; updatedAt: string; error: string; spaceName?: string; paneId?: string | null; paneToken?: string | null; title?: string };
 
 
 export interface ProjectConfig {
@@ -98,6 +103,7 @@ export interface ProjectConfig {
   workspaceId: string;
   cwd: string;
   maxInstances?: number;
+  orchestrator?: { enabled: boolean; cwd: string } | undefined;
   paneRetention?: { mode: "persistent" | "ephemeral"; idleAfterMs?: number | undefined; graceMs?: number | undefined } | undefined;
 }
 
@@ -141,35 +147,116 @@ export interface RetiredPaneCleanupOperation {
   updatedAt: string;
 }
 
-export interface PromptLatencyPhaseSummary {
-  sampleCount: number;
-  averageMs: number | null;
-  maxMs: number | null;
-}
-
-export interface PromptLatencySummary {
-  windowSize: number;
-  sampleCount: number;
-  queue: PromptLatencyPhaseSummary;
-  execution: PromptLatencyPhaseSummary;
-  delivery: PromptLatencyPhaseSummary;
-}
-
 export interface LarkDeliveryCooldownSummary {
   active: boolean; blockedUntil: string | null; remainingMs: number; triggerCount: number;
   lastHttpStatus: number | null; lastLarkErrorCode: string | null; lastReason: string | null;
 }
 
-export interface OutboxWorkSummary {
-  ready: number; inFlight: number; retryWait: number; cooldownWait: number; waitingBehindLane: number;
-  oldestInFlightAt: string | null; oldestInFlightAgeSeconds: number | null;
+export interface DeliveryRingOperationalSummary {
+  pending: number;
+  panePending: number;
+  globalPending: number;
+  durableBytes: number;
+  scopes: number;
+  primaryPaneScopes: number;
+  workerPaneScopes: number;
+  legacyWorkerScopeDebt: number;
+  ready: number;
+  retryWait: number;
+  activeClaims: number;
+  waitingBehindScope: number;
+  oldestPendingAt: string | null;
+  oldestPendingAgeSeconds: number | null;
+  initializedCheckpointScopes: number;
+  lowestBlockingDeliveryOrder: number | null;
+  lowestBlockingAgeSeconds: number | null;
+  uncertainBlocked: number;
+  activeQuarantineBlocked: number;
+  graceBlockedScopes: number;
+  isolatedConflicts: number;
+  isolatedUncertain: number;
+  bypassedDeliveries: number;
+  pendingHumanReviews: number;
+  oldestHumanReviewAgeSeconds: number | null;
+}
+
+export interface PaneTopologyOperationalSummary {
+  pending: number;
+  executing: number;
+  uncertain: number;
+  recoverable: number;
+  oldestOpenAt: string | null;
+}
+
+export interface CoreSessionIngestionDiagnostics {
+  ready: boolean;
+  state: "idle" | "awaiting_session" | "running" | "stopped";
+  recoveryState: "idle" | "indexing" | "needs_human";
+  runCount: number;
+  activeSessions: number;
+  awaitingSessions: number;
+  laggingSessions: number;
+  oldestLagAgeSeconds: number | null;
+  requiredFailures: number;
+  retryingSessions: number;
+  maxRetryAttempt: number;
+  nextRetryAt: string | null;
+  indexingRecoveries: number;
+  needsHumanRecoveries: number;
+  fallbackDelayMs: number | null;
+  nextFallbackAt: string | null;
+  pendingReprojections: number;
+  activeIngestionPermits: number;
+  pendingReprojectionRuns: number;
+  pendingReprojectedEvents: number;
+  pendingReprojectionRetries: number;
+  pendingReprojectionQuarantined: number;
+  pendingReprojectionNoPending: number;
+  pendingReprojectionNoCandidate: number;
+  pendingReprojectionIdentityMismatch: number;
+  pendingReprojectionRouteUnavailable: number;
+  multiplexTargets: number;
+  multiplexOverflow: number;
+  multiplexGeneration: number;
+  lastPendingReprojectionSkipReason: "no_pending" | "no_candidate" | "identity_mismatch" | "route_unavailable" | null;
+  lastPendingReprojectionAt: string | null;
+  lastRunAt: string | null;
+  lastSuccessfulIngestAt: string | null;
+  lastFailureAt: string | null;
+  lastFailureCode: "route_unavailable" | "route_resolution_failed" | "cursor_expired" | "unrecoverable_cursor" | "session_ingestion_failed" | "recovery_not_found" | "recovery_ambiguous" | "recovery_unavailable" | null;
+  lastFailure: string | null;
 }
 
 export interface OperationalSummary {
+  semanticDeliveryRollout: SemanticDeliveryRolloutSummary;
   bindings: Record<BindingState, number>;
-  prompts: Record<PromptState, number>;
-  queueFeedback: { withEstimate: number; withoutEstimate: number };
-  promptLatency: PromptLatencySummary;
+  submissionIntents: {
+    states: Record<import("./submission-intent.js").SubmissionIntentState, number>;
+    awaitingReceipt: number;
+    receiptKnown: number;
+  };
+  coreProjection: {
+    lanes: number; laggingLanes: number; pendingEvents: number; quarantinedEvents: number;
+    oldestPendingAt: string | null; oldestPendingAgeSeconds: number | null;
+  };
+  retentionCompaction: {
+    totalCompacted: number;
+    coreEvent?: {
+      cursorMode: "audit" | "compact" | null;
+      verified: number;
+      compacted: number;
+      retainedBytes: number;
+    };
+    sources: Array<{
+      source: "core_event" | "conversation_segment_item" | "answer_timeline_item" | "delivery";
+      cycleState: "scanning" | "complete";
+      highWater: Readonly<Record<string, unknown>>;
+      after: Readonly<Record<string, unknown>> | null;
+      compacted: number;
+      refusals: Readonly<Record<string, number>>;
+      updatedAt: string;
+    }>;
+  };
   inbound: {
     states: Record<"received" | "processing" | "accepted", number>;
     retryable: number;
@@ -183,6 +270,18 @@ export interface OperationalSummary {
     oldestAcceptedAgeSeconds: number | null;
   };
   workerThreads: Record<import("./worker-session-thread.js").WorkerSessionThreadState, number>;
+  completionReviews: {
+    legacyInline: number;
+    provisional: number;
+    presenting: number;
+    active: number;
+    consumed: number;
+    superseded: number;
+    unavailable: number;
+    deliveredPresentationsAwaitingAdoption: number;
+    pendingPresentations: number;
+    uncertainPresentations: number;
+  };
   outbound: Record<OutboundReplyState, number>;
   pendingOutbox: number;
   deadLetters: number;
@@ -191,19 +290,30 @@ export interface OperationalSummary {
   unresolvedDeadLettersByClass: Record<DeliveryFailureClass | "legacy", number>;
   uncertainDeliveryEffects: number;
   larkDeliveryCooldown: LarkDeliveryCooldownSummary;
-  outboxWork: OutboxWorkSummary;
+  deliveryRings: DeliveryRingOperationalSummary;
+  paneTopology: PaneTopologyOperationalSummary;
   eligibleDeadLetterRecoveries: number;
   deliveryRecoveries: Record<"unresolved" | "replacement_pending" | "recovered" | "dismissed", number>;
-  oldestPendingAt: string | null;
-  outboxLanes: {
-    pending: number; eligible: number; blocked: number; nextAttemptAt: string | null;
-    oldestHeadAt: string | null; oldestHeadAgeSeconds: number | null; stalled: number; oldestStalledAgeSeconds: number | null;
+  projectionDeliveryRecovery: {
+    backlog: number; eligible: number; awaitingAck: number; recovered: number; exhausted: number;
+    byProjection: { primaryAnswer: number; workerTask: number; turnCard: number };
+    oldestEligibleAt: string | null; oldestEligibleAgeSeconds: number | null;
   };
+  turnCards: {
+    pending: number; working: number; terminal: number; needsHuman: number;
+    pagesAwaitingCreate: number; pagesAwaitingUpdate: number; quarantined: number;
+  };
+  oldestPendingAt: string | null;
   outboxQuarantines: {
-    active: number; released: number; byLaneClass: Record<OutboxLaneClass, number>; byFailureClass: Record<DeliveryFailureClass, number>;
+    active: number; current?: number; historical?: number; released: number; byLaneClass: Record<OutboxLaneClass, number>; byFailureClass: Record<DeliveryFailureClass, number>;
     latest: { replyId: string; replyKind: OutboundReplyKind; laneClass: OutboxLaneClass; failureClass: DeliveryFailureClass; action: string; reason: string; createdAt: string; releasedAt: string | null } | null;
   };
-  recentFailedPrompt: { promptId: string; bindingId: string; updatedAt: string; error: string } | null;
+  projectionGaps: import("./projection-gap.js").ProjectionGapOperationalSummary;
+  turnRecovery: {
+    pending: number; due: number; oldestAttemptAt: string | null; oldestAgeSeconds: number | null;
+    byState: Record<"waiting" | "indexing" | "not_found" | "ambiguous" | "transient", number>;
+    latestFailure: { failureCode: string; attemptCount: number; lastAttemptAt: string; nextAttemptAt: string } | null;
+  };
   recentDeadLetter: { replyId: string; bindingId: string | null; promptId: string | null; attemptCount: number; updatedAt: string; error: string } | null;
   lifecycle: Record<import("./pane-thread-lifecycle.js").SessionLifecycle, number>;
   attachment: Record<import("./pane-thread-lifecycle.js").AttachmentState, number>;
@@ -217,6 +327,42 @@ export interface OperationalSummary {
     latestOutcome: { operationId: string; state: RetiredPaneCleanupState; updatedAt: string; detail: string | null } | null;
   };
   oldestInactiveAt: string | null;
+}
+
+export type SemanticDeliveryRolloutBlocker =
+  | "shadow_evidence_missing"
+  | "shadow_mismatch"
+  | "ambiguous_actionable_rows"
+  | "unsupported_versions"
+  | "unresolved_settlement_gaps"
+  | "retention_blockers"
+  | "backup_restore_rehearsal_missing";
+
+export interface SemanticDeliveryRolloutSummary {
+  phase: "expansion" | "shadow" | "cohort" | "contraction_ready";
+  cohortEnabled: boolean;
+  cutoverAllowed: boolean;
+  contractionAllowed: boolean;
+  legacyRows: number;
+  semanticRows: number;
+  shadowMatches: number;
+  shadowMismatches: number;
+  shadowEpoch: number;
+  shadowStartedAt: string | null;
+  ambiguousActionableRows: number;
+  unsupportedVersions: number;
+  unresolvedSettlementGaps: number;
+  retentionBlockers: number;
+  oldestUnpreparedSemanticAt: string | null;
+  oldestUnpreparedSemanticAgeSeconds: number | null;
+  preparationCasFailures: number;
+  unmetPrerequisiteCount: number;
+  oldestUnmetPrerequisiteAt: string | null;
+  oldestUnmetPrerequisiteAgeSeconds: number | null;
+  checkpointBackwardRebases: number;
+  versions: ReadonlyArray<{ snapshotSchemaVersion: number | null; plannerPolicyVersion: number | null; rendererPolicyVersion: number | null; gatewayProfileVersion: number | null; rows: number; supported: boolean }>;
+  backupRestoreRehearsedAt: string | null;
+  blockers: SemanticDeliveryRolloutBlocker[];
 }
 
 export interface SqliteIntegrityIssue {
@@ -238,6 +384,37 @@ export interface SqliteIntegrityDiagnostics extends SqliteIntegrityInspection {
   completedAt: string | null;
   durationMs: number | null;
   error: string | null;
+}
+
+export type DatabaseDiagnosticsFailureClass = "busy" | "locked" | "timeout" | "other";
+
+export interface DatabaseDiagnosticsInspection {
+  operational: OperationalSummary;
+  semantic: {
+    issues: SqliteIntegrityIssue[];
+    truncated: boolean;
+  };
+  physical: {
+    quickCheck: "ok" | "failed";
+    foreignKeyIssues: Array<{ table: string; rowId: number | null }>;
+    truncated: boolean;
+  } | undefined;
+  connection: {
+    queryOnly: true;
+    busyTimeoutMs: number;
+  };
+}
+
+export interface DatabaseDiagnosticsStatus {
+  state: "fresh" | "stale" | "unavailable";
+  refreshing: boolean;
+  collectedAt: string | null;
+  failureClass: DatabaseDiagnosticsFailureClass | null;
+  retryAt: string | null;
+  physicalState: "unknown" | "healthy" | "failed";
+  physicalCheckedAt: string | null;
+  semanticIssueCount: number;
+  semanticTruncated: boolean;
 }
 
 export interface BindingTitleProjectionInput {
@@ -300,6 +477,7 @@ export interface RecoverOrphanBindingProjectionInput {
   expectedPaneId: string;
   expectedGeneration: number;
   pane: HerdrPane;
+  event: import("./create-bridge-event.js").BridgeEventOf<"BindingActivated">;
   view: import("./topic-view.js").TopicViewState;
   rootMessageId: string | null;
   mainCard: object;
@@ -315,14 +493,40 @@ export interface RecoverOrphanBindingProjectionResult {
 
 export type RuntimeObservationApplication =
   | { outcome: "applied"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionMismatch: boolean }
+  | { outcome: "session_rotation_pending"; binding: Binding }
   | { outcome: "terminal_identity_changed"; binding: Binding }
   | { outcome: "stale_binding" };
+
+export type RuntimeIdentityReconciliationApplication =
+  | { outcome: "adopted" | "observed" | "terminal_refreshed"; binding: Binding; terminalIdentityRefreshed: boolean; nativeSessionAdopted: boolean }
+  | { outcome: "recovered"; binding: Binding; outboxReserved: boolean; event: import("./create-bridge-event.js").BridgeEventOf<"BindingActivated"> }
+  | { outcome: "refused"; binding: Binding; reason: string; evidenceFingerprint: string }
+  | { outcome: "unchanged_refusal"; binding: Binding; reason: string }
+  | { outcome: "session_rotation_pending"; binding: Binding }
+  | { outcome: "stale" | "conflict" };
+
+export type RuntimeIdentityReconciliationDecision =
+  | { outcome: "adopt" }
+  | { outcome: "observed" }
+  | { outcome: "observe_unclaimed" }
+  | { outcome: "terminal_refresh" }
+  | { outcome: "orphan_recovery" }
+  | { outcome: "refused"; reason: string; evidenceFingerprint: string }
+  | { outcome: "unchanged_refusal"; reason: string }
+  | { outcome: "stale" };
+
+export type RuntimeIdentityReconciliationPolicy = (input: {
+  binding: Binding;
+  claim: import("./runtime-identity-claim.js").RuntimeIdentityClaim | null;
+  pane: HerdrPane;
+}) => RuntimeIdentityReconciliationDecision;
 
 export type BridgeCommand =
   | { kind: "stop" }
   | { kind: "steer"; text: string }
   | { kind: "model"; name: string | null }
   | { kind: "reset"; title: string | null }
+  | { kind: "clear" }
   | { kind: "new"; title: string | null; agentKind: import("./agent-instance.js").AgentKind }
   | { kind: "projects" }
   | { kind: "spaces" }
@@ -330,7 +534,7 @@ export type BridgeCommand =
   | { kind: "sessions"; cursor: string | null }
   | { kind: "failures" }
   | { kind: "status" }
-  | { kind: "attach"; spaceName: string; paneId: string }
+  | { kind: "attach"; spaceName: string | null; paneId: string }
   | { kind: "rename"; title: string }
   | { kind: "close" }
   | { kind: "pane_close_request" }
@@ -338,8 +542,8 @@ export type BridgeCommand =
   | { kind: "reattach"; paneId: string }
   | { kind: "replace" }
   | { kind: "resume" }
+  | { kind: "archive" }
   | { kind: "awake" }
-  | { kind: "skip" }
   | { kind: "worker_create"; name: string; agentKind: import("./agent-instance.js").AgentKind; model: string | null; start: boolean }
   | { kind: "help" };
 

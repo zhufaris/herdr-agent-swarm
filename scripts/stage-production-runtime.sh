@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 STATE_DIR="${1:?usage: stage-production-runtime.sh <state-directory>}"
 BUILD_INFO="$ROOT/dist/build-info.json"
-for command_name in flock node npm sha256sum tar; do
+for command_name in flock node npm sha256sum tar traecli; do
     command -v "$command_name" >/dev/null 2>&1 || { echo "Missing required command: $command_name" >&2; exit 1; }
 done
 test -r "$BUILD_INFO"
@@ -40,8 +40,9 @@ cleanup() {
 }
 trap cleanup EXIT
 validate_release() {
-    [ -d "$RELEASE" ] && [ ! -L "$RELEASE" ] && [ -r "$RELEASE/dist/build-info.json" ] && [ -r "$RELEASE/package.json" ] && [ -r "$RELEASE/package-lock.json" ] && [ -d "$RELEASE/node_modules" ]
+    [ -d "$RELEASE" ] && [ ! -L "$RELEASE" ] && [ -r "$RELEASE/dist/build-info.json" ] && [ -r "$RELEASE/package.json" ] && [ -r "$RELEASE/package-lock.json" ] && [ -d "$RELEASE/node_modules" ] && [ -r "$RELEASE/plugins/herdr-choice-list/.codex-plugin/plugin.json" ]
     node -e 'const fs=require("node:fs"); const expected=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const actual=JSON.parse(fs.readFileSync(process.argv[2], "utf8")); if (actual.buildId !== expected.buildId || actual.gitCommit !== expected.gitCommit) process.exit(1);' "$BUILD_INFO" "$RELEASE/dist/build-info.json"
+    traecli plugin validate --path "$RELEASE/plugins/herdr-choice-list" >/dev/null
 }
 RELEASE_LOCK="$LOCKS/releases/$RELEASE_KEY"
 ensure_private_directory "$RELEASE_LOCK"
@@ -99,6 +100,9 @@ else
 fi
 STAGING="$(mktemp -d "$RELEASES/.staging.XXXXXX")"
 cp -R "$ROOT/dist" "$STAGING/dist"
+mkdir -p "$STAGING/plugins"
+cp -R "$ROOT/plugins/herdr-choice-list" "$STAGING/plugins/herdr-choice-list"
+traecli plugin validate --path "$STAGING/plugins/herdr-choice-list" >/dev/null
 cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGING/"
 tar -xzf "$CACHE_ARCHIVE" -C "$STAGING"
 [ -d "$STAGING/node_modules" ] || { echo "Production dependency cache did not contain node_modules" >&2; exit 1; }

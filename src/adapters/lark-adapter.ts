@@ -7,6 +7,7 @@ import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult 
 import { normalizeLarkCardElementIds, normalizeLarkElementId } from "../runtime/lark-card-id.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { LruMap } from "../runtime/lru-map.js";
+import { WorkAdmissionGate } from "../runtime/work-lifecycle.js";
 import { compactPromptInput } from "../domain/prompt-input-policy.js";
 
 const CARD_ID_CACHE_CAPACITY = 512;
@@ -25,7 +26,11 @@ export class LarkSdkAdapter implements LarkPort {
   private readonly client: lark.Client;
   private readonly wsClient: lark.WSClient;
   private readonly cardIdsByMessageId: LruMap<string, string>;
+  private readonly ingressAdmission = new WorkAdmissionGate();
   private ready = false;
+  private receivedEvents = 0;
+  private lastReceivedAt: string | null = null;
+  private lastAcceptedAt: string | null = null;
 
   constructor(private readonly options: LarkAdapterOptions, private readonly logger?: Logger) {
     this.cardIdsByMessageId = new LruMap(options.cardIdCacheCapacity ?? CARD_ID_CACHE_CAPACITY);
@@ -49,36 +54,62 @@ export class LarkSdkAdapter implements LarkPort {
   async start(onMessage: (message: IncomingLarkMessage) => Promise<void>, onCardAction?: (action: IncomingLarkCardAction) => Promise<LarkCardActionResult | void>): Promise<void> {
     const dispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data) => {
-        const normalized = normalizeMessage(data, this.options.botOpenId);
-        if (!normalized || normalized.chatId !== this.options.chatId) return;
-        await onMessage(normalized);
+        return this.ingressAdmission.admit(async () => {
+          this.receivedEvents += 1;
+          this.lastReceivedAt = new Date().toISOString();
+          const normalized = normalizeMessage(data, this.options.botOpenId);
+          if (!normalized) {
+            this.logger?.debug({ event: "lark-message-event-ignored", reason: "unsupported_or_empty", outcome: "ignored" }, "ignored unsupported Lark message event");
+            return;
+          }
+          if (normalized.chatId !== this.options.chatId) {
+            this.logger?.debug({ event: "lark-message-event-ignored", eventId: normalized.eventId, messageId: normalized.messageId, reason: "chat_not_configured", outcome: "ignored" }, "ignored Lark message from another chat");
+            return;
+          }
+          this.lastAcceptedAt = new Date().toISOString();
+          this.logger?.info({ event: "lark-message-event-received", eventId: normalized.eventId, messageId: normalized.messageId, messageType: data.message.message_type, outcome: "accepted" }, "received Lark message event");
+          await onMessage(normalized);
+        }) ?? undefined;
       },
       "card.action.trigger": async (data: lark.RawCardActionEvent) => {
-        const normalized = normalizeCardActionEvent(data);
-        if (!normalized || normalized.chatId !== this.options.chatId || !onCardAction) return;
-        const startedAt = Date.now();
-        const action = cardActionName(normalized.value);
-        this.logger?.info({ event: "lark-card-action-received", action, messageId: normalized.messageId, cardDiagnostics: cardActionDiagnostics(data), outcome: "accepted" }, "Lark card action received");
-        try {
-          const result = await onCardAction(normalized);
-          this.logger?.info({ event: "lark-card-action-completed", action, messageId: normalized.messageId, outcome: "responded", responseKind: cardActionResponseKind(result), durationMs: Date.now() - startedAt }, "Lark card action completed");
-          return normalizeCardActionResponse(result);
-        } catch (error) {
-          this.logger?.error({ event: "lark-card-action-failed", action, messageId: normalized.messageId, outcome: "failed", durationMs: Date.now() - startedAt, err: safeLogError(error) }, "Lark card action failed");
-          return { toast: { type: "error", content: "操作失败，请稍后重试。" } };
-        }
+        return this.ingressAdmission.admit(async () => {
+          const normalized = normalizeCardActionEvent(data);
+          if (!normalized || normalized.chatId !== this.options.chatId || !onCardAction) return;
+          const startedAt = Date.now();
+          const action = cardActionName(normalized.value);
+          this.logger?.info({ event: "lark-card-action-received", action, messageId: normalized.messageId, cardDiagnostics: cardActionDiagnostics(data), outcome: "accepted" }, "Lark card action received");
+          try {
+            const result = await onCardAction(normalized);
+            this.logger?.info({ event: "lark-card-action-completed", action, messageId: normalized.messageId, outcome: "responded", responseKind: cardActionResponseKind(result), durationMs: Date.now() - startedAt }, "Lark card action completed");
+            return normalizeCardActionResponse(result);
+          } catch (error) {
+            this.logger?.error({ event: "lark-card-action-failed", action, messageId: normalized.messageId, outcome: "failed", durationMs: Date.now() - startedAt, err: safeLogError(error) }, "Lark card action failed");
+            return { toast: { type: "error", content: "操作失败，请稍后重试。" } };
+          }
+        }) ?? undefined;
       }
     });
     await this.wsClient.start({ eventDispatcher: dispatcher });
   }
 
   async stop(): Promise<void> {
+    this.ingressAdmission.close();
     this.wsClient.close();
+    await this.ingressAdmission.settle();
     this.ready = false;
     this.cardIdsByMessageId.clear();
   }
 
-  isReady(): boolean { return this.ready; }
+  isReady(): boolean { return this.wsClient.getConnectionStatus().state === "connected"; }
+
+  ingressStatus(): { state: string; receivedEvents: number; lastReceivedAt: string | null; lastAcceptedAt: string | null } {
+    return {
+      state: this.wsClient.getConnectionStatus().state,
+      receivedEvents: this.receivedEvents,
+      lastReceivedAt: this.lastReceivedAt,
+      lastAcceptedAt: this.lastAcceptedAt
+    };
+  }
 
   private setReady(ready: boolean, event: string, message: string, error?: unknown): void {
     if (this.ready === ready && event !== "lark-websocket-error") return;
@@ -175,11 +206,9 @@ export class LarkSdkAdapter implements LarkPort {
         params: { receive_id_type: "chat_id" },
         data: { receive_id: target.chatId }
       });
-      const messageId = response.data?.message_id;
-      if (messageId) return { messageId };
-      if (!target.sourceRootMessageId) return { messageId: requireMessageId(messageId) };
+      return { messageId: requireMessageId(response.data?.message_id) };
     } catch (error) {
-      if (!target.sourceRootMessageId || !isInvalidThreadForward(error)) throw error;
+      if (!target.sourceRootMessageId || !shouldFallbackToRootForward(error)) throw error;
     }
     const response = await this.client.im.v1.message.forward({
       path: { message_id: target.sourceRootMessageId! },
@@ -190,10 +219,26 @@ export class LarkSdkAdapter implements LarkPort {
   }
 
   async updateCard(messageId: string, card: object): Promise<void> {
-    await this.client.im.v1.message.patch({
+    const response = await this.client.im.v1.message.patch({
       path: { message_id: messageId },
       data: { content: JSON.stringify(normalizeLarkCardElementIds(card)) }
     });
+    assertLarkMessageSuccess("update", response);
+  }
+
+  async deleteMessage(messageId: string): Promise<"deleted" | "already_absent"> {
+    try {
+      const response = await this.client.im.v1.message.delete({ path: { message_id: messageId } });
+      const code = typeof response.code === "number" ? response.code : 0;
+      if (isAlreadyAbsentMessage(code, null)) { this.cardIdsByMessageId.delete(messageId); return "already_absent"; }
+      if (code !== 0) throw Object.assign(new Error(`Lark message delete failed (code=${code})`), { larkCode: code });
+      this.cardIdsByMessageId.delete(messageId);
+      return "deleted";
+    } catch (error) {
+      const safe = safeLogError(error);
+      if (isAlreadyAbsentMessage(safe.larkCode, safe.status)) { this.cardIdsByMessageId.delete(messageId); return "already_absent"; }
+      throw error;
+    }
   }
 
   async updateCardKit(messageId: string, card: object, sequence: number): Promise<void> {
@@ -246,6 +291,11 @@ function stripFenceLanguages(content: string): string {
   return content.replace(/^( {0,3}`{3,})[A-Za-z0-9_+.-]{1,32}\s*$/gm, "$1");
 }
 
+function isAlreadyAbsentMessage(code: string | number | undefined, status: number | null | undefined): boolean {
+  return status === 404 || code === 230009 || code === "230009"
+    || code === 230011 || code === "230011" || code === 230019 || code === "230019";
+}
+
 function isUnsupportedFenceLanguage(error: unknown): boolean {
   const candidate = error as { message?: unknown; response?: { data?: { msg?: unknown; message?: unknown } } };
   const messages = [candidate?.message, candidate?.response?.data?.msg, candidate?.response?.data?.message]
@@ -253,21 +303,26 @@ function isUnsupportedFenceLanguage(error: unknown): boolean {
   return messages.some((message) => /unsupported[^\n]*(?:fence|language)|(?:fence|language)[^\n]*unsupported/i.test(message));
 }
 
-function isInvalidThreadForward(error: unknown): boolean {
+function shouldFallbackToRootForward(error: unknown): boolean {
   const candidate = error as { response?: { status?: unknown; data?: { code?: unknown } } };
-  return candidate?.response?.status === 400 && Number(candidate.response.data?.code) === 230001;
+  const status = candidate?.response?.status;
+  return status === 400 && Number(candidate.response?.data?.code) === 230001;
 }
 
 type MessageEvent = Parameters<NonNullable<lark.EventHandles["im.message.receive_v1"]>>[0];
 
 export function normalizeMessage(data: MessageEvent, botOpenId: string): IncomingLarkMessage | null {
+  if (!data || typeof data !== "object") return null;
+  const candidate = data as MessageEvent & { sender?: { sender_type?: unknown }; message?: { content?: unknown; message_type?: unknown; mentions?: unknown } };
+  if (!candidate.sender || candidate.sender.sender_type !== "user" || !candidate.message
+    || typeof candidate.message.content !== "string" || typeof candidate.message.message_type !== "string") return null;
   if (data.sender.sender_type !== "user") return null;
   const rawInputTooLarge = Buffer.byteLength(data.message.content, "utf8") > MAX_LARK_MESSAGE_CONTENT_BYTES;
   const normalized = rawInputTooLarge ? { text: "", hasUnsupportedContent: false } : normalizeMessageText(data.message.message_type, data.message.content);
   if (normalized === null) return null;
   let { text } = normalized;
 
-  const botMentions = (data.message.mentions ?? []).filter((mention) => mention.id.open_id === botOpenId);
+  const botMentions = (Array.isArray(data.message.mentions) ? data.message.mentions : []).filter((mention) => mention.id.open_id === botOpenId);
   const mentionsBot = botMentions.length > 0;
   for (const mention of botMentions) text = text.replaceAll(mention.key, "");
   const normalizedText = text.trim();
@@ -325,6 +380,7 @@ function normalizePostNode(node: unknown): string | null {
 }
 
 export function normalizeCardActionEvent(data: lark.RawCardActionEvent): IncomingLarkCardAction | null {
+  if (!data || typeof data !== "object" || !data.action || typeof data.action !== "object") return null;
   const messageId = data.context?.open_message_id ?? data.open_message_id;
   const chatId = data.context?.open_chat_id ?? data.open_chat_id;
   const operatorOpenId = data.operator?.open_id;
@@ -400,6 +456,13 @@ function assertCardKitSuccess(operation: string, response: unknown): void {
   const code = response.code;
   if (code === undefined || code === null || code === 0 || code === "0" || code === "") return;
   throw Object.assign(new Error(`Lark CardKit ${operation} failed (${safeResponseMetadata(response)})`), { larkCode: code });
+}
+
+function assertLarkMessageSuccess(operation: string, response: unknown): void {
+  if (!isRecord(response)) return;
+  const code = response.code;
+  if (code === undefined || code === null || code === 0 || code === "0" || code === "") return;
+  throw Object.assign(new Error(`Lark message ${operation} failed (${safeResponseMetadata(response)})`), { larkCode: code });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createWorkerMainView, reduceWorkerMainView, type WorkerMainTaskSummary } from "../src/domain/worker-main-view.js";
+import { selectPrimaryWorkerSummaries } from "../src/domain/card-context-summary.js";
 
 const createdAt = "2026-09-05T00:00:00.000Z";
 
@@ -19,6 +20,15 @@ function initial() {
 }
 
 describe("WorkerMainView", () => {
+  it("removes terminal workers from active summaries when no runnable task remains", () => {
+    const result = selectPrimaryWorkerSummaries([{
+      workerId: "worker-terminal", workerSessionGeneration: 1, name: "terminal", state: "failed",
+      currentTaskTitle: "Finished", queueCount: 0,
+      workerMain: { aggregateKind: "worker-session", aggregateId: "worker-terminal", generation: 1, messageId: null }, createdAt
+    }]);
+    expect(result.workers).toEqual([]);
+    expect(result.overflowCount).toBe(0);
+  });
   it("keeps session identity across runtime replacement and freezes the exact session generation", () => {
     const restarted = reduceWorkerMainView(initial(), { type: "runtime", runtimeGeneration: 5, runtimeState: "working", runtimeAttached: true, desiredState: "running", parentActive: true, paneId: "pane-replacement", occurredAt: "2026-09-05T00:01:00.000Z" });
     const frozen = reduceWorkerMainView(restarted, { type: "terminated", occurredAt: "2026-09-05T00:02:00.000Z" });
@@ -59,5 +69,27 @@ describe("WorkerMainView", () => {
 
     expect(second.currentTask?.tokenCount).toBe(200);
     expect(second.viewVersion).toBe(first.viewVersion + 1);
+  });
+
+  it("preserves bounded model usage snapshot and is idempotent", () => {
+    const usage = { model: "GPT-5", contextRemainingPercent: 72, inputTokens: null, outputTokens: null, queuedAt: createdAt, firstVisibleAt: null, completedAt: null, waitMs: null, firstVisibleMs: null };
+    const first = reduceWorkerMainView(initial(), { type: "usage", usage, occurredAt: "first" });
+    const repeated = reduceWorkerMainView(first, { type: "usage", usage, occurredAt: "repeat" });
+    expect(first.modelUsage).toEqual(usage);
+    expect(repeated).toBe(first);
+  });
+
+  it("projects branch and worktree changes from runtime identity exactly once", () => {
+    const first = reduceWorkerMainView(initial(), {
+      type: "runtime", runtimeGeneration: 4, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true,
+      paneIdentity: { workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer-v2", paneId: "pane-worker", paneToken: null }, occurredAt: "first"
+    });
+    const repeated = reduceWorkerMainView(first, {
+      type: "runtime", runtimeGeneration: 4, runtimeState: "idle", runtimeAttached: true, desiredState: "running", parentActive: true,
+      paneIdentity: { workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer-v2", paneId: "pane-worker", paneToken: null }, occurredAt: "repeat"
+    });
+
+    expect(first).toMatchObject({ branch: "swarm/reviewer-v2", worktreeName: "reviewer", paneIdentity: { branch: "swarm/reviewer-v2", worktreeName: "reviewer" }, viewVersion: 2 });
+    expect(repeated).toBe(first);
   });
 });

@@ -1,13 +1,14 @@
 import { createConnection } from "node:net";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import pino from "pino";
-import { handleControllerMcpRequest } from "../src/cli/controller-tools-mcp.js";
+import { CONTROLLER_TOOLS_VERSION, handleControllerMcpRequest } from "../src/cli/controller-tools-mcp.js";
 import { ControllerToolGateway } from "../src/runtime/controller-tool-gateway.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
+import packageJson from "../package.json" with { type: "json" };
 
 describe("ControllerToolGateway", () => {
   let directory: string | null = null;
@@ -18,6 +19,34 @@ describe("ControllerToolGateway", () => {
     await gateway?.stop();
     store?.close();
     if (directory) await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rolls back a failed start so a later start can retry", async () => {
+    directory = await mkdtemp(join(tmpdir(), "controller-tools-retry-"));
+    store = new SqliteBindingStore(":memory:");
+    const missing = join(directory, "missing");
+    gateway = new ControllerToolGateway(join(missing, "controller.sock"), store, [], pino({ enabled: false }));
+
+    await expect(gateway.start()).rejects.toBeDefined();
+    await mkdir(missing);
+    await gateway.start();
+  });
+
+  it("waits for an in-flight controller tool call during shutdown", async () => {
+    const fixture = await setup();
+    let release!: () => void;
+    vi.spyOn(gateway as never, "handle").mockImplementation(() => new Promise((resolve) => { release = () => resolve({ accepted: true }); }));
+    const socket = await connect(fixture.socketPath);
+    socket.write(`${JSON.stringify({ jobId: "job-1", capability: fixture.capability, tool: "getInterpretationContext", arguments: {} })}\n`);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+
+    let stopped = false;
+    const stopping = gateway!.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
   });
 
   it("fences every tool call to the exact job capability and active state", async () => {
@@ -76,6 +105,12 @@ describe("ControllerToolGateway", () => {
 });
 
 describe("Controller MCP protocol", () => {
+  it("advertises the release version during initialization", async () => {
+    const response = await handleControllerMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, vi.fn());
+    expect(CONTROLLER_TOOLS_VERSION).toBe(packageJson.version);
+    expect(response).toMatchObject({ result: { serverInfo: { name: "herdr-swarm-controller", version: packageJson.version } } });
+  });
+
   it("exposes only the three proposal tools", async () => {
     const response = await handleControllerMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn());
     expect(response).toMatchObject({ result: { tools: [

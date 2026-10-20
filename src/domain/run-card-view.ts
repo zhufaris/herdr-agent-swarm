@@ -3,9 +3,11 @@ import type { QueueWaitFeedback } from "./queue-wait-estimate.js";
 import type { PrimaryWorkerActivitySummary } from "./card-context-summary.js";
 import type { AgentKind } from "./agent-instance.js";
 import { applyAnswerTimelineDeltas, sameAnswerTimeline, terminalizeAnswerTimelineTools, type AnswerTimelineDelta, type AnswerTimelineItem } from "./answer-timeline.js";
+import type { RunProjectionContext } from "./run-projection-context.js";
+import { sameCurrentGoal, type CurrentGoal } from "./current-goal.js";
 
-export type RunCardPhase = "queued" | "running" | "blocked" | "completed" | "failed";
-export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "test" | "step";
+export type RunCardPhase = "queued" | "submitted" | "running" | "recovering" | "uncertain" | "blocked" | "completed" | "failed";
+export type ProgressEventKind = "analyze" | "search" | "read" | "edit" | "command" | "test" | "skill" | "tool" | "step";
 export type ProgressEventState = "pending" | "active" | "done" | "failed";
 
 export interface RunProgressEvent {
@@ -43,15 +45,23 @@ export interface RunCardView {
   agentKind: AgentKind;
   sessionTitle?: string;
   requestText: string;
+  replyContext?: string | null;
   workspaceId: string;
   spaceName: string;
   paneId: string | null;
+  paneToken?: string | null;
   answer: string;
   answerSegments: string[];
   answerDraft: string;
   answerDraftTransient: boolean;
   timelineItems: AnswerTimelineItem[];
   progressEvents: RunProgressEvent[];
+  /** Native Core Agent plan steps, intentionally distinct from tool activity. */
+  taskList: RunProgressEvent[];
+  /** Latest structured Core status line used only as the Task List heading. */
+  taskListTitle: string | null;
+  /** Read-only snapshot of Primary Session Goal state for mutable Answer pages. */
+  currentGoal: CurrentGoal | null;
   progressSummary: RunProgressSummary;
   queuePosition: number;
   queueFeedback: QueueWaitFeedback | null;
@@ -70,22 +80,32 @@ export interface RunCardView {
 }
 
 export type RunCardChange =
+  | { type: "display-context-refreshed"; occurredAt: string; context: Pick<RunProjectionContext, "sessionTitle" | "agentKind" | "spaceName" | "paneToken"> }
+  | { type: "pane-token-refreshed"; occurredAt: string; paneToken: string }
   | { type: "queue-position"; occurredAt: string; queuePosition: number }
   | { type: "queue-feedback"; occurredAt: string; feedback: QueueWaitFeedback | null }
+  | { type: "submitted"; occurredAt: string }
   | { type: "started"; occurredAt: string }
+  | { type: "recovering"; occurredAt: string; notice: string }
+  | { type: "uncertain"; occurredAt: string; notice: string }
   | { type: "blocked"; occurredAt: string; notice: string }
-  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; timelineDeltas?: AnswerTimelineDelta[]; hasProgressSnapshot?: boolean }
+  | { type: "goal-snapshot"; occurredAt: string; currentGoal: CurrentGoal | null }
+  | { type: "output"; occurredAt: string; answerSnapshot: string; previousAnswerSnapshot?: string; answerUpdate?: "append" | "replace" | "replace-status" | "replace-all"; progressEvents: RunProgressEvent[]; taskList?: RunProgressEvent[]; taskListTitle?: string | null; timelineDeltas?: AnswerTimelineDelta[]; hasProgressSnapshot?: boolean }
   | { type: "completed"; occurredAt: string; answer: string; replaceAnswer?: boolean }
   | { type: "failed"; occurredAt: string; notice: string };
 
-export function createQueuedRunCard(input: {
-  promptId: string; bindingId: string; title: string; sessionTitle?: string; agentKind?: AgentKind; workspaceId: string; spaceName?: string; paneId: string | null; requestText: string;
-  queuePosition: number; occurredAt: string; bindingGeneration?: number; conversionParentPromptId?: string | null;
-}): RunCardView {
+type CreateQueuedRunCardInput = RunProjectionContext & {
+  promptId: string; title: string; requestText: string;
+  replyContext?: string | null;
+  queuePosition: number; occurredAt: string; conversionParentPromptId?: string | null;
+  currentGoal?: CurrentGoal | null;
+};
+
+export function createQueuedRunCard(input: CreateQueuedRunCardInput): RunCardView {
   return {
     promptId: input.promptId, bindingId: input.bindingId, bindingGeneration: input.bindingGeneration ?? 1, conversionParentPromptId: input.conversionParentPromptId ?? null, larkMessageId: null, answerMessageId: null, answerCardId: null, answerElementId: answerElementId(input.promptId, 0), answerSequence: 0, answerPageIndex: 0, answerPageStart: 0, phase: "queued",
-    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, workspaceId: input.workspaceId, spaceName: input.spaceName ?? "unknown", paneId: input.paneId, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, timelineItems: [],
-    progressEvents: [], progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
+    title: input.title, ...(input.sessionTitle !== undefined ? { sessionTitle: input.sessionTitle } : {}), agentKind: input.agentKind ?? "traex", requestText: input.requestText, replyContext: input.replyContext ?? null, workspaceId: input.workspaceId, spaceName: input.spaceName?.trim() || "legacy/unresolved", paneId: input.paneId, paneToken: input.paneToken ?? null, answer: "", answerSegments: [], answerDraft: "", answerDraftTransient: false, timelineItems: [],
+    progressEvents: [], taskList: [], taskListTitle: null, currentGoal: input.currentGoal ?? null, progressSummary: { ...EMPTY_PROGRESS_SUMMARY }, queuePosition: input.queuePosition, queueFeedback: null, startedAt: null, finishedAt: null, notice: null, workerActivity: [], workerDependencyRevision: 0, workerContextFrozenAt: null, activityAt: input.occurredAt,
     viewVersion: 1, deliveredVersion: 0, answerDeliveredVersion: 0, createdAt: input.occurredAt, updatedAt: input.occurredAt
   };
 }
@@ -108,6 +128,16 @@ export function answerElementId(promptId: string, pageIndex: number): string {
 export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCardView {
   let patch: Partial<RunCardView>;
   switch (change.type) {
+    case "display-context-refreshed": {
+      const { sessionTitle, agentKind, spaceName, paneToken } = change.context;
+      if (state.sessionTitle === sessionTitle && state.agentKind === agentKind && state.spaceName === spaceName && state.paneToken === paneToken) return state;
+      patch = { sessionTitle, agentKind, spaceName, paneToken };
+      break;
+    }
+    case "pane-token-refreshed":
+      if (state.paneToken === change.paneToken) return state;
+      patch = { paneToken: change.paneToken };
+      break;
     case "queue-position":
       if (state.queuePosition === change.queuePosition) return state;
       patch = { queuePosition: change.queuePosition };
@@ -116,27 +146,46 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       if (sameQueueFeedback(state.queueFeedback, change.feedback)) return state;
       patch = { queueFeedback: change.feedback };
       break;
+    case "submitted":
+      if (state.phase === "submitted" && state.notice === null) return state;
+      patch = { phase: "submitted", queuePosition: 0, notice: null };
+      break;
     case "started":
       if (state.phase === "running" && state.notice === null) return state;
       patch = { phase: "running", startedAt: state.startedAt ?? change.occurredAt, notice: null };
+      break;
+    case "recovering":
+      if (state.phase === "recovering" && state.notice === change.notice) return state;
+      patch = { phase: "recovering", queuePosition: 0, finishedAt: null, notice: change.notice };
+      break;
+    case "uncertain":
+      if (state.phase === "uncertain" && state.notice === change.notice) return state;
+      patch = { phase: "uncertain", timelineItems: terminalizeAnswerTimelineTools(state.timelineItems ?? []), finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
     case "blocked":
       if (state.phase === "blocked" && state.notice === change.notice) return state;
       patch = { phase: "blocked", notice: change.notice };
       break;
+    case "goal-snapshot":
+      if (sameCurrentGoal(state.currentGoal, change.currentGoal)) return state;
+      patch = { currentGoal: change.currentGoal };
+      break;
     case "output": {
       const answerState = reduceAnswerSnapshot(state, change.answerSnapshot, change.answerUpdate ?? "replace");
       const answer = renderAnswer(answerState.answerSegments, answerState.answerDraft);
       const timelineItems = applyAnswerTimelineDeltas(state.timelineItems ?? [], change.timelineDeltas ?? []);
+      const taskList = change.taskList === undefined ? state.taskList : progressSnapshot(change.taskList).events;
+      const taskListTitle = change.taskListTitle === undefined ? state.taskListTitle : change.taskListTitle;
+      const taskListUnchanged = sameProgress(taskList, state.taskList);
       if (change.hasProgressSnapshot) {
         const progress = progressSnapshot(change.progressEvents);
-        if (answer === state.answer && sameAnswerTimeline(timelineItems, state.timelineItems ?? []) && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
-        patch = { answer, ...answerState, timelineItems, progressEvents: progress.events, progressSummary: progress.summary };
+        if (answer === state.answer && sameAnswerTimeline(timelineItems, state.timelineItems ?? []) && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary) && taskListUnchanged && taskListTitle === state.taskListTitle) return state;
+        patch = { answer, ...answerState, timelineItems, progressEvents: progress.events, progressSummary: progress.summary, ...(change.taskList === undefined ? {} : { taskList }), ...(change.taskListTitle === undefined ? {} : { taskListTitle }) };
         break;
       }
       const progress = mergeRecentProgress(state.progressEvents, state.progressSummary, change.progressEvents);
-      if (answer === state.answer && sameAnswerTimeline(timelineItems, state.timelineItems ?? []) && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary)) return state;
-      patch = { answer, ...answerState, timelineItems, progressEvents: progress.events, progressSummary: progress.summary };
+      if (answer === state.answer && sameAnswerTimeline(timelineItems, state.timelineItems ?? []) && sameProgress(progress.events, state.progressEvents) && sameProgressSummary(progress.summary, state.progressSummary) && taskListUnchanged && taskListTitle === state.taskListTitle) return state;
+      patch = { answer, ...answerState, timelineItems, progressEvents: progress.events, progressSummary: progress.summary, ...(change.taskList === undefined ? {} : { taskList }), ...(change.taskListTitle === undefined ? {} : { taskListTitle }) };
       break;
     }
     case "completed":
@@ -151,7 +200,7 @@ export function reduceRunCard(state: RunCardView, change: RunCardChange): RunCar
       patch = { phase: "failed", timelineItems: terminalizeAnswerTimelineTools(state.timelineItems ?? []), finishedAt: change.occurredAt, queuePosition: 0, notice: change.notice };
       break;
   }
-  const activityAt = change.type === "queue-position" || change.type === "queue-feedback" ? state.activityAt : change.occurredAt;
+  const activityAt = change.type === "display-context-refreshed" || change.type === "pane-token-refreshed" || change.type === "queue-position" || change.type === "queue-feedback" || change.type === "goal-snapshot" ? state.activityAt : change.occurredAt;
   return { ...state, ...patch, activityAt, viewVersion: state.viewVersion + 1, updatedAt: change.occurredAt };
 }
 

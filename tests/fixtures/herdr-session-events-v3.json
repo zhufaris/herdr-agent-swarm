@@ -1,0 +1,97 @@
+{
+  "capability": {
+    "type": "pong",
+    "version": "0.9.3",
+    "protocol": 22,
+    "capabilities": {
+      "live_handoff": true,
+      "detached_server_daemon": true,
+      "surface_interest": true,
+      "health_check": true,
+      "session_event_stream_v1": true,
+      "session_event_multiplex_v1": true,
+      "pane_agent_status_all_v1": false
+    }
+  },
+  "request": {
+    "id": "multiplex-1",
+    "method": "session.events.subscribe.v3",
+    "params": {
+      "targets": [
+        {
+          "ring_id": "session-ring-v2:ring-1",
+          "epoch": "epoch-1",
+          "after": "session-ring-v2:ring-1:epoch-1:9",
+          "limit": 128
+        }
+      ]
+    }
+  },
+  "ack": {
+    "type": "session_event_multiplex_subscribed_v3",
+    "target_count": 1
+  },
+  "batchFrame": {
+    "event": "session.events.batch.v3",
+    "data": {
+      "ring_id": "session-ring-v2:ring-1",
+      "epoch": "epoch-1",
+      "events": [
+        {
+          "schema_version": 1,
+          "event_id": "event-10",
+          "cursor": "session-ring-v2:ring-1:epoch-1:10",
+          "source_id": "source-1",
+          "agent_kind": "traex",
+          "session_id": "session-1",
+          "turn_id": null,
+          "occurred_at": "2026-10-17T00:00:00Z",
+          "payload": {
+            "type": "turn_started"
+          }
+        }
+      ],
+      "next_cursor": "session-ring-v2:ring-1:epoch-1:10",
+      "earliest_cursor": "session-ring-v2:ring-1:epoch-1:1",
+      "latest_cursor": "session-ring-v2:ring-1:epoch-1:10"
+    }
+  },
+  "gapFrames": [
+    {
+      "event": "session.events.gap.v3",
+      "data": {
+        "ring_id": "session-ring-v2:ring-1",
+        "epoch": "epoch-1",
+        "code": "cursor_expired",
+        "resume_cursor": "session-ring-v2:ring-1:epoch-1:4",
+        "earliest_cursor": "session-ring-v2:ring-1:epoch-1:5",
+        "latest_cursor": "session-ring-v2:ring-1:epoch-1:10"
+      }
+    },
+    {
+      "event": "session.events.gap.v3",
+      "data": {
+        "ring_id": "session-ring-v2:ring-1",
+        "epoch": "epoch-1",
+        "code": "epoch_changed",
+        "current_epoch": "epoch-2"
+      }
+    },
+    {
+      "event": "session.events.gap.v3",
+      "data": {
+        "ring_id": "session-ring-v2:ring-1",
+        "epoch": "epoch-1",
+        "code": "missing"
+      }
+    },
+    {
+      "event": "session.events.gap.v3",
+      "data": {
+        "ring_id": "session-ring-v2:ring-1",
+        "epoch": "epoch-1",
+        "code": "unavailable"
+      }
+    }
+  ]
+}

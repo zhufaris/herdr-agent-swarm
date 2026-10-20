@@ -1,8 +1,8 @@
 import type { Logger } from "pino";
 import { LarkSdkAdapter } from "../../adapters/lark-adapter.js";
 import type { LarkPort } from "../../domain/ports/external.js";
-import type { IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult } from "../../domain/types.js";
-import { GATEWAY_PROTOCOL_VERSION, GatewayDeliveryError, type ConversationGatewayPlugin, type GatewayDeliveryContext, type GatewayDeliveryIntent, type GatewayDeliveryReceipt, type GatewayExternalRef, type GatewayIngressResponse, type GatewaySession, type NegotiatedGatewayProfile, type PreparedGatewayDelivery } from "../contract/plugin.js";
+import { inputFromIncomingMessage, type IncomingLarkCardAction, type IncomingLarkMessage, type LarkCardActionResult } from "../../domain/inbound.js";
+import { GATEWAY_PROTOCOL_VERSION, GatewayDeliveryError, type ConversationGatewayPlugin, type GatewayCommandValue, type GatewayDeliveryContext, type GatewayDeliveryIntent, type GatewayDeliveryReceipt, type GatewayExternalRef, type GatewayIngressResponse, type GatewaySession, type NegotiatedGatewayProfile, type PreparedGatewayDelivery } from "../contract/plugin.js";
 import { performFeishuDelivery } from "./errors.js";
 import { materializeFeishuView } from "./cardkit-view.js";
 
@@ -23,7 +23,17 @@ export function createFeishuGatewayPlugin(options: FeishuPluginOptions = {}): Co
       const delivery = new FeishuGatewayDelivery(gatewayId, profile, transport);
       const session: GatewaySession = {
         gatewayId, profile, ingress, delivery,
-        snapshot: () => ({ gatewayId, kind: "feishu", profileId: profile.id, ingress: { ready: transport.isReady() }, delivery: { ready: true }, degradations: profile.degradations }),
+        snapshot: () => {
+          const ingress = transport.ingressStatus?.();
+          return {
+            gatewayId, kind: "feishu", profileId: profile.id,
+            ingress: {
+              ready: transport.isReady(),
+              ...(ingress ? { detail: `state=${ingress.state}; events=${ingress.receivedEvents}; lastReceivedAt=${ingress.lastReceivedAt ?? "never"}; lastAcceptedAt=${ingress.lastAcceptedAt ?? "never"}` } : {})
+            },
+            delivery: { ready: true }, degradations: profile.degradations
+          };
+        },
         close: () => ingress.stop()
       };
       compatibilityPorts.set(session, transport);
@@ -69,6 +79,11 @@ class FeishuGatewayDelivery {
       const cardId = (receipt as { cardId?: unknown }).cardId;
       return { refs: [ref(this.gatewayId, "message", receipt.messageId), ...(typeof cardId === "string" ? [ref(this.gatewayId, "surface", cardId)] : [])] };
     }
+    if (intent.kind === "message.delete") {
+      if (!this.transport.deleteMessage) throw new GatewayDeliveryError({ failureClass: "permanent", effectCertainty: "rejected", providerCode: null, httpStatus: null, safeMessage: "Feishu Gateway does not support message deletion" });
+      const outcome = await performFeishuDelivery(intent, "delete_message", () => this.transport.deleteMessage!(intent.messageId));
+      return { refs: [], messageDeleteOutcome: outcome };
+    }
     if (intent.kind === "surface.replace") {
       if (intent.sequence !== undefined && this.transport.updateCardKit) await performFeishuDelivery(intent, "update_cardkit", () => this.transport.updateCardKit!(intent.messageId, view!, intent.sequence!));
       else await performFeishuDelivery(intent, "update_card", () => this.transport.updateCard(intent.messageId, view!));
@@ -101,6 +116,7 @@ class FeishuGatewayDelivery {
   }
 }
 
+
 function feishuProfile(): NegotiatedGatewayProfile {
   return deepFreeze({
     id: "feishu-cardkit-v1", protocolVersion: GATEWAY_PROTOCOL_VERSION, rendererRevision: 1, degradations: [],
@@ -114,10 +130,65 @@ function feishuProfile(): NegotiatedGatewayProfile {
 function ref<K extends GatewayExternalRef["kind"]>(gatewayId: string, kind: K, opaqueId: string): GatewayExternalRef<K> { return { gatewayId, kind, opaqueId }; }
 function toGatewayMessage(gatewayId: string, message: IncomingLarkMessage): import("../contract/plugin.js").GatewayInboundEvent {
   const root = message.rootMessageId ?? message.messageId;
-  return { schemaVersion: 1, kind: "message.received", eventKey: message.eventId, occurredAt: new Date().toISOString(), address: { gatewayId, conversation: ref(gatewayId, "conversation", message.chatId), thread: message.topicId ? ref(gatewayId, "thread", message.topicId) : null, rootMessage: ref(gatewayId, "message", root) }, message: ref(gatewayId, "message", message.messageId), parentMessage: message.parentMessageId ? ref(gatewayId, "message", message.parentMessageId) : null, actor: ref(gatewayId, "actor", message.actorOpenId), text: message.text, mentionsAgent: message.mentionsBot, isRoot: message.isRootMessage, hasUnsupportedContent: message.hasUnsupportedContent ?? false, inputTooLarge: message.inputTooLarge ?? false };
+  return { schemaVersion: 2, kind: "message.received", eventKey: message.eventId, occurredAt: new Date().toISOString(), address: { gatewayId, conversation: ref(gatewayId, "conversation", message.chatId), thread: message.topicId ? ref(gatewayId, "thread", message.topicId) : null, rootMessage: ref(gatewayId, "message", root) }, message: ref(gatewayId, "message", message.messageId), parentMessage: message.parentMessageId ? ref(gatewayId, "message", message.parentMessageId) : null, actor: ref(gatewayId, "actor", message.actorOpenId), input: inputFromIncomingMessage(message), mentionsAgent: message.mentionsBot, isRoot: message.isRootMessage, hasUnsupportedContent: message.hasUnsupportedContent ?? false, inputTooLarge: message.inputTooLarge ?? false };
 }
 function toGatewayAction(gatewayId: string, action: IncomingLarkCardAction): import("../contract/plugin.js").GatewayInboundEvent {
-  return { schemaVersion: 1, kind: "interaction.invoked", eventKey: `interaction:${action.messageId}:${JSON.stringify(action.value)}`, occurredAt: new Date().toISOString(), address: { gatewayId, conversation: ref(gatewayId, "conversation", action.chatId), thread: null, rootMessage: ref(gatewayId, "message", action.messageId) }, sourceMessage: ref(gatewayId, "message", action.messageId), actor: ref(gatewayId, "actor", action.operatorOpenId), interactionRef: typeof action.value === "object" && action.value && "interactionId" in action.value ? String(action.value.interactionId) : "", commandPayload: structuredClone(action.value), option: action.option ?? null, values: action.formValues ?? {} };
+  const commandPayload = normalizeGatewayCommandValue(action.value);
+  return { schemaVersion: 1, kind: "interaction.invoked", eventKey: `interaction:${action.messageId}:${JSON.stringify(commandPayload)}`, occurredAt: new Date().toISOString(), address: { gatewayId, conversation: ref(gatewayId, "conversation", action.chatId), thread: null, rootMessage: ref(gatewayId, "message", action.messageId) }, sourceMessage: ref(gatewayId, "message", action.messageId), actor: ref(gatewayId, "actor", action.operatorOpenId), interactionRef: interactionRef(commandPayload), commandPayload, option: action.option ?? null, values: action.formValues ?? {} };
+}
+
+const MAX_COMMAND_DEPTH = 16;
+const MAX_COMMAND_NODES = 1_024;
+const MAX_COMMAND_BYTES = 64 * 1024;
+
+function normalizeGatewayCommandValue(value: unknown): GatewayCommandValue {
+  const seen = new WeakSet<object>();
+  let nodes = 0;
+  const normalize = (candidate: unknown, depth: number): GatewayCommandValue => {
+    if (depth > MAX_COMMAND_DEPTH || ++nodes > MAX_COMMAND_NODES) throw new Error("invalid Gateway command payload");
+    if (candidate === null || typeof candidate === "boolean" || typeof candidate === "string") return candidate;
+    if (typeof candidate === "number") {
+      if (!Number.isFinite(candidate)) throw new Error("invalid Gateway command payload");
+      return candidate;
+    }
+    if (typeof candidate !== "object" || seen.has(candidate)) throw new Error("invalid Gateway command payload");
+    seen.add(candidate);
+    if (Array.isArray(candidate)) {
+      if (candidate.length > MAX_COMMAND_NODES || Object.getOwnPropertySymbols(candidate).length > 0) throw new Error("invalid Gateway command payload");
+      for (const key of Object.getOwnPropertyNames(candidate)) {
+        if (key !== "length" && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= candidate.length)) throw new Error("invalid Gateway command payload");
+      }
+      const copy: GatewayCommandValue[] = [];
+      for (let index = 0; index < candidate.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(candidate, String(index));
+        if (!descriptor?.enumerable || !("value" in descriptor)) throw new Error("invalid Gateway command payload");
+        copy.push(normalize(descriptor.value, depth + 1));
+      }
+      return copy;
+    }
+    const prototype = Object.getPrototypeOf(candidate);
+    if (prototype !== Object.prototype && prototype !== null || Object.getOwnPropertySymbols(candidate).length > 0) throw new Error("invalid Gateway command payload");
+    const copy: Record<string, GatewayCommandValue> = {};
+    for (const key of Object.getOwnPropertyNames(candidate)) {
+      const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) throw new Error("invalid Gateway command payload");
+      Object.defineProperty(copy, key, { value: normalize(descriptor.value, depth + 1), enumerable: true, configurable: true, writable: true });
+    }
+    return copy;
+  };
+  const normalized = normalize(value, 0);
+  if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_COMMAND_BYTES) throw new Error("invalid Gateway command payload");
+  return normalized;
+}
+
+function interactionRef(value: GatewayCommandValue): string {
+  if (!isGatewayCommandRecord(value)) return "";
+  const id = value.interactionId;
+  return id === undefined ? "" : String(id);
+}
+
+function isGatewayCommandRecord(value: GatewayCommandValue): value is { readonly [key: string]: GatewayCommandValue } {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function toLarkActionResponse(response: GatewayIngressResponse): LarkCardActionResult | void {
   if (!response) return;

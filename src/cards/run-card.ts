@@ -1,7 +1,9 @@
-import type { TopicViewPhase, TopicViewState } from "../domain/topic-view.js";
+import { normalizeModelUsage, type TopicViewPhase, type TopicViewState } from "../domain/topic-view.js";
 import { summarizeProgress, type RunCardView, type RunProgressEvent, type RunProgressSummary } from "../domain/run-card-view.js";
 import type { ProjectConfig } from "../domain/types.js";
 import type { AgentKind } from "../domain/agent-instance.js";
+import { displayNamedPaneIdentity, displayPaneIdentity } from "../domain/pane-display-identity.js";
+import { createPaneIdentitySnapshot } from "../domain/worker-main-view.js";
 import { normalizeLarkPreview, truncateLarkMarkdown, truncateLarkMarkdownMiddle } from "../runtime/lark-markdown.js";
 import { stripNativeTaskFrame } from "../runtime/native-task-frame.js";
 import { stripTraexConsoleStatus } from "../runtime/traex-output-parser.js";
@@ -13,11 +15,20 @@ import { foldFinalAnswerContent, type FinalAnswerElement } from "./final-answer-
 import { currentPageActionLabel } from "../domain/card-page-handoff.js";
 import { SWARM_COMMAND_DEFINITIONS, SWARM_COMMAND_HELP_GROUPS } from "../domain/swarm-command.js";
 import { renderAnswerTimeline } from "./answer-timeline.js";
+import type { AnswerTimelineItem } from "../domain/answer-timeline.js";
 import { currentMainCardActivity } from "../domain/main-card-activity.js";
+import { projectAnswerCardHeader } from "./answer-card-header.js";
+import type { SessionActivityView } from "../domain/session-activity.js";
+import type { CompletionActionSetRenderState } from "../domain/completion-action-set.js";
+import { completionActionElements } from "./completion-actions.js";
+import { renderSessionActivity } from "./session-activity.js";
 
 const RUN_STATE_VIEW = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
+  submitted: { label: "已提交，等待 Agent 接收", icon: "📨", color: "blue" },
   running: { label: "TraeX 正在处理", icon: "🧠", color: "blue" },
+  recovering: { label: "正在恢复执行观察", icon: "🔄", color: "orange" },
+  uncertain: { label: "结果待确认", icon: "❔", color: "orange" },
   blocked: { label: "等待用户处理", icon: "⚠️", color: "orange" },
   completed: { label: "任务完成", icon: "✅", color: "green" },
   failed: { label: "执行失败", icon: "❌", color: "red" }
@@ -40,6 +51,7 @@ const STATE_VIEW: Record<TopicViewPhase, { label: string; icon: string; color: s
 const MAIN_CARD_PREVIEW_LIMIT = 2_000;
 const PROJECT_ENTRY_PREVIEW_LINE_LIMIT = 6;
 const PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT = 3_000;
+const PROJECT_ENTRY_TIMELINE_ITEM_LIMIT = 5;
 const ANSWER_CARD_PREVIEW_LIMIT = 9_000;
 const HUMAN_INTERRUPTION_NOTICE = "TraeX turn was interrupted by a human operator";
 const AGENT_LABEL: Record<AgentKind, string> = { traex: "TraeX", pi: "Pi", codex: "Codex", "claude-code": "Claude Code" };
@@ -66,7 +78,7 @@ export function renderProjectSelectorCard(input: { selectionId: string; projects
   };
 }
 
-export function renderProjectSelectionStatusCard(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; bindingId?: string; message?: string }): object {
+export function renderProjectSelectionStatusCard(input: { status: "processing" | "recoverable" | "completed" | "failed" | "expired" | "unauthorized"; projectName?: string; spaceName?: string; paneId?: string; paneToken?: string | null; bindingId?: string; message?: string }): object {
   const views = {
     processing: { title: "正在创建项目 Pane", template: "blue", icon: "⏳" },
     recoverable: { title: "项目创建已暂停", template: "orange", icon: "⚠" },
@@ -76,20 +88,20 @@ export function renderProjectSelectionStatusCard(input: { status: "processing" |
     unauthorized: { title: "无法使用此选择器", template: "orange", icon: "🔒" }
   } as const;
   const view = views[input.status];
-  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(input.paneId)}\`` : null, input.message ?? (input.status === "completed" ? "点击“发送话题入口”后，请打开群里随后出现的话题卡片，并在其中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
+  const details = [input.projectName ? `**项目**  ${escapeMarkdown(input.projectName)}` : null, input.spaceName ? `**Space**  \`${escapeCode(input.spaceName)}\`` : null, input.paneId ? `**Pane**  \`${escapeCode(displayPaneIdentity(input))}\`` : null, input.message ?? (input.status === "completed" ? "点击“发送话题入口”后，请打开群里随后出现的话题卡片，并在其中发送第一条任务。" : null)].filter(Boolean).join("\n\n");
   const elements: object[] = [{ tag: "markdown", content: details || view.title }];
   if (input.status === "completed" && input.bindingId) elements.push(callbackButton("发送话题入口", { action: "open_project_thread", bindingId: input.bindingId }, "primary"));
   return { schema: "2.0", config: { update_multi: true, summary: { content: view.title } }, header: { title: { tag: "plain_text", content: `${view.icon} ${view.title}` }, template: view.template }, body: { elements } };
 }
 
-export function renderAttachStatusCard(input: { spaceName: string; paneId: string; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object {
+export function renderAttachStatusCard(input: { spaceName: string; paneId: string; paneToken?: string | null; bindingId?: string; alreadyAttached?: boolean; resumeRequired?: boolean }): object {
   const title = input.resumeRequired ? "Pane 已恢复连接" : input.alreadyAttached ? "Pane 已连接" : "Pane 连接成功";
   const message = input.resumeRequired
     ? "已安全恢复原会话连接，未重放任何任务。点击“发送话题入口”进入原话题，再发送 `/swarm resume` 恢复队列。"
     : input.alreadyAttached ? "该 Pane 已经连接，无需重复连接。" : "已连接现有 TraeX Pane。";
   const elements: object[] = [{
     tag: "markdown",
-    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(input.paneId)}\`\n\n${message}${input.bindingId && !input.resumeRequired ? " 点击“发送话题入口”后，请打开群里随后出现的话题卡片。" : ""}`
+    content: `**Space**  \`${escapeCode(input.spaceName)}\`\n\n**Pane**  \`${escapeCode(displayPaneIdentity(input))}\`\n\n${message}${input.bindingId && !input.resumeRequired ? " 点击“发送话题入口”后，请打开群里随后出现的话题卡片。" : ""}`
   }];
   if (input.bindingId) elements.push(callbackButton("发送话题入口", { action: "open_project_thread", bindingId: input.bindingId }, "primary"));
   return {
@@ -129,7 +141,7 @@ export function renderRunCard(input: TopicViewState): object {
     schema: "2.0",
     config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: view.label } },
     header: {
-      title: { tag: "plain_text", content: agentPaneTitle(input.agentKind, input.spaceName, input.paneId) },
+      title: { tag: "plain_text", content: agentPaneTitle(input) },
       subtitle: { tag: "plain_text", content: "HERDR REMOTE PANEL" },
       template: view.color
     },
@@ -137,19 +149,22 @@ export function renderRunCard(input: TopicViewState): object {
   };
 }
 
-export function renderProjectEntryCard(input: TopicViewState): object {
+export function renderProjectEntryCard(input: TopicViewState, options: { gapWarning?: string | null; sessionActivity?: SessionActivityView | null } = {}): object {
   const view = STATE_VIEW[input.phase];
   const actionable = input.phase === "blocked" || input.phase === "error" || input.phase === "degraded" || input.phase === "orphaned" || input.phase === "draining" || input.phase === "archived";
   const progress = input.recentProgress ?? [];
   const visibleAnswer = stripNativeTraexStatus(input.answer ?? "");
-  const preview = actionable ? null : latestLines(visibleAnswer, PROJECT_ENTRY_PREVIEW_LINE_LIMIT);
+  const recentTimeline = actionable ? [] : recentMainCardTimeline(input.timelineItems);
+  const preview = actionable || recentTimeline.length > 0 ? null : latestLines(visibleAnswer, PROJECT_ENTRY_PREVIEW_LINE_LIMIT);
   const elements: object[] = [];
+  if (options.gapWarning) elements.push(callout("orange", options.gapWarning));
   if (!input.liveStatus) elements.push({ tag: "markdown", content: projectWorkSummary(input) });
   if (input.liveStatus) elements.push(...renderLiveStatus(input.liveStatus, input.phase));
+  if (options.sessionActivity) elements.push(...renderSessionActivity(options.sessionActivity));
   const planKeys = new Set(input.liveStatus?.planSteps.map((step) => step.key) ?? []);
   if (actionable) elements.push(callout(input.phase === "error" ? "red" : "orange", input.phase === "blocked" || input.phase === "degraded" || input.phase === "orphaned" ? safeRecoveryNotice(input.notice) : input.notice ?? "请回到对应 Herdr pane 检查并完成所需处理。"));
-  if (input.primaryToolsAvailable === false && input.primaryToolsNotice) elements.push(callout("orange", input.primaryToolsNotice));
-  if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
+  if (recentTimeline.length > 0) elements.push({ tag: "markdown", content: cardSection("💬", "最新消息") }, ...renderAnswerTimeline(recentTimeline, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT, input.viewVersion));
+  else if (preview) elements.push({ tag: "markdown", content: `${cardSection("💬", "最新消息")}\n\n${truncateLarkMarkdownMiddle(preview, PROJECT_ENTRY_PREVIEW_CHARACTER_LIMIT)}` });
   if (input.currentAnswer?.messageId) elements.push(callbackButton(currentPageActionLabel("answer"), { action: "card_target_open", ...input.currentAnswer }, "primary"));
   const createWorker = { tag: "form", name: "primary_worker_create_form", elements: [
     { tag: "input", name: "name", input_type: "text", required: true, placeholder: { tag: "plain_text", content: "Worker name，例如 reviewer" } },
@@ -170,14 +185,16 @@ export function renderProjectEntryCard(input: TopicViewState): object {
     if (row) elements.push(row);
     if (canCreateWorker) elements.push(createWorker);
   } else elements.push({ tag: "hr" }, { tag: "markdown", content: `${cardSection("🤖", "Workers")}\n暂无 Worker。` }, ...(canCreateWorker ? [createWorker] : []));
-  const currentActivity = currentMainCardActivity(progress, planKeys);
-  if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前活动", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
+  if (recentTimeline.length === 0) {
+    const currentActivity = currentMainCardActivity(progress, planKeys);
+    if (currentActivity.length) elements.push(...renderProgressTimeline(currentActivity, input.phase, { title: "⚙️ 当前活动", summary: summarizeProgress(currentActivity), visibleCount: 1 }));
+  }
   elements.push({ tag: "hr" }, { tag: "markdown", content: runtimeFooter(input) });
   return {
     schema: "2.0",
     config: { update_multi: true, summary: { content: boundedTitle(input.title) } },
     header: {
-      title: { tag: "plain_text", content: `🧭 ${agentTitle(input.title)}` },
+      title: { tag: "plain_text", content: agentPaneTitle(input) },
       subtitle: { tag: "plain_text", content: `HERDR PROJECT · ${lifecycleMarker(input.phase)} ${view.label}` },
       template: view.color
     },
@@ -185,60 +202,55 @@ export function renderProjectEntryCard(input: TopicViewState): object {
   };
 }
 
-export function renderPaneThreadEntryCard(input: TopicViewState): object {
-  const card = renderProjectEntryCard(input) as { body: { elements: object[] }; header: { subtitle: { content: string } } };
+function recentMainCardTimeline(items: readonly AnswerTimelineItem[]): AnswerTimelineItem[] {
+  return items
+    .filter((item) => item.kind !== "human_message")
+    .sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))
+    .slice(-PROJECT_ENTRY_TIMELINE_ITEM_LIMIT);
+}
+
+export function renderPaneThreadEntryCard(input: TopicViewState, options: { gapWarning?: string | null; sessionActivity?: SessionActivityView | null } = {}): object {
+  const card = renderProjectEntryCard(input, options) as { body: { elements: object[] }; header: { subtitle: { content: string } } };
   const passiveElements = passiveCardElements(card.body.elements);
   return { ...card, header: { ...card.header, subtitle: { tag: "plain_text", content: "HERDR PANE ENTRY · 回复此话题继续交互" } }, body: { elements: [...passiveElements, { tag: "hr" }, { tag: "markdown", content: "回复此话题即可向该 Pane 的 Agent 发送新请求；此卡片会同步当前 Pane 状态。" }] } };
 }
 
-export function renderRequestRunCard(input: RunCardView): object {
-  const state = RUN_STATE_VIEW[input.phase];
-  const duration = formatRunDuration(input);
-  const elements: object[] = [
-    { tag: "markdown", content: truncateLarkMarkdown(input.requestText, 2_000) },
-    { tag: "hr" },
-    { tag: "markdown", content: conversationalMetadata(input, duration) }
-  ];
-  if (input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
-  if (input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
-  return {
-    schema: "2.0", config: { update_multi: true, streaming_mode: input.phase === "running", summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
-    header: { title: { tag: "plain_text", content: "💬 你的请求" }, subtitle: { tag: "plain_text", content: boundedTitle(input.title) }, template: state.color },
-    body: { elements }
-  };
-}
-
-export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] } = {}): object {
+export function renderRequestAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent?: string; streaming?: boolean; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[]; gapWarning?: string | null } = {}): object {
   const state = RUN_STATE_VIEW[input.phase];
   const pageNumber = options.pageNumber ?? 1;
-  const streaming = options.streaming ?? input.phase !== "completed";
+  const header = projectAnswerCardHeader(input, pageNumber);
+  const streaming = options.streaming ?? ["queued", "submitted", "running", "recovering", "blocked"].includes(input.phase);
   const summary = effectiveProgressSummary(input.progressSummary, input.progressEvents);
   const stepProgress = { done: summary.stepDone, total: summary.stepTotal };
   const content = options.initialContent !== undefined
     ? options.initialContent
     : defaultAnswerContent(input, stepProgress);
   const firstPage = pageNumber === 1;
-  const showProgress = firstPage && (input.phase === "queued" || input.phase === "running" || input.phase === "blocked");
   const elements: object[] = [{ tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) }];
-  if (showProgress) elements.push(...renderProgressTimeline(input.progressEvents, input.phase, { summary }));
+  if (options.gapWarning) elements.push(callout("orange", options.gapWarning));
   if (firstPage && input.phase === "blocked") elements.push(callout("orange", safeRecoveryNotice(input.notice)));
+  if (firstPage && input.phase === "recovering") elements.push(callout("orange", input.notice ?? "正在按 durable dispatch evidence 恢复执行观察；不会重复发送请求。"));
+  if (firstPage && input.phase === "uncertain") elements.push(callout("orange", input.notice ?? "无法证明历史请求的最终结果；该请求不会自动重放，后续消息可继续处理。"));
+  if (firstPage && input.phase === "completed" && input.notice) elements.push(statusCallout("green", "历史结果已补回", input.notice));
   if (firstPage && input.phase === "failed") elements.push(callout("red", input.notice ?? "执行失败，请检查 Herdr pane。"));
   if (firstPage) elements.push(...workerActivityElements(input));
   if (firstPage && isHumanInterruptedPrimaryAnswer(input)) elements.push(callbackButton("继续这个任务", { action: "primary_continue_form", bindingId: input.bindingId, bindingGeneration: input.bindingGeneration, parentPromptId: input.promptId, sourceAnswerMessageId: input.answerMessageId! }, "primary"));
   const timelineItems = options.timelineItems ?? input.timelineItems;
   const answerElements = timelineItems.length > 0 && (options.timelineItems !== undefined || (input.phase === "completed" && options.initialContent === undefined))
-    ? renderAnswerTimeline(timelineItems)
+    ? renderAnswerTimeline(timelineItems, undefined, input.viewVersion)
     : [{ tag: "markdown", content }];
   attachElementIdToFirstMarkdown(answerElements, input.answerElementId);
   elements.push({ tag: "hr" }, ...answerElements);
+  elements.push(...answerGoalElements(input));
+  elements.push(...answerTaskListElements(input));
   return {
     schema: "2.0", config: {
       update_multi: true, streaming_mode: streaming,
       summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` }
     },
     header: {
-      title: { tag: "plain_text", content: input.phase === "completed" && !streaming ? (pageNumber > 1 ? `✅ ${agentLabel(input.agentKind)} 回复已完成 · 第 ${pageNumber} 页` : `✅ ${agentLabel(input.agentKind)} 回复已完成`) : (pageNumber > 1 ? `✨ ${agentLabel(input.agentKind)} 继续回复 · 第 ${pageNumber} 页` : `✨ ${agentLabel(input.agentKind)} 回复`) },
-      subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
+      title: { tag: "plain_text", content: header.title },
+      subtitle: { tag: "plain_text", content: header.subtitle },
       template: input.phase === "completed" && !streaming ? "green" : state.color
     },
     body: { elements }
@@ -257,8 +269,11 @@ function defaultAnswerContent(input: RunCardView, stepProgress: { done: number; 
     ? normalizeLarkPreview(prose)
     : input.phase === "running" && stepProgress.total > 0
       ? `${agentLabel(input.agentKind)} 正在执行 · ${stepProgress.done}/${stepProgress.total}`
-    : input.phase === "running" ? "⏳ 已接收请求"
-      : input.phase === "queued" ? "⏳ 已接收请求"
+    : input.phase === "running" ? "🧠 已接收，正在等待 Herdr 返回首个可展示结果。"
+      : input.phase === "submitted" ? "📨 已提交给 Agent，正在等待精确 turn identity。"
+        : input.phase === "recovering" ? "🔄 正在恢复执行观察已提交的请求；不会重复发送。"
+          : input.phase === "uncertain" ? "❔ 历史请求结果无法确认；不会自动重放。"
+      : input.phase === "queued" ? "⏳ 已排队，等待前序请求完成。"
         : input.phase === "completed" ? "本次未产生可展示的回答。"
           : input.phase === "failed" ? "本次未产生可展示的回答。"
             : "暂无回答。";
@@ -269,11 +284,12 @@ function effectiveProgressSummary(summary: RunProgressSummary, events: readonly 
   return summary.total === 0 && events.length > 0 ? summarizeProgress(events) : summary;
 }
 
-export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] }, payloadLimit = 12_000): object | null {
+export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?: number; initialContent: string; answerElementId?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[]; gapWarning?: string | null; completionActions?: CompletionActionSetRenderState | null }, payloadLimit = 12_000): object | null {
   const pageNumber = options.pageNumber ?? 1;
+  const header = projectAnswerCardHeader(input, pageNumber);
   const timelineItems = options.timelineItems ?? input.timelineItems;
   const elements = timelineItems.length > 0 && (options.timelineItems !== undefined || (pageNumber === 1 && input.answerPageIndex === 0))
-    ? renderAnswerTimeline(timelineItems, payloadLimit)
+    ? renderAnswerTimeline(timelineItems, payloadLimit, input.viewVersion)
     : foldFinalAnswerContent(options.initialContent, payloadLimit);
   if (options.answerElementId) attachElementIdToFirstMarkdown(elements, options.answerElementId);
   const workerElements = pageNumber === 1 ? workerActivityElements(input) : [];
@@ -281,16 +297,49 @@ export function renderFinalAnswerCard(input: RunCardView, options: { pageNumber?
     schema: "2.0",
     config: { update_multi: true, streaming_mode: false, summary: { content: `${requestSummaryLabel(input.phase)} · ${boundedTitle(input.title)}` } },
     header: {
-      title: { tag: "plain_text", content: input.phase === "completed" ? (pageNumber > 1 ? `✅ ${agentLabel(input.agentKind)} 回复已完成 · 第 ${pageNumber} 页` : `✅ ${agentLabel(input.agentKind)} 回复已完成`) : (pageNumber > 1 ? `✨ ${agentLabel(input.agentKind)} 回复 · 第 ${pageNumber} 页` : `✨ ${agentLabel(input.agentKind)} 回复`) },
-      subtitle: { tag: "plain_text", content: answerCardSubtitle(input) },
+      title: { tag: "plain_text", content: header.title },
+      subtitle: { tag: "plain_text", content: header.subtitle },
       template: input.phase === "completed" ? "green" : RUN_STATE_VIEW[input.phase].color
     },
     body: { elements: [
       { tag: "markdown", content: conversationalMetadata(input, formatRunDuration(input), pageNumber) },
+      ...(options.gapWarning ? [callout("orange", options.gapWarning)] : []),
       ...workerElements,
-      ...elements
+      ...elements,
+      ...answerGoalElements(input),
+      ...answerTaskListElements(input),
+      ...completionActionElements(options.completionActions)
     ] }
   };
+}
+
+function answerGoalElements(input: RunCardView): object[] {
+  const goal = input.currentGoal;
+  if (!goal) return [];
+  const status = goal.status === "active"
+    ? "In progress"
+    : goal.status === "paused"
+      ? "Paused"
+      : goal.blockKind === "budget"
+        ? "Blocked · Budget limit"
+        : goal.blockKind === "usage"
+          ? "Blocked · Usage limit"
+          : "Blocked";
+  const objective = truncateLarkMarkdownMiddle(normalizeLarkPreview(goal.objective), 2_000);
+  return [{ tag: "markdown", content: `${cardSection("🎯", `Goal · ${status}`)}\n${objective}` }];
+}
+
+function answerTaskListElements(input: RunCardView): object[] {
+  const taskList = input.taskList ?? [];
+  return renderProgressTimeline(taskList, input.phase, {
+    title: input.taskListTitle ? `📋 Task List · ${boundedTaskListTitle(input.taskListTitle)}` : "📋 Task List",
+    summary: summarizeProgress(taskList), visibleCount: taskList.length
+  });
+}
+
+function boundedTaskListTitle(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return truncate(normalized || "Current activity", 96);
 }
 
 function workerActivityElements(input: RunCardView): object[] {
@@ -361,29 +410,44 @@ export function renderHelpCard(): object {
       { tag: "markdown", content: [
         "**直接开始**",
         "@机器人 描述任务 → 选择项目 → 自动开始。",
-        "话题里的普通消息始终按 FIFO 排队；需要调整活动 turn 时使用显式 steer。", "",
+        "话题里的普通消息会作为独立 Agent Input 提交；最终会话顺序只由 Core JSONL 决定。", "",
         "**紧急操作**",
         "`/swarm stop` 停止当前任务 · `/swarm status` 刷新状态"
       ].join("\n") },
       { tag: "collapsible_panel", expanded: false, header: { title: { tag: "plain_text", content: "全部命令" } }, elements: commandGroups },
-      { tag: "markdown", content: "自然语言只对 stop、skip 和最终关闭确认增加二次确认。高风险 TraeX 审批必须在 Herdr 终端完成；其它 slash 命令会原样提交给 TraeX。" }
+      { tag: "markdown", content: "自然语言只对 stop 和最终关闭确认增加二次确认。高风险 TraeX 审批必须在 Herdr 终端完成；其它 slash 命令会原样作为 Agent Input 提交。" }
     ] }
   };
 }
 
-export function renderAwakeStatusCard(message: string, recovered = false): object {
-  return {
-    schema: "2.0", config: { update_multi: true, summary: { content: recovered ? "恢复完成" : "无需恢复" } },
-    header: { title: { tag: "plain_text", content: recovered ? "✓ Answer Card 恢复完成" : "ℹ Answer Card 恢复" }, template: recovered ? "green" : "blue" },
-    body: { elements: [{ tag: "markdown", content: message }] }
+export function renderAwakeStatusCard(result: import("../domain/recovery.js").RecoveryBindingResult): object {
+  const successful = result.outcome === "recovered";
+  const requested = result.outcome === "requested" || result.redelivery?.outcome === "scheduled" || result.redelivery?.outcome === "duplicate";
+  const stageLabels: Record<import("../domain/recovery.js").RecoveryStage, string> = {
+    observing_execution: "恢复执行观察",
+    rebuilding_projection: "重建投递投影",
+    delivering: "投递中",
+    awaiting_ack: "等待投递确认",
+    recovered: "已恢复",
+    needs_human: "需要人工处理"
   };
-}
-
-export function renderSkipStatusCard(message: string, outcome: "skipped" | "none" | "stale"): object {
-  const skipped = outcome === "skipped";
+  const counts = `${result.promptCount} 个 Primary Answer、${result.workerTurnCount} 个 Worker Task`;
+  const message = result.redelivery?.outcome === "scheduled" || result.redelivery?.outcome === "duplicate"
+    ? `${result.redelivery.outcome === "duplicate" ? "本次操作已安排过重新投递" : "已通过 durable outbox 安排重新投递"}：${result.redelivery.answerScheduled ? "Primary Main Card 和最新合格 Answer Card" : "仅 Primary Main Card；当前没有合格 Answer Card"}。${result.executionReason === "no_complete_later_turn" ? "原 Prompt 仍保持 detached，且不会重放。" : "没有向 TraeX 提交 Prompt。"}`
+    : result.redelivery?.outcome === "unavailable"
+      ? `无法安全安排当前卡片重新投递（${result.redelivery.reason}）；没有向 TraeX 提交 Prompt。`
+      : result.outcome === "recovered"
+    ? `已通过**恢复执行观察**补回 ${result.recoveredTurns} 个遗漏 turn；不会重发任务。后续 Feishu 投递仍由 durable outbox 独立确认。`
+    : result.outcome === "requested"
+      ? `已从**${stageLabels[result.selectedStage]}**开始处理 ${counts}；投递由 durable outbox 继续，尚未确认 Feishu 已接收。`
+      : result.outcome === "none"
+        ? "当前 Binding 没有可恢复的执行观察或投递债务。"
+        : result.outcome === "busy"
+          ? "当前 Binding 正在恢复执行观察；未重复启动恢复，请稍后再试。"
+          : `无法安全继续自动恢复（${"reason" in result ? result.reason : "unknown"}）；未重发任务，需要人工检查。`;
   return {
-    schema: "2.0", config: { update_multi: true, summary: { content: skipped ? "Detached prompt 已跳过" : "未跳过 prompt" } },
-    header: { title: { tag: "plain_text", content: skipped ? "✓ Detached prompt 已跳过" : "ℹ Detached prompt 未变化" }, template: skipped ? "orange" : "blue" },
+    schema: "2.0", config: { update_multi: true, summary: { content: successful ? "恢复完成" : requested ? "恢复已启动" : "恢复状态" } },
+    header: { title: { tag: "plain_text", content: `${successful ? "✓" : requested ? "↻" : "ℹ"} ${stageLabels[result.stage]}` }, template: successful ? "green" : result.outcome === "needs_human" ? "orange" : "blue" },
     body: { elements: [{ tag: "markdown", content: message }] }
   };
 }
@@ -410,11 +474,11 @@ export function renderMessageRejectedCard(message: string): object {
   };
 }
 
-function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" | "tabId" | "paneId" | "worktreeName" | "model" | "context" | "queueDepth">): string {
+function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" | "tabId" | "paneId" | "paneToken" | "paneName" | "workspace" | "worktreeName" | "branch" | "paneIdentity" | "model" | "context" | "queueDepth" | "modelUsage">): string {
   const entries: Array<[label: string, value: string]> = [
     ["SPACE", input.spaceName],
     ["TAB", input.tabId ?? "—"],
-    ["PANE", input.paneId ?? "provisioning"]
+    ["PANE", displayNamedPaneIdentity(input)]
   ];
   const identity = entries.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
   const metrics: Array<[label: string, value: string]> = [
@@ -424,16 +488,25 @@ function verticalMetrics(input: Pick<TopicViewState, "agentKind" | "spaceName" |
     ["QUEUE", String(input.queueDepth)]
   ];
   const runtime = metrics.map(([label, value]) => `**${label}**  \`${escapeCode(truncate(value, 28))}\``).join("   " );
-  return [identity, runtime, `**WORKTREE**  \`${escapeCode(truncate(input.worktreeName ?? "—", 64))}\``].join("\n");
+  const usage = normalizeModelUsage(input.modelUsage);
+  const usageLine = [["MODEL USAGE", usage.model ?? "—"], ["CONTEXT REMAINING", usage.contextRemainingPercent === null ? "—" : `${usage.contextRemainingPercent}%`], ["INPUT TOKENS", usage.inputTokens === null ? "—" : String(usage.inputTokens)], ["OUTPUT TOKENS", usage.outputTokens === null ? "—" : String(usage.outputTokens)], ["WAIT", usage.waitMs === null ? "—" : `${usage.waitMs}ms`], ["FIRST VISIBLE", usage.firstVisibleMs === null ? "—" : `${usage.firstVisibleMs}ms`]] as Array<[string, string]>;
+  const usageMarkdown = usageLine.map(([label, value]) => `**${label}**  \`${escapeCode(value)}\``).join("   ");
+  const paneIdentity = createPaneIdentitySnapshot({ ...input.paneIdentity, workspace: input.workspace ?? input.paneIdentity?.workspace, worktreeName: input.worktreeName ?? input.paneIdentity?.worktreeName, branch: input.branch ?? input.paneIdentity?.branch, paneId: input.paneId ?? input.paneIdentity?.paneId, paneToken: input.paneToken ?? input.paneIdentity?.paneToken });
+  const identityLines = [paneIdentity.workspace ? `**WORKSPACE**  \`${escapeCode(truncate(paneIdentity.workspace, 64))}\`` : null, `**WORKTREE**  \`${escapeCode(truncate(paneIdentity.worktreeName ?? "—", 64))}\``, paneIdentity.branch ? `**BRANCH**  \`${escapeCode(truncate(paneIdentity.branch, 64))}\`` : null].filter((line): line is string => line !== null);
+  const hasUsage = usage.model !== null || usage.contextRemainingPercent !== null || usage.inputTokens !== null || usage.outputTokens !== null || usage.waitMs !== null || usage.firstVisibleMs !== null;
+  return [identity, runtime, ...(hasUsage ? [usageMarkdown] : []), ...identityLines].join("\n");
 }
 
 function runtimeFooter(input: TopicViewState): string {
-  const identity = [input.spaceName, input.tabId, input.paneId].filter(Boolean).map((value) => `\`${escapeCode(value!)}\``).join(" · " );
+  const identity = [input.spaceName, input.tabId, displayPaneIdentity(input)].filter(Boolean).map((value) => `\`${escapeCode(value!)}\``).join(" · " );
   const preference = modelPreferenceHint(input);
   const runtime = [`agent \`${escapeCode(agentLabel(input.agentKind))}\``, input.model ? `\`${escapeCode(input.model)}\`` : null, preference, input.context ? `context \`${escapeCode(input.context)}\`` : null, `queue \`${input.queueDepth}\``].filter(Boolean).join(" · " );
   const updated = relativeTime(input.activityAt);
-  const worktree = input.worktreeName ? `worktree \`${escapeCode(input.worktreeName)}\`` : null;
-  return [cardSection("🖥️", "Runtime"), identity, runtime, [worktree, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
+  const paneIdentity = createPaneIdentitySnapshot({ ...input.paneIdentity, workspace: input.workspace ?? input.paneIdentity?.workspace, worktreeName: input.worktreeName ?? input.paneIdentity?.worktreeName, branch: input.branch ?? input.paneIdentity?.branch, paneId: input.paneId ?? input.paneIdentity?.paneId, paneToken: input.paneToken ?? input.paneIdentity?.paneToken });
+  const worktree = paneIdentity.worktreeName ? `worktree \`${escapeCode(paneIdentity.worktreeName)}\`` : null;
+  const branch = paneIdentity.branch ? `branch \`${escapeCode(paneIdentity.branch)}\`` : null;
+  const backlog = `待成批消息 \`${input.nativeInputBacklog.unbatchedInputCount}\` · 待执行批次 \`${input.nativeInputBacklog.pendingBatchCount}\` · 活跃 turn \`${input.activePromptId ? 1 : 0}\``;
+  return [cardSection("🖥️", "Runtime"), identity, runtime, backlog, [worktree, branch, updated ? `${updated}更新` : null].filter(Boolean).join(" · " )].filter(Boolean).join("\n");
 }
 
 function modelPreferenceHint(input: TopicViewState): string | null {
@@ -451,20 +524,13 @@ function callout(color: string, content: string): object {
 function escapeCode(value: string): string { return value.replaceAll("`", "'"); }
 function escapeMarkdown(value: string): string { return value.replace(/[\\`*_{}[\]()#+.!|>-]/g, "\\$&"); }
 function truncate(value: string, max: number): string { return value.length > max ? `${value.slice(0, max - 1)}…` : value; }
-function agentPaneTitle(agentKind: AgentKind, spaceName: string, paneId: string | null): string {
-  return truncate(`${agentLabel(agentKind)} · ${spaceName} / ${paneId ?? "provisioning"}`, 96);
+function agentPaneTitle(input: Pick<TopicViewState, "agentKind" | "spaceName" | "paneId" | "paneToken" | "paneName">): string {
+  return truncate(`${agentLabel(input.agentKind)} · ${input.spaceName} / ${displayNamedPaneIdentity(input)}`, 96);
 }
 function agentLabel(kind: AgentKind | undefined): string { return AGENT_LABEL[kind ?? "traex"]; }
-function agentTitle(title: string): string {
-  return boundedTitle(title);
-}
 function boundedTitle(title: string): string { return truncate(title.replace(/\s+/g, " " ).trim() || "未命名任务", 64); }
-function answerCardSubtitle(input: RunCardView): string {
-  const sessionTitle = input.sessionTitle?.trim() || [input.spaceName, input.paneId].filter(Boolean).join(" / " ) || "unknown";
-  return boundedTitle(`${sessionTitle} · ${input.title}`);
-}
 function requestSummaryLabel(phase: RunCardView["phase"]): string {
-  return { queued: "排队中", running: "执行中", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
+  return { queued: "排队中", submitted: "已提交", running: "执行中", recovering: "恢复执行观察中", uncertain: "结果待确认", blocked: "等待处理", completed: "完成", failed: "失败" }[phase];
 }
 function conversationalMetadata(input: RunCardView, duration: string | null, pageNumber?: number): string {
   const state = RUN_STATE_VIEW[input.phase];
@@ -480,10 +546,15 @@ function conversationalMetadata(input: RunCardView, duration: string | null, pag
     : duration ? `用时 ${duration}` : null;
   const outputState = outputStateLabel(input.phase);
   const updated = relativeTime(input.updatedAt);
-  return [outputState, `${state.icon} ${state.label}`, `Pane \`${escapeCode(input.paneId ?? "provisioning")}\``, details, pageNumber && pageNumber > 1 ? `第 ${pageNumber} 页` : null, updated ? `最后更新 ${updated}` : null].filter(Boolean).join("  ·  " );
+  return [outputState, `${state.icon} ${state.label}`, `Pane \`${escapeCode(displayPaneIdentity(input))}\``, details, pageNumber && pageNumber > 1 ? `第 ${pageNumber} 页` : null, updated ? `最后更新 ${updated}` : null].filter(Boolean).join("  ·  " );
 }
 function outputStateLabel(phase: RunCardView["phase"]): string | null {
-  return phase === "running" ? "实时更新中" : phase === "completed" ? "最终结果" : null;
+  return phase === "running" ? "实时更新中" : phase === "recovering" ? "恢复执行观察中" : phase === "uncertain" ? "结果待确认" : phase === "completed" ? "最终结果" : null;
+}
+
+function statusCallout(color: string, title: string, content: string): object {
+  return { tag: "collapsible_panel", expanded: true, border: { color, corner_radius: "6px" },
+    header: { title: { tag: "plain_text", content: title } }, elements: [{ tag: "markdown", content }] };
 }
 function topicStateLine(input: TopicViewState): string {
   const view = STATE_VIEW[input.phase];

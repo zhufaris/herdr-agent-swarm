@@ -1,10 +1,8 @@
-import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import type { SessionOperationStore } from "../domain/ports/workflow.js";
-import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, SessionOperation, SessionOperationDispatcherDiagnostics, SessionOperationKind } from "../domain/types.js";
+import type { Binding, IncomingLarkMessage, SessionOperation, SessionOperationDispatcherDiagnostics } from "../domain/types.js";
 import { UNSUPPORTED_RUNTIME_MODEL_MESSAGE } from "../domain/session-operation-policy.js";
 import { safeLogError } from "../runtime/safe-error.js";
-import { CoalescingDrain } from "../runtime/coalescing-drain.js";
 import type { BindingProvisioningWorkflowPort } from "./binding-provisioning-workflow.js";
 import type { SessionAdministrationWorkflowPort } from "./session-administration-workflow.js";
 import type { PaneControlWorkflowPort } from "./pane-control-workflow.js";
@@ -22,72 +20,57 @@ interface Options {
 }
 
 export interface SessionOperationWorkflowPort {
-  accept(action: IncomingLarkCardAction, binding: Binding, interactionId: string, kind: SessionOperationKind, argument?: string | null): "accepted" | "duplicate" | "missing" | "unauthorized" | "expired" | "stale";
-  start(scanIntervalMs?: number): void;
   recover(): Promise<void>;
   stop(): Promise<void>;
-  wake(): void;
   snapshot(): SessionOperationDispatcherDiagnostics;
 }
 
 export class SessionOperationWorkflow implements SessionOperationWorkflowPort {
-  private readonly drainRuntime: CoalescingDrain;
+  private recovery: Promise<void> | null = null;
+  private state: "idle" | "running" = "idle";
+  private stopping = false;
   private lastCompletedAt: string | null = null;
   private lastFailureAt: string | null = null;
   private lastFailure: string | null = null;
 
-  constructor(private readonly options: Options) {
-    this.drainRuntime = new CoalescingDrain({
-      drain: () => this.drainAcceptedOperations(),
-      onError: (error) => {
-        const safeError = safeLogError(error);
-        this.lastFailureAt = new Date().toISOString();
-        this.lastFailure = safeError.message.slice(0, 500);
-        this.options.logger.error({ event: "session-operation-drain-failed", err: safeError, outcome: "deferred" }, "Session operation drain failed; periodic scan will retry accepted work");
+  constructor(private readonly options: Options) {}
+
+  recover(): Promise<void> {
+    if (this.recovery) return this.recovery;
+    const recovery = this.performRecovery();
+    this.recovery = recovery;
+    void recovery.finally(() => { if (this.recovery === recovery) this.recovery = null; }).catch(() => {});
+    return recovery;
+  }
+
+  private async performRecovery(): Promise<void> {
+    this.state = "running";
+    this.lastFailure = null;
+    try {
+      for (const operation of this.options.store.listRecoverableSessionOperations()) {
+        if (operation.state !== "running") continue;
+        this.options.store.finishSessionOperation(operation.id, "uncertain", "Bridge restarted after the Session operation may have reached Herdr; operation was not replayed");
+        this.options.logger.warn({ event: "session-operation-recovered-uncertain", operationId: operation.id, bindingId: operation.bindingId, kind: operation.kind, outcome: "uncertain" }, "preserved interrupted Session operation without replay");
       }
-    });
-  }
-
-  accept(action: IncomingLarkCardAction, binding: Binding, interactionId: string, kind: SessionOperationKind, argument: string | null = null): ReturnType<SessionOperationWorkflowPort["accept"]> {
-    const result = this.options.store.acceptSessionOperation({
-      id: randomUUID(), idempotencyKey: `interaction:${interactionId}:${kind}`, interactionId, actorOpenId: action.operatorOpenId,
-      bindingId: binding.id, bindingGeneration: binding.generation, expectedPaneId: binding.paneId, expectedTerminalId: binding.traexSessionId,
-      kind, argument, now: new Date().toISOString()
-    });
-    if (result.outcome === "accepted") this.wake();
-    return result.outcome;
-  }
-
-  start(scanIntervalMs?: number): void {
-    this.drainRuntime.start(scanIntervalMs);
-  }
-
-  async recover(): Promise<void> {
-    for (const operation of this.options.store.listRecoverableSessionOperations()) {
-      if (operation.state !== "running") continue;
-      this.options.store.finishSessionOperation(operation.id, "uncertain", "Bridge restarted after the Session operation may have reached Herdr; operation was not replayed");
-      this.options.logger.warn({ event: "session-operation-recovered-uncertain", operationId: operation.id, bindingId: operation.bindingId, kind: operation.kind, outcome: "uncertain" }, "preserved interrupted Session operation without replay");
+      for (let operation = this.options.store.claimNextSessionOperation(); operation; operation = this.options.store.claimNextSessionOperation()) await this.execute(operation);
+    } catch (error) {
+      const safeError = safeLogError(error);
+      this.lastFailureAt = new Date().toISOString();
+      this.lastFailure = safeError.message.slice(0, 500);
+      this.options.logger.error({ event: "session-operation-startup-recovery-failed", err: safeError, outcome: "blocked" }, "Legacy Session operation startup recovery failed");
+      throw error;
+    } finally {
+      this.state = "idle";
     }
   }
 
   async stop(): Promise<void> {
-    await this.drainRuntime.stop();
+    this.stopping = true;
+    if (this.recovery) await Promise.allSettled([this.recovery]);
   }
 
   snapshot(): SessionOperationDispatcherDiagnostics {
-    const runtime = this.drainRuntime.snapshot();
-    return { state: runtime.state, activeOperations: runtime.state === "running" ? 1 : 0, drainRequested: runtime.requested, lastCompletedAt: this.lastCompletedAt, lastFailureAt: this.lastFailureAt, lastFailure: this.lastFailure };
-  }
-
-  wake(): void {
-    this.drainRuntime.wake();
-  }
-
-  private async drainAcceptedOperations(): Promise<void> {
-    const operation = this.options.store.claimNextSessionOperation();
-    if (!operation) return;
-    await this.execute(operation);
-    this.drainRuntime.wake();
+    return { state: this.stopping ? "stopping" : this.state, activeOperations: this.state === "running" ? 1 : 0, drainRequested: false, lastCompletedAt: this.lastCompletedAt, lastFailureAt: this.lastFailureAt, lastFailure: this.lastFailure };
   }
 
   private async execute(operation: SessionOperation): Promise<void> {

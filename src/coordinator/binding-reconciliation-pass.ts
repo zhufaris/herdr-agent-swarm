@@ -2,6 +2,8 @@ import type { Logger } from "pino";
 import type { HerdrPort } from "../domain/ports/external.js";
 import type { RuntimeReconciliationStore } from "../domain/ports/binding.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
+import type { RuntimeObservationPort } from "../domain/ports/runtime-observation.js";
+import type { SemanticPaneSnapshotRead } from "../domain/runtime-observation.js";
 import type { Binding, HerdrPane, ProjectConfig, ReconciliationPassResult } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
@@ -28,6 +30,7 @@ export interface BindingReconciliationPassOptions {
   projects: readonly ProjectConfig[];
   store: RuntimeReconciliationStore;
   herdr: HerdrPort;
+  runtimeObservations?: RuntimeObservationPort;
   lifecycleEvents: LifecycleEventPublisher;
   channelPublisher: { enqueueRunCardUpdate(bindingId: string, promptId: string, messageId: string, viewVersion: number, cardRole: "answer", card: object): Promise<void> };
   wakeOutbound?: () => void;
@@ -37,6 +40,7 @@ export interface BindingReconciliationPassOptions {
   scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
   worktreeNameFor?(cwd: string | null | undefined): Promise<string | null>;
+  branchFor?(cwd: string | null | undefined): Promise<string | null>;
   externalTurnObserver?: { observe(binding: Binding): Promise<void> };
   presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard">;
 }
@@ -56,9 +60,13 @@ export class BindingReconciliationPass {
     this.projects = new ProjectCatalog(options.projects);
   }
 
-  async captureBaselines(): Promise<void> {
-    const panes = await this.snapshots.allOrConfigured([...this.configuredWorkspaceIds]);
+  async captureBaselines(panes?: readonly HerdrPane[]): Promise<void> {
+    panes ??= await this.snapshots.allOrConfigured([...this.configuredWorkspaceIds]);
     for (const pane of panes) this.converger.captureBaseline(pane);
+  }
+
+  async executeSemantic(evidence: Exclude<SemanticPaneSnapshotRead, { kind: "current" }>): Promise<BindingReconciliationPassResult> {
+    return evidence.kind === "rebuild-required" ? this.reconcileOnce(undefined, evidence.panes) : this.reconcileDelta(evidence);
   }
 
   async execute(scope: PriorityReconciliationScope): Promise<BindingReconciliationPassResult | void> {
@@ -74,6 +82,7 @@ export class BindingReconciliationPass {
     for (const paneId of uniquePaneIds) {
       const existing = this.options.store.findBindingByPane(paneId);
       if (!existing || (existing.state !== "active" && existing.state !== "orphaned")) continue;
+      if (this.options.store.hasActiveOrchestratorIdentityMigration(existing.id)) continue;
       try {
         const observation = observations.get(paneId) ?? { pane: null, traexProcess: false, composerReady: false, evidenceSource: "none" as const };
         if (!observation.pane) { await this.converger.orphan(existing); continue; }
@@ -85,14 +94,52 @@ export class BindingReconciliationPass {
     }
   }
 
-  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>): Promise<BindingReconciliationPassResult> {
+  private async reconcileDelta(evidence: Extract<SemanticPaneSnapshotRead, { kind: "delta" }>): Promise<BindingReconciliationPassResult> {
+    const errors: Error[] = [];
+    let existingBindingCount = 0;
+    let discoveryCandidateCount = 0;
+    for (const removed of evidence.removed) {
+      const existing = this.options.store.findBindingByPane(removed.paneId);
+      if (!existing || existing.state !== "active" || this.options.store.hasActiveOrchestratorIdentityMigration(existing.id)) continue;
+      try { await this.converger.orphan(existing); existingBindingCount += 1; }
+      catch (error) { errors.push(new Error(`Binding delta reconciliation failed for Pane ${removed.paneId}`, { cause: error })); }
+    }
+    for (const pane of [...evidence.added, ...evidence.changed]) {
+      if (this.options.store.hasActiveOrchestratorIdentityMigrationForPane(pane)) continue;
+      const existing = this.options.store.findBindingByPane(pane.paneId);
+      if (existing && (existing.state === "active" || existing.state === "orphaned")) {
+        if (this.options.store.hasActiveOrchestratorIdentityMigration(existing.id)) continue;
+        try { await this.converger.converge(existing, pane); existingBindingCount += 1; }
+        catch (error) { errors.push(new Error(`Binding delta reconciliation failed for Pane ${pane.paneId}`, { cause: error })); }
+        continue;
+      }
+      if (!pane.foregroundExecutables.includes("traex")) continue;
+      const matchingProjects = this.projects.projectsForWorkspaceAndCwd(pane.workspaceId, pane.cwd);
+      if (matchingProjects.length !== 1) continue;
+      discoveryCandidateCount += 1;
+      try { await this.options.discoverPane(pane, matchingProjects[0]!); }
+      catch (error) { errors.push(new Error(`Binding delta discovery failed for Pane ${pane.paneId}`, { cause: error })); }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, `Binding semantic delta failed for ${errors.length} Pane${errors.length === 1 ? "" : "s"}`);
+    const reconciledWorkspaceIds = new Set([
+      ...evidence.added.map((pane) => pane.workspaceId), ...evidence.changed.map((pane) => pane.workspaceId), ...evidence.removed.map((pane) => pane.workspaceId)
+    ]);
+    return {
+      reconciledWorkspaceIds, failures: [], snapshotDurationMs: 0, missingPaneDurationMs: 0,
+      existingBindingDurationMs: 0, discoveryDurationMs: 0, existingBindingCount, discoveryCandidateCount
+    };
+  }
+
+  private async reconcileOnce(requestedWorkspaceIds?: ReadonlySet<string>, suppliedSnapshot?: readonly HerdrPane[]): Promise<BindingReconciliationPassResult> {
     const allActiveBindings = this.options.store.listBindingsByState("active");
     const orphanedBindings = this.options.store.listBindingsByState("orphaned");
     const reconciliationWorkspaceIds = new Set(this.configuredWorkspaceIds);
     for (const binding of [...allActiveBindings, ...orphanedBindings]) reconciliationWorkspaceIds.add(binding.workspaceId);
     const workspaceIds = requestedWorkspaceIds ? [...requestedWorkspaceIds].filter((workspaceId) => reconciliationWorkspaceIds.has(workspaceId)) : [...reconciliationWorkspaceIds];
     const snapshotStarted = performance.now();
-    const { panesByWorkspace, failures } = await this.snapshots.collect(workspaceIds);
+    const { panesByWorkspace, failures } = suppliedSnapshot
+      ? { panesByWorkspace: panesByWorkspaceFromSnapshot(workspaceIds, suppliedSnapshot), failures: [] }
+      : await this.snapshots.collect(workspaceIds);
     const snapshotDurationMs = elapsedMs(snapshotStarted);
 
     const paneIdsByWorkspace = new Map<string, Set<string>>();
@@ -104,6 +151,7 @@ export class BindingReconciliationPass {
     let interruptedProvisioningByProjectId: Map<string, Binding> | null = null;
     const missingPaneStarted = performance.now();
     for (const binding of activeBindings) {
+      if (this.options.store.hasActiveOrchestratorIdentityMigration(binding.id)) continue;
       try {
         const workspacePanes = panesByWorkspace.get(binding.workspaceId);
         if (!workspacePanes) {
@@ -129,12 +177,14 @@ export class BindingReconciliationPass {
         this.options.logger.warn({ event: "herdr-pane-skipped", requestedWorkspaceId: item.requestedWorkspaceId, reportedWorkspaceId: item.pane.workspaceId, paneId: item.pane.paneId, reason: "workspace_mismatch" }, "skipping pane returned for the wrong workspace");
         continue;
       }
+      if (this.options.store.hasActiveOrchestratorIdentityMigrationForPane(item.pane)) continue;
       const existing = bindingByPaneId.get(item.pane.paneId) ?? this.options.store.findBindingByPane(item.pane.paneId);
       if (existing) existingPanes.push({ ...item, binding: existing });
       else discoveryPanes.push(item);
     }
     const existingBindingStarted = performance.now();
     await mapWithConcurrency(existingPanes, EXISTING_BINDING_CONCURRENCY, async ({ requestedWorkspaceId, pane: snapshotPane, binding }) => {
+      if (this.options.store.hasActiveOrchestratorIdentityMigration(binding.id)) return;
       try {
         let pane = snapshotPane;
         if (pane.agentState === "unknown") {
@@ -216,4 +266,10 @@ export class BindingReconciliationPass {
 
 function elapsedMs(startedAt: number): number {
   return Math.max(0, Math.round(performance.now() - startedAt));
+}
+
+function panesByWorkspaceFromSnapshot(workspaceIds: readonly string[], panes: readonly HerdrPane[]): Map<string, HerdrPane[]> {
+  const result = new Map(workspaceIds.map((workspaceId) => [workspaceId, [] as HerdrPane[]]));
+  for (const pane of panes) if (result.has(pane.workspaceId)) result.get(pane.workspaceId)!.push(pane);
+  return result;
 }

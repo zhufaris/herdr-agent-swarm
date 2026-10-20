@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { ExactTurnObserver } from "../src/runtime/exact-turn-observer.js";
-import type { TraexTranscriptObservation, TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptObservation, AgentTranscriptReaderPort } from "../src/domain/ports.js";
 
 const session = { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" };
 const exact = { turnId: "turn-1", startedAt: "2026-09-07T00:00:00.000Z" };
 
-function reader(observations: TraexTranscriptObservation[]): TraexTranscriptReaderPort {
+function reader(observations: AgentTranscriptObservation[]): AgentTranscriptReaderPort {
   const readObservation = vi.fn(async () => observations.shift() ?? { answerDelta: "" });
   const opened = { mode: "typed" as const, cursor: { readDelta: vi.fn(async () => ""), readObservation } };
   return {
@@ -58,7 +58,7 @@ describe("ExactTurnObserver", () => {
     const source = reader([active, completed, { turnId: exact.turnId, answerDelta: "late" }]);
     const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "after", ...exact }, expected: exact });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
-    const observed: TraexTranscriptObservation[] = [];
+    const observed: AgentTranscriptObservation[] = [];
 
     const result = await opened.cursor.drain({ limit: 8, onObservation: async (value) => { observed.push(value); return value.turnLifecycle?.state === "completed" ? "stop" : "continue"; } });
 
@@ -66,12 +66,64 @@ describe("ExactTurnObserver", () => {
     expect(observed).toEqual([active, completed]);
   });
 
+  it("quarantines a failed projection and continues draining later observations", async () => {
+    const observations: AgentTranscriptObservation[] = [
+      { turnId: "turn-1", answerDelta: "poison" },
+      { turnId: "turn-2", answerDelta: "healthy" },
+      { answerDelta: "" }
+    ];
+    const acknowledge = vi.fn();
+    const source: AgentTranscriptReaderPort = {
+      open: vi.fn(async () => ({ mode: "typed" as const, cursor: {
+        readDelta: vi.fn(async () => ""),
+        readObservation: vi.fn(async () => observations.shift() ?? { answerDelta: "" }),
+        acknowledge
+      } }))
+    };
+    const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" } });
+    if (opened.mode !== "typed") throw new Error("expected typed cursor");
+
+    const result = await opened.cursor.drain({
+      limit: 8,
+      onObservation: async (observation) => {
+        if (observation.answerDelta === "poison") throw new Error("projection failed");
+        return "continue";
+      }
+    });
+
+    expect(result).toEqual({ accepted: 2, stopped: false });
+    expect(acknowledge).toHaveBeenNthCalledWith(1, "quarantined", "projection failed");
+    expect(acknowledge).toHaveBeenNthCalledWith(2, "projected", undefined);
+  });
+
+  it("does not treat a durable retry of the same failed event as a duplicate", async () => {
+    const poison = { turnId: exact.turnId, answerDelta: "poison" };
+    let settled = false;
+    const source: AgentTranscriptReaderPort = {
+      open: vi.fn(async () => ({ mode: "typed" as const, cursor: {
+        readDelta: vi.fn(async () => ""),
+        readObservation: vi.fn(async () => settled ? { answerDelta: "" } : poison),
+        acknowledge: vi.fn(async (outcome: "projected" | "ignored" | "quarantined") => { if (outcome === "projected") settled = true; })
+      } }))
+    };
+    const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" } });
+    if (opened.mode !== "typed") throw new Error("expected typed cursor");
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(await opened.cursor.read()).toEqual({ kind: "accepted", observation: poison });
+      await opened.cursor.acknowledge?.("quarantined", "projection failed");
+    }
+    expect(await opened.cursor.read()).toEqual({ kind: "accepted", observation: poison });
+    await opened.cursor.acknowledge?.("projected");
+    expect(await opened.cursor.read()).toEqual({ kind: "empty" });
+  });
+
   it("stops a final drain when the transcript repeats the last accepted observation", async () => {
     const active = { turnId: exact.turnId, answerDelta: "one", turnLifecycle: { ...exact, state: "active" as const } };
     const source = reader([active, active, { turnId: exact.turnId, answerDelta: "must not be reached" }]);
     const opened = await new ExactTurnObserver(source).open({ session, boundary: { kind: "latest" } });
     if (opened.mode !== "typed") throw new Error("expected typed cursor");
-    const observed: TraexTranscriptObservation[] = [];
+    const observed: AgentTranscriptObservation[] = [];
 
     const result = await opened.cursor.drain({ limit: 8, onObservation: async (value) => { observed.push(value); return "continue"; } });
 
@@ -99,7 +151,7 @@ describe("ExactTurnObserver", () => {
   });
 
   it("reports an unsupported recovery cursor without falling back to latest", async () => {
-    const source: TraexTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
+    const source: AgentTranscriptReaderPort = { open: vi.fn(async () => ({ mode: "unavailable" as const, reason: "transcript_not_found" })) };
 
     await expect(new ExactTurnObserver(source).open({ session, boundary: { kind: "first" } }))
       .resolves.toEqual({ mode: "unavailable", reason: "recovery_cursor_unavailable" });

@@ -1,476 +1,690 @@
-import { randomUUID } from "node:crypto";
 import type { AgentInstance } from "../../domain/agent-instance.js";
 import type { Binding } from "../../domain/binding.js";
 import type { ControlActor } from "../../domain/commands.js";
-import { InstanceTurnCapacityExceeded } from "../../domain/instance-turn-capacity-error.js";
-import type { InstanceEvent, InstanceEventKind, InstanceTurn, InstanceTurnState, InstanceTurnSummary } from "../../domain/instance-turn.js";
-import type { AcceptInstanceTurnWithCardInput, TransitionInstanceTurnWithProjectionInput, TransitionInstanceTurnWithProjectionResult } from "../../domain/ports.js";
+import type {
+  InstanceEvent,
+  InstanceEventKind,
+  InstanceTurn,
+  InstanceTurnState,
+  InstanceTurnSummary,
+} from "../../domain/instance-turn.js";
+import type {
+  AcceptInstanceTurnWithCardInput,
+  TransitionInstanceTurnWithProjectionInput,
+  TransitionInstanceTurnWithProjectionResult,
+  WorkerCompletionActionAcceptanceInput,
+  WorkerCompletionActionAcceptanceResult,
+} from "../../domain/ports.js";
 import type { OutboxStore } from "../../domain/ports/outbox.js";
-import type { AnswerPageDeliveryFacts, AnswerPageReservationOutcome, AnswerTimelinePageCheckpoint, OutboundReply, OutboundReplyState } from "../../domain/types.js";
 import type { AnswerTimelineItem } from "../../domain/answer-timeline.js";
 import type { AnswerTimelineCursor } from "../../domain/delivery.js";
-import { reduceWorkerTurnCard, type WorkerTurnCardChange, type WorkerTurnCardPage, type WorkerTurnCardView } from "../../domain/worker-turn-card-view.js";
+import type {
+  AnswerPageDeliveryFacts,
+  AnswerPageReservationOutcome,
+  AnswerTimelinePageCheckpoint,
+} from "../../domain/types.js";
+import type { AnswerSegment } from "../../domain/answer-segment.js";
+import type {
+  WorkerTurnCardChange,
+  WorkerTurnCardPage,
+  WorkerTurnCardView,
+} from "../../domain/worker-turn-card-view.js";
+import { matchesExpectedWorkerRuntimeTurn } from "../../domain/worker-turn-policies.js";
 import type { SqliteContext } from "./context.js";
-import { turnActorProvenance } from "./turn-actor-provenance.js";
+import { WorkerTurnAcceptance } from "./worker-turn/acceptance.js";
+import { WorkerHumanReview } from "./worker-turn/human-review.js";
+import { WorkerCompletionActionEligibility } from "./worker-turn/completion-action-eligibility.js";
+import { loadCompletionChoice } from "./completion-choice-store.js";
+import { WorkerTurnProjection } from "./worker-turn/projection.js";
+import { WorkerTurnQueue } from "./worker-turn/queue.js";
+import { WorkerTurnRecovery } from "./worker-turn/recovery.js";
+import { mapInstanceTurn, mapWorkerTurnCard } from "./worker-turn/records.js";
+import { WorkerTurnTransition } from "./worker-turn/transition.js";
+import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
+import { SqliteProjectionGapStore } from "./projection-gap-store.js";
+import { randomUUID } from "node:crypto";
+import { COMPLETION_ACTION_SELECTIONS, completionReviewActionSetIdentity, type CompletionActionSelection, type CompletionActionSetRenderState } from "../../domain/completion-action-set.js";
 import { canMentionFeishuOpenId } from "../../domain/worker-human-review.js";
-import { SqliteAnswerTimelineStore } from "./answer-timeline-store.js";
-import { SqliteAnswerTimelinePageStore } from "./answer-timeline-page-store.js";
+import { recoverCompletionNotification } from "./completion-notification-store.js";
+import type { ConversationSegmentStore } from "../../domain/ports/conversation-segment.js";
+import type { PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
+import { withWorkerTaskProjectionIdentity } from "./worker-task-projection-identity.js";
+import type { ReserveValidatedCardDismissalInput } from "../../domain/ports/card-dismissal.js";
+import { SqliteCompletionReviewStore } from "./completion-review-store.js";
 
 export interface WorkerTurnStoreDependencies {
+  conversationSegments?: ConversationSegmentStore;
   getAgentInstance(id: string): AgentInstance | null;
   getBinding(id: string): Binding | null;
-  enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
+  enqueueOutboundReply(input: EnqueueOutboundReplyInput): unknown;
   invalidateWorkerCardContexts(view: WorkerTurnCardView, reason: string): void;
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean;
+  reserveCardDismissal(input: ReserveValidatedCardDismissalInput): unknown;
 }
 
 export class SqliteWorkerTurnStore {
-  private readonly timelines: SqliteAnswerTimelineStore;
-  private readonly timelinePages: SqliteAnswerTimelinePageStore;
-  constructor(private readonly context: SqliteContext, private readonly dependencies: WorkerTurnStoreDependencies) {
-    this.timelines = new SqliteAnswerTimelineStore(context);
-    this.timelinePages = new SqliteAnswerTimelinePageStore(context);
+  private readonly projection: WorkerTurnProjection;
+  private readonly queue: WorkerTurnQueue;
+  private readonly acceptance: WorkerTurnAcceptance;
+  private readonly transition: WorkerTurnTransition;
+  private readonly recovery: WorkerTurnRecovery;
+  private readonly humanReview: WorkerHumanReview;
+  private readonly completionReviews: SqliteCompletionReviewStore;
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
+  constructor(
+    private readonly context: SqliteContext,
+    private readonly dependencies: WorkerTurnStoreDependencies,
+  ) {
+    this.projection = new WorkerTurnProjection(context, {
+      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
+    });
+    const event = this.insertInstanceEvent.bind(this);
+    this.queue = new WorkerTurnQueue(context, {
+      getAgentInstance: dependencies.getAgentInstance,
+      saveWorkerTurnCard: (view) => this.projection.save(view),
+      invalidateWorkerCardContexts: dependencies.invalidateWorkerCardContexts,
+      insertInstanceEvent: event,
+    });
+    this.acceptance = new WorkerTurnAcceptance(context, {
+      ...dependencies,
+      enqueueOutboundReply: (input) => this.enqueueOutboundReply(input),
+      queue: this.queue,
+      projection: this.projection,
+      insertInstanceEvent: event,
+    });
+    this.humanReview = new WorkerHumanReview(context, dependencies);
+    this.completionReviews = new SqliteCompletionReviewStore(context);
+    const completionActionEligibility = new WorkerCompletionActionEligibility(context, {
+      getAgentInstance: dependencies.getAgentInstance,
+      getBinding: dependencies.getBinding
+    });
+    this.transition = new WorkerTurnTransition(context, {
+      projection: this.projection,
+      queue: this.queue,
+      humanReview: this.humanReview,
+      completionActionEligibility,
+      invalidateWorkerCardContexts: dependencies.invalidateWorkerCardContexts,
+      insertInstanceEvent: event,
+    });
+    this.recovery = new WorkerTurnRecovery(context, {
+      projection: this.projection,
+      insertInstanceEvent: event,
+    });
   }
-
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void {
+    this.preparedDeliveryReservation = reservation;
+    this.preparedDeliveryConsumer = consumer;
+    this.projection.setPreparedDeliveryReservation(reservation, consumer);
+    this.humanReview.setPreparedDeliveryReservation(reservation, consumer);
+  }
+  private enqueueOutboundReply(input: EnqueueOutboundReplyInput): unknown {
+    const routed = withWorkerTaskProjectionIdentity(this.context, input);
+    if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Worker Turn prepared delivery is not connected");
+    const receipt = this.preparedDeliveryReservation.reservePreparedOutboundReply(routed);
+    this.handoffAfterCommit(receipt);
+    return receipt.result;
+  }
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void {
+    queueMicrotask(() => {
+      for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery);
+    });
+  }
   hasPendingOutboundReplyForWorkerTurn(turnId: string): boolean {
     return this.dependencies.hasPendingOutboundReplyForWorkerTurn(turnId);
   }
-
-  acceptInstanceTurn(input: { id: string; idempotencyKey: string; actor: ControlActor; projectId: string; instanceId: string; instanceGeneration: number; kind: InstanceTurn["kind"]; priority?: InstanceTurn["priority"]; text: string; maxQueueDepth?: number }): { turn: InstanceTurn; inserted: boolean } {
-    const timestamp = now();
-    return this.context.transaction(() => {
-      const current = this.dependencies.getAgentInstance(input.instanceId);
-      if (!current || current.projectId !== input.projectId || current.generation !== input.instanceGeneration) throw new Error("Instance generation changed before turn acceptance");
-      const existing = this.getInstanceTurnByKey(input.idempotencyKey);
-      const priority = input.priority ?? "normal";
-      if (existing) {
-        if (existing.instanceId !== input.instanceId || existing.text !== input.text || existing.kind !== input.kind || existing.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
-        return { turn: existing, inserted: false };
-      }
-      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new InstanceTurnCapacityExceeded();
-      if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
-      if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
-      const actor = turnActorProvenance(input.actor);
-      const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id, kind, priority, text, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), actor.actorKind, actor.sourceBindingId, actor.sourceBindingGeneration, actor.sourceParentPromptId, input.kind, priority, input.text, timestamp, timestamp).changes === 1;
-      const turn = this.getInstanceTurnByKey(input.idempotencyKey);
-      if (!turn) throw new Error("Accepted instance turn could not be loaded");
-      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority) throw new Error("Idempotency key belongs to a different instance turn");
-      if (inserted) this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
-      return { turn, inserted };
+  acceptInstanceTurn(input: {
+    id: string;
+    idempotencyKey: string;
+    actor: ControlActor;
+    projectId: string;
+    instanceId: string;
+    instanceGeneration: number;
+    kind: InstanceTurn["kind"];
+    priority?: InstanceTurn["priority"];
+    text: string;
+    maxQueueDepth?: number;
+  }): { turn: InstanceTurn; inserted: boolean; completionActionOwnerTurnIds?: string[] } {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.acceptance.accept(input));
+  }
+  acceptInstanceTurnWithCard(
+    input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number },
+  ): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean; completionActionOwnerTurnIds?: string[] } {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => {
+      const result = this.acceptance.acceptWithCard(input);
+      return result;
     });
   }
-
-  acceptInstanceTurnWithCard(input: AcceptInstanceTurnWithCardInput & { maxQueueDepth?: number }): { turn: InstanceTurn; view: WorkerTurnCardView; inserted: boolean } {
-    const timestamp = now();
-    return this.context.transaction(() => {
-      const current = this.dependencies.getAgentInstance(input.instanceId);
-      if (!current || current.projectId !== input.projectId || current.generation !== input.instanceGeneration) throw new Error("Instance generation changed before turn acceptance");
-      const existing = this.getInstanceTurnByKey(input.idempotencyKey);
-      const priority = input.priority ?? "normal";
-      if (existing) {
-        if (existing.instanceId !== input.instanceId || existing.text !== input.text || existing.kind !== input.kind || existing.priority !== priority || existing.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
-        const view = this.loadWorkerTurnCard(existing.id);
-        if (!view) throw new Error("Accepted Worker turn card could not be loaded");
-        return { turn: existing, view, inserted: false };
-      }
-      if (input.maxQueueDepth !== undefined && this.countPendingInstanceTurns(input.instanceId, input.instanceGeneration) >= input.maxQueueDepth) throw new InstanceTurnCapacityExceeded();
-      if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'priority' AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has a live priority turn");
-      if (priority === "priority" && this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(input.instanceId, input.instanceGeneration)) throw new Error("Target instance already has an active runtime turn");
-      if (input.kind === "turn" && input.parentTurnId !== null) throw new Error("Ordinary Worker turn cannot have a parent");
-      if (input.kind === "followup") {
-        const parent = input.parentTurnId ? this.getInstanceTurn(input.parentTurnId) : null;
-        if (!parent || parent.projectId !== input.projectId || parent.instanceId !== input.instanceId || !["completed", "failed", "cancelled"].includes(parent.state)) throw new Error("Worker follow-up parent must be a settled turn on the same instance");
-      }
-      if (input.view.turnId !== input.id || input.view.instanceId !== input.instanceId || input.view.instanceGeneration !== input.instanceGeneration || input.view.parentTurnId !== input.parentTurnId || input.view.rootMessageId.length === 0) throw new Error("Worker turn card identity does not match the accepted turn");
-      const queuePosition = priority === "priority" ? 0 : Number((this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND priority = 'normal' AND state = 'queued'").get(input.instanceId, input.instanceGeneration) as { count: number }).count) + 1;
-      const acceptedView = { ...input.view, queuePosition };
-      const actor = turnActorProvenance(input.actor);
-      const inserted = this.context.database.prepare(`INSERT INTO instance_turns(id, idempotency_key, project_id, instance_id, instance_generation, actor_json, actor_kind, source_binding_id, source_binding_generation, source_parent_prompt_id, kind, priority, text, state, parent_turn_id, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`)
-        .run(input.id, input.idempotencyKey, input.projectId, input.instanceId, input.instanceGeneration, JSON.stringify(input.actor), actor.actorKind, actor.sourceBindingId, actor.sourceBindingGeneration, actor.sourceParentPromptId, input.kind, priority, input.text, input.parentTurnId, input.sourceMessageId, timestamp, timestamp).changes === 1;
-      const turn = this.getInstanceTurnByKey(input.idempotencyKey);
-      if (!turn) throw new Error("Accepted instance turn could not be loaded");
-      if (turn.instanceId !== input.instanceId || turn.text !== input.text || turn.kind !== input.kind || turn.priority !== priority || turn.parentTurnId !== input.parentTurnId) throw new Error("Idempotency key belongs to a different instance turn");
-      if (inserted) {
-        this.saveWorkerTurnCard(acceptedView);
-        this.insertInstanceEvent(input.projectId, input.instanceId, turn.id, "turn.accepted", { kind: input.kind });
-        if (current.workerSessionLifecycle === "active") {
-          this.dependencies.enqueueOutboundReply({
-            id: randomUUID(), idempotencyKey: `worker-turn:create:${turn.id}:0`, bindingId: null, workerTurnId: turn.id,
-            viewVersion: acceptedView.viewVersion, rootMessageId: acceptedView.rootMessageId, kind: "stream_card_create",
-            payload: JSON.stringify({ card: input.render(acceptedView), stream: { pageIndex: 0, pageStart: 0, elementId: acceptedView.elementId } })
-          });
-        }
-        this.dependencies.invalidateWorkerCardContexts(acceptedView, "turn.accepted");
-      }
-      const view = this.loadWorkerTurnCard(turn.id);
-      if (!view) throw new Error("Accepted Worker turn card could not be loaded");
-      return { turn, view, inserted };
-    });
+  acceptWorkerCompletionAction(input: WorkerCompletionActionAcceptanceInput): WorkerCompletionActionAcceptanceResult {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.acceptance.acceptCompletionAction(input));
   }
-
-  getInstanceTurn(id: string): InstanceTurn | null { return mapInstanceTurn(this.context.database.prepare("SELECT * FROM instance_turns WHERE id = ?").get(id) as Record<string, unknown> | undefined); }
-  claimInstanceTurnTranscript(input: { turnId: string; expectedGeneration: number; runtimeTurnId: string; startedAt: string }): InstanceTurn | null {
-    if (!input.runtimeTurnId || !Number.isFinite(Date.parse(input.startedAt))) return null;
-    return this.context.transaction(() => {
+  ignoreWorkerCompletionAction(input: { actionSetId: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; chatId: string; actorOpenId: string }): import("../../domain/completion-action-set.js").CompletionActionIgnoreResult {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.acceptance.ignoreCompletionAction(input));
+  }
+  resolveWorkerCompletionChoice(input: { actionSetId: string; optionId: string; ownerTurnId: string; ownerGeneration: number; cardMessageId: string; actorOpenId: string }): { label: string; message: string } {
+    const row = this.context.database.prepare(`SELECT option.label, option.message
+      FROM completion_action_sets action
+      JOIN completion_choice_options option ON option.specification_id = action.choice_specification_id
+      WHERE action.id = ? AND action.owner_kind = 'worker-turn' AND action.owner_id = ? AND action.owner_generation = ?
+        AND (CASE WHEN action.presentation_kind='fresh-card' THEN action.presentation_message_id ELSE action.card_message_id END) = ?
+        AND action.mention_open_id = ?
+        AND ((action.presentation_kind='fresh-card' AND action.state='active')
+          OR (action.presentation_kind='legacy-inline' AND action.state='available')
+          OR (action.state = 'consumed' AND action.selected_choice_option_id = option.option_id))
+        AND option.option_id = ?`).get(input.actionSetId, input.ownerTurnId, input.ownerGeneration, input.cardMessageId, input.actorOpenId, input.optionId) as { label: string; message: string } | undefined;
+    if (!row) throw new Error("Worker completion choice is no longer available");
+    return row;
+  }
+  resolveFreshWorkerCompletionReview(input: { actionSetId: string; optionId: string; messageId: string; actorOpenId: string; chatId: string }): { ownerTurnId: string; ownerGeneration: number; cardMessageId: string } | null {
+    const row = this.context.database.prepare(`SELECT action.owner_id,action.owner_generation,action.presentation_message_id
+      FROM completion_action_sets action
+      JOIN bindings binding ON binding.id=action.binding_id AND binding.generation=action.binding_generation
+      LEFT JOIN completion_choice_options option ON option.specification_id=action.choice_specification_id AND option.option_id=?
+      WHERE action.id=? AND action.owner_kind='worker-turn' AND action.presentation_kind='fresh-card'
+        AND action.presentation_message_id=? AND action.mention_open_id=? AND binding.chat_id=?
+        AND (
+          (action.state='active' AND (?='ignore' OR option.option_id IS NOT NULL))
+          OR (action.state='consumed' AND ((?='ignore' AND action.reason='ignored') OR action.selected_choice_option_id=?))
+        )`).get(
+      input.optionId, input.actionSetId, input.messageId, input.actorOpenId, input.chatId,
+      input.optionId, input.optionId, input.optionId
+    ) as { owner_id: string; owner_generation: number; presentation_message_id: string } | undefined;
+    return row ? { ownerTurnId: row.owner_id, ownerGeneration: row.owner_generation, cardMessageId: row.presentation_message_id } : null;
+  }
+  getInstanceTurn(id: string): InstanceTurn | null {
+    return mapInstanceTurn(
+      this.context.database
+        .prepare("SELECT * FROM instance_turns WHERE id = ?")
+        .get(id) as Record<string, unknown> | undefined,
+    );
+  }
+  claimInstanceTurnTranscript(input: {
+    turnId: string;
+    expectedGeneration: number;
+    runtimeTurnId: string;
+    startedAt: string;
+  }): InstanceTurn | null {
+    if (!input.runtimeTurnId || !Number.isFinite(Date.parse(input.startedAt)))
+      return null;
+    return this.context.transaction("sqlite.worker-turn-store.write", () => {
       const current = this.getInstanceTurn(input.turnId);
-      if (!current || current.instanceGeneration !== input.expectedGeneration || !["dispatching", "running", "blocked", "dispatch-uncertain"].includes(current.state)) return null;
-      if (current.runtimeTurnId !== null || current.runtimeTurnStartedAt !== null) {
-        return current.runtimeTurnId === input.runtimeTurnId && current.runtimeTurnStartedAt === input.startedAt ? current : null;
-      }
-      const changed = this.context.database.prepare(`UPDATE instance_turns SET runtime_turn_id = ?, runtime_turn_started_at = ?, updated_at = ?
-        WHERE id = ? AND instance_generation = ? AND runtime_turn_id IS NULL AND runtime_turn_started_at IS NULL
-          AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ? AND i.pane_id IS NOT NULL)`)
-        .run(input.runtimeTurnId, input.startedAt, now(), input.turnId, input.expectedGeneration, input.expectedGeneration);
-      if (changed.changes === 1) this.insertInstanceEvent(current.projectId, current.instanceId, current.id, "turn.transcript-owned", { runtimeTurnId: input.runtimeTurnId, startedAt: input.startedAt });
-      const claimed = changed.changes === 1 ? this.getInstanceTurn(input.turnId) : null;
-      return claimed;
+      if (
+        !current ||
+        current.instanceGeneration !== input.expectedGeneration ||
+        !["dispatching", "running", "blocked", "dispatch-uncertain"].includes(
+          current.state,
+        )
+      )
+        return null;
+      if (
+        current.runtimeTurnId !== null ||
+        current.runtimeTurnStartedAt !== null
+      )
+        return current.runtimeTurnId === input.runtimeTurnId &&
+          current.runtimeTurnStartedAt === input.startedAt
+          ? current
+          : null;
+      const changed = this.context.database
+        .prepare(
+          `UPDATE instance_turns SET runtime_turn_id = ?, runtime_turn_started_at = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND runtime_turn_id IS NULL AND runtime_turn_started_at IS NULL AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ? AND i.pane_id IS NOT NULL)`,
+        )
+        .run(
+          input.runtimeTurnId,
+          input.startedAt,
+          now(),
+          input.turnId,
+          input.expectedGeneration,
+          input.expectedGeneration,
+        );
+      if (changed.changes === 1)
+        this.insertInstanceEvent(
+          current.projectId,
+          current.instanceId,
+          current.id,
+          "turn.transcript-owned",
+          { runtimeTurnId: input.runtimeTurnId, startedAt: input.startedAt },
+        );
+      return changed.changes === 1 ? this.getInstanceTurn(input.turnId) : null;
     });
   }
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null {
-    const view = mapWorkerTurnCard(this.context.database.prepare("SELECT * FROM worker_turn_cards WHERE turn_id = ?").get(turnId) as Record<string, unknown> | undefined);
-    return view ? { ...view, timelineItems: this.timelines.load("worker-turn", turnId) } : null;
+    return this.projection.load(turnId);
   }
-  findWorkerTurnByCardMessage(messageId: string): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
-    const rows = this.context.database.prepare("SELECT turn_id FROM worker_turn_card_pages WHERE message_id = ? UNION SELECT turn_id FROM worker_turn_cards WHERE message_id = ?").all(messageId, messageId) as Array<{ turn_id: string }>;
-    if (rows.length !== 1) return null;
-    const turn = this.getInstanceTurn(rows[0]!.turn_id); const view = this.loadWorkerTurnCard(rows[0]!.turn_id);
+  findWorkerTurnByCardMessage(
+    messageId: string,
+  ): { turn: InstanceTurn; view: WorkerTurnCardView } | null {
+    const id = this.projection.findTurnIdByMessage(messageId);
+    if (!id) return null;
+    const turn = this.getInstanceTurn(id);
+    const view = this.projection.load(id);
     return turn && view ? { turn, view } : null;
   }
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[] {
-    return (this.context.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? ORDER BY page_index").all(turnId) as Array<Record<string, unknown>>).map(mapWorkerTurnCardPage);
+    return this.projection.listPages(turnId);
+  }
+  prepareWorkerCompletionActionSet(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card?: object | ((review: { actionSetId: string; mentionOpenId: string; choicePrompt: import("../../domain/completion-choice.js").ChoicePrompt; choiceSpecification: import("../../domain/completion-choice.js").ChoicePrompt }) => object) }): CompletionActionSetRenderState | null {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => {
+      let existing = this.context.database.prepare(`SELECT id, owner_kind, owner_id, owner_generation, card_message_id, mention_open_id, presentation_kind, state, selected_action, selected_choice_option_id, reason
+        FROM completion_action_sets WHERE owner_kind = 'worker-turn' AND owner_id = ?`).get(input.turnId) as {
+          id: string; owner_kind: "worker-turn"; owner_id: string; owner_generation: number; card_message_id: string;
+          mention_open_id: string | null; presentation_kind: string; state: "available" | "provisional" | "presenting" | "active" | "consumed" | "superseded" | "unavailable"; selected_action: string | null; selected_choice_option_id: string | null; reason: string | null;
+        } | undefined;
+      if (existing && (!input.card || existing.presentation_kind !== "fresh-card")) {
+        if (existing.card_message_id !== input.messageId) return null;
+        recoverCompletionNotification(
+          this.context,
+          "worker-turn",
+          input.turnId,
+          this.preparedDeliveryReservation && this.preparedDeliveryConsumer
+            ? { reservation: this.preparedDeliveryReservation, consumer: this.preparedDeliveryConsumer }
+            : undefined,
+        );
+        existing = this.context.database.prepare(`SELECT id, owner_kind, owner_id, owner_generation, card_message_id, mention_open_id, presentation_kind, state, selected_action, selected_choice_option_id, reason
+          FROM completion_action_sets WHERE owner_kind = 'worker-turn' AND owner_id = ?`).get(input.turnId) as typeof existing;
+        if (!existing) return null;
+        const current = existing;
+        const choice = loadCompletionChoice(this.context, current.owner_kind, current.owner_id, current.owner_generation)?.prompt;
+        if (current.state === "available" && current.mention_open_id) return { id: current.id, state: "available", mentionOpenId: current.mention_open_id, ownerKind: current.owner_kind, ownerId: current.owner_id, ownerGeneration: current.owner_generation, cardMessageId: current.card_message_id, ...(choice ? { choicePrompt: choice, choiceSpecification: choice } : {}) };
+        if (current.state === "consumed" && current.reason === "ignored") return { id: current.id, state: "consumed", ignored: true, ownerKind: current.owner_kind, ownerId: current.owner_id, ownerGeneration: current.owner_generation, cardMessageId: current.card_message_id };
+        if (current.state === "consumed" && choice && current.selected_choice_option_id) {
+          const selected = [choice.defaultOption, ...choice.alternatives].find(({ id }) => id === current.selected_choice_option_id);
+          if (selected) return { id: current.id, state: "consumed", selectedChoice: { id: selected.id, label: selected.label }, ownerKind: current.owner_kind, ownerId: current.owner_id, ownerGeneration: current.owner_generation, cardMessageId: current.card_message_id };
+        }
+        if (current.state === "consumed" && COMPLETION_ACTION_SELECTIONS.includes(current.selected_action as CompletionActionSelection)) return { id: current.id, state: "consumed", selectedAction: current.selected_action as CompletionActionSelection, ownerKind: current.owner_kind, ownerId: current.owner_id, ownerGeneration: current.owner_generation, cardMessageId: current.card_message_id };
+        return null;
+      }
+      const obligation = this.context.database.prepare(`SELECT owner_generation, binding_id, binding_generation, state, notification_reply_id
+        FROM completion_notification_obligations WHERE owner_kind = 'worker-turn' AND owner_id = ?`).get(input.turnId) as {
+          owner_generation: number; binding_id: string; binding_generation: number; state: string; notification_reply_id: string | null;
+        } | undefined;
+      const turn = this.context.database.prepare("SELECT rowid, instance_id, instance_generation, actor_json, actor_kind, state, created_at FROM instance_turns WHERE id = ?").get(input.turnId) as {
+        rowid: number; instance_id: string; instance_generation: number; actor_json: string; actor_kind: string | null; state: string; created_at: string;
+      } | undefined;
+      const page = this.context.database.prepare("SELECT page_index, card_id, message_id, state FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(input.turnId, input.pageIndex) as { page_index: number; card_id: string | null; message_id: string | null; state: string } | undefined;
+      const latest = this.context.database.prepare("SELECT MAX(page_index) AS page_index FROM worker_turn_card_pages WHERE turn_id = ?").get(input.turnId) as { page_index: number | null };
+      const view = this.projection.load(input.turnId);
+      const instance = turn ? this.dependencies.getAgentInstance(turn.instance_id) : null;
+      const parent = instance?.parent;
+      const binding = parent ? this.dependencies.getBinding(parent.bindingId) : null;
+      const legacyPending = obligation?.state === "released" && obligation.notification_reply_id
+        ? this.context.database.prepare(`SELECT 1 FROM outbound_replies WHERE id = ? AND state = 'pending'
+            AND kind = 'text' AND target_role='operation_result' AND payload LIKE '%需要你的选择%'
+            AND claim_attempt_id IS NULL AND claimed_owner_id IS NULL AND claimed_fence IS NULL
+            AND claimed_at IS NULL AND first_claimed_at IS NULL AND attempt_count = 0
+            AND delivered_message_id IS NULL AND card_id_checkpoint IS NULL AND gateway_checkpoint_json IS NULL
+            AND COALESCE(effect_certainty,'not-started') IN ('not-started','rejected')`).get(obligation.notification_reply_id) !== undefined
+        : false;
+      if (!obligation || !turn || !page || !view || !instance || !parent || !binding
+        || obligation.state === "suppressed" && existing?.presentation_kind !== "fresh-card"
+        || obligation.state === "released" && !legacyPending
+        || turn.state !== "completed" || view.phase !== "completed" || page.page_index !== latest.page_index || !["active", "finished"].includes(page.state)
+        || page.card_id !== input.cardId || page.message_id !== input.messageId || view.instanceId !== instance.id
+        || instance.generation !== turn.instance_generation || view.instanceGeneration !== turn.instance_generation
+        || instance.role !== "worker" || instance.desiredState !== "running"
+        || instance.workerSessionLifecycle !== "active" || !instance.runtimeRef
+        || instance.workerSessionGeneration !== obligation.owner_generation || view.workerSessionGeneration !== obligation.owner_generation
+        || parent.bindingId !== obligation.binding_id || parent.bindingGeneration !== obligation.binding_generation
+        || parent.paneId !== binding.paneId || binding.traexSessionId !== null && parent.nativeSessionId !== binding.traexSessionId
+        || binding.generation !== obligation.binding_generation || binding.state !== "active" || binding.lifecycle !== "active" || binding.attachment !== "attached") return null;
+      const successor = this.context.database.prepare(`SELECT 1 FROM instance_turns later
+        WHERE later.instance_id = ? AND later.instance_generation = ? AND later.actor_kind = 'human' AND later.id != ?
+          AND (later.created_at > ? OR (later.created_at = ? AND later.rowid > ?)) LIMIT 1`).get(
+          turn.instance_id, turn.instance_generation, input.turnId, turn.created_at, turn.created_at, turn.rowid
+        );
+      let actor: InstanceTurn["actor"] | null = null;
+      try { actor = JSON.parse(turn.actor_json) as InstanceTurn["actor"]; } catch { actor = null; }
+      const mentionOpenId = actor?.kind === "human" && actor.channel === "feishu" && canMentionFeishuOpenId(actor.userId)
+        ? actor.userId
+        : canMentionFeishuOpenId(binding.creatorOpenId) ? binding.creatorOpenId : null;
+      const state = successor ? "superseded" : mentionOpenId ? "available" : "unavailable";
+      const timestamp = now();
+      const choice = loadCompletionChoice(this.context, "worker-turn", input.turnId, obligation.owner_generation);
+      if (input.card && mentionOpenId && choice && (!successor || existing?.presentation_kind === "fresh-card")) {
+        if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Completion Review prepared delivery is not connected");
+        const actionSetId = completionReviewActionSetIdentity("worker-turn", input.turnId, obligation.owner_generation);
+        const card = typeof input.card === "function"
+          ? input.card({ actionSetId, mentionOpenId, choicePrompt: choice.prompt, choiceSpecification: choice.prompt })
+          : input.card;
+        const reserved = this.completionReviews.reserveWorker({
+          turnId: input.turnId, workerId: instance.id, workerGeneration: instance.generation, ownerGeneration: obligation.owner_generation,
+          bindingId: binding.id, bindingGeneration: binding.generation,
+          pageIndex: input.pageIndex, mentionOpenId, choiceSpecificationId: choice.id,
+          rootMessageId: view.rootMessageId, card,
+          reserveDelivery: this.preparedDeliveryReservation
+        });
+        if (reserved.receipt) this.handoffAfterCommit(reserved.receipt);
+        return { id: reserved.actionSetId, state: "available", presentationKind: "fresh-card", mentionOpenId,
+          ownerKind: "worker-turn", ownerId: input.turnId, ownerGeneration: obligation.owner_generation,
+          cardMessageId: input.messageId, choicePrompt: choice.prompt, choiceSpecification: choice.prompt };
+      }
+      const id = randomUUID();
+      this.context.database.prepare(`INSERT INTO completion_action_sets(
+        id, owner_kind, owner_id, owner_generation, binding_id, binding_generation, page_index, card_id, card_message_id,
+        mention_open_id, state, selected_action, result_source_key, reason, created_at, updated_at, decided_at, choice_specification_id, selected_choice_option_id
+      ) VALUES (?, 'worker-turn', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL)`).run(
+        id, input.turnId, obligation.owner_generation, binding.id, binding.generation, input.pageIndex, input.cardId, input.messageId,
+        mentionOpenId, state, successor ? "successor-present" : mentionOpenId ? null : "missing-mention-target", timestamp, timestamp,
+        state === "available" ? null : timestamp, choice?.id ?? null
+      );
+      this.context.database.prepare(`UPDATE completion_notification_obligations SET state = ?, released_at = ?, updated_at = ?
+        WHERE owner_kind = 'worker-turn' AND owner_id = ? AND owner_generation = ? AND state IN ('waiting_for_answer','missing_mention_target')`).run(
+          state === "available" ? "waiting_for_answer" : successor ? "suppressed" : "missing_mention_target", null,
+          timestamp, input.turnId, obligation.owner_generation
+        );
+      if (state === "available") {
+        this.context.database.prepare("UPDATE worker_turn_cards SET view_version = view_version + 1, updated_at = ? WHERE turn_id = ?").run(timestamp, input.turnId);
+      }
+      return state === "available" && mentionOpenId
+        ? { id, state: "available", mentionOpenId, ownerKind: "worker-turn", ownerId: input.turnId, ownerGeneration: obligation.owner_generation, cardMessageId: input.messageId, ...(choice ? { choicePrompt: choice.prompt, choiceSpecification: choice.prompt } : {}) }
+        : null;
+    });
+  }
+  listAnswerSegments(
+    aggregateKind: "primary-run" | "worker-turn",
+    aggregateId: string,
+  ): AnswerSegment[] {
+    return this.projection.listAnswerSegments(aggregateKind, aggregateId);
   }
   listActionableWorkerTurnCardIds(): string[] {
-    return (this.context.database.prepare(`SELECT DISTINCT card.turn_id
-      FROM worker_turn_cards card
-      JOIN worker_turn_card_pages page ON page.turn_id = card.turn_id
-      WHERE page.state = 'active' AND page.message_id IS NOT NULL AND page.card_id IS NOT NULL
-      ORDER BY card.updated_at, card.turn_id`).all() as Array<{ turn_id: string }>).map(({ turn_id }) => turn_id);
+    return this.projection.listActionableIds();
   }
-  getWorkerTurnCardDeliveryFacts(turnId: string, pageIndex: number): AnswerPageDeliveryFacts {
-    const page = this.context.database.prepare("SELECT element_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(turnId, pageIndex) as { element_id: string } | undefined;
-    if (!page) return { latestContent: null, finishPending: false, continuationPending: false, finalUpdateState: null };
-    const contentRow = this.context.database.prepare("SELECT payload, state, view_version FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND stream_page_index = ? AND selection_id IS NULL AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC LIMIT 1").get(turnId, pageIndex) as { payload: string; state: OutboundReplyState; view_version: number | null } | undefined;
-    const contentPayload = contentRow ? parseJsonRecord(contentRow.payload) : null;
-    const latestContent = contentRow && contentPayload ? { content: typeof contentPayload.content === "string" ? contentPayload.content : "", sequence: Number(contentPayload.sequence ?? contentRow.view_version ?? 0), state: contentRow.state, sourceEnd: Number.isInteger(contentPayload.sourceEnd) ? Number(contentPayload.sourceEnd) : null } : null;
-    const finishPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_finish' AND stream_page_index = ? AND state = 'pending' LIMIT 1").get(turnId, pageIndex) !== undefined;
-    const continuationPending = this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_card_create' AND stream_page_index = ? AND state = 'pending' LIMIT 1").get(turnId, pageIndex + 1) !== undefined;
-    return { latestContent, finishPending, continuationPending, finalUpdateState: null };
+  listRecoverableWorkerTurnIds(limit: number): string[] {
+    return this.projection.listRecoverableIds(limit);
   }
-  getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint {
-    return this.timelinePages.load("worker-turn", turnId, pageIndex);
+  listRecoverableWorkerTurnIdsForBinding(bindingId: string, limit: number): string[] {
+    return this.projection.listRecoverableIdsForBinding(bindingId, limit);
   }
-  listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number) { return this.timelinePages.frozenItems("worker-turn", turnId, beforePageIndex); }
-  reserveWorkerAnswerTimelineCard(input: { turnId: string; pageIndex: number; messageId: string; card: object; cursor: AnswerTimelineCursor | null; items: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome {
-    return this.context.transaction(() => {
-      const page = this.context.database.prepare("SELECT state, message_id FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(input.turnId, input.pageIndex) as { state: string; message_id: string | null } | undefined;
-      const view = this.loadWorkerTurnCard(input.turnId);
-      if (!page || !view || page.state !== "active" || page.message_id !== input.messageId) return "stale";
-      this.timelinePages.ensure("worker-turn", input.turnId, input.pageIndex, { itemIndex: 0, markdownOffset: 0 });
-      if (this.timelinePages.load("worker-turn", input.turnId, input.pageIndex).pending || this.timelinePages.isDelivered("worker-turn", input.turnId, input.pageIndex, input.cursor, input.items)) return "waiting";
-      const reply = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:timeline:${input.turnId}:${input.pageIndex}:${view.viewVersion}`, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `worker-turn:${input.turnId}` }) as OutboundReply;
-      this.timelinePages.reserve("worker-turn", input.turnId, input.pageIndex, reply.id, input.cursor, input.items);
-      return "reserved";
-    });
+  getWorkerTurnCardDeliveryFacts(
+    turnId: string,
+    pageIndex: number,
+  ): AnswerPageDeliveryFacts {
+    return this.projection.getDeliveryFacts(turnId, pageIndex);
   }
-  reserveWorkerTurnContent(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string; sourceEnd: number }): AnswerPageReservationOutcome {
-    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
-      if (page.cardId !== input.cardId || page.elementId !== input.elementId) return "stale";
-      const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
-      if (facts.latestContent?.state === "pending" || facts.latestContent?.content === input.content) return "waiting";
-      const sequence = page.sequence + 1;
-      this.context.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
-      this.context.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:stream:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sourceEnd: input.sourceEnd, sequence }) });
-      return "reserved";
-    });
+  getWorkerAnswerTimelinePage(
+    turnId: string,
+    pageIndex: number,
+  ): AnswerTimelinePageCheckpoint {
+    return this.projection.getTimelinePage(turnId, pageIndex);
   }
-  reserveWorkerTurnProgress(input: { turnId: string; pageIndex: number; cardId: string; elementId: string; content: string }): AnswerPageReservationOutcome {
-    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
-      if (page.cardId !== input.cardId) return "stale";
-      const view = this.loadWorkerTurnCard(input.turnId);
-      if (!view) return "stale";
-      const row = this.context.database.prepare("SELECT payload, state FROM outbound_replies WHERE worker_turn_id = ? AND kind = 'stream_content' AND stream_page_index = ? AND selection_id = 'worker-progress' AND state IN ('pending','delivered','dead_letter') ORDER BY delivery_order DESC LIMIT 1").get(input.turnId, input.pageIndex) as { payload: string; state: OutboundReplyState } | undefined;
-      const latest = row ? { ...row, payload: parseJsonRecord(row.payload) } : undefined;
-      if (latest?.state === "pending" || latest?.state === "dead_letter" || latest?.payload.content === input.content) return "waiting";
-      const sequence = view.progressSequence + 1;
-      const changed = this.context.database.prepare("UPDATE worker_turn_cards SET progress_sequence = ?, updated_at = ? WHERE turn_id = ? AND progress_sequence = ?").run(sequence, now(), input.turnId, view.progressSequence);
-      if (changed.changes !== 1) return "stale";
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:progress:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, selectionId: "worker-progress", viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_content", payload: JSON.stringify({ workerElement: "progress", pageIndex: input.pageIndex, elementId: input.elementId, content: input.content, sequence }) });
-      return "reserved";
-    });
+  listFrozenWorkerAnswerTimelineItems(turnId: string, beforePageIndex: number) {
+    return this.projection.listFrozenTimelineItems(turnId, beforePageIndex);
   }
-  reserveWorkerTurnFinish(input: { turnId: string; pageIndex: number; cardId: string; summary: string }): AnswerPageReservationOutcome {
-    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
-      if (page.cardId !== input.cardId) return "stale";
-      const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
-      if (facts.finishPending) return "waiting";
-      const sequence = page.sequence + 1;
-      this.context.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
-      this.context.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:finish:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
-      return "reserved";
-    });
+  getWorkerProjectionGapSummary(turnId: string) {
+    return new SqliteProjectionGapStore(this.context).summarize({ workerTurnId: turnId });
   }
-  reserveWorkerTurnCardHydration(input: { turnId: string; pageIndex: number; cardId: string; messageId: string; card: object }): AnswerPageReservationOutcome {
-    return this.context.transaction(() => {
-      const pageRow = this.context.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ?").get(input.turnId, input.pageIndex) as Record<string, unknown> | undefined;
-      const view = this.loadWorkerTurnCard(input.turnId);
-      if (!pageRow || !view) return "stale";
-      const page = mapWorkerTurnCardPage(pageRow);
-      const liveContinuation = page.pageIndex > 0 && page.state === "active" && (view.phase === "running" || view.phase === "blocked");
-      const completedPage = ["active", "finished"].includes(page.state) && view.phase === "completed";
-      if ((!liveContinuation && !completedPage) || page.cardId !== input.cardId || page.messageId !== input.messageId) return "stale";
-      const key = `worker-turn:hydrate:${input.turnId}:${input.pageIndex}:${input.cardId}:${view.phase}:${page.state}`;
-      if (this.context.database.prepare("SELECT 1 FROM outbound_replies WHERE idempotency_key = ?").get(key)) return "waiting";
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: key, bindingId: null, workerTurnId: input.turnId, viewVersion: view.viewVersion, rootMessageId: input.messageId, kind: "card_update", payload: JSON.stringify(input.card), laneKeyOverride: `worker-turn:${input.turnId}` });
-      return "reserved";
-    });
+  reserveHumanMessageAnswerSegments(input: {
+    aggregateKind: "primary-run" | "worker-turn";
+    aggregateId: string;
+    expectedGeneration: number;
+    boundaries: readonly import("../../domain/answer-segment.js").AnswerSegmentBoundary[];
+    previousFinalizedCard: object;
+    nextCards: readonly object[];
+    rootMessageId: string;
+    workClass?: import("../../domain/types.js").OutboundWorkClass;
+  }) {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.projection.reserveHumanMessageAnswerSegments(input),
+    );
   }
-  reserveWorkerTurnContinuation(input: { turnId: string; pageIndex: number; cardId: string; summary: string; nextPageIndex: number; nextPageStart: number; nextElementId: string; rootMessageId: string; viewVersion: number; card: object; timelineStartCursor?: AnswerTimelineCursor; timelineEndCursor?: AnswerTimelineCursor | null; timelineItems?: readonly AnswerTimelineItem[] }): AnswerPageReservationOutcome {
-    return this.reserveWorkerTurnPageIntent(input.turnId, input.pageIndex, (page) => {
-      if (page.cardId !== input.cardId || input.nextPageIndex !== input.pageIndex + 1 || input.nextPageStart <= page.pageStart) return "stale";
-      const facts = this.getWorkerTurnCardDeliveryFacts(input.turnId, input.pageIndex);
-      if ((facts.latestContent && facts.latestContent.state !== "delivered") || facts.finishPending || facts.continuationPending) return "waiting";
-      const sequence = page.sequence + 1;
-      this.context.database.prepare("UPDATE worker_turn_card_pages SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ? AND state = 'active' AND sequence = ?").run(sequence, now(), input.turnId, input.pageIndex, page.sequence);
-      this.context.database.prepare("UPDATE worker_turn_cards SET sequence = ?, updated_at = ? WHERE turn_id = ? AND page_index = ?").run(sequence, now(), input.turnId, input.pageIndex);
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:finish:${input.turnId}:${input.pageIndex}:${sequence}`, bindingId: null, workerTurnId: input.turnId, viewVersion: sequence, rootMessageId: input.cardId, kind: "stream_finish", payload: JSON.stringify({ pageIndex: input.pageIndex, summary: input.summary, sequence }) });
-      const create = this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-turn:create:${input.turnId}:${input.nextPageIndex}`, bindingId: null, workerTurnId: input.turnId, viewVersion: input.viewVersion, rootMessageId: input.rootMessageId, kind: "stream_card_create", payload: JSON.stringify({ card: input.card, stream: { pageIndex: input.nextPageIndex, pageStart: input.nextPageStart, elementId: input.nextElementId } }) }) as OutboundReply;
-      if (input.timelineStartCursor) {
-        this.timelinePages.ensure("worker-turn", input.turnId, input.nextPageIndex, input.timelineStartCursor);
-        this.timelinePages.reserve("worker-turn", input.turnId, input.nextPageIndex, create.id, input.timelineEndCursor ?? null, input.timelineItems ?? []);
-      }
-      return "reserved";
-    });
+  reserveWorkerAnswerTimelineCard(input: {
+    turnId: string;
+    pageIndex: number;
+    messageId: string;
+    card: object;
+    cursor: AnswerTimelineCursor | null;
+    items: readonly AnswerTimelineItem[];
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.projection.reserveTimelineCard(input),
+    );
   }
-  private reserveWorkerTurnPageIntent(turnId: string, pageIndex: number, reserve: (page: WorkerTurnCardPage, view: WorkerTurnCardView) => AnswerPageReservationOutcome): AnswerPageReservationOutcome {
-    return this.context.transaction(() => {
-      const pageRow = this.context.database.prepare("SELECT * FROM worker_turn_card_pages WHERE turn_id = ? AND page_index = ? AND state = 'active'").get(turnId, pageIndex) as Record<string, unknown> | undefined;
-      const view = this.loadWorkerTurnCard(turnId);
-      return pageRow && view ? reserve(mapWorkerTurnCardPage(pageRow), view) : "stale";
-    });
+  reserveWorkerTurnContent(input: {
+    turnId: string;
+    pageIndex: number;
+    cardId: string;
+    elementId: string;
+    content: string;
+    sourceEnd: number;
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.projection.reserveContent(input),
+    );
   }
-  applyInstanceTurnProjection(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; change: WorkerTurnCardChange; render(view: WorkerTurnCardView): object }): WorkerTurnCardView | null {
-    return this.context.transaction(() => {
-      const turn = this.getInstanceTurn(input.turnId); const current = this.loadWorkerTurnCard(input.turnId);
-      if (!turn || !current || turn.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(turn, input)) return null;
-      const next = reduceWorkerTurnCard(current, input.change);
-      if (next !== current) {
-        this.saveWorkerTurnCard(next);
-        this.dependencies.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
-      }
-      return next;
-    });
+  reserveWorkerTurnProgress(input: {
+    turnId: string;
+    pageIndex: number;
+    cardId: string;
+    elementId: string;
+    content: string;
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.projection.reserveProgress(input),
+    );
   }
-  transitionInstanceTurnWithProjection(input: TransitionInstanceTurnWithProjectionInput): TransitionInstanceTurnWithProjectionResult | null {
-    const timestamp = now();
-    return this.context.transaction(() => {
-      const current = this.getInstanceTurn(input.turnId);
-      const currentView = this.loadWorkerTurnCard(input.turnId);
-      if (!current || !currentView || current.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(current, input)) return null;
-      const changed = this.context.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)")
-        .run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
-      if (changed.changes !== 1) return null;
-      const blockedEpisode = input.state === "blocked" && current.state !== "blocked";
-      const eventId = blockedEpisode || input.state !== "blocked"
-        ? this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state })
-        : null;
-      const next = reduceWorkerTurnCard(currentView, input.change);
-      const projectionChanged = next !== currentView;
-      if (projectionChanged) {
-        this.saveWorkerTurnCard(next);
-        this.dependencies.invalidateWorkerCardContexts(next, `turn.${next.phase}`);
-      }
-      if (["completed", "failed", "cancelled"].includes(input.state)) {
-        const queued = this.context.database.prepare("SELECT c.* FROM worker_turn_cards c JOIN instance_turns t ON t.id = c.turn_id WHERE t.instance_id = ? AND t.instance_generation = ? AND t.state = 'queued' ORDER BY t.created_at, t.rowid").all(current.instanceId, input.expectedGeneration) as Array<Record<string, unknown>>;
-        for (const [index, row] of queued.entries()) {
-          const queuedView = mapWorkerTurnCard(row);
-          if (!queuedView || queuedView.queuePosition === index + 1) continue;
-          const reordered = reduceWorkerTurnCard(queuedView, { type: "queue-position", occurredAt: timestamp, queuePosition: index + 1 });
-          this.saveWorkerTurnCard(reordered);
-          this.dependencies.invalidateWorkerCardContexts(reordered, "turn.queue-position");
-        }
-      }
-      let notification: TransitionInstanceTurnWithProjectionResult["notification"] = { outcome: "skipped", reason: "not-blocked-transition" };
-      if (blockedEpisode && eventId !== null && input.renderHumanReviewNotification) {
-        const instance = this.dependencies.getAgentInstance(current.instanceId);
-        const parent = instance?.parent;
-        const binding = parent ? this.dependencies.getBinding(parent.bindingId) : null;
-        const routeCurrent = instance?.role === "worker"
-          && instance.generation === current.instanceGeneration
-          && instance.workerSessionLifecycle === "active"
-          && instance.workerSessionGeneration === currentView.workerSessionGeneration
-          && parent?.bindingGeneration === binding?.generation
-          && parent?.paneId === binding?.paneId
-          && binding?.state === "active" && binding.lifecycle === "active" && binding.attachment === "attached"
-          && typeof binding.rootMessageId === "string" && binding.rootMessageId.length > 0
-          && typeof instance.runtimeRef?.paneId === "string";
-        if (routeCurrent && instance && parent && binding?.rootMessageId && instance.runtimeRef) {
-          const mention = canMentionFeishuOpenId(binding.creatorOpenId) ? "included" as const : "omitted" as const;
-          const card = input.renderHumanReviewNotification({
-            workerId: instance.id, workerSessionGeneration: instance.workerSessionGeneration, workerName: instance.name,
-            turnId: current.id, taskTitle: current.text, primaryName: binding.title, parentPaneId: parent.paneId,
-            workerPaneId: instance.runtimeRef.paneId, notice: next.notice ?? "Worker 正在等待本地处理。",
-            creatorOpenId: binding.creatorOpenId, workerMainMessageId: next.workerMain.messageId
-          });
-          this.dependencies.enqueueOutboundReply({
-            id: randomUUID(), idempotencyKey: `worker-review:${instance.id}:${instance.workerSessionGeneration}:${current.id}:${eventId}`,
-            bindingId: binding.id, targetRole: "operation_result", rootMessageId: binding.rootMessageId, kind: "card_reply", payload: JSON.stringify(card)
-          });
-          notification = { outcome: "reserved", mention, eventId };
-        } else notification = { outcome: "skipped", reason: "stale-routing" };
-      }
-      const turn = this.getInstanceTurn(input.turnId);
-      return turn ? { turn, view: next, projectionChanged, notification } : null;
-    });
+  reserveWorkerTurnFinish(input: {
+    turnId: string;
+    pageIndex: number;
+    cardId: string;
+    summary: string;
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.projection.reserveFinish(input));
+  }
+  reserveWorkerTurnCardHydration(input: {
+    turnId: string;
+    pageIndex: number;
+    cardId: string | null;
+    messageId: string;
+    card: object;
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.projection.reserveHydration(input),
+    );
+  }
+  reserveWorkerTurnContinuation(input: {
+    turnId: string;
+    pageIndex: number;
+    cardId: string;
+    summary: string;
+    nextPageIndex: number;
+    nextPageStart: number;
+    nextElementId: string;
+    rootMessageId: string;
+    viewVersion: number;
+    card: object;
+    timelineStartCursor?: AnswerTimelineCursor;
+    timelineEndCursor?: AnswerTimelineCursor | null;
+    timelineItems?: readonly AnswerTimelineItem[];
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.projection.reserveContinuation(input),
+    );
+  }
+  reserveWorkerTurnRecovery(input: {
+    turnId: string;
+    previousPageIndex: number;
+    nextPageIndex: number;
+    pageStart: number;
+    nextElementId: string;
+    rootMessageId: string;
+    viewVersion: number;
+    card: object;
+  }): AnswerPageReservationOutcome {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.projection.reserveRecovery(input));
+  }
+  applyInstanceTurnProjection(input: {
+    turnId: string;
+    expectedGeneration: number;
+    expectedRuntimeTurnId?: string;
+    expectedRuntimeTurnStartedAt?: string;
+    change: WorkerTurnCardChange;
+    render(view: WorkerTurnCardView): object;
+  }): WorkerTurnCardView | null {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.transition.applyProjection(input),
+    );
+  }
+  transitionInstanceTurnWithProjection(
+    input: TransitionInstanceTurnWithProjectionInput,
+  ): TransitionInstanceTurnWithProjectionResult | null {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.transition.transition(input));
   }
   saveWorkerTurnCard(view: WorkerTurnCardView): void {
-    this.context.transaction(() => {
-      this.context.database.prepare(`INSERT INTO worker_turn_cards(turn_id, instance_id, instance_generation, worker_session_generation, worker_name, parent_turn_id, root_message_id, message_id, card_id, element_id, progress_sequence, phase, request_text, answer, status_title, token_count, progress_json, queue_position, started_at, finished_at, notice, result_capture, worker_main_ref_json, primary_answer_ref_json, page_index, page_start, sequence, view_version, delivered_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(turn_id) DO UPDATE SET message_id=excluded.message_id, card_id=excluded.card_id, phase=excluded.phase, answer=excluded.answer, status_title=excluded.status_title, token_count=excluded.token_count, progress_json=excluded.progress_json, queue_position=excluded.queue_position, started_at=excluded.started_at, finished_at=excluded.finished_at, notice=excluded.notice, result_capture=excluded.result_capture, worker_main_ref_json=excluded.worker_main_ref_json, primary_answer_ref_json=excluded.primary_answer_ref_json, page_index=excluded.page_index, page_start=excluded.page_start, sequence=excluded.sequence, view_version=excluded.view_version, delivered_version=excluded.delivered_version, updated_at=excluded.updated_at`)
-        .run(view.turnId, view.instanceId, view.instanceGeneration, view.workerSessionGeneration, view.workerName, view.parentTurnId, view.rootMessageId, view.messageId, view.cardId, view.elementId, view.progressSequence, view.phase, view.requestText, view.answer, view.statusTitle, view.tokenCount, JSON.stringify(view.progressEvents), view.queuePosition, view.startedAt, view.finishedAt, view.notice, view.resultCapture, JSON.stringify(view.workerMain), view.primaryAnswer ? JSON.stringify(view.primaryAnswer) : null, view.pageIndex, view.pageStart, view.sequence, view.viewVersion, view.deliveredVersion, view.createdAt, view.updatedAt);
-      this.timelines.save("worker-turn", view.turnId, view.timelineItems ?? []);
+    this.context.transaction("sqlite.worker-turn-store.write", () => this.projection.save(view));
+  }
+  listInstanceTurns(
+    instanceId: string,
+    options: { limit?: number; after?: { createdAt: string; id: string } } = {},
+  ): {
+    items: InstanceTurn[];
+    nextCursor: { createdAt: string; id: string } | null;
+  } {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
+    const rows = (
+      options.after
+        ? this.context.database
+            .prepare(
+              "SELECT * FROM instance_turns WHERE instance_id = ? AND (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at, id LIMIT ?",
+            )
+            .all(
+              instanceId,
+              options.after.createdAt,
+              options.after.createdAt,
+              options.after.id,
+              limit + 1,
+            )
+        : this.context.database
+            .prepare(
+              "SELECT * FROM instance_turns WHERE instance_id = ? ORDER BY created_at, id LIMIT ?",
+            )
+            .all(instanceId, limit + 1)
+    ) as Array<Record<string, unknown>>;
+    const items = rows.slice(0, limit).map((row) => mapInstanceTurn(row)!);
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor:
+        rows.length > limit && last
+          ? { createdAt: last.createdAt, id: last.id }
+          : null,
+    };
+  }
+  listRecentInstanceTurnSummaries(
+    instanceId: string,
+    requestedLimit = 5,
+  ): InstanceTurnSummary[] {
+    const limit = Math.max(1, Math.min(requestedLimit, 5));
+    return (
+      this.context.database
+        .prepare(
+          `SELECT t.*, COALESCE(c.result_capture, CASE WHEN t.result IS NOT NULL THEN 'captured' ELSE 'pending' END) AS result_capture FROM instance_turns t LEFT JOIN worker_turn_cards c ON c.turn_id = t.id WHERE t.instance_id = ? ORDER BY t.created_at DESC, t.id DESC LIMIT ?`,
+        )
+        .all(instanceId, limit) as Array<Record<string, unknown>>
+    ).map((row) => ({
+      ...mapInstanceTurn(row)!,
+      resultCapture: String(
+        row.result_capture,
+      ) as InstanceTurnSummary["resultCapture"],
+    }));
+  }
+  getActiveInstanceTurn(
+    instanceId: string,
+    expectedGeneration: number,
+  ): InstanceTurn | null {
+    return this.queue.getActive(instanceId, expectedGeneration);
+  }
+  claimNextInstanceTurn(
+    instanceId: string,
+    expectedGeneration: number,
+  ): InstanceTurn | null {
+    return this.context.transaction("sqlite.worker-turn-store.write", () =>
+      this.queue.claimNext(instanceId, expectedGeneration),
+    );
+  }
+  recoverInterruptedInstanceTurns(): {
+    requeuedTurnIds: string[];
+    cancelledLegacyTurnIds: string[];
+    observableTurns: InstanceTurn[];
+  } {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.recovery.recover());
+  }
+  listObservableInstanceTurns(): InstanceTurn[] {
+    return this.recovery.listObservable();
+  }
+  listObservableInstanceTurnsByPaneIds(
+    paneIds: readonly string[],
+  ): InstanceTurn[] {
+    return this.recovery.listObservableByPaneIds(paneIds);
+  }
+  getInstanceTurnDiagnostics(): {
+    queuedTurns: number;
+    activeTurns: number;
+    uncertainTurns: number;
+  } {
+    return this.recovery.diagnostics();
+  }
+  updateInstanceTurn(input: {
+    turnId: string;
+    expectedGeneration: number;
+    expectedRuntimeTurnId?: string;
+    expectedRuntimeTurnStartedAt?: string;
+    state: InstanceTurnState;
+    result?: string | null;
+    error?: string | null;
+    eventKind: InstanceEventKind;
+  }): InstanceTurn | null {
+    return this.context.transaction("sqlite.worker-turn-store.write", () => this.transition.update(input));
+  }
+  completeInstanceTurn(input: {
+    turnId: string;
+    expectedGeneration: number;
+    result: string;
+  }): InstanceTurn | null {
+    return this.updateInstanceTurn({
+      ...input,
+      state: "completed",
+      eventKind: "turn.completed",
     });
   }
-  private getInstanceTurnByKey(key: string): InstanceTurn | null { return mapInstanceTurn(this.context.database.prepare("SELECT * FROM instance_turns WHERE idempotency_key = ?").get(key) as Record<string, unknown> | undefined); }
-  private insertInstanceEvent(projectId: string, instanceId: string, turnId: string | null, kind: InstanceEventKind, payload: Record<string, unknown>): number {
-    const result = this.context.database.prepare("INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+  listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] {
+    return (
+      this.context.database
+        .prepare(
+          "SELECT * FROM instance_events WHERE instance_id = ? AND id > ? ORDER BY id LIMIT 100",
+        )
+        .all(instanceId, afterId) as Array<Record<string, unknown>>
+    ).map((row) => ({
+      id: Number(row.id),
+      projectId: String(row.project_id),
+      instanceId: String(row.instance_id),
+      turnId: row.turn_id === null ? null : String(row.turn_id),
+      kind: String(row.kind) as InstanceEventKind,
+      payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
+      createdAt: String(row.created_at),
+    }));
+  }
+  countPendingInstanceTurns(
+    instanceId: string,
+    expectedGeneration?: number,
+  ): number {
+    return this.queue.countPending(instanceId, expectedGeneration);
+  }
+  private insertInstanceEvent(
+    projectId: string,
+    instanceId: string,
+    turnId: string | null,
+    kind: InstanceEventKind,
+    payload: Record<string, unknown>,
+  ): number {
+    const result = this.context.database
+      .prepare(
+        "INSERT INTO instance_events(project_id, instance_id, turn_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
       .run(projectId, instanceId, turnId, kind, JSON.stringify(payload), now());
     return Number(result.lastInsertRowid);
   }
-  listInstanceTurns(instanceId: string, options: { limit?: number; after?: { createdAt: string; id: string } } = {}): { items: InstanceTurn[]; nextCursor: { createdAt: string; id: string } | null } {
-    const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
-    const rows = (options.after
-      ? this.context.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at, id LIMIT ?").all(instanceId, options.after.createdAt, options.after.createdAt, options.after.id, limit + 1)
-      : this.context.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? ORDER BY created_at, id LIMIT ?").all(instanceId, limit + 1)) as Array<Record<string, unknown>>;
-    const items = rows.slice(0, limit).map((row) => mapInstanceTurn(row)!);
-    const last = items.at(-1);
-    return { items, nextCursor: rows.length > limit && last ? { createdAt: last.createdAt, id: last.id } : null };
-  }
-  listRecentInstanceTurnSummaries(instanceId: string, requestedLimit = 5): InstanceTurnSummary[] {
-    const limit = Math.max(1, Math.min(requestedLimit, 5));
-    const rows = this.context.database.prepare(`
-      SELECT t.*, COALESCE(c.result_capture, CASE WHEN t.result IS NOT NULL THEN 'captured' ELSE 'pending' END) AS result_capture
-      FROM instance_turns t LEFT JOIN worker_turn_cards c ON c.turn_id = t.id
-      WHERE t.instance_id = ? ORDER BY t.created_at DESC, t.id DESC LIMIT ?
-    `).all(instanceId, limit) as Array<Record<string, unknown>>;
-    return rows.map((row) => ({ ...mapInstanceTurn(row)!, resultCapture: String(row.result_capture) as InstanceTurnSummary["resultCapture"] }));
-  }
-  getActiveInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
-    const row = this.context.database.prepare("SELECT * FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked') ORDER BY created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as Record<string, unknown> | undefined;
-    return mapInstanceTurn(row);
-  }
-  claimNextInstanceTurn(instanceId: string, expectedGeneration: number): InstanceTurn | null {
-    return this.context.transaction(() => {
-      const instance = this.dependencies.getAgentInstance(instanceId);
-      if (!instance || instance.generation !== expectedGeneration || instance.desiredState !== "running" || !instance.runtimeRef || !["idle", "working", "blocked"].includes(instance.observedState)) return null;
-      const active = this.context.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
-      if (active) return null;
-      const row = this.context.database.prepare("SELECT id FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state = 'queued' ORDER BY CASE priority WHEN 'priority' THEN 0 ELSE 1 END, created_at, rowid LIMIT 1").get(instanceId, expectedGeneration) as { id: string } | undefined;
-      if (!row) return null;
-      this.context.database.prepare("UPDATE instance_turns SET state = 'claimed', updated_at = ? WHERE id = ? AND state = 'queued'").run(now(), row.id);
-      const turn = this.getInstanceTurn(row.id)!; this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.claimed", {});
-      return turn;
-    });
-  }
-
-  recoverInterruptedInstanceTurns(): { requeuedTurnIds: string[]; cancelledLegacyTurnIds: string[]; observableTurns: InstanceTurn[] } {
-    const timestamp = now();
-    return this.context.transaction(() => {
-      const legacyNotice = "Legacy Worker session is detached and cannot be resumed";
-      const legacyQueued = this.context.database.prepare(`SELECT t.*
-        FROM instance_turns t
-        JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation
-        WHERE t.state = 'queued'
-          AND i.role = 'worker'
-          AND i.worker_session_lifecycle = 'legacy'
-          AND i.observed_state = 'detached'
-          AND i.pane_id IS NULL
-          AND i.pending_pane_id IS NULL
-        ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>;
-      const cancelledLegacyTurnIds: string[] = [];
-      for (const row of legacyQueued) {
-        const turn = mapInstanceTurn(row)!;
-        const changed = this.context.database.prepare(`UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ?
-          WHERE id = ? AND instance_generation = ? AND state = 'queued'
-            AND EXISTS (SELECT 1 FROM agent_instances i
-              WHERE i.id = instance_turns.instance_id
-                AND i.generation = instance_turns.instance_generation
-                AND i.role = 'worker'
-                AND i.worker_session_lifecycle = 'legacy'
-                AND i.observed_state = 'detached'
-                AND i.pane_id IS NULL
-                AND i.pending_pane_id IS NULL)`)
-          .run(legacyNotice, timestamp, turn.id, turn.instanceGeneration);
-        if (changed.changes !== 1) continue;
-        const view = this.loadWorkerTurnCard(turn.id);
-        if (view) this.saveWorkerTurnCard({ ...reduceWorkerTurnCard(view, { type: "cancelled", occurredAt: timestamp, notice: legacyNotice }), resultCapture: "unavailable" });
-        this.insertInstanceEvent(turn.projectId, turn.instanceId, turn.id, "turn.cancelled", { state: "cancelled", reason: "legacy_worker_unrecoverable" });
-        cancelledLegacyTurnIds.push(turn.id);
-      }
-      const claimed = this.context.database.prepare(`SELECT t.id, t.project_id, t.instance_id FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state = 'claimed' ORDER BY t.created_at, t.rowid`).all() as Array<{ id: string; project_id: string; instance_id: string }>;
-      for (const turn of claimed) {
-        this.context.database.prepare("UPDATE instance_turns SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'claimed'").run(timestamp, turn.id);
-        this.insertInstanceEvent(turn.project_id, turn.instance_id, turn.id, "turn.requeued-after-restart", {});
-      }
-      const rows = this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>;
-      return { requeuedTurnIds: claimed.map(({ id }) => id), cancelledLegacyTurnIds, observableTurns: rows.map((row) => mapInstanceTurn(row)!) };
-    });
-  }
-
-  listObservableInstanceTurns(): InstanceTurn[] {
-    return (this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') ORDER BY t.created_at, t.rowid`).all() as Array<Record<string, unknown>>).map((row) => mapInstanceTurn(row)!);
-  }
-
-  listObservableInstanceTurnsByPaneIds(paneIds: readonly string[]): InstanceTurn[] {
-    const uniquePaneIds = [...new Set(paneIds)];
-    if (uniquePaneIds.length === 0) return [];
-    const placeholders = uniquePaneIds.map(() => "?").join(",");
-    return (this.context.database.prepare(`SELECT t.* FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation WHERE t.state IN ('dispatching','running','blocked','dispatch-uncertain') AND i.pane_id IN (${placeholders}) ORDER BY t.created_at, t.rowid`).all(...uniquePaneIds) as Array<Record<string, unknown>>).map((row) => mapInstanceTurn(row)!);
-  }
-
-  getInstanceTurnDiagnostics(): { queuedTurns: number; activeTurns: number; uncertainTurns: number } {
-    const row = this.context.database.prepare(`SELECT
-      SUM(CASE WHEN t.state = 'queued' THEN 1 ELSE 0 END) AS queued_turns,
-      SUM(CASE WHEN t.state IN ('claimed','dispatching','running','blocked') THEN 1 ELSE 0 END) AS active_turns,
-      SUM(CASE WHEN t.state = 'dispatch-uncertain' THEN 1 ELSE 0 END) AS uncertain_turns
-      FROM instance_turns t JOIN agent_instances i ON i.id = t.instance_id AND i.generation = t.instance_generation`).get() as { queued_turns: number | null; active_turns: number | null; uncertain_turns: number | null };
-    return { queuedTurns: row.queued_turns ?? 0, activeTurns: row.active_turns ?? 0, uncertainTurns: row.uncertain_turns ?? 0 };
-  }
-
-  updateInstanceTurn(input: { turnId: string; expectedGeneration: number; expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string; state: InstanceTurnState; result?: string | null; error?: string | null; eventKind: InstanceEventKind }): InstanceTurn | null {
-    const timestamp = now();
-    return this.context.transaction(() => {
-      const current = this.getInstanceTurn(input.turnId);
-      if (!current || current.instanceGeneration !== input.expectedGeneration || !matchesExpectedRuntimeTurn(current, input)) return null;
-      const changed = this.context.database.prepare("UPDATE instance_turns SET state = ?, result = ?, error = ?, updated_at = ? WHERE id = ? AND instance_generation = ? AND EXISTS (SELECT 1 FROM agent_instances i WHERE i.id = instance_turns.instance_id AND i.generation = ?)").run(input.state, input.result ?? null, input.error ?? null, timestamp, input.turnId, input.expectedGeneration, input.expectedGeneration);
-      if (changed.changes !== 1) return null;
-      this.insertInstanceEvent(current.projectId, current.instanceId, current.id, input.eventKind, { state: input.state });
-      return this.getInstanceTurn(input.turnId);
-    });
-  }
-  completeInstanceTurn(input: { turnId: string; expectedGeneration: number; result: string }): InstanceTurn | null { return this.updateInstanceTurn({ ...input, state: "completed", eventKind: "turn.completed" }); }
-  listInstanceEvents(instanceId: string, afterId = 0): InstanceEvent[] {
-    return (this.context.database.prepare("SELECT * FROM instance_events WHERE instance_id = ? AND id > ? ORDER BY id LIMIT 100").all(instanceId, afterId) as Array<Record<string, unknown>>).map((row) => ({ id: Number(row.id), projectId: String(row.project_id), instanceId: String(row.instance_id), turnId: row.turn_id === null ? null : String(row.turn_id), kind: String(row.kind) as InstanceEventKind, payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>, createdAt: String(row.created_at) }));
-  }
-  countPendingInstanceTurns(instanceId: string, expectedGeneration?: number): number {
-    const row = expectedGeneration === undefined
-      ? this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId)
-      : this.context.database.prepare("SELECT COUNT(*) AS count FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain')").get(instanceId, expectedGeneration);
-    return Number((row as { count: number }).count);
-  }
 }
 
-function now(): string { return new Date().toISOString(); }
-function parseJsonRecord(payload: string): Record<string, unknown> { try { const value = JSON.parse(payload) as unknown; return isRecord(value) ? value : {}; } catch { return {}; } }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-export function mapWorkerTurnCard(row: Record<string, unknown> | undefined): WorkerTurnCardView | null {
-  if (!row) return null;
-  const progressEvents = parseWorkerProgress(row.progress_json);
-  return { turnId: String(row.turn_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), workerSessionGeneration: Number(row.worker_session_generation ?? 1), workerName: String(row.worker_name), parentTurnId: row.parent_turn_id === null ? null : String(row.parent_turn_id), rootMessageId: String(row.root_message_id), messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id), elementId: String(row.element_id), progressSequence: Number(row.progress_sequence ?? 0), phase: String(row.phase) as WorkerTurnCardView["phase"], requestText: String(row.request_text), answer: String(row.answer), timelineItems: [], statusTitle: row.status_title === null || row.status_title === undefined ? null : String(row.status_title), tokenCount: row.token_count === null || row.token_count === undefined ? null : Number(row.token_count), progressEvents, progressSummary: summarizeWorkerProgress(progressEvents), queuePosition: Number(row.queue_position), startedAt: row.started_at === null ? null : String(row.started_at), finishedAt: row.finished_at === null ? null : String(row.finished_at), notice: row.notice === null ? null : String(row.notice), resultCapture: String(row.result_capture) as WorkerTurnCardView["resultCapture"], workerMain: JSON.parse(String(row.worker_main_ref_json ?? '{}')) as WorkerTurnCardView["workerMain"], primaryAnswer: row.primary_answer_ref_json === null || row.primary_answer_ref_json === undefined ? null : JSON.parse(String(row.primary_answer_ref_json)) as WorkerTurnCardView["primaryAnswer"], pageIndex: Number(row.page_index), pageStart: Number(row.page_start), sequence: Number(row.sequence), viewVersion: Number(row.view_version), deliveredVersion: Number(row.delivered_version), createdAt: String(row.created_at), updatedAt: String(row.updated_at) };
+export { mapWorkerTurnCard };
+function now(): string {
+  return new Date().toISOString();
 }
-function parseWorkerProgress(value: unknown): import("../../domain/run-card-view.js").RunProgressEvent[] { try { const parsed = JSON.parse(String(value ?? "[]")) as unknown; return Array.isArray(parsed) ? parsed as import("../../domain/run-card-view.js").RunProgressEvent[] : []; } catch { return []; } }
-function summarizeWorkerProgress(events: readonly import("../../domain/run-card-view.js").RunProgressEvent[]): import("../../domain/run-card-view.js").RunProgressSummary { let stepTotal = 0; let stepDone = 0; for (const event of events) if (event.kind === "step") { stepTotal += 1; if (event.state === "done") stepDone += 1; } return { total: events.length, stepTotal, stepDone }; }
-function mapWorkerTurnCardPage(row: Record<string, unknown>): WorkerTurnCardPage { return { id: String(row.id), turnId: String(row.turn_id), pageIndex: Number(row.page_index), pageStart: Number(row.page_start), elementId: String(row.element_id), messageId: row.message_id === null ? null : String(row.message_id), cardId: row.card_id === null ? null : String(row.card_id), state: String(row.state) as WorkerTurnCardPage["state"], sequence: Number(row.sequence), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }; }
-function matchesExpectedRuntimeTurn(turn: InstanceTurn, input: { expectedRuntimeTurnId?: string; expectedRuntimeTurnStartedAt?: string }): boolean { return (input.expectedRuntimeTurnId === undefined || turn.runtimeTurnId === input.expectedRuntimeTurnId) && (input.expectedRuntimeTurnStartedAt === undefined || turn.runtimeTurnStartedAt === input.expectedRuntimeTurnStartedAt); }
-function mapInstanceTurn(row: Record<string, unknown> | undefined): InstanceTurn | null { return row ? { id: String(row.id), idempotencyKey: String(row.idempotency_key), projectId: String(row.project_id), instanceId: String(row.instance_id), instanceGeneration: Number(row.instance_generation), actor: JSON.parse(String(row.actor_json)) as ControlActor, kind: String(row.kind) as InstanceTurn["kind"], priority: String(row.priority ?? "normal") as InstanceTurn["priority"], text: String(row.text), state: String(row.state) as InstanceTurnState, result: row.result === null ? null : String(row.result), error: row.error === null ? null : String(row.error), parentTurnId: row.parent_turn_id === null || row.parent_turn_id === undefined ? null : String(row.parent_turn_id), sourceMessageId: row.source_message_id === null || row.source_message_id === undefined ? null : String(row.source_message_id), runtimeTurnId: row.runtime_turn_id === null || row.runtime_turn_id === undefined ? null : String(row.runtime_turn_id), runtimeTurnStartedAt: row.runtime_turn_started_at === null || row.runtime_turn_started_at === undefined ? null : String(row.runtime_turn_started_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : null; }

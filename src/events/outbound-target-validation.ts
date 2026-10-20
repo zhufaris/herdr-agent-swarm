@@ -15,7 +15,7 @@ export function assertWorkerMainMessageTarget(store: Pick<OutboxStore, "loadWork
 }
 
 export function assertAnswerCardCreateTarget(
-  store: Pick<OutboxStore, "getBinding" | "isActiveBindingThreadAlias" | "loadRunCard">, bindingId: string | null, promptId: string | null, rootMessageId: string,
+  store: Pick<OutboxStore, "getAnswerPage" | "getBinding" | "isActiveBindingThreadAlias" | "loadRunCard">, bindingId: string | null, promptId: string | null, rootMessageId: string,
   card: object, stream?: { pageIndex: number; pageStart: number; elementId: string; deliveryMode?: "static" }
 ): void {
   if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card create target is missing binding or prompt identity");
@@ -27,10 +27,31 @@ export function assertAnswerCardCreateTarget(
     if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0) throw new PermanentDeliveryError(`Initial answer card create is stale for prompt ${promptId}`);
     return;
   }
-  const expectedPageStart = stream.deliveryMode === "static" ? stream.pageStart === view.answerPageStart : stream.pageStart > view.answerPageStart;
-  if (!view.answerCardId || stream.pageIndex !== view.answerPageIndex + 1 || !expectedPageStart || !stream.elementId) throw new PermanentDeliveryError(`Answer continuation target mismatch for prompt ${promptId}`);
   const expectedElementId = answerElementId(promptId, stream.pageIndex);
   const cardElementIds = collectElementIds(card);
+  if (stream.pageIndex === 0) {
+    if (view.answerMessageId || view.answerCardId || view.answerPageIndex !== 0 || view.answerPageStart !== 0 || stream.pageStart !== 0 || stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) {
+      throw new PermanentDeliveryError(`Initial answer card create target mismatch for prompt ${promptId}`);
+    }
+    return;
+  }
+  const isNextPage = stream.pageIndex === view.answerPageIndex + 1;
+  if (stream.deliveryMode === "static") {
+    const previous = store.getAnswerPage(promptId, view.answerPageIndex);
+    const replacement = store.getAnswerPage(promptId, stream.pageIndex);
+    const exactStaticReplacement = previous?.state === "frozen"
+      && previous.deliveryMode === "static"
+      && previous.sourceStart === stream.pageStart
+      && replacement?.state === "creating"
+      && replacement.deliveryMode === "static"
+      && replacement.sourceStart === stream.pageStart
+      && replacement.elementId === stream.elementId
+      && replacement.messageId === null
+      && replacement.cardId === null;
+    if (!isNextPage || view.answerPageStart !== stream.pageStart || !exactStaticReplacement) throw new PermanentDeliveryError(`Answer continuation target mismatch for prompt ${promptId}`);
+  } else if (!view.answerCardId || !isNextPage || stream.pageStart <= view.answerPageStart || !stream.elementId) {
+    throw new PermanentDeliveryError(`Answer continuation target mismatch for prompt ${promptId}`);
+  }
   if (stream.elementId !== expectedElementId || cardElementIds.length === 0 || cardElementIds.some((id) => id !== stream.elementId)) throw new PermanentDeliveryError(`Answer continuation element mismatch for prompt ${promptId}`);
 }
 
@@ -48,11 +69,13 @@ export function assertAnswerStreamTarget(store: Pick<OutboxStore, "getActiveAnsw
   if (!view || (page?.elementId ?? view.answerElementId) !== elementId) throw new PermanentDeliveryError(`Answer stream element target mismatch for prompt ${promptId}`);
 }
 
-export function assertAnswerMessageTarget(store: Pick<OutboxStore, "loadRunCard">, bindingId: string | null, promptId: string | null, messageId: string): void {
+export function assertAnswerMessageTarget(store: Pick<OutboxStore, "getAnswerPage" | "loadRunCard">, bindingId: string | null, promptId: string | null, pageIndex: number | null, messageId: string): void {
   if (!bindingId || !promptId) throw new PermanentDeliveryError("Answer card target is missing binding or prompt identity");
   const view = store.loadRunCard(promptId);
-  if (!view || view.bindingId !== bindingId || view.answerMessageId !== messageId) throw new PermanentDeliveryError(`Answer card message target mismatch for prompt ${promptId}`);
+  const page = pageIndex === null ? null : store.getAnswerPage(promptId, pageIndex);
+  if (!view || view.bindingId !== bindingId || !page || page.messageId !== messageId) throw new PermanentDeliveryError(`Answer card message target mismatch for prompt ${promptId}`);
 }
+
 
 export function assertWorkerCardCreateTarget(
   store: Pick<OutboxStore, "loadWorkerTurnCard" | "listWorkerTurnCardPages">, turnId: string, rootMessageId: string,

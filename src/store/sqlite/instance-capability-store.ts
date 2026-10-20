@@ -24,11 +24,16 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
   createWorkerAgentInstance: InstanceStore["createWorkerAgentInstance"] = (input, maxWorkers) => this.instances.createWorkerAgentInstance(input, maxWorkers);
   getAgentInstance: InstanceStore["getAgentInstance"] = (id) => this.instances.getAgentInstance(id);
   findAgentInstanceByPane: InstanceStore["findAgentInstanceByPane"] = (paneId) => this.instances.findAgentInstanceByPane(paneId);
+  findCompletionChoicePaneCandidates: InstanceStore["findCompletionChoicePaneCandidates"] = (paneId) => [
+    ...this.bindings.findBindingsByPane(paneId).map((binding) => ({ kind: "primary" as const, binding })),
+    ...this.instances.findWorkerAgentInstancesByPane(paneId).map((instance) => ({ kind: "worker" as const, instance }))
+  ];
   listWorkerInstancesByParent: InstanceStore["listWorkerInstancesByParent"] = (input) => this.instances.listWorkerInstancesByParent(input);
   listAgentInstances: InstanceStore["listAgentInstances"] = (projectId) => this.instances.listAgentInstances(projectId);
   setPrimaryAgentInstance: InstanceStore["setPrimaryAgentInstance"] = (projectId, instanceId) => this.instances.setPrimaryAgentInstance(projectId, instanceId);
   attachAgentInstanceRuntime: InstanceStore["attachAgentInstanceRuntime"] = (input) => this.instances.attachAgentInstanceRuntime(input);
   refreshAgentInstanceRuntimeSession: InstanceStore["refreshAgentInstanceRuntimeSession"] = (input) => this.instances.refreshAgentInstanceRuntimeSession(input);
+  adoptAgentInstanceRuntimeMove: InstanceStore["adoptAgentInstanceRuntimeMove"] = (input) => this.instances.adoptAgentInstanceRuntimeMove(input);
   checkpointAgentInstance: InstanceStore["checkpointAgentInstance"] = (input) => this.instances.checkpointAgentInstance(input);
   updateAgentInstanceLifecycle: InstanceStore["updateAgentInstanceLifecycle"] = (input) => this.instances.updateAgentInstanceLifecycle(input);
   updateAgentInstanceObservation: InstanceStore["updateAgentInstanceObservation"] = (input) => this.instances.updateAgentInstanceObservation(input);
@@ -47,21 +52,38 @@ export class SqliteInstanceCapabilityStore implements InstanceStore {
 
   acceptInstanceTurn: InstanceStore["acceptInstanceTurn"] = (input) => this.turns.acceptInstanceTurn(input);
   acceptInstanceTurnWithCard: InstanceStore["acceptInstanceTurnWithCard"] = (input) => this.turns.acceptInstanceTurnWithCard(input);
+  acceptWorkerCompletionAction: InstanceStore["acceptWorkerCompletionAction"] = (input) => this.turns.acceptWorkerCompletionAction(input);
+  ignoreWorkerCompletionAction: InstanceStore["ignoreWorkerCompletionAction"] = (input) => this.turns.ignoreWorkerCompletionAction(input);
+  resolveWorkerCompletionChoice: InstanceStore["resolveWorkerCompletionChoice"] = (input) => this.turns.resolveWorkerCompletionChoice(input);
+  resolveFreshWorkerCompletionReview: InstanceStore["resolveFreshWorkerCompletionReview"] = (input) => this.turns.resolveFreshWorkerCompletionReview(input);
   getInstanceTurn: InstanceStore["getInstanceTurn"] = (id) => this.turns.getInstanceTurn(id);
   claimInstanceTurnTranscript: InstanceStore["claimInstanceTurnTranscript"] = (input) => this.turns.claimInstanceTurnTranscript(input);
   loadWorkerTurnCard: InstanceStore["loadWorkerTurnCard"] = (turnId) => this.turns.loadWorkerTurnCard(turnId);
   findWorkerTurnByCardMessage: InstanceStore["findWorkerTurnByCardMessage"] = (messageId) => this.turns.findWorkerTurnByCardMessage(messageId);
+  listAnswerSegments: InstanceStore["listAnswerSegments"] = (aggregateKind, aggregateId) => {
+    if (aggregateKind === "primary-run") return this.projections.listAnswerSegments(aggregateKind, aggregateId);
+    return this.turns.listAnswerSegments(aggregateKind, aggregateId);
+  };
   listWorkerTurnCardPages: InstanceStore["listWorkerTurnCardPages"] = (turnId) => this.turns.listWorkerTurnCardPages(turnId);
+  prepareWorkerCompletionActionSet: InstanceStore["prepareWorkerCompletionActionSet"] = (input) => this.turns.prepareWorkerCompletionActionSet(input);
   getWorkerTurnCardDeliveryFacts: InstanceStore["getWorkerTurnCardDeliveryFacts"] = (turnId, pageIndex) => this.turns.getWorkerTurnCardDeliveryFacts(turnId, pageIndex);
   getWorkerAnswerTimelinePage: InstanceStore["getWorkerAnswerTimelinePage"] = (turnId, pageIndex) => this.turns.getWorkerAnswerTimelinePage(turnId, pageIndex);
   listFrozenWorkerAnswerTimelineItems: InstanceStore["listFrozenWorkerAnswerTimelineItems"] = (turnId, beforePageIndex) => this.turns.listFrozenWorkerAnswerTimelineItems(turnId, beforePageIndex);
+  getWorkerProjectionGapSummary: InstanceStore["getWorkerProjectionGapSummary"] = (turnId) => this.turns.getWorkerProjectionGapSummary(turnId);
+  reserveHumanMessageAnswerSegments: InstanceStore["reserveHumanMessageAnswerSegments"] = (input) => {
+    if (input.aggregateKind === "primary-run") return this.projections.reserveHumanMessageAnswerSegments(input);
+    return this.turns.reserveHumanMessageAnswerSegments(input);
+  };
   reserveWorkerAnswerTimelineCard: InstanceStore["reserveWorkerAnswerTimelineCard"] = (input) => this.turns.reserveWorkerAnswerTimelineCard(input);
   reserveWorkerTurnContent: InstanceStore["reserveWorkerTurnContent"] = (input) => this.turns.reserveWorkerTurnContent(input);
   listActionableWorkerTurnCardIds: InstanceStore["listActionableWorkerTurnCardIds"] = () => this.turns.listActionableWorkerTurnCardIds();
+  listRecoverableWorkerTurnIds: InstanceStore["listRecoverableWorkerTurnIds"] = (limit) => this.turns.listRecoverableWorkerTurnIds(limit);
+  listRecoverableWorkerTurnIdsForBinding: InstanceStore["listRecoverableWorkerTurnIdsForBinding"] = (bindingId, limit) => this.turns.listRecoverableWorkerTurnIdsForBinding(bindingId, limit);
   reserveWorkerTurnProgress: InstanceStore["reserveWorkerTurnProgress"] = (input) => this.turns.reserveWorkerTurnProgress(input);
   reserveWorkerTurnFinish: InstanceStore["reserveWorkerTurnFinish"] = (input) => this.turns.reserveWorkerTurnFinish(input);
   reserveWorkerTurnCardHydration: InstanceStore["reserveWorkerTurnCardHydration"] = (input) => this.turns.reserveWorkerTurnCardHydration(input);
   reserveWorkerTurnContinuation: InstanceStore["reserveWorkerTurnContinuation"] = (input) => this.turns.reserveWorkerTurnContinuation(input);
+  reserveWorkerTurnRecovery: InstanceStore["reserveWorkerTurnRecovery"] = (input) => this.turns.reserveWorkerTurnRecovery(input);
   applyInstanceTurnProjection: InstanceStore["applyInstanceTurnProjection"] = (input) => this.turns.applyInstanceTurnProjection(input);
   transitionInstanceTurnWithProjection: InstanceStore["transitionInstanceTurnWithProjection"] = (input) => this.turns.transitionInstanceTurnWithProjection(input);
   listInstanceTurns: InstanceStore["listInstanceTurns"] = (instanceId, options) => this.turns.listInstanceTurns(instanceId, options);

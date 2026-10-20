@@ -44,6 +44,113 @@ function setupPending(snapshot: HerdrPane[]) {
 }
 
 describe("instance runtime reconciliation", () => {
+  it("skips project and instance enumeration on current semantic generations and targets one changed Pane", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "semantic-worker", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "semantic-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "semantic-worker", expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: null })!;
+    let observed = pane();
+    const listAllPanes = vi.fn(async () => [observed]);
+    const listPanes = vi.fn(async () => [observed]);
+    const cache = new WorkspaceSnapshotCache({ listAllPanes, listPanes } as unknown as HerdrPort);
+    const listInstances = vi.spyOn(store, "listAgentInstances");
+    const reconciler = new InstanceRuntimeReconciler({ projects: [project], store, paneHost: new HerdrPaneHost(cache), runtimeObservations: cache, wake: vi.fn() });
+
+    await reconciler.reconcile();
+    expect(listInstances).toHaveBeenCalledOnce();
+    listInstances.mockClear();
+    await reconciler.reconcile();
+    expect(listInstances).not.toHaveBeenCalled();
+    expect(listAllPanes).toHaveBeenCalledOnce();
+
+    observed = pane({ agentState: "working" });
+    cache.invalidatePanes([observed.paneId]);
+    await reconciler.reconcile();
+
+    expect(listInstances).not.toHaveBeenCalled();
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+  });
+
+  it("retries a semantic generation when topology mutation invalidates evidence before acknowledgement", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "semantic-worker", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "semantic-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "semantic-worker", expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: null })!;
+    let observed = pane();
+    const listAllPanes = vi.fn(async () => [observed]);
+    const listPanes = vi.fn(async () => [observed]);
+    const cache = new WorkspaceSnapshotCache({ listAllPanes, listPanes } as unknown as HerdrPort);
+    const topology = {
+      reconcileWorkspace: vi.fn(async () => {
+        if (topology.reconcileWorkspace.mock.calls.length === 2) {
+          cache.invalidatePanes([observed.paneId]);
+          return { topologyChanged: true };
+        }
+        return { topologyChanged: false };
+      })
+    };
+    const reconciler = new InstanceRuntimeReconciler({
+      projects: [project], store, paneHost: new HerdrPaneHost(cache), runtimeObservations: cache,
+      topology, wake: vi.fn()
+    });
+
+    await reconciler.reconcile();
+    observed = pane({ agentState: "working" });
+    cache.invalidatePanes([observed.paneId]);
+
+    await reconciler.reconcile();
+
+    expect(topology.reconcileWorkspace).toHaveBeenCalledTimes(2);
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ observedState: "idle" });
+
+    await reconciler.reconcile();
+
+    expect(topology.reconcileWorkspace).toHaveBeenCalledTimes(3);
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledTimes(2);
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+
+    await reconciler.reconcile();
+    expect(topology.reconcileWorkspace).toHaveBeenCalledTimes(3);
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not acknowledge a semantic generation when topology changes without invalidating evidence", async () => {
+    store = new SqliteBindingStore(":memory:");
+    store.createAgentInstance({ id: "semantic-worker", projectId: "p1", name: "worker", role: "worker", agentKind: "codex", model: null, desiredState: "running", workspace: { id: "semantic-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+    const instance = store.attachAgentInstanceRuntime({ instanceId: "semantic-worker", expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId: "herdr-w:p1", nativeSessionId: null })!;
+    let observed = pane();
+    const listAllPanes = vi.fn(async () => [observed]);
+    const listPanes = vi.fn(async () => [observed]);
+    const cache = new WorkspaceSnapshotCache({ listAllPanes, listPanes } as unknown as HerdrPort);
+    const topology = {
+      reconcileWorkspace: vi.fn(async () => ({ topologyChanged: topology.reconcileWorkspace.mock.calls.length === 2 }))
+    };
+    const reconciler = new InstanceRuntimeReconciler({
+      projects: [project], store, paneHost: new HerdrPaneHost(cache), runtimeObservations: cache,
+      topology, wake: vi.fn()
+    });
+
+    await reconciler.reconcile();
+    observed = pane({ agentState: "working" });
+    cache.invalidatePanes([observed.paneId]);
+
+    await reconciler.reconcile();
+
+    expect(topology.reconcileWorkspace).toHaveBeenCalledTimes(2);
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ observedState: "idle" });
+
+    await reconciler.reconcile();
+
+    expect(topology.reconcileWorkspace).toHaveBeenCalledTimes(3);
+    expect(listAllPanes).toHaveBeenCalledOnce();
+    expect(listPanes).toHaveBeenCalledOnce();
+    expect(store.getAgentInstance(instance.id)).toMatchObject({ observedState: "working" });
+  });
+
   it("reuses one pane snapshot across projects in the same workspace", async () => {
     store = new SqliteBindingStore(":memory:");
     const projects = [
@@ -112,6 +219,76 @@ describe("instance runtime reconciliation", () => {
 
     expect(listPanes).toHaveBeenCalledTimes(2);
     expect(reconciler.snapshot()).toMatchObject({ successCount: 1, failureCount: 1, lastError: null });
+  });
+
+  it("continues later instances before reporting one local reconciliation failure", async () => {
+    store = new SqliteBindingStore(":memory:");
+    for (const [id, paneId] of [["i1", "herdr-w:p1"], ["i2", "herdr-w:p2"]] as const) {
+      store.createAgentInstance({
+        id, projectId: "p1", name: id, role: "worker", agentKind: "codex", model: null, desiredState: "running",
+        workspace: { id: `ws-${id}`, kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" }
+      });
+      store.attachAgentInstanceRuntime({ instanceId: id, expectedGeneration: 1, herdrWorkspaceId: "herdr-w", paneId, nativeSessionId: null });
+    }
+    const panes = [
+      pane({ paneId: "herdr-w:p1", agentState: "working" }),
+      pane({ paneId: "herdr-w:p2", agentState: "working" })
+    ];
+    const originalUpdate = store.updateAgentInstanceObservation.bind(store);
+    const update = vi.spyOn(store, "updateAgentInstanceObservation").mockImplementation((input) => {
+      if (input.instanceId === "i1") throw new Error("simulated instance write failure");
+      return originalUpdate(input);
+    });
+    const reconciler = new InstanceRuntimeReconciler({
+      projects: [project], store, paneHost: { listPanes: vi.fn(async () => panes) } as unknown as PaneHost, wake: vi.fn()
+    });
+
+    await expect(reconciler.reconcile()).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: "Instance runtime reconciliation failed for instance i1" })]
+    });
+    expect(store.getAgentInstance("i2")).toMatchObject({ observedState: "working" });
+    expect(reconciler.snapshot()).toMatchObject({
+      successCount: 0, failureCount: 1, ready: false, lastError: expect.stringContaining("instance i1")
+    });
+
+    update.mockRestore();
+    await reconciler.reconcile();
+    expect(store.getAgentInstance("i1")).toMatchObject({ observedState: "working" });
+    expect(reconciler.snapshot()).toMatchObject({ successCount: 1, failureCount: 1, ready: true, lastError: null });
+  });
+
+  it("continues later workspaces before reporting one snapshot failure", async () => {
+    store = new SqliteBindingStore(":memory:");
+    const projects = [
+      { id: "p1", name: "One", description: "one", workspaceId: "w1", cwd: "/repo/one" },
+      { id: "p2", name: "Two", description: "two", workspaceId: "w2", cwd: "/repo/two" }
+    ] as ProjectConfig[];
+    for (const candidate of projects) {
+      store.createAgentInstance({
+        id: `worker-${candidate.id}`, projectId: candidate.id, name: `worker-${candidate.id}`, role: "worker", agentKind: "codex", model: null,
+        desiredState: "running", workspace: { id: `lease-${candidate.id}`, kind: "shared-read-only", cwd: candidate.cwd, branch: null, baseCommit: "base" }
+      });
+      store.attachAgentInstanceRuntime({
+        instanceId: `worker-${candidate.id}`, expectedGeneration: 1, herdrWorkspaceId: candidate.workspaceId,
+        paneId: `${candidate.workspaceId}:${candidate.id}`, nativeSessionId: null
+      });
+    }
+    const listPanes = vi.fn(async (workspaceId: string) => {
+      if (workspaceId === "w1") throw new Error("simulated workspace snapshot failure");
+      return [pane({ paneId: "w2:p2", workspaceId: "w2", cwd: "/repo/two", agentState: "working" })];
+    });
+    const reconciler = new InstanceRuntimeReconciler({
+      projects, store, paneHost: { listPanes } as unknown as PaneHost, wake: vi.fn()
+    });
+
+    await expect(reconciler.reconcile()).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: "Instance runtime reconciliation failed for workspace w1" })]
+    });
+    expect(listPanes.mock.calls).toEqual([["w1"], ["w2"]]);
+    expect(store.getAgentInstance("worker-p2")).toMatchObject({ observedState: "working" });
+    expect(reconciler.snapshot()).toMatchObject({
+      successCount: 0, failureCount: 1, ready: false, lastError: expect.stringContaining("workspace w1")
+    });
   });
 
   it("reports bounded lifecycle and timing diagnostics for successful and coalesced scans", async () => {
@@ -200,7 +377,7 @@ describe("instance runtime reconciliation", () => {
     expect(reconciler.snapshot().state).toBe("stopping");
   });
 
-  it("records failed scans and reports stopping while waiting for an active scan", async () => {
+  it("records failed scans and settles stopping while waiting for an active scan", async () => {
     let reject!: (error: Error) => void;
     const blocked = new Promise<never>((_resolve, rejectPromise) => { reject = rejectPromise; });
     const { reconciler, paneHost } = setup([]);
@@ -212,15 +389,32 @@ describe("instance runtime reconciliation", () => {
     expect(reconciler.snapshot().state).toBe("stopping");
     reject(new Error("runtime scan failed"));
     await expect(running).rejects.toThrow("runtime scan failed");
-    await expect(stopping).rejects.toThrow("runtime scan failed");
+    await expect(stopping).resolves.toBeUndefined();
     expect(reconciler.snapshot()).toMatchObject({ state: "stopping", runCount: 1, successCount: 0, failureCount: 1, lastOutcome: "failed", lastDurationMs: expect.any(Number) });
   });
 
-  it("converges a matching runtime and wakes queued work only after an idle observation", async () => {
+  it("does not wake cards or queued work for an unchanged idle observation", async () => {
     const { instance, reconciler, wake, wakeCardContext } = setup([pane({ agentState: "idle" })]);
     store!.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
     await reconciler.reconcile();
     expect(store!.getAgentInstance(instance.id)).toMatchObject({ generation: instance.generation, observedState: "idle", runtimeRef: { paneId: "herdr-w:p1" } });
+    expect(wake).not.toHaveBeenCalled();
+    expect(wakeCardContext).not.toHaveBeenCalled();
+  });
+
+  it("wakes cards and queued work once when runtime state changes to idle", async () => {
+    const observed = pane({ agentState: "working" });
+    const { instance, reconciler, wake, wakeCardContext } = setup([observed]);
+    store!.acceptInstanceTurn({ id: "queued", idempotencyKey: "queued", actor: { kind: "human", userId: "u1" }, projectId: "p1", instanceId: instance.id, instanceGeneration: instance.generation, kind: "turn", text: "work" });
+    await reconciler.reconcile();
+    expect(wake).not.toHaveBeenCalled();
+    expect(wakeCardContext).toHaveBeenCalledOnce();
+    wakeCardContext.mockClear();
+
+    observed.agentState = "idle";
+    await reconciler.reconcile();
+
+    expect(wake).toHaveBeenCalledOnce();
     expect(wake).toHaveBeenCalledWith(instance.id);
     expect(wakeCardContext).toHaveBeenCalledOnce();
   });
@@ -252,7 +446,7 @@ describe("instance runtime reconciliation", () => {
     expect(store!.getAgentInstance(instance.id)).toMatchObject({
       generation: instance.generation, runtimeRef: { paneId: "herdr-w:p1", nativeSessionId: "native-traex-session" }
     });
-    expect(wakeCardContext).toHaveBeenCalledTimes(2);
+    expect(wakeCardContext).toHaveBeenCalledOnce();
   });
 
   it("adopts a matching pending TraeX runtime without starting it again", async () => {
@@ -311,6 +505,37 @@ describe("instance runtime reconciliation", () => {
     expect(store!.getInstanceTurn("not-started")).toMatchObject({ state: "cancelled", instanceGeneration: instance.generation });
     expect(wake).not.toHaveBeenCalled();
     expect(wakeCardContext).toHaveBeenCalledOnce();
+  });
+
+  it("adopts an exactly relocated pane before ordinary missing-pane termination", async () => {
+    const moved = pane({ paneId: "herdr-w:p2", tabId: "herdr-w:t1", terminalId: "term-worker", agentSession: null });
+    const { instance, paneHost } = setup([moved]);
+    store!.database.prepare("UPDATE agent_instances SET native_session_id=NULL,worker_session_lifecycle='active' WHERE id=?").run(instance.id);
+    const terminate = vi.spyOn(store!, "terminateWorkerSession");
+    const topology = {
+      reconcileWorkspace: vi.fn(async () => {
+        const adopted = store!.adoptAgentInstanceRuntimeMove({
+          instanceId: instance.id, expectedGeneration: instance.generation,
+          expectedWorkspaceId: "herdr-w", expectedPaneId: "herdr-w:p1", expectedNativeSessionId: null,
+          paneId: "herdr-w:p2", paneToken: null
+        });
+        expect(adopted).toMatchObject({ runtimeRef: { paneId: "herdr-w:p2" }, workerSessionLifecycle: "active" });
+        return { topologyChanged: true };
+      })
+    };
+    const reconciler = new InstanceRuntimeReconciler({
+      projects: [project], store: store!, paneHost, wake: vi.fn(), topology
+    });
+
+    await reconciler.reconcile();
+
+    expect(topology.reconcileWorkspace).toHaveBeenCalledOnce();
+    expect(paneHost.listPanes).toHaveBeenCalledTimes(2);
+    expect(terminate).not.toHaveBeenCalled();
+    expect(store!.getAgentInstance(instance.id)).toMatchObject({
+      generation: instance.generation, desiredState: "running", workerSessionLifecycle: "active",
+      runtimeRef: { paneId: "herdr-w:p2" }
+    });
   });
 
   it("detaches missing active work as uncertain without replaying it", async () => {
@@ -407,7 +632,9 @@ describe("instance runtime reconciliation", () => {
     periodic.start(100);
     await vi.advanceTimersByTimeAsync(100);
     await vi.waitFor(() => expect(warn).toHaveBeenCalledOnce());
-    expect(periodic.snapshot()).toMatchObject({ failureCount: 1, lastOutcome: "failed", lastError: "snapshot unavailable" });
+    expect(periodic.snapshot()).toMatchObject({
+      failureCount: 1, lastOutcome: "failed", lastError: expect.stringMatching(/workspace herdr-w.*snapshot unavailable/)
+    });
 
     await vi.advanceTimersByTimeAsync(100);
     await vi.waitFor(() => expect(periodic.snapshot()).toMatchObject({ successCount: 1, lastOutcome: "succeeded", lastError: null }));

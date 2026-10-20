@@ -26,7 +26,7 @@ function fixture() {
     },
     registry: { defaultProjectId: "bridge", projects: [{
       id: "bridge", displayName: "Bridge", description: "Bridge service", workspaceId: "w1", cwd,
-      maxInstances: 8
+      maxInstances: 8, orchestrator: { enabled: true, cwd: "/tmp" }
     }] }
   };
   return { root, cwd, configDirectory, context, draft };
@@ -56,7 +56,7 @@ describe("file setup configuration repository", () => {
     expect(readEnvironmentFile(result.environmentFile).LARK_APP_SECRET).toBe("top-secret");
     expect(JSON.parse(readFileSync(result.projectsFile, "utf8"))).toEqual(draft.registry);
     expect(readFileSync(result.projectsFile, "utf8")).toBe(`${JSON.stringify(draft.registry, null, 2)}\n`);
-    expect(readFileSync(result.runtimeFile, "utf8")).toContain("answerPageLimitChars: 9000");
+    expect(readFileSync(result.runtimeFile, "utf8")).toContain("answerPageLimitChars: 21000");
     expect(existsSync(join(context.configDirectory, ".setup-transaction.json"))).toBe(false);
   });
 
@@ -150,7 +150,7 @@ describe("file setup configuration repository", () => {
     await repository.commit(draft, context);
     expect(await repository.load(context)).toEqual({
       environment: expect.objectContaining({ LARK_APP_SECRET: "top-secret" }), registry: draft.registry,
-      runtime: expect.objectContaining({ cards: expect.objectContaining({ answerPageLimitChars: 9_000 }) })
+      runtime: expect.objectContaining({ cards: expect.objectContaining({ answerPageLimitChars: 21_000 }) })
     });
     expect(await repository.validate(draft, context)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "config.schema", status: "pass" }),
@@ -181,5 +181,6 @@ describe("setup summary", () => {
     expect(summary).toContain("127.0.0.1:8787");
     expect(summary).toContain("herdr-agent-swarm.service");
     expect(summary).toContain("Worker limit: 8");
+    expect(summary).toContain("Orchestrator: enabled -> /tmp");
   });
 });

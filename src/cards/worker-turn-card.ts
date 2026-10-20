@@ -6,6 +6,8 @@ import { actionRow, cardSection, compactMetadata, lifecycleMarker, recentItems }
 import { workerTaskInteraction } from "../domain/worker-task-interaction.js";
 import { renderAnswerTimeline } from "./answer-timeline.js";
 import type { FinalAnswerElement } from "./final-answer-content.js";
+import type { CompletionActionSetRenderState } from "../domain/completion-action-set.js";
+import { completionActionElements } from "./completion-actions.js";
 
 const STATE = {
   queued: { label: "已排队", icon: "⏳", color: "blue" },
@@ -20,7 +22,7 @@ const STATE = {
 
 const REQUEST_PREVIEW_LIMIT = 2_000;
 
-export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[] } = {}): object {
+export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurnCardPage, options: { snapshot?: boolean; initialContent?: string; timelineItems?: readonly import("../domain/answer-timeline.js").AnswerTimelineItem[]; gapWarning?: string | null; completionActions?: CompletionActionSetRenderState | null } = {}): object {
   const state = STATE[view.phase];
   const pageIndex = page?.pageIndex ?? view.pageIndex;
   const elementId = page?.elementId ?? view.elementId;
@@ -42,13 +44,14 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
     firstPage && view.parentTurnId ? `承接 \`${escapeCode(view.parentTurnId)}\`` : null
   ]);
   const elements: object[] = [{ tag: "markdown", content: metadata }];
+  if (options.gapWarning) elements.push(callout("orange", options.gapWarning));
   if (firstPage) elements.push({ tag: "markdown", content: `${cardSection("💬", "请求")}\n\n${truncateLarkMarkdown(normalizeLarkPreview(redactSecrets(view.requestText)), REQUEST_PREVIEW_LIMIT)}` });
   elements.push({ tag: "markdown", element_id: workerTurnProgressElementId(view.turnId, pageIndex), content: workerTurnProgressContent(view, showOutput && Boolean(content)) });
   if (view.notice) elements.push(callout(view.phase === "failed" ? "red" : "orange", redactSecrets(view.notice)));
   if (showOutput) {
     const timelineItems = options.timelineItems ?? view.timelineItems;
     const outputElements = timelineItems.length > 0 && options.initialContent === undefined
-      ? renderAnswerTimeline(timelineItems)
+      ? renderAnswerTimeline(timelineItems, undefined, view.viewVersion)
       : [{ tag: "markdown", content }];
     attachElementId(outputElements, elementId);
     elements.push(...outputElements);
@@ -60,6 +63,7 @@ export function renderWorkerTurnCard(view: WorkerTurnCardView, page?: WorkerTurn
     const row = actionRow([callbackButton(interaction.actionLabel, { action: "worker_task_instruction_form", ...identity }, "primary"), ...(interaction.canInterrupt ? [callbackButton("停止当前任务", { action: "worker_task_interrupt", ...identity }, "danger")] : [])]);
     if (row) elements.push(row);
   }
+  if (!options.snapshot) elements.push(...completionActionElements(options.completionActions));
   const targets = [
     view.workerMain.messageId ? callbackButton("View Worker Main", { action: "card_target_open", ...view.workerMain }, "primary") : null,
     view.primaryAnswer?.messageId ? callbackButton("View Primary Answer", { action: "card_target_open", ...view.primaryAnswer }, "default") : null

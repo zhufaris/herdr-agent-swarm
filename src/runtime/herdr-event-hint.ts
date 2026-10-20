@@ -19,6 +19,18 @@ export interface HerdrRuntimeHint {
   paneIds: string[];
 }
 
+export interface CoreSessionEventSourceHint {
+  sourceId: string;
+  latestCursor: string;
+}
+
+export interface CoreSessionEventsAvailableHint {
+  kind: "session-events-available";
+  sources: CoreSessionEventSourceHint[];
+}
+
+export type HerdrNativeEventHint = HerdrRuntimeHint | CoreSessionEventsAvailableHint;
+
 const eventKinds = new Map<string, HerdrEventKind>([
   ["pane.agent_status_changed", "agent-status"],
   ["pane_agent_status_changed", "agent-status"],
@@ -46,7 +58,7 @@ export function normalizeHerdrEvent(
   const workspaceIds = boundedUnique(ids.workspaceIds, 64);
   const paneIds = boundedUnique(ids.paneIds, 128);
   let scope: HerdrEventScope = "all";
-  if (kind === "agent-status" && paneIds.length > 0) scope = "panes";
+  if ((kind === "agent-status" || kind === "pane-updated") && paneIds.length > 0) scope = "panes";
   else if (kind !== "unknown" && workspaceIds.length > 0) scope = "workspaces";
   return { kind, scope, workspaceIds, paneIds };
 }
@@ -59,6 +71,15 @@ export function mergeHerdrRuntimeHints(current: HerdrRuntimeHint | null, next: H
     workspaceIds: boundedUnique([...current.workspaceIds, ...next.workspaceIds], 64),
     paneIds: boundedUnique([...current.paneIds, ...next.paneIds], 128)
   };
+}
+
+export function mergeCoreSessionEventsAvailableHints(
+  current: CoreSessionEventsAvailableHint | null,
+  next: CoreSessionEventsAvailableHint
+): CoreSessionEventsAvailableHint {
+  const sources = new Map(current?.sources.map((source) => [source.sourceId, source]) ?? []);
+  for (const source of next.sources) sources.set(source.sourceId, source);
+  return { kind: "session-events-available", sources: [...sources.values()].slice(0, 128) };
 }
 
 function boundedUnique(values: readonly string[], limit: number): string[] {

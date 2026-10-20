@@ -1,62 +1,45 @@
 import { describe, expect, it, vi } from "vitest";
 import { TraexControlAdapter } from "../src/adapters/traex-control-adapter.js";
+import { listTraexModelsFromCli } from "../src/runtime/traex-model-protocol.js";
 
 const session = { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" };
-const peer = { threadId: session.value, socketPath: "/run/user/1/traex.sock", pid: 42, startedAtMs: 100 };
-
 describe("TraexControlAdapter", () => {
-  it("lists models for a native TraeX session", async () => {
-    const listModels = vi.fn(async () => [{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
-    const findPeer = vi.fn(async () => peer);
-    const adapter = control({ findPeer, listModels });
+  it("lists models through the public TraeX CLI", async () => {
+    const run = vi.fn(async () => ({
+      stdout: JSON.stringify([{ name: "GPT-5.4", config_name: "gpt-5-4", provider: "trae" }]),
+      stderr: ""
+    }));
+    const adapter = control({ run });
 
-    await expect(adapter.listModels(session)).resolves.toEqual([{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
-    expect(findPeer).toHaveBeenCalledWith("/peers", session.value);
-    expect(listModels).toHaveBeenCalledWith(peer, { timeoutMs: 1_000 });
+    await expect(adapter.listModels(session)).resolves.toEqual([{ id: "gpt-5-4", name: "GPT-5.4", displayName: "GPT-5.4" }]);
+    expect(run).toHaveBeenCalledWith("traex", ["models", "--json"], 1_000);
+  });
+
+  it("uses only the public TraeX CLI model catalog", async () => {
+    const run = vi.fn(async () => ({
+      stdout: JSON.stringify([
+        { name: "GPT-5.4", config_name: "gpt-5-4", provider: "trae" },
+        { name: "Seed-2.1-Pro-0915", provider: "trae" }
+      ]),
+      stderr: ""
+    }));
+    const adapter = control({ run });
+
+    await expect(adapter.listModels(session)).resolves.toEqual([
+      { id: "gpt-5-4", name: "GPT-5.4", displayName: "GPT-5.4" },
+      { id: "Seed-2.1-Pro-0915", name: "Seed-2.1-Pro-0915", displayName: "Seed-2.1-Pro-0915" }
+    ]);
+    expect(run).toHaveBeenCalledWith("traex", ["models", "--json"], 1_000);
   });
 
   it.each(["herdr:codex", "herdr-traex-shim"])("rejects legacy TraeX source %s", async (source) => {
-    const findPeer = vi.fn(async () => peer);
-    const adapter = control({ findPeer });
+    const run = vi.fn(async () => ({ stdout: "[]", stderr: "" }));
+    const adapter = control({ run });
     await expect(adapter.listModels({ ...session, source })).rejects.toThrow("Session does not support TraeX control");
-    expect(findPeer).not.toHaveBeenCalled();
-  });
-
-  it("prepares, checkpoints, and commits before reporting acceptance", async () => {
-    const events: string[] = [];
-    const adapter = control({
-      prepare: vi.fn(async () => ({ operationId: "a".repeat(64), state: "prepared" as const, turnId: null, detail: null })),
-      commit: vi.fn(async () => ({ operationId: "a".repeat(64), state: "accepted" as const, turnId: "turn-1", detail: null }))
-    });
-
-    await expect(adapter.runModelPrompt("w1:p1", "hello", {
-      modelDispatch: { name: "GPT-5.4", revision: 3 }, agentSession: session,
-      onPrepared: () => { events.push("prepared"); }, onAccepted: ({ turnId }) => { events.push(`accepted:${turnId}`); }
-    }, undefined, () => { events.push("dispatched"); })).resolves.toEqual({ operationId: "a".repeat(64), turnId: "turn-1" });
-    expect(events).toEqual(["prepared", "dispatched", "accepted:turn-1"]);
-  });
-
-  it("aborts a prepared operation when the durable dispatch checkpoint fails", async () => {
-    const onPrepareAborted = vi.fn();
-    const abort = vi.fn(async () => ({ operationId: "a".repeat(64), state: "rejected" as const, turnId: null, detail: "Aborted before dispatch" }));
-    const adapter = control({ abort });
-
-    await expect(adapter.runModelPrompt("w1:p1", "hello", {
-      modelDispatch: { name: "GPT-5.4", revision: 3 }, agentSession: session, onPrepared() {}, onPrepareAborted
-    }, undefined, () => { throw new Error("dispatch checkpoint failed"); })).rejects.toThrow("dispatch checkpoint failed");
-    expect(abort).toHaveBeenCalledOnce();
-    expect(onPrepareAborted).toHaveBeenCalledWith("a".repeat(64));
+    expect(run).not.toHaveBeenCalled();
   });
 });
 
-function control(overrides: Partial<ConstructorParameters<typeof TraexControlAdapter>[3]> = {}) {
-  const operations = {
-    findPeer: vi.fn(async () => peer),
-    listModels: vi.fn(async () => []),
-    prepare: vi.fn(async () => ({ operationId: "a".repeat(64), state: "prepared" as const, turnId: null, detail: null })),
-    commit: vi.fn(async () => ({ operationId: "a".repeat(64), state: "accepted" as const, turnId: "turn-1", detail: null })),
-    abort: vi.fn(async () => ({ operationId: "a".repeat(64), state: "rejected" as const, turnId: null, detail: "Aborted before dispatch" })),
-    ...overrides
-  };
-  return new TraexControlAdapter("/peers", "/operations", 1_000, operations);
+function control(runner = { run: vi.fn(async () => ({ stdout: "[]", stderr: "" })) }) {
+  return new TraexControlAdapter(1_000, runner, "traex", listTraexModelsFromCli);
 }

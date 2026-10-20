@@ -4,18 +4,22 @@ import type { OutboundCheckpointSubscriber, OutboundIntentPort } from "../domain
 import type { ProjectionStore } from "../domain/ports/projection.js";
 import type { PrimaryPresentation } from "../domain/ports/presentation.js";
 import type { AnswerPageConvergencePort, MainCardConvergencePort } from "../domain/ports/card-convergence.js";
+import type { ConversationSegmentProjectionNotification } from "../domain/ports/conversation-segment.js";
 import { reduceRunCard, type RunCardChange } from "../domain/run-card-view.js";
-import { initialTopicView, reduceTopicView } from "../domain/topic-view.js";
+import { applyTopicGoalChanges, initialTopicView, reduceTopicView, updateTopicSessionIdentity, updateTopicView } from "../domain/topic-view.js";
+import { sameCurrentGoal } from "../domain/current-goal.js";
 import type { LifecycleEventSubscriber } from "./bridge-event-bus.js";
 import { CardUpdateScheduler, type CardUpdateSchedulerDiagnostics } from "./card-update-scheduler.js";
 import { safeLogError } from "../runtime/safe-error.js";
 import { LruMap } from "../runtime/lru-map.js";
 import { KeyedSerialWorkQueue } from "../runtime/keyed-serial-work-queue.js";
+import type { OutboundWorkClass } from "../domain/types.js";
+import type { SessionActivityStore } from "../domain/ports/session-activity.js";
 
-const ANSWER_STREAM_INTERVAL_MS = 500;
+const ANSWER_STREAM_INTERVAL_MS = 250;
+const ANSWER_INTERACTIVE_DELAY_MS = 120;
 const ANSWER_UPDATE_BUDGET_MS = 1_500;
 const ANSWER_STREAM_MIN_DELTA_CHARS = 80;
-const MAIN_CARD_UPDATE_INTERVAL_MS = 2_500;
 const ANSWER_LENGTH_CACHE_CAPACITY = 512;
 
 export class ConversationViewProjector {
@@ -27,36 +31,43 @@ export class ConversationViewProjector {
   private stopPromise: Promise<void> | null = null;
   private readonly scheduler: CardUpdateScheduler;
   private readonly answerContentLengths = new LruMap<string, number>(ANSWER_LENGTH_CACHE_CAPACITY);
+  private readonly segmentWorkClasses = new Map<string, OutboundWorkClass>();
   private readonly answerUpdateDelayMs: number;
+  private readonly answerInteractiveDelayMs: number;
   private readonly mainUpdateDelayMs: number;
+  private readonly sessionActivity: Pick<SessionActivityStore, "projectTopicViewChange"> | undefined;
 
   constructor(
     private readonly bus: LifecycleEventSubscriber,
     private readonly store: ProjectionStore,
-    private readonly channelPublisher: OutboundIntentPort,
+    _channelPublisher: OutboundIntentPort,
     private readonly checkpoints: OutboundCheckpointSubscriber,
     private readonly logger: Logger,
-    private readonly presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
+    presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "finalAnswer" | "answerStreamContent" | "answerStreamPage" | "finalAnswerPage">,
     private readonly answerPages: AnswerPageConvergencePort,
     private readonly mainCards: MainCardConvergencePort,
-    options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number } = {}
+    options: { cardUpdateDebounceMs?: number; mainCardUpdateDebounceMs?: number; turnCards?: { converge(segmentId: string, workClass?: OutboundWorkClass): Promise<void> }; sessionActivity?: Pick<SessionActivityStore, "projectTopicViewChange"> } = {}
   ) {
     this.answerUpdateDelayMs = Math.min(options.cardUpdateDebounceMs ?? ANSWER_STREAM_INTERVAL_MS, ANSWER_UPDATE_BUDGET_MS);
-    this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? MAIN_CARD_UPDATE_INTERVAL_MS;
+    this.answerInteractiveDelayMs = Math.min(this.answerUpdateDelayMs, ANSWER_INTERACTIVE_DELAY_MS);
+    this.mainUpdateDelayMs = options.mainCardUpdateDebounceMs ?? this.answerUpdateDelayMs;
+    this.sessionActivity = options.sessionActivity;
     this.scheduler = new CardUpdateScheduler(async (cardKey) => {
       const [family, id] = splitCardKey(cardKey);
       if (family === "main") {
         await this.mainCards.converge(id);
         return;
       }
-      const promptId = id;
-      const view = this.store.loadRunCard(promptId);
-      if (!view?.answerCardId && view?.answerMessageId) {
-        await this.channelPublisher.enqueueRunCardUpdate(view.bindingId, promptId, view.answerMessageId, view.viewVersion, "answer", this.presentation.answerCard(view));
-        this.answerContentLengths.set(promptId, view.answer.length);
+      if (family === "segment") {
+        const workClass = this.segmentWorkClasses.get(id) ?? "live";
+        if (workClass === "history") await options.turnCards?.converge(id, workClass);
+        else await options.turnCards?.converge(id);
+        if (this.segmentWorkClasses.get(id) === workClass) this.segmentWorkClasses.delete(id);
         return;
       }
+      const promptId = id;
       await this.answerPages.converge(promptId);
+      const view = this.store.loadRunCard(promptId);
       if (view) this.answerContentLengths.set(promptId, view.answer.length);
     }, this.answerUpdateDelayMs, (error, cardKey, version) => {
       this.logger.error({ event: "card-update-failed", err: safeLogError(error), cardKey, viewVersion: version, outcome: "retry" }, "failed to converge card; retry scheduled");
@@ -66,19 +77,40 @@ export class ConversationViewProjector {
   }
 
   snapshot(): CardUpdateSchedulerDiagnostics { return this.scheduler.diagnostics(); }
+  scheduleTurnCard(notification: ConversationSegmentProjectionNotification): void {
+    const workClass = notification.workClass ?? "live";
+    if (this.segmentWorkClasses.get(notification.segmentId) !== "live") {
+      this.segmentWorkClasses.set(notification.segmentId, workClass);
+    }
+    this.scheduler.schedule(segmentCardKey(notification.segmentId), notification.viewVersion, {
+      priority: notification.urgency === "immediate" ? "terminal" : "normal",
+      delayMs: notification.urgency === "immediate" ? 0 : ANSWER_STREAM_INTERVAL_MS
+    });
+  }
   cacheDiagnostics(): { topicViews: number; answerLengths: number } {
     return { topicViews: 0, answerLengths: this.answerContentLengths.size };
   }
 
   start(): () => void {
-    this.unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
+    if (this.unsubscribe) return this.unsubscribe;
+    const unsubscribe = this.bus.onBridgeEvent("conversation-view-projector", (event) => this.enqueue(event));
     this.unsubscribeStreamCardCreated = this.checkpoints.onAnswerCheckpoint((promptId, viewVersion) => {
       this.scheduler.schedule(answerCardKey(promptId), viewVersion, { priority: "terminal" });
     });
     this.unsubscribeMainCardCheckpoint = this.checkpoints.onMainCardCheckpoint?.((bindingId, viewVersion) => {
       this.scheduler.schedule(mainCardKey(bindingId), viewVersion, { priority: "terminal" });
     }) ?? null;
-    return () => { this.unsubscribe?.(); this.unsubscribeStreamCardCreated?.(); this.unsubscribeMainCardCheckpoint?.(); };
+    const stopSubscriptions = () => {
+      if (this.unsubscribe !== stopSubscriptions) return;
+      unsubscribe();
+      this.unsubscribeStreamCardCreated?.();
+      this.unsubscribeMainCardCheckpoint?.();
+      this.unsubscribe = null;
+      this.unsubscribeStreamCardCreated = null;
+      this.unsubscribeMainCardCheckpoint = null;
+    };
+    this.unsubscribe = stopSubscriptions;
+    return stopSubscriptions;
   }
 
   stop(): Promise<void> {
@@ -91,30 +123,61 @@ export class ConversationViewProjector {
     this.unsubscribeMainCardCheckpoint?.();
     this.unsubscribeMainCardCheckpoint = null;
     this.answerContentLengths.clear();
-    this.stopPromise = this.bindingWork.stop().then(() => this.scheduler.stop());
+    this.stopPromise = this.bindingWork.stop().then(() => this.scheduler.stop()).finally(() => this.segmentWorkClasses.clear());
     return this.stopPromise;
   }
 
-  private async onEvent(event: BridgeEvent): Promise<void> {
+  private onEvent(event: BridgeEvent): void {
+    const settlement = event.type === "TurnOutputObserved"
+      ? normalizeTurnOutputObservation(event.payload).coreEventSettlement
+      : undefined;
+    if (settlement) {
+      const promptId = promptIdOf(event);
+      if (!promptId) throw new Error("Core event projection requires a Prompt owner");
+      this.store.projectCoreEvent(settlement, { kind: "prompt", id: promptId }, () => this.projectEvent(event));
+      return;
+    }
+    this.projectEvent(event);
+  }
+
+  private projectEvent(event: BridgeEvent): void {
     if (this.stopping) return;
+    if (event.type === "PaneOutputObserved" && event.payload.paneToken) {
+      for (const view of this.store.listRunCardsByPhases(event.bindingId, ["queued", "running", "blocked"])) {
+        const refreshed = reduceRunCard(view, { type: "pane-token-refreshed", occurredAt: event.occurredAt, paneToken: event.payload.paneToken });
+        if (refreshed === view) continue;
+        const next = this.store.saveRunCard(refreshed);
+        this.scheduler.schedule(answerCardKey(next.promptId), next.viewVersion, { priority: "interactive", delayMs: this.answerUpdateDelayMs });
+      }
+    }
+    const binding = this.store.getBinding(event.bindingId);
+    const stored = this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
+    const currentBinding = binding && binding.generation !== stored.bindingGeneration
+      ? updateTopicView(stored, { bindingGeneration: binding.generation, currentGoal: null })
+      : stored;
+    const current = binding ? updateTopicSessionIdentity(currentBinding, binding) : currentBinding;
+    let next = reduceTopicView(current, event);
+    const goalChanges = event.type === "TurnOutputObserved" || event.type === "PaneOutputObserved" ? normalizeTurnOutputObservation(event.payload).goalChanges ?? [] : [];
+    if (goalChanges.length > 0) {
+      if (binding?.generation === next.bindingGeneration) {
+        const expectedSessionId = binding.agentSessionKind === "id" ? binding.agentSessionValue ?? undefined : undefined;
+        const goalProjection = applyTopicGoalChanges(current, goalChanges, expectedSessionId);
+        if (!sameCurrentGoal(goalProjection.currentGoal, current.currentGoal)) {
+          next = next === current ? goalProjection : { ...next, currentGoal: goalProjection.currentGoal };
+        }
+      }
+    }
+    const goalChanged = !sameCurrentGoal(current.currentGoal, next.currentGoal);
     const promptId = promptIdOf(event);
     const runCard = promptId ? this.store.loadRunCard(promptId) : null;
+    let changedRunCard: ReturnType<typeof reduceRunCard> | null = null;
     if (promptId && runCard) {
       const change = runCardChange(event);
       if (change) {
         const next = reduceRunCard(runCard, change);
         if (next !== runCard) {
-          this.store.saveRunCard(next);
-          const terminal = ["blocked", "completed", "failed"].includes(next.phase);
-          const contentLength = next.answer.length;
-          const previousLength = this.answerContentLengths.get(promptId) ?? 0;
-          const firstContent = previousLength === 0 && contentLength > 0;
-          const progressChanged = event.type === "TurnOutputObserved" && normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0;
-          this.scheduler.schedule(answerCardKey(promptId), next.viewVersion, {
-            priority: terminal || firstContent || progressChanged || contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS ? "terminal" : "normal",
-            delayMs: this.answerUpdateDelayMs
-          });
-          if (terminal) this.answerContentLengths.delete(promptId);
+          changedRunCard = next;
+          if (!goalChanged) this.saveAndScheduleRunCard(next, event);
         } else if (["blocked", "completed", "failed"].includes(runCard.phase) && runCard.viewVersion > runCard.answerDeliveredVersion) {
           // The durable workflow transition may have projected the terminal view
           // before this process-local lifecycle notification arrived.
@@ -122,10 +185,25 @@ export class ConversationViewProjector {
         }
       }
     }
-    const current = this.store.loadTopicView(event.bindingId) ?? initialTopicView(event.bindingId);
-    const next = reduceTopicView(current, event);
-    if (next === current) return;
-    this.store.saveTopicView(next);
+    if (goalChanged) {
+      const mutable = this.store.listRunCardsByPhases(event.bindingId, ["queued", "running", "blocked"])
+        .map((original) => {
+          const withOutput = changedRunCard?.promptId === original.promptId ? changedRunCard : original;
+          const projected = reduceRunCard(withOutput, { type: "goal-snapshot", occurredAt: event.occurredAt, currentGoal: next.currentGoal });
+          return { original, projected, outputChanged: withOutput !== original };
+        })
+        .filter(({ original, projected, outputChanged }) => outputChanged || projected !== original)
+        .map(({ projected }) => projected);
+      for (const saved of this.store.saveGoalProjection(next, mutable)) {
+        this.scheduler.schedule(answerCardKey(saved.promptId), saved.viewVersion, { priority: "interactive", delayMs: this.answerUpdateDelayMs });
+      }
+    }
+    if (next === current) {
+      if (current !== stored) this.store.saveTopicView(current);
+      return;
+    }
+    if (!goalChanged) this.store.saveTopicView(next);
+    this.sessionActivity?.projectTopicViewChange(current, next, event.occurredAt);
 
     try {
       this.scheduler.schedule(mainCardKey(event.bindingId), next.viewVersion, {
@@ -139,6 +217,24 @@ export class ConversationViewProjector {
     }
   }
 
+  private saveAndScheduleRunCard(next: ReturnType<typeof reduceRunCard>, event: BridgeEvent): void {
+    this.store.saveRunCard(next);
+    const terminal = ["blocked", "completed", "failed"].includes(next.phase);
+    const contentLength = next.answer.length;
+    const previousLength = this.answerContentLengths.get(next.promptId) ?? 0;
+    const firstContent = previousLength === 0 && contentLength > 0;
+    const progressChanged = event.type === "TurnOutputObserved" && normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0;
+    const timelineChanged = event.type === "TurnOutputObserved" && (normalizeTurnOutputObservation(event.payload).answer.timelineDeltas?.length ?? 0) > 0;
+    const largeContentDelta = contentLength - previousLength >= ANSWER_STREAM_MIN_DELTA_CHARS;
+    const interactive = largeContentDelta || progressChanged || timelineChanged;
+    this.scheduler.schedule(answerCardKey(next.promptId), next.viewVersion, {
+      priority: terminal || firstContent ? "terminal" : interactive ? "interactive" : "normal",
+      delayMs: terminal || firstContent ? 0 : interactive ? this.answerInteractiveDelayMs : this.answerUpdateDelayMs
+    });
+    if (terminal) this.answerContentLengths.delete(next.promptId);
+    else this.answerContentLengths.set(next.promptId, contentLength);
+  }
+
   private enqueue(event: BridgeEvent): Promise<void> {
     return this.bindingWork.enqueue(event.bindingId, () => this.onEvent(event));
   }
@@ -146,12 +242,13 @@ export class ConversationViewProjector {
 
 function answerCardKey(promptId: string): string { return `answer:${promptId}`; }
 function mainCardKey(bindingId: string): string { return `main:${bindingId}`; }
-function splitCardKey(cardKey: string): ["answer" | "main", string] {
+function segmentCardKey(segmentId: string): string { return `segment:${segmentId}`; }
+function splitCardKey(cardKey: string): ["answer" | "main" | "segment", string] {
   const separator = cardKey.indexOf(":");
   const family = cardKey.slice(0, separator);
   const id = cardKey.slice(separator + 1);
-  if ((family !== "answer" && family !== "main") || !id) throw new Error(`Invalid card update key: ${cardKey}`);
-  return [family, id];
+  if ((family !== "answer" && family !== "main" && family !== "segment") || !id) throw new Error(`Invalid card update key: ${cardKey}`);
+  return [family, id] as ["answer" | "main" | "segment", string];
 }
 
 function isImmediateMainEvent(event: BridgeEvent, phase: ReturnType<typeof initialTopicView>["phase"]): boolean {
@@ -160,7 +257,10 @@ function isImmediateMainEvent(event: BridgeEvent, phase: ReturnType<typeof initi
 }
 
 function isInteractiveMainEvent(event: BridgeEvent): boolean {
-  return event.type === "TurnStarted" || event.type === "AgentStateChanged" || event.type === "TurnOutputObserved" && normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0;
+  return event.type === "TurnStarted" || event.type === "AgentStateChanged" || (event.type === "TurnOutputObserved" || event.type === "PaneOutputObserved") && (
+    normalizeTurnOutputObservation(event.payload).answer.toolActivities.length > 0
+    || Boolean(normalizeTurnOutputObservation(event.payload).goalChanges?.length)
+  );
 }
 
 function promptIdOf(event: BridgeEvent): string | null {
@@ -177,7 +277,9 @@ function runCardChange(event: BridgeEvent): RunCardChange | null {
     case "TurnStarted": return { type: "started", occurredAt: event.occurredAt };
     case "TurnOutputObserved": {
       const answer = normalizeTurnOutputObservation(event.payload).answer;
-      return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(answer.timelineDeltas?.length ? { timelineDeltas: answer.timelineDeltas } : {}), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };
+      const status = normalizeTurnOutputObservation(event.payload).main.status;
+      const taskList = status?.planSteps;
+      return { type: "output", occurredAt: event.occurredAt, answerSnapshot: answer.snapshot, ...(answer.previousSnapshot === undefined ? {} : { previousAnswerSnapshot: answer.previousSnapshot }), ...(answer.update === undefined ? {} : { answerUpdate: answer.update }), progressEvents: answer.toolActivities.map((item) => ({ ...item, occurredAt: event.occurredAt })), ...(taskList === undefined ? {} : { taskList: taskList.map((step) => ({ ...step, occurredAt: event.occurredAt })) }), ...(status?.statusTitle === undefined ? {} : { taskListTitle: status.statusTitle }), ...(answer.timelineDeltas?.length ? { timelineDeltas: answer.timelineDeltas } : {}), ...(answer.hasToolActivitySnapshot === undefined ? {} : { hasProgressSnapshot: answer.hasToolActivitySnapshot }) };
     }
     case "AgentStateChanged": return event.payload.state === "blocked"
       ? { type: "blocked", occurredAt: event.occurredAt, notice: "TraeX 需要人工审批。请回到对应 Herdr pane 完成审批。" }

@@ -6,9 +6,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const RELEASE_FILES = [
-  "dist", "package.json", "package-lock.json", "scripts", "config",
+  "dist", "package.json", "package-lock.json", "scripts", "config", "plugins/herdr-choice-list",
   ".env.example", "README.md", "LICENSE", "docs/architecture.md",
-  "docs/architecture-reference.md", "docs/feishu-group-usage.md"
+  "docs/architecture-reference.md", "docs/feishu-group-usage.md",
+  "docs/agents/group-orchestrator-rollout.md"
 ];
 
 export function validateReleaseTag(tag, version) {

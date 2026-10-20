@@ -39,12 +39,28 @@ export function materializeFeishuView(view: GatewayRenderableView): object {
 function parseNode(value: unknown): GatewayViewNode {
   const node = record(value, "CardKit element");
   const tag = string(node.tag, "CardKit element tag");
-  if (tag === "markdown") return { kind: "markdown", content: string(node.content, "markdown content"), ...(typeof node.element_id === "string" ? { slot: node.element_id } : {}) };
+  if (tag === "markdown") {
+    const content = string(node.content, "markdown content");
+    const mention = /^<at id=(?:"([^"]+)"|([^>]+))><\/at>\s*(.*)$/su.exec(content);
+    if (mention && typeof node.element_id !== "string") return { kind: "mention", userId: mention[1] ?? mention[2]!, content: mention[3] ?? "" };
+    return { kind: "markdown", content, ...(typeof node.element_id === "string" ? { slot: node.element_id } : {}) };
+  }
   if (tag === "hr") return { kind: "divider" };
   if (tag === "button") {
-    const behavior = array(node.behaviors, "button behaviors").map((item) => record(item, "button behavior")).find((item) => item.type === "callback");
-    if (!behavior || !("value" in behavior)) throw new Error("CardKit callback button is missing action");
-    return { kind: "button", label: textContent(record(node.text, "button text")) ?? "Action", ...(buttonStyle(node.type) ? { style: buttonStyle(node.type)! } : {}), action: structuredClone(behavior.value), ...(typeof node.name === "string" ? { name: node.name } : {}), ...(node.form_action_type === "submit" ? { submit: true } : {}) };
+    const behaviors = array(node.behaviors, "button behaviors").map((item) => record(item, "button behavior"));
+    const callback = behaviors.find((item) => item.type === "callback");
+    const link = behaviors.find((item) => item.type === "open_url");
+    const label = textContent(record(node.text, "button text")) ?? "Action";
+    const style = buttonStyle(node.type);
+    const size = typeof node.size === "string" ? node.size : undefined;
+    if (callback && "value" in callback) return { kind: "button", label, ...(style ? { style } : {}), ...(size ? { size } : {}), action: structuredClone(callback.value), ...(typeof node.name === "string" ? { name: node.name } : {}), ...(node.form_action_type === "submit" ? { submit: true } : {}) };
+    if (link) return {
+      kind: "link", label, url: string(link.default_url, "button default URL"), ...(style ? { style } : {}), ...(size ? { size } : {}),
+      ...(typeof link.pc_url === "string" ? { pcUrl: link.pc_url } : {}),
+      ...(typeof link.ios_url === "string" ? { iosUrl: link.ios_url } : {}),
+      ...(typeof link.android_url === "string" ? { androidUrl: link.android_url } : {})
+    };
+    throw new Error("CardKit button is missing callback or open URL behavior");
   }
   if (tag === "column_set") return { kind: "columns", columns: array(node.columns, "columns").map((item) => { const column = record(item, "column"); return { width: column.width === "auto" ? "auto" as const : "weighted" as const, ...(typeof column.weight === "number" ? { weight: column.weight } : {}), nodes: array(column.elements, "column elements").map(parseNode) }; }), ...(node.flex_mode === "none" ? { flex: "none" as const } : {}), ...(typeof node.horizontal_spacing === "string" ? { horizontalSpacing: node.horizontal_spacing } : {}), ...(typeof node.vertical_align === "string" ? { verticalAlign: node.vertical_align } : {}), ...(typeof node.background_style === "string" ? { background: node.background_style } : {}) };
   if (tag === "collapsible_panel") { const border = optionalRecord(node.border); return { kind: "panel", title: textContent(optionalRecord(optionalRecord(node.header)?.title)) ?? "Details", expanded: node.expanded === true, nodes: array(node.elements, "panel elements").map(parseNode), ...(typeof border?.color === "string" ? { borderColor: border.color } : {}), ...(typeof border?.corner_radius === "string" ? { cornerRadius: border.corner_radius } : {}) }; }
@@ -62,8 +78,10 @@ function parseNode(value: unknown): GatewayViewNode {
 
 function materializeNode(node: GatewayViewNode): object {
   if (node.kind === "markdown") return { tag: "markdown", ...(node.slot ? { element_id: node.slot } : {}), content: node.content };
+  if (node.kind === "mention") return { tag: "markdown", content: `<at id=${node.userId}></at>${node.content ? ` ${node.content}` : ""}` };
   if (node.kind === "divider") return { tag: "hr" };
-  if (node.kind === "button") return { tag: "button", text: { tag: "plain_text", content: node.label }, ...(node.style ? { type: node.style } : {}), ...(node.name ? { name: node.name } : {}), ...(node.submit ? { form_action_type: "submit" } : {}), behaviors: [{ type: "callback", value: structuredClone(node.action) }] };
+  if (node.kind === "button") return { tag: "button", text: { tag: "plain_text", content: node.label }, ...(node.style ? { type: node.style } : {}), ...(node.size ? { size: node.size } : {}), ...(node.name ? { name: node.name } : {}), ...(node.submit ? { form_action_type: "submit" } : {}), behaviors: [{ type: "callback", value: structuredClone(node.action) }] };
+  if (node.kind === "link") return { tag: "button", text: { tag: "plain_text", content: node.label }, ...(node.style ? { type: node.style } : {}), ...(node.size ? { size: node.size } : {}), behaviors: [{ type: "open_url", default_url: node.url, ...(node.pcUrl ? { pc_url: node.pcUrl } : {}), ...(node.iosUrl ? { ios_url: node.iosUrl } : {}), ...(node.androidUrl ? { android_url: node.androidUrl } : {}) }] };
   if (node.kind === "columns") return { tag: "column_set", ...(node.flex ? { flex_mode: node.flex } : {}), ...(node.horizontalSpacing ? { horizontal_spacing: node.horizontalSpacing } : {}), ...(node.verticalAlign ? { vertical_align: node.verticalAlign } : {}), ...(node.background ? { background_style: node.background } : {}), columns: node.columns.map((column) => ({ tag: "column", width: column.width, ...(column.weight === undefined ? {} : { weight: column.weight }), elements: column.nodes.map(materializeNode) })) };
   if (node.kind === "panel") return { tag: "collapsible_panel", expanded: node.expanded, ...(node.borderColor || node.cornerRadius ? { border: { ...(node.borderColor ? { color: node.borderColor } : {}), ...(node.cornerRadius ? { corner_radius: node.cornerRadius } : {}) } } : {}), header: { title: { tag: "plain_text", content: node.title } }, elements: node.nodes.map(materializeNode) };
   if (node.kind === "form") return { tag: "form", name: node.name, elements: node.nodes.map(materializeNode) };

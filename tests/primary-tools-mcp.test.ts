@@ -24,6 +24,34 @@ describe("Primary tools MCP surface", () => {
     expect(response.result.tools.find(({ name }) => name === "wait_instance")?.inputSchema.properties.timeoutMs?.maximum).toBe(29_000);
   });
 
+  it("adds bounded topology queries only for the Orchestrator profile", async () => {
+    const task = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn()) as { result: { tools: Array<{ name: string }> } };
+    const orchestrator = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" }, vi.fn(), "orchestrator") as { result: { tools: Array<{ name: string }> } };
+    expect(task.result.tools.map(({ name }) => name)).not.toContain("list_spaces");
+    expect(task.result.tools.map(({ name }) => name)).not.toContain("list_panes");
+    expect(orchestrator.result.tools.map(({ name }) => name)).toEqual(expect.arrayContaining(["list_spaces", "list_panes"]));
+  });
+
+  it("refuses hidden Orchestrator methods under the task profile", async () => {
+    const invoke = vi.fn();
+    await expect(handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_panes", arguments: {} } }, invoke)).resolves.toMatchObject({ error: { code: -32602 } });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("maps Orchestrator topology calls without caller-owned project or Pane scope", async () => {
+    const invoke = vi.fn(async () => []);
+    await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_spaces", arguments: { projectId: "forged" } } }, invoke, "orchestrator");
+    await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_panes", arguments: { workspaceId: "forged", paneId: "forged" } } }, invoke, "orchestrator");
+    expect(invoke).toHaveBeenNthCalledWith(1, "listSpaces", { projectId: "forged" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "listPanes", { workspaceId: "forged", paneId: "forged" });
+  });
+
+  it("keeps raw terminal, approval, kill, deployment, push, and filesystem tools absent", async () => {
+    const response = await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" }, vi.fn(), "orchestrator") as { result: { tools: Array<{ name: string }> } };
+    const names = response.result.tools.map(({ name }) => name).join(" ");
+    expect(names).not.toMatch(/terminal|key|approve|deny|process|pane_kill|deploy|push|filesystem|shell|retarget/);
+  });
+
   it("maps Worker creation without accepting caller-owned scope", async () => {
     const invoke = vi.fn(async () => ({ status: "created" }));
     await handlePrimaryMcpRequest({ jsonrpc: "2.0", id: "create", method: "tools/call", params: { name: "create_worker", arguments: { name: "reviewer", agentKind: "traex", idempotencyKey: "create-reviewer", projectId: "forged", rootMessageId: "forged" } } }, invoke);

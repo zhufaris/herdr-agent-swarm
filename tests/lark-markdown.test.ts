@@ -146,29 +146,6 @@ describe("source-aware Lark Markdown pages", () => {
     });
   });
 
-  it("keeps many complete tool activities atomic while making monotonic source progress", () => {
-    const activity = (index: number) => [
-      `◆ **Ran** · command ${index}`, "", "```bash", `echo ${index}`, "```", "",
-      "```text", ...Array.from({ length: 30 }, (_, line) => `output ${index}.${line}`), "```"
-    ].join("\n");
-    const source = Array.from({ length: 80 }, (_, index) => activity(index)).join("\n");
-    const starts = [0];
-    const pages: string[] = [];
-    while (starts.at(-1)! < source.length) {
-      const rendered = renderLarkMarkdownPage(source, starts.at(-1)!, 900);
-      pages.push(rendered.page);
-      if (rendered.nextPageStart === null) break;
-      expect(rendered.nextPageStart).toBeGreaterThan(starts.at(-1)!);
-      starts.push(rendered.nextPageStart);
-    }
-
-    expect(pages.length).toBeGreaterThan(20);
-    expect(pages.every((page) => page.length <= 900)).toBe(true);
-    expect(pages.join("\n")).toContain("⚙️ **Ran** · `echo 0` · ✓ command 0");
-    expect(pages.join("\n")).not.toContain("output 0.0");
-    expect(starts.every((start, index) => index === 0 || start > starts[index - 1]!)).toBe(true);
-  });
-
   it("normalizes mixed Markdown without changing the canonical source", () => {
     const source = [
       "# Result",
@@ -356,39 +333,4 @@ describe("source-aware Lark Markdown pages", () => {
     expect(diagnostics.rangeRenderCount).toBe(1);
   });
 
-  it("keeps long tool-activity streams atomic without rerendering the full source", () => {
-    const ticks = "`".repeat(3);
-    const activity = (index: number) => [
-      `◆ **Ran** · command ${index}`,
-      "", `${ticks}bash`, `echo ${index}`, ticks, "", `${ticks}text`,
-      ...Array.from({ length: 30 }, (_, line) => `output ${index}.${line}`), ticks
-    ].join("\n");
-    let source = "";
-    for (let index = 0; source.length < 512 * 1024; index += 1) source += `${activity(index)}\n`;
-    const { result: rendered, diagnostics } = renderLarkMarkdownPageForTest(source, 0, 9_000);
-
-    expect(rendered.page).toContain("⚙️ **Ran** · `echo 0` · ✓ command 0");
-    expect(rendered.page).not.toContain("output 0.0");
-    expect(rendered.page.length).toBeLessThanOrEqual(9_000);
-    expect(rendered.nextPageStart).toBeGreaterThan(0);
-    expect(diagnostics.sourceCharactersRendered).toBeLessThanOrEqual(18_000);
-    expect(diagnostics.rangeRenderCount).toBe(1);
-  });
-
-  it("keeps a tool activity with very large folded output atomic across pages", () => {
-    const source = [
-      "before",
-      "◆ **Ran** · command 0",
-      "", "```bash", "npm test", "```", "", "```text",
-      ...Array.from({ length: 2_000 }, (_, line) => `output-${line}`),
-      "```",
-      "after"
-    ].join("\n");
-    const first = renderLarkMarkdownPage(source, 0, 900);
-
-    expect(first.page).toContain("⚙️ **Ran** · `npm test` · ✓ command 0");
-    expect(first.page).not.toContain("output-");
-    expect(first.page).toContain("after");
-    expect(first.nextPageStart).toBeNull();
-  });
 });

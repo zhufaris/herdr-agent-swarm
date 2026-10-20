@@ -1,5 +1,6 @@
 import type { CardAggregateKind } from "../domain/card-target-ref.js";
 import type { SessionOperationKind } from "../domain/types.js";
+import { COMPLETION_ACTION_SELECTIONS, type CompletionActionSelection } from "../domain/completion-action-set.js";
 
 export const instanceCardActionNames = [
   "card_target_open", "instance_create_form", "instance_create_submit", "primary_worker_create_submit", "instance_open", "instance_turn_open",
@@ -14,6 +15,7 @@ export const sessionCardActionNames = [
   "session_archive", "session_replace", "session_resume", "session_pane_close", "primary_continue_form", "primary_continue_submit",
 ] as const;
 export const paneDirectoryCardActionNames = ["pane_primary_thread_forward", "pane_worker_thread_forward"] as const;
+export const shortcutPanelActionNames = ["shortcut_panes", "shortcut_sessions", "shortcut_new_primary", "shortcut_model", "shortcut_help"] as const;
 
 export const retiredCardActionNames = ["open_supplement", "submit_supplement", "convert_queued_prompt", "enqueue_failed_steering"] as const;
 export type RetiredCardActionName = typeof retiredCardActionNames[number];
@@ -55,9 +57,15 @@ export type InstanceCardActionCommand =
   | ({ kind: "instance"; action: "worker_task_instruction_submit"; interactionId: string; requestedBy: string; intent: "steer" | "followup" } & WorkerTaskIdentity);
 
 export type CardActionCommand = InstanceCardActionCommand | SessionCardActionCommand
+  | { kind: "completion-action"; actionSetId: string; optionId: string; ownerKind?: undefined; ownerId?: undefined; ownerGeneration?: undefined; cardMessageId?: undefined }
+  | { kind: "completion-action"; actionSetId: string; selection: CompletionActionSelection; ownerKind: "primary-prompt" | "primary-segment" | "worker-turn"; ownerId: string; ownerGeneration: number; cardMessageId: string }
+  | { kind: "completion-action"; actionSetId: string; optionId: string; ownerKind: "primary-prompt" | "primary-segment" | "worker-turn"; ownerId: string; ownerGeneration: number; cardMessageId: string }
+  | { kind: "completion-action"; actionSetId: string; ignore: true; ownerKind: "primary-prompt" | "primary-segment" | "worker-turn"; ownerId: string; ownerGeneration: number; cardMessageId: string }
   | { kind: "natural-language-confirmation"; decision: "confirm" | "cancel"; confirmationId: string }
+  | { kind: "orchestrator-clear-confirmation"; decision: "confirm" | "cancel"; confirmationId: string }
   | { kind: "pane-directory"; action: "pane_primary_thread_forward"; bindingId: string; bindingGeneration: number; paneId: string; sourceMainMessageId: string }
   | { kind: "pane-directory"; action: "pane_worker_thread_forward"; instanceId: string; generation: number; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; parentPaneId: string; sourceMainMessageId: string }
+  | { kind: "shortcut-panel"; action: typeof shortcutPanelActionNames[number] }
   | { kind: "model"; bindingId: string; model: string }
   | { kind: "model-mode"; bindingId: string; operationId: string; mode: string }
   | { kind: "open-thread"; bindingId: string }
@@ -69,6 +77,7 @@ export type CardActionCommand = InstanceCardActionCommand | SessionCardActionCom
 
 const retiredActions = new Set<string>(retiredCardActionNames);
 const modelPattern = /^[a-z0-9][a-z0-9._:+/-]{0,127}$/i;
+const completionReviewActionSetIdPattern = /^completion-review:v3:[a-f0-9]{64}$/;
 const aggregateKinds = new Set<CardAggregateKind>(["primary-session", "primary-turn", "worker-session", "worker-turn"]);
 
 export function parseCardActionCommand(value: unknown, option?: string | null): CardActionCommand {
@@ -76,7 +85,25 @@ export function parseCardActionCommand(value: unknown, option?: string | null): 
   const item = value as Record<string, unknown>;
   const action = string(item.action);
   if (!action) return unknown();
+  if (action === "completion_action") {
+    const actionSetId = string(item.actionSetId);
+    const selection = (COMPLETION_ACTION_SELECTIONS as readonly unknown[]).includes(item.selection) ? item.selection as CompletionActionSelection : null;
+    const optionId = interaction(item.optionId);
+    if (actionSetId?.startsWith("completion-review:v3:")) {
+      const isMinimalV3Command = Object.keys(item).every((key) => key === "action" || key === "actionSetId" || key === "optionId");
+      return completionReviewActionSetIdPattern.test(actionSetId) && optionId && !selection && isMinimalV3Command
+        ? { kind: "completion-action", actionSetId, optionId }
+        : unknown();
+    }
+    const ownerKind = item.ownerKind === "primary-prompt" || item.ownerKind === "primary-segment" || item.ownerKind === "worker-turn" ? item.ownerKind : null;
+    const ownerId = string(item.ownerId); const ownerGeneration = integer(item.ownerGeneration); const cardMessageId = string(item.cardMessageId);
+    return actionSetId && (selection || optionId) && !(selection && optionId) && ownerKind && ownerId && ownerGeneration !== null && cardMessageId
+      ? { kind: "completion-action", actionSetId, ...(selection ? { selection } : optionId === "ignore" ? { ignore: true as const } : { optionId: optionId! }), ownerKind, ownerId, ownerGeneration, cardMessageId }
+      : unknown();
+  }
+  if ((shortcutPanelActionNames as readonly string[]).includes(action)) return { kind: "shortcut-panel", action: action as typeof shortcutPanelActionNames[number] };
   if (action === "natural_language_command_confirm" || action === "natural_language_command_cancel") { const confirmationId = interaction(item.confirmationId); return confirmationId ? { kind: "natural-language-confirmation", decision: action.endsWith("confirm") ? "confirm" : "cancel", confirmationId } : unknown(); }
+  if (action === "orchestrator_clear_confirm" || action === "orchestrator_clear_cancel") { const confirmationId = interaction(item.confirmationId); return confirmationId ? { kind: "orchestrator-clear-confirmation", decision: action.endsWith("confirm") ? "confirm" : "cancel", confirmationId } : unknown(); }
   if (retiredActions.has(action)) return { kind: "retired", action: action as RetiredCardActionName };
   const session = parseSession(action, item);
   if (session) return session;

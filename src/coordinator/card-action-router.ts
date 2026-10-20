@@ -12,6 +12,7 @@ import { ActiveWorkTracker } from "../runtime/active-work-tracker.js";
 import { parseCardActionCommand, type CardActionCommand } from "./card-action-command.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import type { NaturalLanguageCommandWorkflowPort } from "./natural-language-command-workflow.js";
+import type { SwarmCommandRuntime } from "./swarm-command-gateway.js";
 
 export interface CardActionRouterPort {
   handle(action: IncomingLarkCardAction): Promise<LarkCardActionResult | void>;
@@ -28,8 +29,9 @@ interface Options {
   deliveryRecovery: DeliveryRecoveryWorkflowPort;
   instanceInteractions?: Pick<InstanceInteractionWorkflowPort, "handleCardAction">;
   naturalLanguageCommands?: Pick<NaturalLanguageCommandWorkflowPort, "decide">;
+  swarmCommands?: Pick<SwarmCommandRuntime, "submit">;
   logger: Pick<Logger, "info" | "error">;
-  enqueueInitialPrompt(binding: Binding, selection: ProjectSelection): Promise<void>;
+  submitInitialAgentInput(binding: Binding, selection: ProjectSelection): Promise<unknown>;
 }
 
 export class CardActionRouter implements CardActionRouterPort {
@@ -54,10 +56,16 @@ export class CardActionRouter implements CardActionRouterPort {
     switch (command.kind) {
       case "natural-language-confirmation":
         return this.options.naturalLanguageCommands?.decide(action, command.confirmationId, command.decision) ?? staleAction();
+      case "orchestrator-clear-confirmation":
+        return this.options.naturalLanguageCommands?.decide(action, command.confirmationId, command.decision) ?? staleAction();
       case "instance":
         return this.options.instanceInteractions?.handleCardAction(action, command) ?? staleAction();
       case "session":
         return this.options.cardInteractions.handle(action, command);
+      case "completion-action":
+        return command.ownerKind === "worker-turn"
+          ? this.options.instanceInteractions?.handleCardAction(action, command) ?? staleAction()
+          : this.options.cardInteractions.handle(action, command);
       case "model":
         if (!this.isCreator(action, command.bindingId)) return { toast: { type: "error", content: "只有会话创建者可以切换模型。" } };
         return this.options.modelSelection.selectModel(action, command.bindingId, command.model);
@@ -71,12 +79,14 @@ export class CardActionRouter implements CardActionRouterPort {
         if (outcome === "stale") return { toast: { type: "warning", content: "该 Thread 尚未就绪或已失效，请刷新 `/swarm panes` 后重试。" } };
         return { toast: { type: "success", content: command.action === "pane_primary_thread_forward" ? "已将原始 Primary Thread 发送到群底部。" : "已将原始 Worker Thread 发送到群底部。" } };
       }
+      case "shortcut-panel":
+        return this.handleShortcutPanelAction(action, command.action);
       case "dead-letter":
         return this.options.deliveryRecovery.decideDeadLetter(action, command.replyId, command.decision);
       case "project-selection": {
       if (!this.isAdmin(action)) return { toast: { type: "error", content: "你没有管理权限。" } };
       this.track(this.options.provisioning.completeSelection(action, command.selectionId, command.projectId)
-        .then(async (completed) => { if (completed) await this.options.enqueueInitialPrompt(completed.binding, completed.selection); })
+        .then(async (completed) => { if (completed) await this.options.submitInitialAgentInput(completed.binding, completed.selection); })
         .catch((error) => this.options.logger.error({ event: "project-selection-background-failed", err: safeLogError(error), selectionId: command.selectionId, projectId: command.projectId, outcome: "checkpointed" }, "background project selection failed after the card callback returned")));
       return { toast: { type: "success", content: "项目创建已开始。" } };
       }
@@ -114,6 +124,19 @@ export class CardActionRouter implements CardActionRouterPort {
   }
 
   private isAdmin(action: IncomingLarkCardAction): boolean { return (this.options.adminOpenIds ?? []).includes(action.operatorOpenId); }
+
+  private async handleShortcutPanelAction(action: IncomingLarkCardAction, shortcut: Extract<CardActionCommand, { kind: "shortcut-panel" }> ["action"]): Promise<LarkCardActionResult> {
+    const command = shortcut === "shortcut_panes" || shortcut === "shortcut_model" ? { kind: "panes" as const }
+      : shortcut === "shortcut_sessions" ? { kind: "sessions" as const, cursor: null }
+        : shortcut === "shortcut_new_primary" ? { kind: "projects" as const }
+          : { kind: "help" as const };
+    const message: IncomingLarkMessage = { eventId: `shortcut:${action.messageId}:${shortcut}:${action.operatorOpenId}`, messageId: action.messageId, parentMessageId: null, chatId: action.chatId, topicId: null, rootMessageId: action.messageId, actorOpenId: action.operatorOpenId, text: `/swarm ${command.kind}`, mentionsBot: true, isRootMessage: true };
+    const receipt = await this.options.swarmCommands?.submit({ source: "literal", message, command });
+    if (!receipt) return staleAction();
+    if (receipt.outcome === "rejected") return { toast: { type: "warning", content: receipt.message } };
+    if (shortcut === "shortcut_model") return { toast: { type: "success", content: "请在目标 Primary 会话的主卡片中选择模型。" } };
+    return { toast: { type: "success", content: "已发送入口卡片。" } };
+  }
 }
 
 function retiredAction(action: Extract<CardActionCommand, { kind: "retired" }>["action"]): LarkCardActionResult {

@@ -1,8 +1,9 @@
-import { SqliteContext } from "./sqlite/context.js";
+import { SqliteContext, type SqliteContextOptions } from "./sqlite/context.js";
 import { runWithExclusiveMigrationLock } from "./sqlite/exclusive-migration-lock.js";
 import { SqliteLeaseStore } from "./sqlite/lease-store.js";
 import { createInstanceLeaseSchema } from "./sqlite/schema.js";
 import { createSqliteStoreBundleFromContext, type SqliteStoreBundle } from "./sqlite-store-bundle.js";
+import { hasLeaseExpiryMilliseconds, leaseExpiryMs } from "./sqlite/lease-time.js";
 
 type BootstrapState = "open" | "completed" | "closed";
 
@@ -12,8 +13,8 @@ export interface SqliteLeaseBootstrap {
   close(): void;
 }
 
-export function openSqliteLeaseBootstrap(path: string): SqliteLeaseBootstrap {
-  const context = new SqliteContext(path);
+export function openSqliteLeaseBootstrap(path: string, options: SqliteContextOptions = {}): SqliteLeaseBootstrap {
+  const context = new SqliteContext(path, options);
   try {
     createInstanceLeaseSchema(context);
   } catch (error) {
@@ -27,9 +28,9 @@ export function openSqliteLeaseBootstrap(path: string): SqliteLeaseBootstrap {
     complete(owner) {
       assertOpen(state, "complete");
       assertLeaseOwner(context, owner);
-      const stores = runWithExclusiveMigrationLock(context, () => {
+      const stores = runWithExclusiveMigrationLock(context, owner, (migrationLeaseAuthorization) => {
         assertLeaseOwner(context, owner);
-        const completed = createSqliteStoreBundleFromContext(context, lease);
+        const completed = createSqliteStoreBundleFromContext(context, lease, migrationLeaseAuthorization);
         assertLeaseOwner(context, owner);
         return completed;
       });
@@ -45,12 +46,12 @@ export function openSqliteLeaseBootstrap(path: string): SqliteLeaseBootstrap {
 }
 
 function assertLeaseOwner(context: SqliteContext, owner: { ownerId: string; fencingToken: number }): void {
-  const held = context.database.prepare(`
-    SELECT 1 FROM instance_lease
-    WHERE singleton_id = 1 AND owner_id = ? AND fencing_token = ?
-      AND julianday(expires_at) > julianday('now')
-  `).get(owner.ownerId, owner.fencingToken);
-  if (!held) throw new Error("Cannot complete SQLite bootstrap without a live matching instance lease");
+  const hasExpiryMs = hasLeaseExpiryMilliseconds(context.database);
+  const held = context.database.prepare(`SELECT expires_at${hasExpiryMs ? ",expires_at_ms" : ""} FROM instance_lease
+    WHERE singleton_id=1 AND owner_id=? AND fencing_token=?`).get(owner.ownerId, owner.fencingToken) as {
+      expires_at: string; expires_at_ms?: number;
+    } | undefined;
+  if (!held || leaseExpiryMs(held) <= Date.now()) throw new Error("Cannot complete SQLite bootstrap without a live matching instance lease");
 }
 
 function assertOpen(state: BootstrapState, operation: string): asserts state is "open" {

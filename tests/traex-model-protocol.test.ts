@@ -1,66 +1,35 @@
-import { chmod, mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { listTraexModels } from "../src/runtime/traex-model-protocol.js";
-
-const peer = { threadId: "01a03eb1-c193-7531-83c0-e6c6f70143d4", socketPath: "/run/user/1/traex.sock", pid: 42, startedAtMs: 1 };
-const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+import { describe, expect, it, vi } from "vitest";
+import { listTraexModelsFromCli } from "../src/runtime/traex-model-protocol.js";
 
 describe("TraeX model protocol", () => {
-  it("paginates the current peer catalog and excludes hidden models", async () => {
-    const callPage = vi.fn()
-      .mockResolvedValueOnce({ data: [{ id: "one", model: "GPT-5.4", displayName: "GPT 5.4", hidden: false }, { id: "hidden", model: "secret", displayName: "Secret", hidden: true }], nextCursor: "next" })
-      .mockResolvedValueOnce({ data: [{ id: "two", model: "GPT-5.5", displayName: "GPT 5.5", hidden: false }], nextCursor: null });
+  it("parses the bounded public CLI catalog", async () => {
+    const runner = { run: vi.fn(async () => ({
+      stdout: JSON.stringify([
+        { name: "GPT-5.5", config_name: "gpt-5-5", provider: "trae" },
+        { name: "Seed-2.1-Pro-0915", provider: "trae" }
+      ]),
+      stderr: ""
+    })) };
 
-    await expect(listTraexModels(peer, { callPage })).resolves.toEqual([
-      { id: "one", name: "GPT-5.4", displayName: "GPT 5.4" },
-      { id: "two", name: "GPT-5.5", displayName: "GPT 5.5" }
+    await expect(listTraexModelsFromCli(runner, "traex", 1_000)).resolves.toEqual([
+      { id: "gpt-5-5", name: "GPT-5.5", displayName: "GPT-5.5" },
+      { id: "Seed-2.1-Pro-0915", name: "Seed-2.1-Pro-0915", displayName: "Seed-2.1-Pro-0915" }
     ]);
-    expect(callPage).toHaveBeenNthCalledWith(1, peer, { cursor: null, limit: 100, includeHidden: false }, 10_000);
-    expect(callPage).toHaveBeenNthCalledWith(2, peer, { cursor: "next", limit: 100, includeHidden: false }, 10_000);
+    expect(runner.run).toHaveBeenCalledWith("traex", ["models", "--json"], 1_000);
   });
 
-  it("fails closed for repeated cursors, malformed entries, and oversized catalogs", async () => {
-    await expect(listTraexModels(peer, { callPage: vi.fn(async () => ({ data: [], nextCursor: "same" })) })).rejects.toThrow(/cursor/i);
-    await expect(listTraexModels(peer, { callPage: vi.fn(async () => ({ data: [{ model: "bad" }], nextCursor: null })) })).rejects.toThrow(/entry/i);
-    const data = Array.from({ length: 101 }, (_, index) => ({ id: String(index), model: `model-${index}`, displayName: `Model ${index}`, hidden: false }));
-    await expect(listTraexModels(peer, { maxEntries: 100, callPage: vi.fn(async () => ({ data, nextCursor: null })) })).rejects.toThrow(/limit/i);
+  it.each([
+    ["invalid JSON", "{"],
+    ["non-list JSON", "{}"],
+    ["malformed entry", "[{}]"],
+    ["duplicate model", '[{"name":"GPT-5.5"},{"name":"GPT-5.5"}]']
+  ])("fails closed for %s", async (_case, stdout) => {
+    const runner = { run: vi.fn(async () => ({ stdout, stderr: "" })) };
+    await expect(listTraexModelsFromCli(runner, "traex", 1_000)).rejects.toThrow();
   });
 
-  it("speaks initialize and paginated model/list over the authenticated peer socket", async () => {
-    const root = await mkdtemp(join(tmpdir(), "traex-model-list-")); roots.push(root);
-    const socketPath = join(root, "peer.sock");
-    const received: Array<Record<string, unknown>> = [];
-    const server = createServer((socket) => serve(socket, received));
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-    await chmod(socketPath, 0o600);
-    try {
-      await expect(listTraexModels({ ...peer, socketPath })).resolves.toEqual([{ id: "one", name: "GPT-5.4", displayName: "GPT 5.4" }]);
-    } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
-    expect(received).toEqual([
-      expect.objectContaining({ method: "initialize", id: expect.stringContaining("model-list:init:") }),
-      { method: "initialized" },
-      expect.objectContaining({ method: "model/list", params: { cursor: null, limit: 100, includeHidden: false } })
-    ]);
+  it("rejects an oversized CLI response before parsing it", async () => {
+    const runner = { run: vi.fn(async () => ({ stdout: " ".repeat(256 * 1024 + 1), stderr: "" })) };
+    await expect(listTraexModelsFromCli(runner, "traex", 1_000)).rejects.toThrow(/byte limit/i);
   });
 });
-
-function serve(socket: Socket, received: Array<Record<string, unknown>>): void {
-  let buffer = "";
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk) => {
-    buffer += chunk;
-    for (;;) {
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      const message = JSON.parse(line) as Record<string, unknown>; received.push(message);
-      if (message.method === "initialize") socket.write(`${JSON.stringify({ id: message.id, result: { userAgent: "test" } })}\n`);
-      if (message.method === "model/list") socket.write(`${JSON.stringify({ id: message.id, result: { data: [{ id: "one", model: "GPT-5.4", displayName: "GPT 5.4", hidden: false }], nextCursor: null } })}\n`);
-    }
-  });
-}

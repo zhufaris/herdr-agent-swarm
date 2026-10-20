@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AgentDriverRegistry } from "../src/runtime/agents/agent-driver.js";
 import { TraexDriver } from "../src/runtime/agents/traex-driver.js";
 import { CodexDriver } from "../src/runtime/agents/codex-driver.js";
@@ -36,6 +39,26 @@ describe("agent driver contract", () => {
     expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ name: "yy1r-test" }));
   });
 
+  it("marks only an explicitly rotatable TraeX launch for Core supervision", async () => {
+    const startAgent = vi.fn(async () => undefined);
+    const driver = new TraexDriver({ startAgent } as unknown as HerdrPort, "/bin/traex", 1_000);
+
+    await driver.start(runtime, { projectId: "demo", name: "primary", model: null, rotatable: true });
+
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ rotatable: true }));
+  });
+
+  it("does not truncate an already-valid 32-character managed name twice", async () => {
+    const startAgent = vi.fn(async () => undefined);
+    const driver = new TraexDriver({ startAgent } as unknown as HerdrPort, "/bin/traex", 1_000);
+    const managedName = "herdr-agent-swarm-pri-1234567890";
+
+    await driver.start(runtime, { name: "primary", managedName, model: null });
+
+    expect(managedName).toHaveLength(32);
+    expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ name: managedName }));
+  });
+
   it("injects the scoped MCP server into capable Primary drivers only", async () => {
     const startAgent = vi.fn(async () => undefined);
     const traex = new TraexDriver({ startAgent } as unknown as HerdrPort, "traex", 1_000);
@@ -65,6 +88,29 @@ describe("agent driver contract", () => {
 
     await expect(driver.submit(runtime, "do work")).resolves.toEqual({ status: "confirmed-delivered" });
     expect(runPrompt).toHaveBeenCalledWith("w1:p1", "do work", 1_000, undefined, undefined, expect.any(Function));
+  });
+
+  it("submits identified Worker turns through the native queue with the exact Core identity", async () => {
+    const queuePrompt = vi.fn(async () => ({ submissionId: "worker-turn-1" }));
+    const runPrompt = vi.fn();
+    const onDispatched = vi.fn();
+    const driver = new TraexDriver({ queuePrompt, runPrompt } as unknown as HerdrPort, "traex", 1_000);
+    const nativeRuntime = { ...runtime, nativeSessionId: "session-1" };
+
+    await expect(driver.submit(nativeRuntime, "do work", { submissionId: "worker-turn-1", onDispatched })).resolves.toEqual({ status: "confirmed-delivered" });
+    expect(queuePrompt).toHaveBeenCalledWith("w1:p1", "do work", { submissionId: "worker-turn-1", expectedSessionId: "session-1" }, undefined);
+    expect(onDispatched).toHaveBeenCalledOnce();
+    expect(runPrompt).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an identified Worker turn has no exact native session fence", async () => {
+    const queuePrompt = vi.fn();
+    const runPrompt = vi.fn();
+    const driver = new TraexDriver({ queuePrompt, runPrompt } as unknown as HerdrPort, "traex", 1_000);
+
+    await expect(driver.submit(runtime, "do work", { submissionId: "worker-turn-1" })).resolves.toMatchObject({ status: "not-delivered" });
+    expect(queuePrompt).not.toHaveBeenCalled();
+    expect(runPrompt).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -154,6 +200,17 @@ describe("agent driver contract", () => {
     await expect(driver.steer(runtime, "change course")).resolves.toEqual({ status: "unsupported" });
   });
 
+  it("starts managed Pi with a deterministic private transcript session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-driver-"));
+    try {
+      const startAgent = vi.fn(async () => undefined);
+      const driver = new PiDriver({ startAgent } as unknown as HerdrPort, "pi", 1_000, true, root);
+      expect(driver.describe()).toMatchObject({ structuredEvents: true, usageReporting: true });
+      await driver.start(runtime, { name: "primary", model: null, transcriptOwnerId: "binding-1" });
+      expect(startAgent).toHaveBeenCalledWith("w1:p1", expect.objectContaining({ args: ["--session-id", expect.stringMatching(/^[0-9a-f-]{36}$/), "--session-dir", expect.stringContaining("binding-1")] }));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("detects all configured Agent runtimes with one Herdr capability probe", async () => {
     const runner = { run: vi.fn(async () => ({ stdout: "[possible values: pi, codex, traex]\n", stderr: "" })) };
 
@@ -164,6 +221,18 @@ describe("agent driver contract", () => {
     })).resolves.toEqual({ codex: true, claude: false, pi: false });
     expect(runner.run).toHaveBeenCalledOnce();
     expect(runner.run).toHaveBeenCalledWith("herdr", ["agent", "start", "--help"]);
+  });
+
+  it("propagates a Herdr capability probe rejection unchanged", async () => {
+    const error = new Error("Herdr capability probe timed out");
+    const runner = { run: vi.fn(async () => { throw error; }) };
+
+    await expect(detectAgentRuntimeAvailabilities({
+      runner, herdrExecutable: "herdr",
+      agents: { codex: process.execPath, claude: "missing-claude", pi: "missing-pi" },
+      pathValue: ""
+    })).rejects.toBe(error);
+    expect(runner.run).toHaveBeenCalledOnce();
   });
 
   it("skips the Herdr capability probe when no configured Agent executable exists", async () => {

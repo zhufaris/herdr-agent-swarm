@@ -1,7 +1,7 @@
 import { GatewayDeliveryError, type GatewayDeliveryIntent, type GatewayFailure } from "../contract/plugin.js";
 import { safeLogError } from "../../runtime/safe-error.js";
 
-const PERMANENT_CODES = new Set(["10002", "200740", "200750", "230028", "230031", "230099", "300309", "300317"]);
+const PERMANENT_CODES = new Set(["10002", "200740", "200750", "230001", "230011", "230019", "230028", "230031", "230072", "230099", "300309", "300317"]);
 const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_CONNECT_TIMEOUT"]);
 const RETRYABLE_CLIENT_STATUSES = new Set([408, 409, 425, 429]);
 
@@ -15,18 +15,25 @@ export function classifyFeishuFailure(error: unknown, intent: GatewayDeliveryInt
   const httpStatus = safe.status ?? null;
   const providerCode = safe.larkCode === undefined ? null : String(safe.larkCode).slice(0, 128);
   const code = safe.code === undefined ? null : String(safe.code).toUpperCase();
-  const timeout = error instanceof Error && (error.name === "AbortError" || /timeout|timed out/i.test(error.message));
   let effectCertainty: GatewayFailure["effectCertainty"] = "uncertain";
   if (httpStatus !== null || providerCode !== null) effectCertainty = "rejected";
+  if (httpStatus === 408 || (httpStatus !== null && httpStatus >= 500)) effectCertainty = "uncertain";
   else if (code !== null && PRE_CONNECT_CODES.has(code)) effectCertainty = "not-started";
+  const uncertainWorkerFinalization = providerCode === "300307" && intent.purpose === "worker-turn" && providerOperation === "finish_streaming_card";
+  if (uncertainWorkerFinalization) effectCertainty = "uncertain";
   let failureClass: GatewayFailure["failureClass"] = "unknown";
-  if (providerCode !== null && PERMANENT_CODES.has(providerCode)) failureClass = "permanent";
-  else if (httpStatus !== null && (RETRYABLE_CLIENT_STATUSES.has(httpStatus) || httpStatus >= 500) || effectCertainty === "not-started") failureClass = "transient";
+  if (uncertainWorkerFinalization || effectCertainty === "uncertain") failureClass = "unknown";
+  else if (providerCode !== null && PERMANENT_CODES.has(providerCode)) failureClass = "permanent";
+  else if ((httpStatus !== null && RETRYABLE_CLIENT_STATUSES.has(httpStatus)) || effectCertainty === "not-started") failureClass = "transient";
   else if (httpStatus !== null && httpStatus >= 400 && httpStatus < 500) failureClass = "permanent";
-  else if (timeout || effectCertainty === "uncertain") failureClass = "unknown";
-  const recoveryKind = providerCode === "300309" && providerOperation === "stream_card_content" && intent.purpose === "primary-answer"
+  const recoveryKind = providerCode === "230011" || providerCode === "230019"
+    ? "defunct_target" as const
+    : providerCode === "300309" && providerOperation === "stream_card_content" && intent.purpose === "primary-answer"
     ? "closed_answer_stream" as const
-    : providerCode === "230031" && (providerOperation === "update_card" || providerOperation === "update_cardkit") && intent.purpose === "primary-answer"
+    : providerCode === "230031" && (providerOperation === "update_card" || providerOperation === "update_cardkit")
+      && (intent.purpose === "worker-main" || intent.purpose === "worker-turn")
+      ? "expired_worker_view_target" as const
+    : (providerCode === "230001" || providerCode === "230031") && (providerOperation === "update_card" || providerOperation === "update_cardkit") && intent.purpose === "primary-answer"
       ? "expired_view_target" as const
     : (providerCode === "230099" && (providerOperation === "update_card" || providerOperation === "update_cardkit") || providerCode === "300317" && providerOperation === "update_cardkit") && intent.purpose === "primary-main"
       ? "stale_main_card" as const : undefined;

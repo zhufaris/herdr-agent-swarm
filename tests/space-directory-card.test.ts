@@ -19,7 +19,7 @@ describe("space directory card", () => {
     expect(serialized).toContain("workspace unavailable");
   });
 
-  it("renders a row-aligned table with short pane ids and full action payloads", () => {
+  it("renders a row-aligned table with canonical pane identities and full action payloads", () => {
     const cards = renderSpaceDirectoryCards([{ spaceName: "datasage", workspaceId: "w5", directories: ["/work/datasage"], panes: [
       { paneId: "w5:p20", name: "Working pane", agentState: "working", foregroundExecutables: ["traex"], bindingId: "binding-20" },
       { paneId: "w5:p21", name: "Free pane", agentState: "idle", foregroundExecutables: ["traex"], claimProjectId: "datasage" },
@@ -38,6 +38,16 @@ describe("space directory card", () => {
     expect(JSON.stringify(rows[1])).toContain('"paneId":"w5:p21"');
   });
 
+  it("uses the native token as the visible fallback when a pane has no name", () => {
+    const cards = renderSpaceDirectoryCards([{ spaceName: "datasage", workspaceId: "w5", directories: ["/work/datasage"], panes: [
+      { paneId: "w5:p21", paneToken: "vdfn", name: "", agentState: "idle", foregroundExecutables: ["traex"] }
+    ] }]);
+    const text = JSON.stringify(cards);
+
+    expect(text).toContain("vdfn");
+    expect(text).not.toContain("w5:p21");
+  });
+
   it("splits large groups without dropping panes", () => {
     const panes = Array.from({ length: 120 }, (_, index) => ({
       paneId: `w1:p${index}`, name: `pane-${String(index).padStart(3, "0")}-${"x".repeat(100)}`, agentState: "idle" as const, foregroundExecutables: ["shell"]
@@ -46,7 +56,7 @@ describe("space directory card", () => {
     const serialized = JSON.stringify(cards);
     expect(cards.length).toBeGreaterThan(1);
     for (const card of cards) expect(JSON.stringify(card).length).toBeLessThanOrEqual(12_500);
-    for (const pane of panes) expect(serialized).toContain(`\`p${pane.paneId.split(":p")[1]}\``);
+    for (const pane of panes) expect(serialized).toContain(`\`${pane.paneId}\``);
   });
 
   it("bounds a group's directory list without exceeding the card budget", () => {

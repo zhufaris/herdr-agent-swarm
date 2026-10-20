@@ -50,6 +50,20 @@ function expectRedacted(value: unknown): void {
 }
 
 describe("LarkSetupProbe", () => {
+  it("accepts the canonical Feishu v3 top-level tenant token response", async () => {
+    const responses = successfulResponses();
+    responses[0] = { status: 200, body: { code: 0, msg: "ok", tenant_access_token: token, expire: 7200 } };
+
+    const checks = await new LarkSetupProbe(new FakeHttpClient(responses)).check(draft());
+
+    expect(checks).toEqual([
+      { id: "lark.auth", status: "pass", summary: "Lark credentials authenticated" },
+      { id: "lark.chat", status: "pass", summary: 'Target chat is readable: "Swarm Chat"' },
+      { id: "lark.bot", status: "pass", summary: "Bot identity matches the configured open ID" }
+    ]);
+    expectRedacted(checks);
+  });
+
   it("authenticates, reads the chat, and verifies bot identity without resource writes", async () => {
     const http = new FakeHttpClient(successfulResponses());
     const checks = await new LarkSetupProbe(http, 1234).check(draft());

@@ -3,16 +3,23 @@ import { createAcceptedCommandStatusView, transitionCommandStatusView, type Comm
 import type { SwarmCommandSource } from "../../domain/swarm-command.js";
 import type { CommandStatusRenderer } from "../../domain/ports/swarm-command.js";
 import type { EnqueueOutboundReplyInput } from "./outbox-queue-store.js";
+import type { PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
 import { mapCommandIntent, mapCommandStatusView, type CommandIntentRow, type CommandStatusViewRow } from "../sqlite-records.js";
 import type { SqliteContext } from "./context.js";
 
 export class SqliteCommandIntentStore {
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext, private readonly dependencies: { enqueue(input: EnqueueOutboundReplyInput): unknown }) {}
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void {
+    this.preparedDeliveryReservation = reservation;
+    this.preparedDeliveryConsumer = consumer;
+  }
 
   accept(input: AcceptCommandIntentInput, source: SwarmCommandSource = "literal", renderStatus: CommandStatusRenderer = identityStatus): AcceptCommandIntentResult {
     const commandJson = JSON.stringify(input.command);
     const contextJson = JSON.stringify(input.context);
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.command-intent-store.write", () => {
       const existing = this.context.database.prepare("SELECT * FROM swarm_command_intents WHERE idempotency_key = ?").get(input.idempotencyKey) as CommandIntentRow | undefined;
       if (existing) {
         const intent = mapCommandIntent(existing);
@@ -27,7 +34,7 @@ export class SqliteCommandIntentStore {
       `).run(input.id, input.idempotencyKey, input.laneKey, commandJson, contextJson, input.replayPolicy, input.acceptedAt, input.acceptedAt);
       const view = createAcceptedCommandStatusView(input, source);
       this.saveStatus(view, renderStatus);
-      this.projectStatus(view, input.context.rootMessageId ?? input.context.sourceMessageId, input.context.primary?.bindingId ?? null, renderStatus);
+      this.projectStatus(view, input.context.rootMessageId ?? input.context.sourceMessageId, input.context.primary?.bindingId ?? null, input.context.primary?.bindingGeneration ?? null, renderStatus);
       const intent = this.get(input.id);
       if (!intent) throw new Error(`Command intent insertion was not observable: ${input.id}`);
       return { outcome: "accepted", intent };
@@ -44,8 +51,19 @@ export class SqliteCommandIntentStore {
     return row ? mapCommandStatusView(row) : null;
   }
 
+  findExact(input: AcceptCommandIntentInput, source: SwarmCommandSource): CommandIntent | null {
+    const row = this.context.database.prepare(`
+      SELECT intent.* FROM swarm_command_intents intent
+      JOIN command_status_views status ON status.intent_id = intent.id
+      WHERE intent.idempotency_key = ? AND status.source = ?
+    `).get(input.idempotencyKey, source) as CommandIntentRow | undefined;
+    if (!row || row.lane_key !== input.laneKey || row.command_json !== JSON.stringify(input.command)
+      || row.context_json !== JSON.stringify(input.context) || row.replay_policy !== input.replayPolicy) return null;
+    return mapCommandIntent(row);
+  }
+
   claimNext(laneKey?: string, renderStatus: CommandStatusRenderer = identityStatus): CommandIntent | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.command-intent-store.write", () => {
       const row = this.context.database.prepare(`
         SELECT candidate.* FROM swarm_command_intents candidate
         WHERE candidate.state = 'accepted' ${laneKey ? "AND candidate.lane_key = ?" : ""}
@@ -68,7 +86,7 @@ export class SqliteCommandIntentStore {
   }
 
   finish(id: string, state: CommandIntentTerminalState, outcome: CommandIntent["outcome"], renderStatus: CommandStatusRenderer = identityStatus): CommandIntent | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.command-intent-store.write", () => {
       const occurredAt = now();
       const changed = this.context.database.prepare("UPDATE swarm_command_intents SET state = ?, outcome_json = ?, updated_at = ? WHERE id = ? AND state IN ('executing','uncertain')")
         .run(state, outcome === null ? null : JSON.stringify(outcome), occurredAt, id);
@@ -86,7 +104,7 @@ export class SqliteCommandIntentStore {
 
   recoverExecuting(recoveredAt: string, renderStatus: CommandStatusRenderer = identityStatus): number {
     const outcome = JSON.stringify({ code: "restart_during_execution", detail: "Command execution outcome is uncertain after restart", operationKind: null, operationId: null });
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.command-intent-store.write", () => {
       const ids = (this.context.database.prepare("SELECT id FROM swarm_command_intents WHERE state = 'executing' ORDER BY created_at").all() as Array<{ id: string }>).map(({ id }) => id);
       const changed = Number(this.context.database.prepare("UPDATE swarm_command_intents SET state = 'uncertain', outcome_json = COALESCE(outcome_json, ?), updated_at = ? WHERE state = 'executing'").run(outcome, recoveredAt).changes);
       for (const id of ids) { const intent = this.get(id); if (intent) this.transitionStatus(intent, recoveredAt, renderStatus); }
@@ -100,7 +118,7 @@ export class SqliteCommandIntentStore {
     const next = transitionCommandStatusView(current, { state: intent.state, attemptCount: intent.attemptCount, outcome: intent.outcome, occurredAt });
     if (next === current) return;
     this.saveStatus(next, renderStatus);
-    this.projectStatus(next, intent.context.rootMessageId ?? intent.context.sourceMessageId, intent.context.primary?.bindingId ?? null, renderStatus);
+    this.projectStatus(next, intent.context.rootMessageId ?? intent.context.sourceMessageId, intent.context.primary?.bindingId ?? null, intent.context.primary?.bindingGeneration ?? null, renderStatus);
   }
 
   private saveStatus(view: CommandStatusView, renderStatus: CommandStatusRenderer): void {
@@ -113,20 +131,39 @@ export class SqliteCommandIntentStore {
     `).run(view.intentId, view.commandKind, view.summary, view.source, view.actorOpenId, view.laneKey, view.state, view.attemptCount, view.outcome === null ? null : JSON.stringify(view.outcome), view.messageId, view.cardId, cardJson, view.revision, view.deliveredRevision, view.createdAt, view.updatedAt);
   }
 
-  private projectStatus(view: CommandStatusView, replyTarget: string, bindingId: string | null, renderStatus: CommandStatusRenderer): void {
+  private projectStatus(view: CommandStatusView, replyTarget: string, bindingId: string | null, bindingGeneration: number | null, renderStatus: CommandStatusRenderer): void {
     const projectionKey = `command-status:${view.intentId}`;
-    const create = this.context.database.prepare("SELECT state, first_claimed_at FROM outbound_replies WHERE idempotency_key = ?").get(`${projectionKey}:create`) as { state: string; first_claimed_at: string | null } | undefined;
-    if (!view.messageId && (!create || (create.state === "pending" && create.first_claimed_at === null))) {
-      this.dependencies.enqueue({ id: `${projectionKey}:create`, idempotencyKey: `${projectionKey}:create`, bindingId, targetRole: "operation_result", rootMessageId: replyTarget, kind: "card_reply", payload: JSON.stringify(renderStatus(view)), projectionKey, snapshotRevision: view.revision, laneKeyOverride: projectionKey });
+    const create = this.context.database.prepare("SELECT state, first_claimed_at, gateway_plan_json FROM outbound_replies WHERE idempotency_key = ?").get(`${projectionKey}:create`) as { state: string; first_claimed_at: string | null; gateway_plan_json: string | null } | undefined;
+    if (!view.messageId && (!create || (create.state === "pending" && create.first_claimed_at === null && create.gateway_plan_json === null))) {
+      this.enqueueStatus({ id: `${projectionKey}:create`, idempotencyKey: `${projectionKey}:create`, bindingId, bindingGeneration, targetRole: "operation_result", rootMessageId: replyTarget, kind: "card_reply", payload: JSON.stringify(renderStatus(view)), projectionKey, snapshotRevision: view.revision, laneKeyOverride: projectionKey, ...(bindingId === null ? { globalDelivery: true as const } : {}) });
       return;
     }
     if (!view.messageId) return;
-    this.dependencies.enqueue({ id: `${projectionKey}:update:${view.revision}`, idempotencyKey: `${projectionKey}:update:${view.revision}`, bindingId, targetRole: "operation_result", rootMessageId: view.messageId, kind: "card_update", payload: JSON.stringify(renderStatus(view)), projectionKey, snapshotRevision: view.revision, laneKeyOverride: projectionKey });
+    this.enqueueStatus({ id: `${projectionKey}:update:${view.revision}`, idempotencyKey: `${projectionKey}:update:${view.revision}`, bindingId, bindingGeneration, targetRole: "operation_result", rootMessageId: view.messageId, kind: "card_update", payload: JSON.stringify(renderStatus(view)), projectionKey, snapshotRevision: view.revision, laneKeyOverride: projectionKey, ...(bindingId === null ? { globalDelivery: true as const } : {}) });
+  }
+
+  private enqueueStatus(input: EnqueueOutboundReplyInput): void {
+    if (!input.bindingId) {
+      if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Command Intent prepared delivery is not connected");
+      this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(input));
+      return;
+    }
+    if (input.bindingGeneration === null || input.bindingGeneration === undefined
+      || !this.hasExactActiveBinding(input.bindingId, input.bindingGeneration)) return;
+    if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Command Intent prepared delivery is not connected");
+    this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply(input));
+  }
+
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void {
+    queueMicrotask(() => { for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery); });
+  }
+  private hasExactActiveBinding(id: string, generation: number): boolean {
+    return this.context.database.prepare("SELECT 1 FROM bindings WHERE id=? AND generation=? AND state='active' AND lifecycle='active' AND attachment='attached'").get(id, generation) !== undefined;
   }
 
   registerWorkerThreadEntry(input: { commandIntentId: string; workerId: string; workerSessionGeneration: number; bindingId: string; bindingGeneration: number; rootMessageId: string }): boolean {
     const timestamp = now();
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.command-intent-store.write", () => {
       const existing = this.context.database.prepare(`
         SELECT worker_id, worker_session_generation, binding_id, binding_generation, root_message_id
         FROM worker_thread_entry_requests WHERE command_intent_id = ?

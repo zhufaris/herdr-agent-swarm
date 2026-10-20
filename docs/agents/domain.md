@@ -22,14 +22,14 @@ This repository uses a multi-context layout:
 │   ├── adr/                         # system-wide decisions, when present
 │   └── domain/
 │       ├── primary-session/CONTEXT.md
-│       ├── prompt-execution/CONTEXT.md
+│       ├── agent-input/CONTEXT.md
 │       ├── worker-runtime/CONTEXT.md
 │       ├── conversation-projection/CONTEXT.md
 │       └── delivery-operations/CONTEXT.md
 └── src/
 ```
 
-The current contexts are Primary Session, Prompt Execution, Worker Runtime, Conversation Projection, and Delivery and Operations. `CONTEXT-MAP.md` is the routing authority when contexts are added, renamed, or split.
+The current contexts are Primary Session, Agent Input, Worker Runtime, Conversation Projection, and Delivery and Operations. `CONTEXT-MAP.md` is the routing authority when contexts are added, renamed, or split.
 
 ## Use the glossary's vocabulary
 

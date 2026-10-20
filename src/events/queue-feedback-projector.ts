@@ -30,10 +30,17 @@ export class QueueFeedbackProjector {
   }) {}
 
   start(bus: LifecycleEventSubscriber): () => void {
-    this.unsubscribe = bus.onBridgeEvent("queue-feedback-projector", (event) => {
+    if (this.unsubscribe) return this.unsubscribe;
+    const unsubscribe = bus.onBridgeEvent("queue-feedback-projector", (event) => {
       if (REFRESH_EVENTS.has(event.type)) return this.refresh(event.bindingId);
     });
-    return () => { this.unsubscribe?.(); this.unsubscribe = null; };
+    const stopSubscription = () => {
+      if (this.unsubscribe !== stopSubscription) return;
+      unsubscribe();
+      this.unsubscribe = null;
+    };
+    this.unsubscribe = stopSubscription;
+    return stopSubscription;
   }
 
   async converge(): Promise<void> {

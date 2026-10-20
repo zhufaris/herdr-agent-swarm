@@ -14,6 +14,19 @@ import { primaryPresentation } from "./helpers/presentation.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
+function queueLegacyPrompt(store: SqliteBindingStore, bindingId: string, scheduler: InProcessPromptWorkScheduler, messageId: string, body: string): void {
+  const view = createQueuedRunCard({
+    promptId: messageId, bindingId, bindingGeneration: 1, title: body,
+    workspaceId: "w1", paneId: "w1:p1", requestText: body, queuePosition: 1,
+    occurredAt: new Date().toISOString()
+  });
+  store.acceptPrompt({
+    prompt: { id: messageId, bindingId, larkMessageId: messageId, ingressSource: "feishu", actorOpenId: "user", body },
+    view, rootMessageId: "root-1", answerCard: {}
+  });
+  scheduler.wake({ kind: "prompt-ready", bindingId });
+}
+
 async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
   let release!: () => void;
   const hold = new Promise<void>((resolve) => { release = resolve; });
@@ -32,7 +45,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
   };
   const herdr: HerdrPort = {
     async assertWorkspace() {},
-    async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+    async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], terminalId: "terminal-1", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" } }]; },
     async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
     async runPrompt(_paneId, text, _timeoutMs, onObservation, _signal, onDispatched) {
       turns.push(text);
@@ -58,7 +71,7 @@ async function createAutomaticSteeringHarness(maxQueueDepth = 20) {
   const bindingId = store.findBindingByPane("w1:p1")!.id;
   const message = (id: string, text: string, hasUnsupportedContent = false) => ({ eventId: `event-${id}`, messageId: id, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false, hasUnsupportedContent });
   const send = (id: string, text: string, hasUnsupportedContent = false) => coordinator.handleMessage(message(id, text, hasUnsupportedContent));
-  await send("parent-message", "parent");
+  queueLegacyPrompt(store, bindingId, scheduler, "parent-message", "parent");
   await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "working" }));
   const parent = store.listRunCards(bindingId)[0]!;
   schedulerWake.mockClear();
@@ -75,6 +88,7 @@ describe("active-turn steering", () => {
     const escapes: string[] = [];
     const info = vi.fn();
     const logger = { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+    const scheduler = new InProcessPromptWorkScheduler(logger);
     let cardNumber = 0;
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
@@ -113,12 +127,12 @@ describe("active-turn steering", () => {
     publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation);
     projector.start();
-    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger);
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger, 30_000, scheduler);
     await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
     const message = (n: number, text: string) => ({ eventId: `e${n}`, messageId: `m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 
-    await coordinator.handleMessage(message(1, "parent"));
+    queueLegacyPrompt(store, bindingId, scheduler, "m1", "parent");
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
     store.updateBinding(bindingId, { agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1" });
     let activePrompt = store.getActiveOrdinaryPrompt(bindingId, 1)!;
@@ -132,8 +146,9 @@ describe("active-turn steering", () => {
     store.acceptPrompt({ prompt: { id: "queued-turn", bindingId, larkMessageId: "queued-message", actorOpenId: "user", body: "queued turn" }, view: queued, rootMessageId: "root-1", answerCard: {} });
     await publisher.drain();
     await coordinator.handleMessage(message(4, "/swarm stop"));
-    await vi.waitFor(() => expect(store.database.prepare("SELECT kind, state FROM turn_control_operations").all()).toEqual([expect.objectContaining({ kind: "interrupt", state: "delivered" })]));
     await vi.waitFor(() => expect(escapes).toEqual(["w1:p1"]));
+    await publisher.drain();
+    expect(store.database.prepare("SELECT kind, state FROM turn_control_operations").all()).toEqual([expect.objectContaining({ kind: "interrupt", state: "dispatching" })]);
     store.finishPaneControlOperation(runningModel.operation.id, "confirmed");
     expect(store.listRunCards(bindingId).some((view) => view.requestText === "/swarm stop")).toBe(false);
     await Promise.all([coordinator.handleMessage(message(2, "/swarm steer steer one")), coordinator.handleMessage(message(3, "/swarm steer steer two"))]);
@@ -168,7 +183,7 @@ describe("active-turn steering", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], terminalId: "terminal-1", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" } }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
@@ -182,13 +197,15 @@ describe("active-turn steering", () => {
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const logger = pino({ enabled: false });
+    const scheduler = new InProcessPromptWorkScheduler(logger);
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
-    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger, 30_000, scheduler); await coordinator.start();
     const bindingId = store.findBindingByPane("w1:p1")!.id;
     const message = (n: number, text: string) => ({ eventId: `e${n}`, messageId: `m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 
-    await coordinator.handleMessage(message(1, "parent"));
+    queueLegacyPrompt(store, bindingId, scheduler, "m1", "parent");
     await vi.waitFor(() => expect(store.listRunCards(bindingId)[0]).toMatchObject({ phase: "running" }));
     await coordinator.handleMessage(message(2, "/swarm steer late steer"));
     expect(steering).toEqual([]);
@@ -221,12 +238,15 @@ describe("active-turn steering", () => {
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const logger = pino({ enabled: false });
+    const scheduler = new InProcessPromptWorkScheduler(logger);
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
-    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger, 30_000, scheduler); await coordinator.start();
+    const bindingId = store.findBindingByPane("w1:p1")!.id;
     const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `approval-e${n}`, messageId: `approval-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 
-    await send(1, "parent");
+    queueLegacyPrompt(store, bindingId, scheduler, "approval-m1", "parent");
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
     await send(2, "/swarm steer continue");
     expect(store.database.prepare("SELECT state FROM pane_control_operations WHERE payload = 'continue'").get()).toBeUndefined();
@@ -236,13 +256,11 @@ describe("active-turn steering", () => {
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("keeps messages FIFO while the active turn is blocked", async () => {
+  it("submits ordinary input independently while a legacy turn is blocked", async () => {
     let output = "initial";
     let release!: () => void;
     const hold = new Promise<void>((resolve) => { release = resolve; });
     const turns: string[] = [];
-    const steering: string[] = [];
-    const escapes: string[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "topic-1", rootMessageId: "root-1" }; },
@@ -250,7 +268,7 @@ describe("active-turn steering", () => {
     };
     const herdr: HerdrPort = {
       async assertWorkspace() {},
-      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"] }]; },
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle", foregroundExecutables: ["traex"], terminalId: "terminal-1", agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" } }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
       async runPrompt(_paneId, text, _timeoutMs, onObservation) {
         turns.push(text);
@@ -259,146 +277,79 @@ describe("active-turn steering", () => {
         await onObservation?.({ state: "done", stateSource: "structured", output });
         return "done";
       },
-      async sendEscape(paneId) { escapes.push(paneId); }, async renamePane() {}
+      async sendEscape() {}, async renamePane() {}
     };
     const config = { lark: { appId: "app", appSecret: "secret", chatId: "chat", botOpenId: "bot", allowedOpenIds: ["u1", "u2", "creator", "user", "user-1"], adminOpenIds: ["u1", "u2", "creator", "user", "user-1"] }, herdr: { workspaceId: "w1", workspaceCwd: "/repo", executable: "herdr" }, projects: [{ id: "default", displayName: "Default project", description: "Test project", workspaceId: "w1", cwd: "/repo" }], defaultProjectId: "default", projectsConfigPath: "test", traex: { executable: "traex" }, databasePath: ":memory:", http: { host: "127.0.0.1", port: 8787 }, logLevel: "silent", commandTimeoutMs: 1000, turnTimeoutMs: 1000, reconcileIntervalMs: 60_000, maxQueueDepth: 20, larkMessageChunkSize: 3500 } as const satisfies BridgeConfig;
     const store = new SqliteBindingStore(":memory:"); const bus = new BridgeEventBus();
+    const logger = pino({ enabled: false });
+    const scheduler = new InProcessPromptWorkScheduler(logger);
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
-    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, pino({ enabled: false })); await coordinator.start();
+    const coordinator = createTestRouter(config, store, herdr, lark, bus, publisher, logger, 30_000, scheduler); await coordinator.start();
+    const bindingId = store.findBindingByPane("w1:p1")!.id;
     const send = (n: number, text: string) => coordinator.handleMessage({ eventId: `blocked-e${n}`, messageId: `blocked-m${n}`, chatId: "chat", topicId: "topic-1", rootMessageId: "root-1", actorOpenId: "user", text, mentionsBot: false, isRootMessage: false });
 
-    await send(1, "parent");
+    queueLegacyPrompt(store, bindingId, scheduler, "blocked-m1", "parent");
     await vi.waitFor(() => expect(store.findBindingByPane("w1:p1")).toMatchObject({ lastAgentState: "blocked" }));
     await send(2, "later turn");
-    const pendingBeforeStop = store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id);
-    await send(3, "/swarm stop");
-    await send(4, "/swarm steer capacity queue status");
-    expect(steering).toEqual([]);
-    await send(5, "/swarm stop");
-    expect(steering).toEqual([]);
-    expect(escapes).toEqual([]); expect(turns).toEqual(["parent"]);
-    expect(store.countPendingPrompts(store.findBindingByPane("w1:p1")!.id)).toBe(pendingBeforeStop);
-    expect(store.listRunCards(store.findBindingByPane("w1:p1")!.id).some((view) => view.requestText === "/swarm stop")).toBe(false);
+    expect(store.database.prepare("SELECT text, state FROM submission_intents WHERE source_message_key = ?").get("blocked-m2")).toEqual({ text: "later turn", state: "prepared" });
+    const pendingBeforeStop = store.countPendingPrompts(bindingId);
+    expect(turns).toEqual(["parent"]);
+    expect(store.countPendingPrompts(bindingId)).toBe(pendingBeforeStop);
     release();
-    await vi.waitFor(() => expect(turns).toHaveLength(2));
-    expect(turns[1]).toBe("later turn");
+    await vi.waitFor(() => expect(store.getPrompt("blocked-m1")?.state).toBe("delivered"));
+    expect(turns).toEqual(["parent"]);
 
     await coordinator.stop(); await projector.stop(); await publisher.stop(); store.close();
   });
 });
 
 describe("ordinary continuation messages", () => {
-  it("wakes durable ordinary work before queued-card projection completes", async () => {
-    const harness = await createAutomaticSteeringHarness();
-    harness.release();
-    await vi.waitFor(() => expect(harness.store.getPrompt(harness.parent.promptId)?.state).toBe("delivered"));
-    await harness.publisher.stop();
-    harness.schedulerWake.mockClear();
-    let releaseProjection!: () => void;
-    const projectionBlocked = new Promise<void>((resolve) => { releaseProjection = resolve; });
-    let projectionStarted!: () => void;
-    const projectionEntered = new Promise<void>((resolve) => { projectionStarted = resolve; });
-    const unsubscribe = harness.bus.onBridgeEvent("blocked-queue-projection", async (event) => {
-      if (event.type !== "PromptQueued") return;
-      projectionStarted();
-      await projectionBlocked;
-    });
-
-    const handling = harness.send("nonblocking-dispatch", "investigate another issue");
-    await projectionEntered;
-
-    const prompt = harness.store.database.prepare("SELECT id, state FROM prompt_jobs WHERE lark_message_id = ?").get("nonblocking-dispatch") as { id: string; state: string };
-    expect(["queued", "running"]).toContain(prompt.state);
-    expect(harness.store.database.prepare("SELECT kind, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.id)).toEqual({ kind: "stream_card_create", state: "pending" });
-    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
-    await vi.waitFor(() => expect(harness.turns).toContain("investigate another issue"));
-
-    releaseProjection();
-    await handling;
-    unsubscribe();
-    await harness.close();
-  });
-
-  it("keeps an eligible continuation as ordinary FIFO work", async () => {
+  it("submits an eligible continuation independently while a legacy turn is active", async () => {
     const harness = await createAutomaticSteeringHarness();
     await harness.send("auto-message", "继续");
-    expect(harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === "继续")!.promptId)).toMatchObject({
-      body: "继续", state: "queued"
+    expect(harness.store.database.prepare("SELECT source_message_key, text, owner_id, state FROM submission_intents WHERE source_message_key = ?").get("auto-message")).toEqual({
+      source_message_key: "auto-message", text: "继续", owner_id: harness.bindingId, state: "prepared"
     });
-    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
-    expect(harness.store.loadQueueFeedbackInputs(harness.bindingId).queued.map((view) => view.requestText)).toContain("继续");
+    expect(harness.store.getPromptInputBySource("feishu", "auto-message")).toBeNull();
+    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
     await harness.close();
   });
 
   it.each([
     ["ambiguous new work", "修复另一个问题", false],
     ["unsupported rich content", "继续", true]
-  ])("keeps %s as an ordinary FIFO turn", async (_label, text, hasUnsupportedContent) => {
+  ])("keeps %s as unchanged Agent Input", async (_label, text, hasUnsupportedContent) => {
     const harness = await createAutomaticSteeringHarness();
-    await harness.send(`ordinary-${_label.replaceAll(" ", "-")}`, text, hasUnsupportedContent);
-    const prompt = harness.store.getPrompt(harness.store.listRunCards(harness.bindingId).find((view) => view.requestText === text)!.promptId);
-    expect(prompt).toMatchObject({ body: text, state: "queued" });
-    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
+    const messageId = `ordinary-${_label.replaceAll(" ", "-")}`;
+    await harness.send(messageId, text, hasUnsupportedContent);
+    expect(harness.store.database.prepare("SELECT text, state FROM submission_intents WHERE source_message_key = ?").get(messageId)).toEqual({ text, state: "prepared" });
+    expect(harness.store.getPromptInputBySource("feishu", messageId)).toBeNull();
     await harness.close();
   });
 
-  it("retains /instances command semantics instead of classifying it as a prompt", async () => {
+  it("routes non-reserved slash text as Agent Input", async () => {
     const harness = await createAutomaticSteeringHarness();
     await harness.send("instances-message", "/instances");
-    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
+    expect(harness.store.database.prepare("SELECT text, state FROM submission_intents WHERE source_message_key = ?").get("instances-message")).toEqual({ text: "/instances", state: "prepared" });
     await harness.close();
   });
 
-  it("preserves one durable ordinary decision and one scheduler wake for duplicate delivery", async () => {
+  it("preserves one durable Submission Intent for duplicate delivery", async () => {
     const harness = await createAutomaticSteeringHarness();
     const duplicate = harness.message("duplicate-message", "继续");
     await harness.coordinator.handleMessage(duplicate);
     await harness.coordinator.handleMessage(duplicate);
-    const rows = harness.store.database.prepare("SELECT id, body, state FROM prompt_jobs WHERE lark_message_id = ?").all(duplicate.messageId);
-    expect(rows).toEqual([{ id: expect.any(String), body: "继续", state: "queued" }]);
-    expect(harness.schedulerWake).toHaveBeenCalledWith({ kind: "prompt-ready", bindingId: harness.bindingId });
+    const rows = harness.store.database.prepare("SELECT submission_id, text, state FROM submission_intents WHERE source_message_key = ?").all(duplicate.messageId);
+    expect(rows).toEqual([{ submission_id: expect.any(String), text: "继续", state: "prepared" }]);
     await harness.close();
   });
 
-  it("rejects an eligible continuation when the ordinary queue is full", async () => {
+  it("does not defer Agent Input when legacy Prompt capacity is full", async () => {
     const harness = await createAutomaticSteeringHarness(1);
-    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
-    await harness.send("full-auto-message", "继续");
-    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
-    await harness.close();
-  });
-
-  it("rejects ambiguous ordinary work when the queue is full", async () => {
-    const harness = await createAutomaticSteeringHarness(1);
-    await harness.send("full-ordinary-message", "修复另一个问题");
-    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
-    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
-    await harness.close();
-  });
-
-  it("rejects an eligible continuation when its full-queue parent invalidates before acceptance", async () => {
-    const harness = await createAutomaticSteeringHarness(1);
-    const eventsBefore = harness.bridgeEvents.length;
-    const auditsBefore = Number((harness.store.database.prepare("SELECT COUNT(*) AS count FROM audit_log").get() as { count: number }).count);
-    harness.replyCard.mockClear();
-    const acceptPrompt = harness.store.acceptPrompt.bind(harness.store);
-    vi.spyOn(harness.store, "acceptPrompt").mockImplementation((input) => {
-      harness.store.markPromptObservationDetached(harness.parent.promptId, "test race");
-      return acceptPrompt(input);
-    });
-    await harness.send("full-fallback-message", "继续");
-    await vi.waitFor(() => expect(harness.replyCard).toHaveBeenCalledTimes(1));
-    expect(harness.store.listRunCards(harness.bindingId).map((view) => view.requestText)).toEqual(["parent"]);
-    expect(harness.store.countPendingPrompts(harness.bindingId)).toBe(1);
-    expect(harness.schedulerWake.mock.calls.filter(([hint]) => hint.kind === "prompt-ready")).toHaveLength(0);
-    expect(harness.bridgeEvents).toHaveLength(eventsBefore);
-    expect(harness.store.database.prepare("SELECT COUNT(*) AS count FROM audit_log").get()).toEqual({ count: auditsBefore });
-    expect(harness.error.mock.calls.some(([record]) => record.event === "lark-message-handling-failed")).toBe(false);
-    expect(harness.info.mock.calls).toContainEqual([expect.objectContaining({ event: "lark-message-accepted", messageId: "full-fallback-message", disposition: "rejected" }), "completed durable inbound handling"]);
+    await harness.send("full-message", "继续");
+    expect(harness.store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = ?").get("event-full-message")).toEqual({ state: "accepted" });
+    expect(harness.store.database.prepare("SELECT text, state FROM submission_intents WHERE source_message_key = ?").get("full-message")).toEqual({ text: "继续", state: "prepared" });
     await harness.close();
   });
 

@@ -36,10 +36,13 @@ export class CardUpdateScheduler {
     const existing = this.pending.get(cardKey);
     const item = existing ?? { desiredVersion: version, timer: null, dueAt: now + delayMs, requestedAt: now, inFlight: false, requestedWhileInFlight: false, priority, consecutiveFailures: 0 };
     if (existing) this.coalesced += 1;
-    if (item.inFlight) item.requestedWhileInFlight = true;
+    const previousPriority = item.priority;
+    if (item.inFlight && (version > item.desiredVersion || priority === "terminal")) item.requestedWhileInFlight = true;
     item.desiredVersion = Math.max(item.desiredVersion, version);
     if (priorityRank(priority) > priorityRank(item.priority)) item.priority = priority;
-    item.dueAt = Math.min(item.dueAt, now + delayMs);
+    item.dueAt = priority === "normal" && previousPriority === "normal"
+      ? now + delayMs
+      : Math.min(item.dueAt, now + delayMs);
     this.pending.set(cardKey, item);
     if (item.inFlight) return;
     this.arm(cardKey, item);
@@ -91,6 +94,8 @@ export class CardUpdateScheduler {
     item.requestedWhileInFlight = false;
     const version = item.desiredVersion;
     const priority = item.priority;
+    item.priority = "normal";
+    item.dueAt = Number.POSITIVE_INFINITY;
     const startedAt = Date.now();
     let failed = false;
     try {
@@ -108,12 +113,12 @@ export class CardUpdateScheduler {
       item.inFlight = false;
       if (this.stopped) return;
       if (failed || item.desiredVersion > version || item.requestedWhileInFlight) {
-        if (!failed && (item.priority === "terminal" || item.requestedWhileInFlight)) this.launchFlush(cardKey);
+        if (!failed && priorityRank(item.priority) === priorityRank("terminal")) this.launchFlush(cardKey);
         else {
-          const retryDelayMs = failed
-            ? Math.min(Math.max(1, this.intervalMs) * (2 ** (item.consecutiveFailures - 1)), 30_000)
-            : this.intervalMs;
-          item.dueAt = Date.now() + retryDelayMs;
+          if (failed) {
+            const retryDelayMs = Math.min(Math.max(1, this.intervalMs) * (2 ** (item.consecutiveFailures - 1)), 30_000);
+            item.dueAt = Date.now() + retryDelayMs;
+          } else if (!Number.isFinite(item.dueAt)) item.dueAt = Date.now() + this.intervalMs;
           this.arm(cardKey, item);
         }
       } else this.pending.delete(cardKey);

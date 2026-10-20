@@ -4,7 +4,6 @@ import type { ShutdownContext } from "../runtime/shutdown-context.js";
 import type { CardActionRouterPort } from "./card-action-router.js";
 import type { HerdrRuntimeReconcilerPort } from "./herdr-runtime-reconciler.js";
 import type { DurableInboundPipelinePort } from "./durable-inbound-pipeline.js";
-import type { PromptRunWorkflowPort } from "./prompt-run-workflow.js";
 import type { RetiredPaneCleanupWorkflowPort } from "./retired-pane-cleanup-workflow.js";
 import type { SessionOperationWorkflowPort } from "./session-operation-workflow.js";
 import type { StartupRecoveryWorkflowPort } from "./startup-recovery-workflow.js";
@@ -22,7 +21,7 @@ export interface InboundRouterPort {
 }
 
 export interface InboundRouterOptions {
-  gatewayIngress: Pick<GatewayIngressPort, "stop">; promptRun: PromptRunWorkflowPort; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandRuntime, "stop">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
+  gatewayIngress: Pick<GatewayIngressPort, "stop">; reconciler: HerdrRuntimeReconcilerPort; retiredPaneCleanup: RetiredPaneCleanupWorkflowPort; sessionOperations: SessionOperationWorkflowPort; swarmCommands: Pick<SwarmCommandRuntime, "stop">; inboundPipeline: DurableInboundPipelinePort; cardActionRouter: CardActionRouterPort; startupRecovery: StartupRecoveryWorkflowPort;
 }
 
 export class InboundRouter implements InboundRouterPort {
@@ -42,12 +41,12 @@ export class InboundRouter implements InboundRouterPort {
   async handleMessage(message: IncomingLarkMessage): Promise<void> { await this.options.inboundPipeline.receive(message); }
   async handleCardAction(action: IncomingLarkCardAction): Promise<import("../domain/types.js").LarkCardActionResult | void> { return this.options.cardActionRouter.handle(action); }
 
-  async stop(context?: ShutdownContext): Promise<void> {
+  async stop(_context?: ShutdownContext): Promise<void> {
     await this.options.startupRecovery.stop();
     const cardActionsStopped = this.options.cardActionRouter.stop();
     await this.options.gatewayIngress.stop();
     await Promise.allSettled([this.options.inboundPipeline.stop(), cardActionsStopped]);
     await this.options.swarmCommands.stop();
-    await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.promptRun.stop(context), this.options.sessionOperations.stop()]);
+    await Promise.allSettled([this.options.retiredPaneCleanup.stop(), this.options.reconciler.stop(), this.options.sessionOperations.stop()]);
   }
 }

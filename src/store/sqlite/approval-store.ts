@@ -14,7 +14,7 @@ export class SqliteApprovalStore {
   }
 
   resolveApprovalRequest(input: { requestId: string; actorId: string; approved: boolean; now: string; grantId: string }): { outcome: "approved" | "rejected" | "missing" | "unauthorized" | "expired" | "duplicate"; request: ApprovalRequest | null; grant: ApprovalGrant | null } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.approval-store.write", () => {
       const request = this.getApprovalRequest(input.requestId);
       if (!request) return { outcome: "missing", request: null, grant: null };
       if (request.actorId !== input.actorId) return { outcome: "unauthorized", request, grant: null };
@@ -32,7 +32,7 @@ export class SqliteApprovalStore {
   }
 
   consumeApprovalGrant(input: ApprovalIdentity & { grantId: string; now: string }): "consumed" | "missing" | "expired" | "used" | "mismatch" {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.approval-store.write", () => {
       const grant = this.getApprovalGrant(input.grantId);
       if (!grant) return "missing";
       if (grant.consumedAt) return "used";

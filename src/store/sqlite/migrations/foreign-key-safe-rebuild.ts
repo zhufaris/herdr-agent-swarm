@@ -3,11 +3,16 @@ import type { SqliteContext } from "../context.js";
 interface ForeignKeyViolation { table: string; rowid: number | null; parent: string; fkid: number }
 
 export function runForeignKeySafeRebuild(context: SqliteContext, label: string, rebuild: () => void): void {
+  context.observeManualTransactions("sqlite.migrations.foreign-key-rebuild", () => runRebuild(context, label, rebuild));
+}
+
+function runRebuild(context: SqliteContext, label: string, rebuild: () => void): void {
   const { database } = context;
   if (database.isTransaction) throw new Error(`${label} cannot start inside an active transaction`);
   database.exec("PRAGMA foreign_keys = OFF");
   try {
     database.exec("BEGIN IMMEDIATE");
+    context.assertMigrationLeaseGuard();
     rebuild();
     const violation = database.prepare("PRAGMA foreign_key_check").get() as ForeignKeyViolation | undefined;
     if (violation) throw new Error(`${label} produced a foreign-key violation: ${JSON.stringify(violation)}`);

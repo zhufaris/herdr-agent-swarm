@@ -1,21 +1,14 @@
-import { appendWithinCardLimit } from "./card-payload.js";
-
 export type FinalAnswerElement = { tag: string; [key: string]: unknown };
 
 const CODE_FOLD_LINE_LIMIT = 80;
 const CODE_FOLD_CHARACTER_LIMIT = 6_000;
-const COMMAND_TARGET_LIMIT = 160;
-const COMMAND_OUTPUT_LIMIT = 4_000;
-const COMMAND_OUTPUT_TRUNCATION_MARKER = "…（命令输出已截断）";
-const COMMAND_HEADING = /^◆ \*\*Ran\*\*(?: · (.+))?$/;
 const ACTIVITY_EMOJI = { Skill: "🧩", Read: "📖", Search: "🔍", Edit: "✏️", Wait: "⏳", Agent: "🤖", Tool: "🛠️" } as const;
 
 type AnswerContentBlock =
   | { kind: "markdown"; content: string }
-  | { kind: "code"; source: string; language: string; code: string }
-  | { kind: "command"; source: string; title: string; compact: string; command: string; output: string | null; terminal: boolean };
+  | { kind: "code"; source: string; language: string; code: string };
 
-/** Replaces exact bridge-generated command blocks with Herdr-like summary rows. */
+/** Decorates exact bridge-generated activity rows while preserving Markdown literals. */
 export function compactAnswerToolActivity(content: string): string {
   const lines = content.split("\n");
   const rendered: string[] = [];
@@ -29,64 +22,29 @@ export function compactAnswerToolActivity(content: string): string {
       continue;
     }
     if (fence) { fenceMarker = "`"; rendered.push(lines[index]!); index += 1; continue; }
-    const command = parseCommandBlock(lines, index);
-    if (!command) { rendered.push(decorateActivityLine(lines[index]!)); index += 1; continue; }
-    rendered.push(command.block.compact);
-    index = command.nextIndex;
+    rendered.push(decorateActivityLine(lines[index]!));
+    index += 1;
   }
   return rendered.join("\n");
 }
 
 /** Turns final answer text into CardKit content without adding card metadata or delivery state. */
-export function foldFinalAnswerContent(content: string, payloadLimit = 12_000): FinalAnswerElement[] {
+export function foldFinalAnswerContent(content: string, _payloadLimit = 12_000): FinalAnswerElement[] {
   const elements: FinalAnswerElement[] = [];
   for (const block of splitFinalAnswerBlocks(content)) {
-    const additions = renderBlock(block);
-    if (block.kind !== "command" || appendWithinCardLimit(elements, additions, 800, payloadLimit)) { elements.push(...additions); continue; }
-    const fitted = fitCommandPanel(elements, block, payloadLimit);
-    elements.push(...(fitted ?? [{ tag: "markdown", content: block.compact }]));
+    elements.push(...renderBlock(block));
   }
   return elements;
 }
 
-function fitCommandPanel(elements: readonly object[], block: Extract<AnswerContentBlock, { kind: "command" }>, payloadLimit: number): FinalAnswerElement[] | null {
-  if (!block.terminal || !block.output) return null;
-  let low = 0;
-  let high = block.output.length;
-  let result: FinalAnswerElement[] | null = null;
-  while (low <= high) {
-    const length = Math.floor((low + high) / 2);
-    const output = `${block.output.slice(0, length)}${length > 0 ? "\n" : ""}${COMMAND_OUTPUT_TRUNCATION_MARKER}`;
-    const candidate = renderCommandBlock(block, output);
-    if (appendWithinCardLimit(elements, candidate, 800, payloadLimit)) { result = candidate; low = length + 1; }
-    else high = length - 1;
-  }
-  return result;
-}
-
 function renderBlock(block: AnswerContentBlock): FinalAnswerElement[] {
   if (block.kind === "markdown") return [{ tag: "markdown", content: compactAnswerToolActivity(block.content) }];
-  if (block.kind === "command") {
-    if (!block.terminal) return [{ tag: "markdown", content: block.compact }];
-    return renderCommandBlock(block, block.output);
-  }
   const lineCount = block.code.length === 0 ? 0 : block.code.split("\n").length;
   if (lineCount <= CODE_FOLD_LINE_LIMIT && block.code.length <= CODE_FOLD_CHARACTER_LIMIT) return [{ tag: "markdown", content: block.source }];
   return [{
     tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: foldedCodeTitle(block.language, lineCount, block.code.length) } },
     elements: [{ tag: "markdown", content: block.source }]
-  }];
-}
-
-function renderCommandBlock(block: Extract<AnswerContentBlock, { kind: "command" }>, output: string | null): FinalAnswerElement[] {
-  const detail = output
-    ? ["```bash", block.command, "```", "", "```text", output, "```"].join("\n")
-    : ["```bash", block.command, "```", "", "命令已完成，无可展示输出。"].join("\n");
-  return [{
-    tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
-    header: { title: { tag: "plain_text", content: block.title } },
-    elements: [{ tag: "markdown", content: detail }]
   }];
 }
 
@@ -100,8 +58,6 @@ function splitFinalAnswerBlocks(content: string): AnswerContentBlock[] {
     markdown = [];
   };
   for (let index = 0; index < lines.length;) {
-    const command = parseCommandBlock(lines, index);
-    if (command) { flushMarkdown(); result.push(command.block); index = command.nextIndex; continue; }
     const opening = /^```([^`]*)$/.exec(lines[index]!);
     if (!opening) { markdown.push(lines[index]!); index += 1; continue; }
     const closingIndex = lines.findIndex((line, candidate) => candidate > index && line === "```");
@@ -116,39 +72,6 @@ function splitFinalAnswerBlocks(content: string): AnswerContentBlock[] {
   return result;
 }
 
-function parseCommandBlock(lines: readonly string[], start: number): { block: Extract<AnswerContentBlock, { kind: "command" }>; nextIndex: number } | null {
-  const heading = COMMAND_HEADING.exec(lines[start] ?? "");
-  if (!heading) return null;
-  let index = start + 1;
-  if (lines[index] === "") index += 1;
-  if (lines[index] !== "```bash") return null;
-  const commandEnd = lines.indexOf("```", index + 1);
-  if (commandEnd < 0) return null;
-  const command = lines.slice(index + 1, commandEnd).join("\n");
-  if (!command || command.includes("\n")) return null;
-  index = commandEnd + 1;
-  if (lines[index] === "") index += 1;
-  let output: string | null = null;
-  if (lines[index] === "```text") {
-    const outputEnd = lines.indexOf("```", index + 1);
-    if (outputEnd < 0) return null;
-    output = lines.slice(index + 1, outputEnd).join("\n");
-    index = outputEnd + 1;
-  }
-  const state = commandState(heading[1]);
-  const terminal = heading[1] !== "运行中";
-  const normalizedCommand = command.replace(/\s+/g, " ").trim();
-  const plainCommand = truncateWithEllipsis(normalizedCommand, COMMAND_TARGET_LIMIT);
-  output = output === null ? null : truncateWithEllipsis(output, COMMAND_OUTPUT_LIMIT);
-  const title = `⚙️ Ran · ${plainCommand} · ${state}`;
-  const compact = `⚙️ **Ran** · \`${plainCommand.replaceAll("`", "\\`")}\` · ${state}`;
-  return { block: { kind: "command", source: lines.slice(start, index).join("\n"), title, compact, command: plainCommand, output, terminal }, nextIndex: index };
-}
-
-function truncateWithEllipsis(value: string, limit: number): string {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1).trimEnd()}…`;
-}
-
 function decorateActivityLine(line: string): string {
   const activity = /^(✓|…|✗) (Skill|Read|Search|Edit|Agent|Tool) · (.+)$/.exec(line);
   if (activity) {
@@ -159,12 +82,6 @@ function decorateActivityLine(line: string): string {
   if (!wait) return line;
   const state = wait[1]!.startsWith("✓") ? "✓ 完成" : wait[1]!.startsWith("…") ? "… 运行中" : "✗ 失败";
   return `${ACTIVITY_EMOJI.Wait} Wait · ${wait[2]} · ${state}`;
-}
-
-function commandState(value: string | undefined): string {
-  if (!value) return "✓ 完成";
-  if (value === "运行中") return "… 运行中";
-  return value.startsWith("✗") ? value : `✓ ${value}`;
 }
 
 function foldedCodeTitle(language: string, lineCount: number, characterCount: number): string {

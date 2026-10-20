@@ -17,6 +17,7 @@ interface PromptSafetyScannerOptions {
   staleClaimGraceMs: number;
   isBindingOwned(bindingId: string): boolean;
   maintainObserverCaches(): void;
+  externallyScheduled?: boolean;
 }
 
 export class PromptSafetyScanner {
@@ -80,12 +81,13 @@ export class PromptSafetyScanner {
       this.options.logger.error({ event: "prompt-safety-scan-failed", err: safeLogError(error), outcome: "deferred_to_next_scan" }, "durable prompt safety scan failed");
     } finally {
       this.diagnostics.lastScanAt = new Date().toISOString();
-      if (this.running) this.arm(this.nextDelayMs ?? this.options.intervalMs);
+      if (this.running && !this.options.externallyScheduled) this.arm(this.nextDelayMs ?? this.options.intervalMs);
     }
   }
 
   resetCadence(): void {
     this.consecutiveIdleScans = 0;
+    if (this.options.externallyScheduled) return;
     this.arm(this.options.intervalMs);
   }
 

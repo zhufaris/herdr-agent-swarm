@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HerdrAgentSession } from "../src/domain/types.js";
-import type { TraexTranscriptCursorPort, TraexTranscriptOpenResult } from "../src/domain/ports.js";
+import type { AgentTranscriptCursorPort, AgentTranscriptOpenResult } from "../src/domain/ports.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
 
 const sessionId = "01a03eb1-c193-7531-83c0-e6c6f70143d4";
@@ -44,13 +44,23 @@ function eventMessage(payload: unknown): string {
   return `${JSON.stringify({ type: "event_msg", payload })}\n`;
 }
 
-async function expectTyped(result: TraexTranscriptOpenResult): Promise<TraexTranscriptCursorPort> {
+async function expectTyped(result: AgentTranscriptOpenResult): Promise<AgentTranscriptCursorPort> {
   expect(result.mode).toBe("typed");
   if (result.mode !== "typed") throw new Error(`Expected typed transcript, received ${result.reason}`);
   return result.cursor;
 }
 
 describe("TraexTranscriptReader", () => {
+  it("resolves the validated transcript descriptor used by Core registration", async () => {
+    const { root, path } = await createTranscript();
+    const source = { agentKind: "traex" as const, bindingId: "binding-1", generation: 1, nativeSession: session() };
+
+    await expect(new TraexTranscriptReader({ sessionsRoot: root }).resolveTranscriptDescriptor(source)).resolves.toEqual({
+      sessionId,
+      path
+    });
+  });
+
   it("opens one exact UUID transcript whose session metadata agrees", async () => {
     const { root } = await createTranscript();
 
@@ -284,6 +294,14 @@ describe("TraexTranscriptReader", () => {
       answerDelta: "Public answer",
       mainStatus: { statusTitle: "Considering package installation" }
     });
+  });
+
+  it("hides legacy reasoning summaries when configured", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root, reasoningDisplay: "hidden" }).open(session()));
+    await appendFile(path, eventMessage({ type: "agent_reasoning_raw_content", text: "**Private progress**\n\nHidden body." }));
+
+    await expect(cursor.readObservation?.()).resolves.toEqual({ answerDelta: "" });
   });
 
   it("reports a turn as active until the matching task_complete arrives", async () => {
@@ -721,7 +739,7 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readObservation?.()).resolves.toEqual({
       turnId,
       answerDelta: "",
-      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "npm test", command: "npm test", state: "running" }],
+      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "Test · project", command: "npm test", state: "running" }],
       toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "active" }],
       turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
     });
@@ -733,11 +751,56 @@ describe("TraexTranscriptReader", () => {
 
     await expect(cursor.readObservation?.()).resolves.toEqual({
       turnId,
-      answerDelta: "◆ **Ran**\n\n```bash\nnpm test\n```\n\n```text\nTest Files 2 passed\nTests 8 passed\n```",
-      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "npm test", command: "npm test", resultPreview: expect.stringContaining("Test Files 2 passed"), state: "succeeded" }],
+      answerDelta: "",
+      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "Test · project", command: "npm test", result: expect.stringContaining("Test Files 2 passed"), state: "succeeded" }],
       toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "done" }],
       turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
     });
+  });
+
+  it("projects current item-completed CommandExecution events into the active Answer timeline", async () => {
+    const { root, path } = await createTranscript();
+    const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
+    const turnId = "01a04f35-8c1f-7913-8ac7-9642e7c6a614";
+    const itemId = "code-mode-nested:29:call-live:exec-live";
+    await appendFile(path, [
+      eventMessage({ type: "task_started", turn_id: turnId, started_at: 1_788_035_304 }),
+      eventMessage({
+        type: "item_completed",
+        turn_id: turnId,
+        item: {
+          type: "CommandExecution",
+          id: itemId,
+          command: ["/bin/bash", "-lc", "TOKEN=top-secret npm test"],
+          status: "completed",
+          exit_code: 0,
+          aggregated_output: "Test Files 2 passed\nAuthorization: Bearer private-output"
+        }
+      })
+    ].join(""));
+
+    const observation = await cursor.readObservation?.();
+    expect(observation).toMatchObject({
+      turnId,
+      timelineDeltas: [{
+        kind: "tool",
+        id: `tool:${itemId}`,
+        sequence: 1,
+        category: "test",
+        label: "Test · project",
+        command: "TOKEN=[REDACTED] npm test",
+        state: "succeeded",
+        parentToolId: "tool:call-live"
+      }],
+      toolActivities: [{
+        key: `tool:${itemId}`,
+        kind: "test",
+        label: "Command · TOKEN=[REDACTED] npm test",
+        state: "done"
+      }],
+      turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
+    });
+    expect(JSON.stringify(observation)).not.toMatch(/top-secret|private-output/);
   });
 
   it("uses the sanitized task-jz33 history_mutation records as typed input", async () => {
@@ -761,7 +824,7 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readDelta()).resolves.toBe("");
   });
 
-  it("summarizes a skill load and suppresses its paired document output", async () => {
+  it("keeps a skill load and its paired document output out of the Answer", async () => {
     const skillPath = "/data00/" + "home/alice/.trae/skills/brainstorming/SKILL.md";
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
@@ -776,7 +839,7 @@ describe("TraexTranscriptReader", () => {
       type: "function_call_output", id: "fco-skill", call_id: "call-skill",
       output: "---\nname: brainstorming\n---\n# Full private skill instructions"
     }]));
-    await expect(cursor.readDelta()).resolves.toBe("✓ Skill · brainstorming");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
   it("summarizes distinct trusted skill paths in source order", async () => {
@@ -807,24 +870,24 @@ describe("TraexTranscriptReader", () => {
 
     const output = await cursor.readDelta();
     expect(output).not.toContain("✓ Skill ·");
-    expect(output).toContain("✓ Read · docs/SKILL.md");
-    expect(output).toContain("✓ Read · /tmp/demo/SKILL.md");
+    expect(output).not.toContain("✓ Read · docs/SKILL.md");
+    expect(output).not.toContain("✓ Read · /tmp/demo/SKILL.md");
     expect(output).not.toContain("ordinary SKILL.md contents");
     expect(output).not.toContain("temporary SKILL.md contents");
     expect(output).toContain("The file is named SKILL.md.");
   });
 
-  it.each(["command", "cmd"])("renders an explicit exec.%s value as a compact command", async (field) => {
+  it.each(["command", "cmd"])("keeps an explicit exec.%s value out of the Answer", async (field) => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-" + field, call_id: "call-" + field, name: "exec", arguments: JSON.stringify({ [field]: "npm test" }) }]));
 
     await expect(cursor.readDelta()).resolves.toBe("");
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-" + field, call_id: "call-" + field, output: "Script completed" }]));
-    await expect(cursor.readDelta()).resolves.toBe("◆ **Ran**\n\n```bash\nnpm test\n```");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
-  it("renders a wrapped command and JSON result as fenced Answer Card Markdown", async () => {
+  it("keeps a wrapped command and JSON result out of the Answer", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{
@@ -837,23 +900,23 @@ describe("TraexTranscriptReader", () => {
       type: "function_call_output", id: "fco-wrapper", call_id: "call-wrapper",
       output: JSON.stringify({ exit_code: 0, output: "Test Files 1 passed\nTests 2 passed" })
     }]));
-    await expect(cursor.readDelta()).resolves.toBe([
-      "◆ **Ran**", "", "```bash", "npm test", "```", "", "```text",
-      "Test Files 1 passed", "Tests 2 passed", "```"
-    ].join("\n"));
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
-  it("renders repeated internal wait checkpoints without exposing output", async () => {
+  it("keeps repeated internal wait checkpoints out of the Answer", async () => {
     const { root, path } = await createTranscript();
     const cursor = await expectTyped(await new TraexTranscriptReader({ sessionsRoot: root }).open(session()));
     await appendFile(path, mutation([{ type: "function_call", id: "fc-running", call_id: "call-running", name: "write_stdin", arguments: JSON.stringify({ session_id: 263 }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("");
+    await expect(cursor.readObservation?.()).resolves.toMatchObject({
+      answerDelta: "",
+      toolActivities: [{ key: "wait:session 263", kind: "tool", label: "Wait · session 263", state: "active" }]
+    });
 
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-running", call_id: "call-running", output: JSON.stringify({ session_id: 263, output: "private partial output" }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("… 等待命令完成 · session 263");
+    await expect(cursor.readDelta()).resolves.toBe("");
 
     await appendFile(path, mutation([{ type: "function_call_output", id: "fco-complete", call_id: "call-running", output: JSON.stringify({ exit_code: 0, output: "private final output" }) }]));
-    await expect(cursor.readDelta()).resolves.toBe("✓ 等待完成 · session 263");
+    await expect(cursor.readDelta()).resolves.toBe("");
   });
 
   it("redacts secrets and bounds rendered typed deltas", async () => {

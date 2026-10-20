@@ -1,5 +1,7 @@
 import type { RunCardView } from "../domain/run-card-view.js";
 import { renderDetailedLarkMarkdownRange, renderLarkMarkdownPageWithSuffix } from "./lark-markdown.js";
+import { inspectTraceEndReviewProtocol } from "../domain/completion-choice.js";
+import { normalizeFinalTraceEnvelope } from "../domain/final-trace-envelope.js";
 
 /**
  * A Lark streaming element is visually rendered as a whole-card refresh. Keep
@@ -7,8 +9,8 @@ import { renderDetailedLarkMarkdownRange, renderLarkMarkdownPageWithSuffix } fro
  * new card. This makes completed pages stable while preserving the durable
  * continuation/recovery protocol.
  */
-export const ANSWER_STREAM_PAGE_LIMIT = 9_000;
-export const ANSWER_RECOVERY_PAGE_LIMIT = 4_000;
+export const ANSWER_STREAM_PAGE_LIMIT = 21_000;
+export const ANSWER_RECOVERY_PAGE_LIMIT = ANSWER_STREAM_PAGE_LIMIT;
 const CONTINUATION_WARNING = "… 本页接近显示上限，后续内容将继续显示在下一张 Answer Card。";
 const CONTINUATION_SUFFIX = `\n\n${CONTINUATION_WARNING}`;
 
@@ -18,9 +20,18 @@ interface RenderedAnswerStreamPage {
 }
 
 export function answerStreamContent(view: RunCardView): string {
-  const base = ["⏳ 已接收请求", view.answer].filter(Boolean).join("\n\n");
+  const terminal = view.phase === "completed" || view.phase === "failed";
+  const visibleAnswer = terminal
+    ? normalizeFinalTraceEnvelope({ finalMarkdown: view.answer }).presentationMarkdown
+    : visibleStreamingAnswer(view.answer);
+  const base = ["⏳ 已接收请求", visibleAnswer].filter(Boolean).join("\n\n");
   return view.phase === "blocked" ? `${base}\n\n⚠️ ${view.notice ?? "等待用户处理"}`
     : view.phase === "failed" ? `${base}\n\n❌ ${view.notice ?? "执行失败"}` : base;
+}
+
+function visibleStreamingAnswer(answer: string): string {
+  const inspected = inspectTraceEndReviewProtocol(answer, { terminal: false });
+  return inspected.kind === "none" ? answer : inspected.visibleMarkdown;
 }
 
 /** Builds a render-safe page without changing the canonical Answer stream. */

@@ -4,7 +4,7 @@ type TimelinePhase = string;
 
 const DEFAULT_VISIBLE_EVENT_COUNT = 3;
 
-export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string; summary?: RunProgressSummary; visibleCount?: number } = {}): object[] {
+export function renderProgressTimeline(events: RunProgressEvent[], phase: TimelinePhase, options: { title?: string; summary?: RunProgressSummary; visibleCount?: number; expanded?: boolean } = {}): object[] {
   if (!events.length) return [];
   const summary = options.summary ?? summarizeProgress(events);
   const visible = events.slice(-Math.max(1, options.visibleCount ?? DEFAULT_VISIBLE_EVENT_COUNT));
@@ -12,7 +12,7 @@ export function renderProgressTimeline(events: RunProgressEvent[], phase: Timeli
   const elements: object[] = [{ tag: "markdown", content: visible.map(progressLine).join("\n") }];
   if (earlierCount) elements.push({ tag: "markdown", content: `… 更早 ${earlierCount} 项已省略，可在 Herdr pane 查看完整过程。` });
   return [{
-    tag: "collapsible_panel", expanded: true, border: { color: timelineColor(phase), corner_radius: "6px" },
+    tag: "collapsible_panel", expanded: options.expanded ?? true, border: { color: timelineColor(phase), corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: options.title ? activityTitle(options.title, summary, phase) : timelineTitle(summary, phase) } },
     elements
   }];
@@ -40,7 +40,7 @@ function timelineColor(phase: TimelinePhase): string {
 function progressLine(event: RunProgressEvent): string {
   const label = boundedLabel(event.label);
   const state = { pending: "☐", active: "◌", done: "✓", failed: "✕" }[event.state];
-  const icon = { analyze: "🧠", search: "🔎", read: "📖", edit: "🛠️", test: "🧪", step: "•" }[event.kind] ?? "•";
+  const icon = { analyze: "🧠", search: "🔎", read: "📖", edit: "🛠️", command: "⚙️", test: "🧪", skill: "🧩", tool: "🔧", step: "•" }[event.kind] ?? "•";
   return `${state} ${icon} ${label}`;
 }
 

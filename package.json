@@ -1,6 +1,6 @@
 {
   "name": "herdr-agent-swarm",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -24,6 +24,7 @@
     "swarm:restart": "bash scripts/swarm-service.sh restart",
     "swarm:stop": "bash scripts/swarm-service.sh stop",
     "swarm:logs": "bash scripts/swarm-service.sh logs",
+    "swarm:maintenance": "bash scripts/swarm-service.sh maintenance",
     "dev": "tsx watch src/main.ts",
     "start": "node --enable-source-maps dist/main.js",
     "architecture:check": "node scripts/check-architecture-imports.mjs",

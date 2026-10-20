@@ -1,6 +1,7 @@
 import type { SpaceDirectoryGroup, SpaceDirectoryPane } from "../domain/ports/presentation.js";
 import { callbackButton } from "./cardkit-button.js";
 import { appendWithinCardLimit } from "./card-payload.js";
+import { displayPaneIdentity } from "../domain/pane-display-identity.js";
 
 const MAX_PANE_ROWS_PER_PAGE = 16;
 const MAX_FIELD_LENGTH = 160;
@@ -83,7 +84,7 @@ function paneRow(group: SpaceDirectoryGroup, pane: SpaceDirectoryPane): object {
     ? pane.foregroundExecutables.map((value) => escapeMarkdown(bound(value))).join(", ")
     : "—";
   return columnSet([
-    textColumn(`**${escapeMarkdown(bound(normalizedName(pane)))}**\n\`${escapeCode(shortPaneId(pane.paneId))}\``, 3),
+    textColumn(`**${escapeMarkdown(bound(normalizedName(pane)))}**\n\`${escapeCode(bound(displayPaneIdentity(pane)))}\``, 3),
     textColumn(escapeMarkdown(pane.agentState), 2),
     textColumn(executables, 2),
     actionColumn(group, pane)
@@ -114,13 +115,8 @@ function buttonColumn(content: string, value: object): object {
   return { tag: "column", width: "weighted", weight: 2, elements: [callbackButton(content, value, "primary", { size: "small" })] };
 }
 
-function shortPaneId(paneId: string): string {
-  const separator = paneId.indexOf(":");
-  return bound(separator >= 0 ? paneId.slice(separator + 1) : paneId);
-}
-
 function normalizedName(pane: SpaceDirectoryPane): string {
-  return pane.name.replace(/\s+/g, " " ).trim() || pane.paneId;
+  return pane.name.replace(/\s+/g, " " ).trim() || displayPaneIdentity(pane);
 }
 
 function bound(value: string): string { return value.length > MAX_FIELD_LENGTH ? `${value.slice(0, MAX_FIELD_LENGTH - 1)}…` : value; }

@@ -23,8 +23,13 @@ describe("build identity", () => {
   });
 
   it("loads strict sanitized build metadata", () => {
-    const path = fixture({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567" });
-    expect(loadBuildIdentity(path)).toEqual({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567" });
+    const path = fixture({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567", gitBranch: "fix/card-branch" });
+    expect(loadBuildIdentity(path)).toEqual({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: "0123456789abcdef0123456789abcdef01234567", gitBranch: "fix/card-branch" });
+    expect(loadBuildIdentity(fixture({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: null }))).toMatchObject({ gitBranch: null });
+  });
+
+  it("rejects an unsanitized build branch", () => {
+    expect(() => loadBuildIdentity(fixture({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:abc123", gitCommit: null, gitBranch: "<at-id=ou_attacker>" }))).toThrow(/gitBranch/);
   });
 
   it("rejects another service and an expected-build mismatch", () => {

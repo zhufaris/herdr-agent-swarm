@@ -1,0 +1,6 @@
+interface:
+  display_name: "Herdr Choice List"
+  short_description: "Emit a bounded Feishu completion choice protocol"
+  default_prompt: "Use $herdr-choice-list:herdr-choice-list in the collective Final Trace Envelope order answer -> requester syntax -> invocation -> choice -> optional terminal memory citation, and append exactly one compact terminal version-3 decision with real submitText for every option."
+policy:
+  allow_implicit_invocation: false

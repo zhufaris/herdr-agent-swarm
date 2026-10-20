@@ -110,12 +110,3 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
     void promise.then(() => { clearTimeout(timer); resolve(true); }, () => { clearTimeout(timer); resolve(true); });
   });
 }
-
-export function closeHealthServer(server: { close(callback: (error?: Error) => void): unknown }): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (error) reject(error);
-      else resolve();
-    });
-  });
-}

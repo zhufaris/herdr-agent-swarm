@@ -7,15 +7,15 @@ restarts a service.
 ## Prepare a release
 
 1. Update `version` in both `package.json` and `package-lock.json`. Use a semantic
-   version such as `0.4.0` or `0.4.0-rc.1`.
+   version such as `0.5.0` or `0.5.0-rc.1`.
 2. Run `npm ci`, `npm test`, `npm run typecheck`, and `npm run build`.
 3. Merge the version change only after the `CI` workflow passes on the final
    commit.
 4. Create an annotated tag whose name is exactly `v` plus the package version:
 
    ```bash
-   git tag -a v0.4.0 -m "Release v0.4.0"
-   git push origin v0.4.0
+   git tag -a v0.5.0 -m "Release v0.5.0"
+   git push origin v0.5.0
    ```
 
 The `Release` workflow rejects a tag that does not exactly match the committed
@@ -47,9 +47,9 @@ GitHub Release:
 
 ```bash
 release_dir="$(mktemp -d)"
-npm run release:package -- --output "$release_dir" --tag v0.4.0
+npm run release:package -- --output "$release_dir" --tag v0.5.0
 (cd "$release_dir" && sha256sum --check SHA256SUMS)
 ```
 
-Use the current `package.json` version in place of `v0.4.0`. This command writes
+Use the current `package.json` version in place of `v0.5.0`. This command writes
 only to the explicit output directory and does not install or restart the service.

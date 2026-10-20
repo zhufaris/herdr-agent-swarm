@@ -64,6 +64,18 @@ describe("model command without terminal interaction", () => {
     await fixture.close();
   });
 
+  it("reports a pre-turn TraeX Pane as waiting for a native Session instead of unsupported", async () => {
+    const fixture = await setup({ nativeSession: false });
+
+    await fixture.coordinator.handleMessage(message("/swarm model"));
+
+    await vi.waitFor(() => expect(fixture.cards.some((card) => JSON.stringify(card).includes("尚未建立 TraeX Session"))).toBe(true));
+    expect(fixture.cards.some((card) => JSON.stringify(card).includes("当前 Session 不支持结构化模型切换"))).toBe(false);
+    expect(fixture.herdrCalls).not.toContain("listModels");
+    expect(fixture.store.getModelPreference(fixture.bindingId)).toBeNull();
+    await fixture.close();
+  });
+
   it("rejects a recovered model operation and releases queued prompt work", async () => {
     const fixture = await setup();
     await fixture.coordinator.stop();
@@ -100,7 +112,7 @@ describe("model command without terminal interaction", () => {
   });
 });
 
-async function setup() {
+async function setup(options: { nativeSession?: boolean } = {}) {
   const cards: object[] = [];
   const updates: Array<{ messageId: string; card: object }> = [];
   const herdrCalls: string[] = [];
@@ -111,7 +123,11 @@ async function setup() {
     async replyCard(_root, card) { cards.push(card); return { messageId: `card-${cards.length}` }; },
     async updateCard(messageId, card) { updates.push({ messageId, card }); }
   };
-  const pane = { paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const, agentKind: "traex", foregroundExecutables: ["traex"], agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } };
+  const pane = {
+    paneId: "w1:p1", terminalId: "term-1", workspaceId: "w1", cwd: "/repo", label: "task", agentState: "idle" as const,
+    agentKind: "traex", foregroundExecutables: ["traex"],
+    ...(options.nativeSession === false ? {} : { agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" } })
+  };
   const herdr: HerdrPort = {
     async assertWorkspace() { herdrCalls.push("assertWorkspace"); }, async listPanes() { return [pane]; }, async getPane() { return pane; },
     async observeRuntime() { herdrCalls.push("observeRuntime"); return { pane, traexProcess: true, composerReady: true, evidenceSource: "structured" }; },
@@ -120,8 +136,7 @@ async function setup() {
     async renamePane() { herdrCalls.push("renamePane"); }
   };
   const traexControl: TraexControlPort = {
-    async listModels() { herdrCalls.push("listModels"); return ["GPT-5.5", "GPT-5.6-Terra"].map((name) => ({ id: name, name, displayName: name })); },
-    async runModelPrompt() { throw new Error("unused"); }
+    async listModels() { herdrCalls.push("listModels"); return ["GPT-5.5", "GPT-5.6-Terra"].map((name) => ({ id: name, name, displayName: name })); }
   };
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();

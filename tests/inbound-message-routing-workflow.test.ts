@@ -1,5 +1,6 @@
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { BindingPromptWorkflow } from "../src/coordinator/binding-prompt-workflow.js";
 import { InboundMessageRoutingWorkflow } from "../src/coordinator/inbound-message-routing-workflow.js";
 import { PromptAdmissionWorkflow } from "../src/coordinator/prompt-admission-workflow.js";
 import { InstanceTurnCapacityExceeded } from "../src/domain/instance-turn-capacity-error.js";
@@ -7,6 +8,23 @@ import { InstanceTargetError } from "../src/domain/instance-target-error.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 
 describe("InboundMessageRoutingWorkflow instance commands", () => {
+  it("stages one durable confirmation for literal /swarm clear", async () => {
+    const binding = { id: "binding-1", kind: "orchestrator", projectId: "p1", workspaceId: "w1", paneId: "w1:p1", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
+    const context = { chatId: "chat", topicId: "topic", rootMessageId: "root", sourceMessageId: "message-clear", actorOpenId: "admin", projectId: "p1", workspaceId: "w1", primary: { bindingId: "binding-1", bindingGeneration: 1, paneId: "w1:p1", terminalId: "terminal-1", nativeSession: null, activePromptId: null } };
+    const swarmCommands = { submit: vi.fn(async () => ({ outcome: "confirmation-required" as const, commandKind: "clear" as const, context })) };
+    const requestSwarmConfirmation = vi.fn(async () => undefined);
+    const workflow = routingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: ["admin"] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      swarmCommands, naturalLanguage: { interpreter: { interpret: vi.fn() }, workflow: { handle: vi.fn(), requestSwarmConfirmation } },
+      presentation: primaryPresentation, logger: pino({ enabled: false })
+    });
+    const message = { eventId: "event-clear", messageId: "message-clear", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "admin", text: "/swarm clear", mentionsBot: true, isRootMessage: false };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "command:clear", disposition: "command_completed" });
+    expect(requestSwarmConfirmation).toHaveBeenCalledWith(message, { kind: "clear" }, context);
+  });
+
   it("durably rejects oversized input before routing or prompt acceptance", async () => {
     const outbound = { enqueueCard: vi.fn(async () => undefined) };
     const workerSessionThreads = { handleMessage: vi.fn() };
@@ -25,22 +43,20 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     expect(store.acceptPromptWithEffects).not.toHaveBeenCalled();
   });
 
-  it("emits one accepted log with route and durable Prompt identity", async () => {
+  it("returns the durable Agent Input identity for an accepted bound Primary message", async () => {
     const info = vi.fn();
-    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
-    const store = {
-      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 0),
-      acceptPromptWithEffects: vi.fn((input) => ({ result: { inserted: false, prompt: { ...input.prompt, id: "durable-prompt" }, view: input.view }, commitState: "committed", consumeEffects: () => [] }))
-    };
+    const binding = activePrimaryBinding({ title: "Primary" });
+    const store = { findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) };
+    const agentInput = acceptedAgentInput("durable-submission");
     const workflow = routingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      stores: inboundStores(store), primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: { info, error: vi.fn() }
+      stores: inboundStores(store), agentInput, presentation: primaryPresentation, logger: { info, error: vi.fn() }
     } as never);
     const message = { eventId: "event-correlated", messageId: "message-correlated", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: false, isRootMessage: false };
 
     const routed = await workflow.route(message);
 
-    expect(routed).toMatchObject({ bindingId: "binding-1", promptId: "durable-prompt", decision: "prompt", disposition: "prompt_queued" });
+    expect(routed).toMatchObject({ bindingId: "binding-1", submissionId: "durable-submission", decision: "agent-input", disposition: "agent_input_accepted" });
     expect(info).not.toHaveBeenCalled();
   });
 
@@ -60,58 +76,261 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     expect(JSON.stringify(info.mock.calls)).not.toContain(message.text);
   });
 
-  it("interprets only explicit mentions before the ordinary Primary prompt fallback", async () => {
-    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
-    const store = { findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 0), acceptPromptWithEffects: vi.fn((input) => ({ result: { inserted: false, prompt: input.prompt, view: input.view }, commitState: "committed", consumeEffects: () => [] })) };
+  it("routes ordinary bot mentions in a bound Primary thread as Agent Input", async () => {
+    const binding = activePrimaryBinding();
+    const store = { findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) };
+    const agentInput = acceptedAgentInput();
     const naturalLanguage = { interpreter: { interpret: vi.fn(() => ({ outcome: "command", source: "deterministic", family: "swarm", command: { kind: "stop" } })) }, workflow: { handle: vi.fn() } };
-    const workflow = routingWorkflow({ config: { projects: [], lark: { adminOpenIds: ["operator"] } }, stores: inboundStores(store), naturalLanguage, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false }) });
+    const workflow = routingWorkflow({ config: { projects: [], lark: { adminOpenIds: ["operator"] } }, stores: inboundStores(store), agentInput, naturalLanguage, presentation: primaryPresentation, logger: pino({ enabled: false }) });
     const mentioned = { eventId: "e1", messageId: "m1", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "停止当前任务", mentionsBot: true, isRootMessage: false };
     await workflow.route(mentioned);
-    expect(naturalLanguage.workflow.handle).toHaveBeenCalledOnce();
-    expect(store.acceptPromptWithEffects).not.toHaveBeenCalled();
-
     await workflow.route({ ...mentioned, eventId: "e2", messageId: "m2", mentionsBot: false });
-    expect(naturalLanguage.interpreter.interpret).toHaveBeenCalledOnce();
-    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
+
+    expect(agentInput.submit).toHaveBeenCalledTimes(2);
+    expect(naturalLanguage.interpreter.interpret).not.toHaveBeenCalled();
+    expect(naturalLanguage.workflow.handle).not.toHaveBeenCalled();
   });
   it("provisions the configured default project for a mentioned root task", async () => {
     const info = vi.fn();
-    const selection = { id: "selection-1", commandMessageId: "message-1", initialPromptText: "ship it" };
-    const binding = { id: "binding-1", projectId: "default", workspaceId: "w1", paneId: "w1:p1", rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1 };
+    const selection = { id: "selection-1", commandMessageId: "message-1", chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "operator", initialPromptText: "ship it" };
+    const binding = { id: "binding-1", gatewayId: "feishu:primary", projectId: "default", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal-1", agentKind: "traex", agentSessionAgent: null, agentSessionValue: null, rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1, lastAgentState: "idle" };
     const provisioning = { selectProject: vi.fn(), provisionDefaultProject: vi.fn(async () => ({ binding, selection })) };
+    const agentInput = acceptedAgentInput("initial-input");
+    const acceptPromptWithEffects = vi.fn();
     const workflow = routingWorkflow({
-      config: { defaultProjectId: "default", projects: [], lark: { adminOpenIds: ["operator"] } },
-      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 0), acceptPromptWithEffects: vi.fn((input) => ({ result: { inserted: false, prompt: { ...input.prompt, id: "initial-durable-prompt" }, view: input.view }, commitState: "committed", consumeEffects: () => [] })) }),
-      provisioning, presentation: primaryPresentation, logger: { info, error: vi.fn() }, primaryState: { activeTurn: vi.fn(() => null) }
+      config: { gateway: { id: "feishu:primary" }, defaultProjectId: "default", projects: [], lark: { adminOpenIds: ["operator"] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), acceptPromptWithEffects }),
+      provisioning, agentInput, presentation: primaryPresentation, logger: { info, error: vi.fn() }, primaryState: { activeTurn: vi.fn(() => null) }
     } as never);
     const message = { eventId: "event-1", messageId: "message-1", parentMessageId: null, chatId: "chat", topicId: "message-1", rootMessageId: "message-1", actorOpenId: "operator", text: "ship it", mentionsBot: true, isRootMessage: true };
 
-    await workflow.route(message);
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "create_binding", disposition: "agent_input_accepted", bindingId: "binding-1", submissionId: "initial-input" });
 
     expect(provisioning.provisionDefaultProject).toHaveBeenCalledWith(message, "ship it", "ship it");
     expect(provisioning.selectProject).not.toHaveBeenCalled();
+    expect(agentInput.submit).toHaveBeenCalledWith(expect.objectContaining({ expectedSessionId: null, text: "ship it" }));
+    expect(acceptPromptWithEffects).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
     expect(JSON.stringify(info.mock.calls)).not.toContain(message.text);
   });
 
-  it("does not claim an initial Prompt was queued when durable acceptance rejects it", async () => {
+  it("lazily initializes the enabled default-project Orchestrator for an allowed root mention", async () => {
+    const selection = { id: "selection-orchestrator", commandMessageId: "message-orchestrator", chatId: "chat", topicId: null, rootMessageId: "message-orchestrator", actorOpenId: "allowed-user", initialPromptText: "coordinate this" };
+    const binding = { id: "binding-orchestrator", kind: "orchestrator", gatewayId: "feishu:primary", projectId: "default", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal-1", agentKind: "traex", agentSessionAgent: null, agentSessionValue: null, rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1 };
+    const provisioning = {
+      ensureOrchestrator: vi.fn(async () => ({ outcome: "initialized" as const, binding, selection })),
+      provisionDefaultProject: vi.fn(), shareOrchestratorThread: vi.fn()
+    };
+    const promptAdmission = { accept: vi.fn(), acceptInitial: vi.fn(async () => ({ outcome: "accepted" as const, promptId: "initial-orchestrator-prompt" })) };
+    const agentInput = acceptedAgentInput("initial-orchestrator-input");
+    const naturalLanguage = { interpreter: { interpret: vi.fn(async () => ({ outcome: "unresolved" as const, reason: "not a control request" })) }, workflow: { handle: vi.fn() } };
+    const workflow = routingWorkflow({
+      config: { gateway: { id: "feishu:primary" }, defaultProjectId: "default", projects: [{ id: "default", displayName: "Default", description: "default", workspaceId: "w1", cwd: "/repo", orchestrator: { enabled: true, cwd: "/orchestrator" } }], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      provisioning, promptAdmission, agentInput, naturalLanguage, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-orchestrator", messageId: "message-orchestrator", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "message-orchestrator", actorOpenId: "allowed-user", text: "coordinate this", mentionsBot: true, isRootMessage: true };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "orchestrator_initialize", disposition: "agent_input_accepted", bindingId: "binding-orchestrator", submissionId: "initial-orchestrator-input" });
+
+    expect(provisioning.ensureOrchestrator).toHaveBeenCalledWith(message);
+    expect(agentInput.submit).toHaveBeenCalledWith({
+      ingressSource: "feishu:primary",
+      sourceMessageKey: "message-orchestrator",
+      actor: { kind: "human", id: "allowed-user", gatewayId: "feishu:primary", chatId: "chat", topicId: null, rootMessageId: "message-orchestrator" },
+      text: "coordinate this",
+      owner: { kind: "primary", id: "binding-orchestrator", generation: 1 },
+      paneId: "w1:p1",
+      terminalId: "terminal-1",
+      expectedAgentKind: "traex",
+      expectedSessionId: null
+    });
+    expect(promptAdmission.acceptInitial).not.toHaveBeenCalled();
+    expect(provisioning.provisionDefaultProject).not.toHaveBeenCalled();
+    expect(naturalLanguage.interpreter.interpret).not.toHaveBeenCalled();
+  });
+
+  it("shares the fixed Orchestrator Thread for later root mentions without submitting a Prompt", async () => {
+    const binding = { id: "binding-orchestrator", kind: "orchestrator", projectId: "default", workspaceId: "w1", paneId: "w1:p1", topicId: "orchestrator-topic", rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1 };
+    const provisioning = {
+      ensureOrchestrator: vi.fn(async () => ({ outcome: "existing" as const, binding })),
+      provisionDefaultProject: vi.fn(), shareOrchestratorThread: vi.fn(async () => undefined)
+    };
+    const promptAdmission = { accept: vi.fn(), acceptInitial: vi.fn() };
+    const workflow = routingWorkflow({
+      config: { gateway: { id: "feishu:primary" }, defaultProjectId: "default", projects: [{ id: "default", displayName: "Default", description: "default", workspaceId: "w1", cwd: "/repo", orchestrator: { enabled: true, cwd: "/orchestrator" } }], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false) }),
+      provisioning, promptAdmission, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-later", messageId: "message-later", parentMessageId: null, chatId: "chat", topicId: null, rootMessageId: "message-later", actorOpenId: "allowed-user", text: "do more work", mentionsBot: true, isRootMessage: true };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "orchestrator_entry", disposition: "user_feedback", bindingId: "binding-orchestrator" });
+
+    expect(provisioning.shareOrchestratorThread).toHaveBeenCalledWith(message, binding);
+    expect(promptAdmission.accept).not.toHaveBeenCalled();
+    expect(promptAdmission.acceptInitial).not.toHaveBeenCalled();
+  });
+
+  it("does not gate initial Agent Input on legacy Prompt capacity", async () => {
     const info = vi.fn();
-    const selection = { id: "selection-full", commandMessageId: "message-full", initialPromptText: "ship it" };
-    const binding = { id: "binding-full", projectId: "default", workspaceId: "w1", paneId: "w1:p1", rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1 };
+    const selection = { id: "selection-full", commandMessageId: "message-full", chatId: "chat", topicId: "message-full", rootMessageId: "message-full", actorOpenId: "operator", initialPromptText: "ship it" };
+    const binding = { id: "binding-full", gatewayId: "feishu:primary", projectId: "default", workspaceId: "w1", paneId: "w1:p1", traexSessionId: "terminal-1", agentKind: "traex", agentSessionAgent: null, agentSessionValue: null, rootMessageId: "thread-root", state: "active", lifecycle: "active", generation: 1, lastAgentState: "idle" };
+    const acceptPromptWithEffects = vi.fn(() => { throw new Error("legacy Prompt path must not run"); });
     const workflow = routingWorkflow({
       config: { defaultProjectId: "default", projects: [], lark: { adminOpenIds: ["operator"] } },
       stores: inboundStores({
         findBindingByLarkScope: vi.fn(() => null), isBindingThreadAlias: vi.fn(() => false), countPendingPrompts: vi.fn(() => 20),
-        acceptPromptWithEffects: vi.fn(() => { throw new Error("This topic's prompt queue is full"); })
+        acceptPromptWithEffects
       }),
       provisioning: { provisionDefaultProject: vi.fn(async () => ({ binding, selection })) }, outbound: { enqueueCard: vi.fn(async () => undefined) },
-      presentation: primaryPresentation, logger: { info, error: vi.fn() }, primaryState: { activeTurn: vi.fn(() => null) }
+      agentInput: acceptedAgentInput("initial-capacity-independent"), presentation: primaryPresentation, logger: { info, error: vi.fn() }, primaryState: { activeTurn: vi.fn(() => null) }
     } as never);
     const message = { eventId: "event-full", messageId: "message-full", parentMessageId: null, chatId: "chat", topicId: "message-full", rootMessageId: "message-full", actorOpenId: "operator", text: "ship it", mentionsBot: true, isRootMessage: true };
 
-    await workflow.route(message);
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "create_binding", disposition: "agent_input_accepted", bindingId: "binding-full" });
 
+    expect(acceptPromptWithEffects).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
+  });
+
+  it("submits bound Primary Agent-native slash text unchanged through Agent Input", async () => {
+    const binding = {
+      id: "binding-1", gatewayId: "feishu:primary", projectId: "p1", workspaceId: "w1", paneId: "w1:primary",
+      traexSessionId: "terminal-1", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1",
+      agentKind: "traex", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1, lastAgentState: "idle"
+    };
+    const promptAdmission = { accept: vi.fn(), acceptInitial: vi.fn() };
+    const agentInput = { submit: vi.fn(async () => ({ outcome: "accepted" as const, submissionId: "submission-1", state: "prepared" as const })) };
+    const naturalLanguage = { interpreter: { interpret: vi.fn() }, workflow: { handle: vi.fn(), requestSwarmConfirmation: vi.fn() } };
+    const workflow = routingWorkflow({
+      config: { gateway: { id: "feishu:primary" }, projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      promptAdmission, agentInput, naturalLanguage, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-model", messageId: "message-model", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "  /model gpt-x  ", mentionsBot: true, isRootMessage: false };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({
+      decision: "agent-input",
+      disposition: "agent_input_accepted",
+      bindingId: "binding-1",
+      submissionId: "submission-1"
+    });
+
+    expect(agentInput.submit).toHaveBeenCalledWith({
+      ingressSource: "feishu:primary",
+      sourceMessageKey: "message-model",
+      actor: { kind: "human", id: "operator", gatewayId: "feishu:primary", chatId: "chat", topicId: "topic", rootMessageId: "root" },
+      text: "  /model gpt-x  ",
+      input: { schemaVersion: 2, text: "  /model gpt-x  " },
+      owner: { kind: "primary", id: "binding-1", generation: 1 },
+      paneId: "w1:primary",
+      terminalId: "terminal-1",
+      expectedAgentKind: "traex",
+      expectedSessionId: "session-1"
+    });
+    expect(promptAdmission.accept).not.toHaveBeenCalled();
+    expect(naturalLanguage.interpreter.interpret).not.toHaveBeenCalled();
+  });
+
+  it("preserves a matching path-based native session as the Core session fence", async () => {
+    const binding = activePrimaryBinding({
+      agentKind: "pi",
+      agentSessionAgent: "pi",
+      agentSessionKind: "path",
+      agentSessionValue: "/sessions/pi-1"
+    });
+    const agentInput = acceptedAgentInput();
+    const workflow = routingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      agentInput, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-pi", messageId: "message-pi", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: false, isRootMessage: false };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "agent-input", disposition: "agent_input_accepted" });
+    expect(agentInput.submit).toHaveBeenCalledWith(expect.objectContaining({
+      expectedAgentKind: "pi",
+      expectedSessionId: "/sessions/pi-1"
+    }));
+  });
+
+  it("fails closed before Agent Input admission for a Core-unsupported Primary agent kind", async () => {
+    const binding = activePrimaryBinding({ agentKind: "codex", agentSessionAgent: "codex", agentSessionValue: "codex-session" });
+    const agentInput = acceptedAgentInput();
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const workflow = routingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      agentInput, outbound, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-codex", messageId: "message-codex", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: false, isRootMessage: false };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({ decision: "agent-input-unsupported", disposition: "rejected" });
+    expect(agentInput.submit).not.toHaveBeenCalled();
+    expect(outbound.enqueueCard).toHaveBeenCalledWith("root", "rejected:message-codex", expect.any(Object));
+  });
+
+  it("keeps slash characters inside ordinary bound Primary Agent Input", async () => {
+    const binding = activePrimaryBinding();
+    const agentInput = acceptedAgentInput("ordinary-submission");
+    const workflow = routingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      agentInput, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-path", messageId: "message-path", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "please inspect /tmp/output and compare a/b", mentionsBot: false, isRootMessage: false };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({
+      decision: "agent-input",
+      disposition: "agent_input_accepted",
+      submissionId: "ordinary-submission"
+    });
+    expect(agentInput.submit).toHaveBeenCalledWith(expect.objectContaining({ text: message.text }));
+  });
+
+  it("shows a durable rejection when Core definitely cancels bound Primary Agent Input", async () => {
+    const binding = activePrimaryBinding();
+    const outbound = { enqueueCard: vi.fn(async () => undefined) };
+    const agentInput = { submit: vi.fn(async () => ({ outcome: "accepted" as const, submissionId: "cancelled-submission", state: "cancelled" as const })) };
+    const workflow = routingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      agentInput, outbound, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+    const message = { eventId: "event-blocked", messageId: "message-blocked", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: false, isRootMessage: false };
+
+    await expect(workflow.route(message)).resolves.toMatchObject({
+      decision: "agent-input",
+      disposition: "rejected",
+      submissionId: "cancelled-submission"
+    });
+    expect(outbound.enqueueCard).toHaveBeenCalledWith("root", "rejected:message-blocked", expect.any(Object));
+  });
+
+  it("never routes /swarm commands through managed Primary prompt acceptance", async () => {
+    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1, lastAgentState: "idle" };
+    const bindingPrompts = { acceptManagedInput: vi.fn() };
+    const promptAdmission = new PromptAdmissionWorkflow({
+      bindingPrompts,
+      routing: { isBindingThreadAlias: vi.fn(() => false) },
+      primaryState: { activeTurn: vi.fn(() => null) },
+      outbound: { enqueueCard: vi.fn(async () => undefined) },
+      presentation: primaryPresentation
+    } as never);
+    const swarmCommands = { submit: vi.fn(async () => ({ outcome: "accepted" as const })) };
+    const workflow = routingWorkflow({
+      config: { projects: [], lark: { adminOpenIds: [] } },
+      stores: inboundStores({ findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false) }),
+      promptAdmission, swarmCommands, presentation: primaryPresentation, logger: pino({ enabled: false })
+    } as never);
+
+    await expect(workflow.route({ eventId: "event-status", messageId: "message-status", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "/swarm status", mentionsBot: false, isRootMessage: false }))
+      .resolves.toMatchObject({ decision: "command:status", disposition: "command_completed" });
+    await expect(workflow.route({ eventId: "event-steer", messageId: "message-steer", parentMessageId: null, chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "/swarm steer continue", mentionsBot: false, isRootMessage: false }))
+      .resolves.toMatchObject({ decision: "command:steer", disposition: "command_completed" });
+
+    expect(bindingPrompts.acceptManagedInput).not.toHaveBeenCalled();
+    expect(swarmCommands.submit).toHaveBeenCalledTimes(2);
   });
 
   it("does not provision the default project for an unmentioned root message", async () => {
@@ -222,56 +441,55 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     expect(outbound.enqueueCard).not.toHaveBeenCalled();
   });
 
-  it("routes an active-topic reply to the Primary FIFO without consulting Worker targeting", async () => {
-    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1 };
+  it("routes an active-topic reply to Primary Agent Input without consulting Worker targeting", async () => {
+    const binding = activePrimaryBinding();
     const store = {
       findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false),
       getConversationTarget: vi.fn(() => null),
-      countPendingPrompts: vi.fn(() => 0),
-      acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => true) };
+    const agentInput = acceptedAgentInput();
     const workflow = routingWorkflow({
       config: { projects: [], lark: { adminOpenIds: [] } },
-      stores: inboundStores(store), instanceInteractions, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), agentInput, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-worker-reply", messageId: "message-worker-reply", parentMessageId: "worker-task-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue", mentionsBot: true, isRootMessage: false };
 
     await workflow.route(message);
 
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
-    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
+    expect(agentInput.submit).toHaveBeenCalledOnce();
   });
 
-  it("falls back to the active Primary FIFO when the replied card is not a Worker Task Card", async () => {
-    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
+  it("falls back to Primary Agent Input when the replied card is not a Worker Task Card", async () => {
+    const binding = activePrimaryBinding({ title: "Primary" });
     const store = {
-      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
-      acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
+      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null)
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
+    const agentInput = acceptedAgentInput();
     const workflow = routingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      stores: inboundStores(store), instanceInteractions, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), agentInput, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = { eventId: "event-primary-reply", messageId: "message-primary-reply", parentMessageId: "primary-card", chatId: "chat", topicId: "topic", rootMessageId: "root", actorOpenId: "operator", text: "continue primary", mentionsBot: true, isRootMessage: false };
 
     await workflow.route(message);
 
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
-    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
+    expect(agentInput.submit).toHaveBeenCalledOnce();
   });
 
-  it("keeps a Lark-flattened Task Card reply on the Primary FIFO instead of guessing a Worker", async () => {
-    const binding = { id: "binding-1", projectId: "p1", workspaceId: "w1", paneId: "w1:primary", rootMessageId: "primary-root", title: "Primary", state: "active", lifecycle: "active", generation: 1 };
+  it("keeps a Lark-flattened Task Card reply on Primary Agent Input instead of guessing a Worker", async () => {
+    const binding = activePrimaryBinding({ rootMessageId: "primary-root", title: "Primary" });
     const store = {
-      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null), countPendingPrompts: vi.fn(() => 0),
-      acceptPromptWithEffects: vi.fn(() => ({ result: { inserted: false, prompt: { id: "primary-prompt" } }, commitState: "committed", consumeEffects: () => [] }))
+      findBindingByLarkScope: vi.fn(() => binding), isBindingThreadAlias: vi.fn(() => false), getConversationTarget: vi.fn(() => null)
     };
     const instanceInteractions = { handleOrdinaryMessage: vi.fn(async () => false) };
+    const agentInput = acceptedAgentInput();
     const workflow = routingWorkflow({
       config: { projects: [{ id: "p1", displayName: "Project", description: "project", workspaceId: "w1", cwd: "/repo" }], lark: { adminOpenIds: [] }, maxQueueDepth: 20 },
-      stores: inboundStores(store), instanceInteractions, primaryState: { activeTurn: vi.fn(() => null) }, presentation: primaryPresentation, logger: pino({ enabled: false })
+      stores: inboundStores(store), agentInput, instanceInteractions, presentation: primaryPresentation, logger: pino({ enabled: false })
     } as never);
     const message = {
       eventId: "event-flattened-card-reply", messageId: "text-created-from-task-card-reply",
@@ -282,7 +500,7 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
     await workflow.route(message);
 
     expect(instanceInteractions.handleOrdinaryMessage).not.toHaveBeenCalled();
-    expect(store.acceptPromptWithEffects).toHaveBeenCalledOnce();
+    expect(agentInput.submit).toHaveBeenCalledOnce();
   });
 
   it("turns a stopped Worker rejection into a durable terminal disposition", async () => {
@@ -329,18 +547,71 @@ describe("InboundMessageRoutingWorkflow instance commands", () => {
 });
 
 function inboundStores(store: Record<string, unknown>) {
-  return { routing: store, promptAcceptance: store } as never;
+  const legacyAcceptance = store.acceptPromptWithEffects as ((input: any) => { result: unknown }) | undefined;
+  return {
+    routing: store,
+    promptAcceptance: {
+      getCurrentGoal: () => null,
+      hasAcceptedPromptSource: () => false,
+      getNativeInputBacklog: () => ({ unbatchedInputCount: 0, pendingBatchCount: 0 }),
+      formDueNativeInputBatch: () => ({ outcome: "none" }),
+      acceptImmediateNativeInputBatch: (input: any) => {
+        if (!legacyAcceptance) throw new Error("test Prompt acceptance is not configured");
+        return legacyAcceptance({
+          prompt: {
+            id: input.batchId, bindingId: input.input.bindingId, larkMessageId: input.input.larkMessageId,
+            actorOpenId: input.input.actorOpenId, body: input.combinedBody
+          },
+          view: input.view
+        }).result;
+      },
+      acceptCollectingNativeInput: (input: any) => {
+        if (!legacyAcceptance) throw new Error("test Prompt acceptance is not configured");
+        legacyAcceptance({ prompt: { id: input.batchId, bindingId: input.input.bindingId }, view: null });
+        return {
+          inserted: true,
+          input: { ...input.input, state: "queued", batchId: null, createdAt: input.occurredAt, updatedAt: input.occurredAt },
+          batch: { id: input.batchId, bindingId: input.input.bindingId, bindingGeneration: input.input.bindingGeneration, state: "collecting", windowOpenedAt: input.occurredAt, drainDueAt: new Date(Date.parse(input.occurredAt) + input.windowMs).toISOString(), combinedBody: null, executionPromptId: null, formedAt: null, createdAt: input.occurredAt, updatedAt: input.occurredAt }
+        };
+      },
+      ...store
+    }
+  } as never;
 }
 
 function routingWorkflow(options: Record<string, any>): InboundMessageRoutingWorkflow {
   const stores = options.stores ?? {};
   const routing = stores.routing ?? {};
   const promptStore = stores.promptAcceptance ?? {};
+  const primaryState = options.primaryState ?? { activeTurn: () => null };
+  const bindingPrompts = options.bindingPrompts ?? new BindingPromptWorkflow({
+    config: options.config,
+    store: promptStore,
+    primaryState,
+    lifecycleEvents: options.lifecycleEvents ?? { publish: async () => {} },
+    outboundWork: options.outboundWork ?? { wake() {}, subscribe: () => () => {} },
+    scheduler: options.scheduler ?? { wake() {}, subscribe: () => () => {} },
+    presentation: options.presentation ?? primaryPresentation
+  } as never);
   const promptAdmission = options.promptAdmission ?? new PromptAdmissionWorkflow({
-    config: options.config, store: promptStore, routing, primaryState: options.primaryState ?? { activeTurn: () => null },
-    lifecycleEvents: options.lifecycleEvents ?? { publish: async () => {} }, outbound: options.outbound ?? { enqueueCard: async () => {} },
-    outboundWork: options.outboundWork ?? { wake() {}, subscribe: () => () => {} }, scheduler: options.scheduler ?? { wake() {}, subscribe: () => () => {} },
+    bindingPrompts,
+    routing,
+    primaryState,
+    outbound: options.outbound ?? { enqueueCard: async () => {} },
     presentation: options.presentation ?? primaryPresentation
   } as never);
   return new InboundMessageRoutingWorkflow({ ...options, routing, promptAdmission } as never);
+}
+
+function activePrimaryBinding(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "binding-1", gatewayId: "feishu:primary", projectId: "p1", workspaceId: "w1", paneId: "w1:primary",
+    traexSessionId: "terminal-1", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1",
+    agentKind: "traex", rootMessageId: "root", state: "active", lifecycle: "active", generation: 1, lastAgentState: "idle",
+    ...overrides
+  };
+}
+
+function acceptedAgentInput(submissionId = "submission-1") {
+  return { submit: vi.fn(async () => ({ outcome: "accepted" as const, submissionId, state: "prepared" as const })) };
 }

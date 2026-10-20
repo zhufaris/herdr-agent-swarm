@@ -4,6 +4,15 @@ import { runForeignKeySafeRebuild } from "./foreign-key-safe-rebuild.js";
 export class WorkerMigrations {
   constructor(private readonly context: SqliteContext) {}
 
+  private migrationTransaction<T>(operation: () => T): T {
+    return this.context.migrationTransaction("sqlite.migrations.worker", operation);
+  }
+
+  ensureWorkerPaneTokenColumn(): void {
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!columns.has("pane_token")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN pane_token TEXT");
+  }
+
   ensureWorkerSessionThreads(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 35").get();
     const table = this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_session_threads'").get();
@@ -47,10 +56,21 @@ export class WorkerMigrations {
   ensureWorkerThreadEntryInvalidations(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 43").get();
     const timestamp = now();
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       if (!migrated) this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (43)").run();
-      this.context.database.prepare(`
+      this.convergeWorkerThreadEntryInvalidationData(timestamp);
+    });
+  }
+
+  convergeWorkerThreadEntryInvalidations(): void {
+    const timestamp = now();
+    this.context.transaction("sqlite.startup.worker-thread-entry-convergence", () => {
+      this.convergeWorkerThreadEntryInvalidationData(timestamp);
+    });
+  }
+
+  private convergeWorkerThreadEntryInvalidationData(timestamp: string): void {
+    this.context.database.prepare(`
         UPDATE worker_thread_entry_requests AS request SET state = 'stale', updated_at = ?
         WHERE request.state = 'pending' AND NOT EXISTS (
           SELECT 1
@@ -70,8 +90,8 @@ export class WorkerMigrations {
             AND binding.state = 'active' AND binding.lifecycle = 'active' AND binding.attachment = 'attached'
             AND thread.state = 'active' AND main.message_id = thread.root_message_id
         )
-      `).run(timestamp);
-      this.context.database.prepare(`
+    `).run(timestamp);
+    this.context.database.prepare(`
         INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
         SELECT 'worker-session', request.worker_id, request.worker_session_generation, 1, 0, 'startup.worker-thread-entry-backfill', ?, ?
         FROM worker_thread_entry_requests request
@@ -93,9 +113,7 @@ export class WorkerMigrations {
             ELSE card_context_invalidations.requested_dependency_revision
           END,
           reason = excluded.reason, updated_at = excluded.updated_at
-      `).run(timestamp, timestamp);
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    `).run(timestamp, timestamp);
   }
 
   ensureWorkerCardDisplayRequests(): void {
@@ -120,8 +138,7 @@ export class WorkerMigrations {
   ensureInstanceTurnActorProvenance(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 27").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const names = new Set((this.context.database.prepare("PRAGMA table_info(instance_turns)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!names.has("actor_kind")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN actor_kind TEXT CHECK(actor_kind IN ('human','thread-primary'))");
       if (!names.has("source_binding_id")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN source_binding_id TEXT");
@@ -138,8 +155,7 @@ export class WorkerMigrations {
         CREATE INDEX IF NOT EXISTS worker_turn_cards_session_phase ON worker_turn_cards(instance_id, worker_session_generation, phase, created_at, turn_id);
         INSERT INTO schema_migrations(version) VALUES (27);
       `);
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerOutboxStreamMetadata(): void {
@@ -147,8 +163,7 @@ export class WorkerMigrations {
     const existingColumns = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
     const existingIndexes = new Set((this.context.database.prepare("PRAGMA index_list(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
     if (migrated && existingColumns.has("stream_page_index") && existingColumns.has("stream_element_id") && existingIndexes.has("outbound_replies_worker_pending") && existingIndexes.has("outbound_replies_worker_stream")) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const names = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!names.has("stream_page_index")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN stream_page_index INTEGER");
       if (!names.has("stream_element_id")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN stream_element_id TEXT");
@@ -169,15 +184,13 @@ export class WorkerMigrations {
         CREATE INDEX IF NOT EXISTS outbound_replies_worker_stream ON outbound_replies(worker_turn_id, kind, stream_page_index, selection_id, delivery_order DESC) WHERE worker_turn_id IS NOT NULL AND state IN ('pending','delivered','dead_letter');
         INSERT OR IGNORE INTO schema_migrations(version) VALUES (28);
       `);
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerTurnCards(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 8").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const turnColumns = new Set((this.context.database.prepare("PRAGMA table_info(instance_turns)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!turnColumns.has("parent_turn_id")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN parent_turn_id TEXT REFERENCES instance_turns(id)");
       if (!turnColumns.has("source_message_id")) this.context.database.exec("ALTER TABLE instance_turns ADD COLUMN source_message_id TEXT");
@@ -195,89 +208,98 @@ export class WorkerMigrations {
         );
         CREATE INDEX IF NOT EXISTS worker_turn_cards_instance ON worker_turn_cards(instance_id, created_at, turn_id);
         CREATE TABLE IF NOT EXISTS worker_turn_card_pages(
-          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
+          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, segment_index INTEGER NOT NULL DEFAULT 0, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, state TEXT NOT NULL CHECK(state IN ('active','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
         );
         CREATE INDEX IF NOT EXISTS worker_turn_card_pages_turn ON worker_turn_card_pages(turn_id, page_index);
         INSERT INTO schema_migrations(version) VALUES (8);
       `);
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
+  }
+
+  ensureActionableWorkerTurnPageIndex(): void {
+    if (!this.context.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_turn_cards'").get()) return;
+    this.context.database.exec(`
+      CREATE INDEX IF NOT EXISTS worker_turn_cards_actionable_page_keyset
+        ON worker_turn_cards(
+          updated_at,
+          turn_id,
+          instance_id,
+          instance_generation,
+          worker_session_generation,
+          delivered_version,
+          view_version
+        );
+    `);
   }
 
   ensureWorkerTurnCardPageStates(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 9").get();
-    if (migrated) return;
     const schema = this.context.database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'worker_turn_card_pages'").get() as { sql: string } | undefined;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
-      if (schema && (!schema.sql.includes("'creating'") || !schema.sql.includes("'frozen'"))) this.context.database.exec(`
+    if (migrated && !schema?.sql.includes("'rich_post'")) return;
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_card_pages)").all() as Array<{ name: string }>).map(({ name }) => name));
+    this.migrationTransaction(() => {
+      if (schema && (!schema.sql.includes("'creating'") || !schema.sql.includes("'frozen'") || schema.sql.includes("'rich_post'"))) this.context.database.exec(`
         CREATE TABLE worker_turn_card_pages_next(
-          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
+          id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES instance_turns(id) ON DELETE CASCADE, page_index INTEGER NOT NULL, segment_index INTEGER NOT NULL DEFAULT 0, page_start INTEGER NOT NULL, element_id TEXT NOT NULL, message_id TEXT UNIQUE, card_id TEXT, delivery_mode TEXT NOT NULL DEFAULT 'streaming' CHECK(delivery_mode IN ('streaming')), state TEXT NOT NULL CHECK(state IN ('creating','active','frozen','finished')), sequence INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(turn_id, page_index)
         );
-        INSERT INTO worker_turn_card_pages_next SELECT * FROM worker_turn_card_pages;
+        INSERT INTO worker_turn_card_pages_next(id, turn_id, page_index, segment_index, page_start, element_id, message_id, card_id, delivery_mode, state, sequence, created_at, updated_at)
+          SELECT id, turn_id, page_index, 0, page_start, element_id, message_id, card_id,
+            CASE WHEN ${columns.has("delivery_mode") ? "delivery_mode" : "'streaming'"} = 'rich_post' THEN 'streaming' ELSE ${columns.has("delivery_mode") ? "delivery_mode" : "'streaming'"} END,
+            CASE WHEN ${columns.has("delivery_mode") ? "delivery_mode" : "'streaming'"} = 'rich_post' AND state = 'active' THEN 'frozen' ELSE state END,
+            sequence, created_at, updated_at FROM worker_turn_card_pages;
         DROP TABLE worker_turn_card_pages; ALTER TABLE worker_turn_card_pages_next RENAME TO worker_turn_card_pages;
       `);
       this.context.database.exec("CREATE INDEX IF NOT EXISTS worker_turn_card_pages_turn ON worker_turn_card_pages(turn_id, page_index)");
-      this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (9)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+      this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)").run();
+    });
   }
 
   ensureWorkerTurnCardProgress(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 11").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("status_title")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN status_title TEXT");
       if (!columns.has("progress_json")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_json TEXT NOT NULL DEFAULT '[]'");
       if (!columns.has("progress_sequence")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (11)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerTurnProgressSequence(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 12").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("progress_sequence")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (12)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerTurnTokenCount(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 44").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("token_count")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN token_count INTEGER");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (44)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerSourcePrimaryPaneLabel(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 13").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("source_primary_pane_label")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN source_primary_pane_label TEXT");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (13)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerParentIdentity(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 14").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("parent_binding_id")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_binding_id TEXT");
       if (!columns.has("parent_pane_id")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_pane_id TEXT");
@@ -285,8 +307,7 @@ export class WorkerMigrations {
       if (!columns.has("worker_session_lifecycle")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN worker_session_lifecycle TEXT");
       this.context.database.exec("UPDATE agent_instances SET worker_session_lifecycle = 'legacy' WHERE role = 'worker' AND worker_session_lifecycle IS NULL");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (14)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensurePrimaryScopedWorkerNames(): void {
@@ -328,8 +349,7 @@ export class WorkerMigrations {
   ensureCardContextProjectionTables(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 17").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(agent_instances)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("worker_session_generation")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN worker_session_generation INTEGER NOT NULL DEFAULT 1");
       if (!columns.has("parent_binding_generation")) this.context.database.exec("ALTER TABLE agent_instances ADD COLUMN parent_binding_generation INTEGER");
@@ -349,15 +369,13 @@ export class WorkerMigrations {
         CREATE INDEX card_context_invalidations_pending ON card_context_invalidations(projected_dependency_revision, requested_dependency_revision, updated_at);
         INSERT INTO schema_migrations(version) VALUES (17);
       `);
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureCardContextPendingIndex(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 43").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       this.context.database.exec(`
         DROP INDEX IF EXISTS card_context_invalidations_pending;
         CREATE INDEX card_context_invalidations_pending
@@ -365,15 +383,13 @@ export class WorkerMigrations {
           WHERE projected_dependency_revision < requested_dependency_revision;
         INSERT INTO schema_migrations(version) VALUES (43);
       `);
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureActiveWorkerScopedNames(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 21").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       this.context.database.exec(`
         DROP INDEX IF EXISTS agent_instances_worker_parent_name;
         CREATE UNIQUE INDEX agent_instances_worker_parent_name
@@ -381,33 +397,28 @@ export class WorkerMigrations {
           WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id IS NOT NULL AND parent_pane_id IS NOT NULL;
       `);
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (21)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerTurnContextReferences(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 18").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_turn_cards)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("worker_main_ref_json")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN worker_main_ref_json TEXT");
       if (!columns.has("primary_answer_ref_json")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN primary_answer_ref_json TEXT");
       if (!columns.has("worker_session_generation")) this.context.database.exec("ALTER TABLE worker_turn_cards ADD COLUMN worker_session_generation INTEGER NOT NULL DEFAULT 1");
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (18)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerMainOutboxIdentity(): void {
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       const columns = new Set((this.context.database.prepare("PRAGMA table_info(outbound_replies)").all() as Array<{ name: string }>).map(({ name }) => name));
       if (!columns.has("worker_id")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN worker_id TEXT REFERENCES agent_instances(id) ON DELETE CASCADE");
       if (!columns.has("worker_session_generation")) this.context.database.exec("ALTER TABLE outbound_replies ADD COLUMN worker_session_generation INTEGER");
       this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (19)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensurePrimaryCardContextColumns(): void {
@@ -422,8 +433,7 @@ export class WorkerMigrations {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 23").get();
     if (migrated) return;
     const timestamp = now();
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       this.context.database.prepare(`
         INSERT INTO card_context_invalidations(target_kind, target_id, target_generation, requested_dependency_revision, projected_dependency_revision, reason, created_at, updated_at)
         SELECT 'worker-session', worker.id, worker.worker_session_generation, 1, 0, 'startup.worker-backfill', ?, ?
@@ -462,15 +472,13 @@ export class WorkerMigrations {
           reason = excluded.reason, updated_at = excluded.updated_at
       `).run(timestamp, timestamp);
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (23)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { if (this.context.database.isTransaction) this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerPaneCloseSteps(): void {
     const migrated = this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 15").get();
     if (migrated) return;
-    this.context.database.exec("BEGIN IMMEDIATE");
-    try {
+    this.migrationTransaction(() => {
       this.context.database.exec(`
         CREATE TABLE IF NOT EXISTS worker_pane_close_steps(
           operation_id TEXT NOT NULL REFERENCES pane_close_requests(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, parent_pane_id TEXT NOT NULL, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, pane_id TEXT NOT NULL,
@@ -479,12 +487,16 @@ export class WorkerMigrations {
         CREATE INDEX IF NOT EXISTS worker_pane_close_steps_unresolved ON worker_pane_close_steps(state, created_at);
       `);
       this.context.database.prepare("INSERT INTO schema_migrations(version) VALUES (15)").run();
-      this.context.database.exec("COMMIT");
-    } catch (error) { this.context.database.exec("ROLLBACK"); throw error; }
+    });
   }
 
   ensureWorkerPaneCloseRetainedState(): void {
     if (this.context.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 45").get()) return;
+    const columns = new Set((this.context.database.prepare("PRAGMA table_info(worker_pane_close_steps)").all() as Array<{ name: string }>).map(({ name }) => name));
+    if (columns.has("instance_generation")) {
+      this.context.database.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES (45)").run();
+      return;
+    }
     runForeignKeySafeRebuild(this.context, "Worker-pane close retained-state migration", () => this.context.database.exec(`
       CREATE TABLE worker_pane_close_steps_next(
         operation_id TEXT NOT NULL REFERENCES pane_close_requests(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, parent_pane_id TEXT NOT NULL, worker_id TEXT NOT NULL REFERENCES agent_instances(id) ON DELETE CASCADE, pane_id TEXT NOT NULL, instance_generation INTEGER NOT NULL,

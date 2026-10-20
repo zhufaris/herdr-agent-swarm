@@ -18,11 +18,11 @@ export type AnswerPagePlan =
 
 export function planAnswerPage(view: RunCardView, page: AnswerPage, facts: AnswerPageDeliveryFacts, planning: AnswerPagePlanningPort): AnswerPagePlan {
   if (page.state !== "active") return { type: "wait" };
-  const content = planning.answerStreamContent(view);
-  const rendered = planning.renderAnswerStreamPage(content, page.sourceStart, planning.pageLimit);
   if (facts.continuationPending) return { type: "wait" };
   if (facts.latestContent?.state === "pending") return { type: "wait" };
   if (facts.latestContent?.state === "dead_letter") return { type: "wait" };
+  const content = planning.answerStreamContent(view);
+  const rendered = planning.renderAnswerStreamPage(content, page.sourceStart, planning.pageLimit);
   if (typeof facts.latestContent?.sourceEnd === "number" && facts.latestContent.sourceEnd > page.sourceStart) {
     if (facts.latestContent.sourceEnd >= content.length) {
       if (view.phase === "completed" || view.phase === "failed") {

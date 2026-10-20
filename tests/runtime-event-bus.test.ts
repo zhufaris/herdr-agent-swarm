@@ -33,6 +33,47 @@ describe("RuntimeEventBus", () => {
     expect(bus.snapshot().channels.work).toMatchObject({ published: 3, delivered: 2, coalesced: 1, pending: 0, listenerCount: 1 });
   });
 
+  it("waits for an asynchronous work listener during shutdown", async () => {
+    const bus = new RuntimeEventBus();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    bus.subscribe("work", "slow-worker", async () => gate);
+
+    bus.publishWork({ kind: "worker-ready", instanceId: "worker-1" });
+    bus.seal();
+    await vi.waitFor(() => expect(bus.snapshot().channels.work.delivered).toBe(1));
+
+    let stopped = false;
+    const stopping = bus.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it("flushes work emitted after an asynchronous listener yields", async () => {
+    const bus = new RuntimeEventBus();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const received: string[] = [];
+    bus.subscribe("work", "reentrant-worker", async ({ payload }) => {
+      if (payload.kind !== "worker-ready") return;
+      received.push(payload.instanceId);
+      if (payload.instanceId === "worker-1") {
+        await gate;
+        bus.publishWork({ kind: "worker-ready", instanceId: "worker-2" });
+      }
+    });
+
+    bus.publishWork({ kind: "worker-ready", instanceId: "worker-1" });
+    bus.seal();
+    await vi.waitFor(() => expect(received).toEqual(["worker-1"]));
+    release();
+    await vi.waitFor(() => expect(received).toEqual(["worker-1", "worker-2"]));
+    await bus.stop();
+  });
+
   it("isolates lifecycle subscriber failures without logging payload content", async () => {
     const error = vi.fn();
     const bus = new RuntimeEventBus({ error });
@@ -45,6 +86,15 @@ describe("RuntimeEventBus", () => {
     expect(received).toEqual(["event-1"]);
     expect(bus.snapshot().channels.lifecycle).toMatchObject({ published: 1, delivered: 1, subscriberFailures: 1, failuresBySubscriber: { broken: 1 } });
     expect(JSON.stringify(error.mock.calls)).not.toContain("secret answer");
+  });
+
+  it("propagates a Core output projection failure so its inbox event is not acknowledged", async () => {
+    const bus = new RuntimeEventBus();
+    bus.subscribe("lifecycle", "conversation-view-projector", () => { throw new Error("projection failed"); });
+    const event = { eventId: "output-1", bindingId: "binding-1", type: "TurnOutputObserved" as const, origin: "herdr" as const, occurredAt: "2026-09-24T00:00:00.000Z", payload: { promptId: "prompt-1", answerSnapshot: "answer", progressEvents: [] } };
+
+    await expect(bus.publishLifecycle(event, false)).rejects.toThrow("projection failed");
+    expect(bus.snapshot().channels.lifecycle).toMatchObject({ published: 1, delivered: 0, subscriberFailures: 1 });
   });
 
   it("propagates inbound failures so the durable inbox can retry", async () => {

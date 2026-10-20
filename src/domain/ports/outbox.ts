@@ -1,23 +1,88 @@
-import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, OutboxDispatcherDiagnostics, PromptJob, DeliveryFailureMetadata, LarkDeliveryCooldownSummary, OutboundWorkClass } from "../types.js";
+import type { AnswerPage, Binding, OutboundFailureTransition, OutboundReply, PromptJob, DeliveryFailureMetadata, LarkDeliveryCooldownSummary, OutboundWorkClass } from "../types.js";
 import type { RunCardView } from "../run-card-view.js";
 import type { WorkerTurnCardPage, WorkerTurnCardView } from "../worker-turn-card-view.js";
 
-import type { OutboundDeliveryClaim } from "../delivery.js";
+import type { DeliveryRingWork, DeliverySubject, OutboundDeliveryClaim, PreparedDeliveryPlan, PresentationSnapshot } from "../delivery.js";
+import type { AnswerTimelinePageCheckpoint } from "../delivery.js";
+import type { DeliveryOwnerFence, DeliveryScope } from "../delivery-scope.js";
 
-export interface OutboxStore {
+export interface DeliveryReservationIdentity {
+  readonly deliveryTarget: { gatewayId: string; kind: OutboundReply["kind"]; rootMessageId: string | null; targetChatId: string | null };
+  readonly scope: DeliveryScope | null;
+  readonly ownerFence: DeliveryOwnerFence | null;
+  readonly parentPaneId: string | null;
+  readonly laneKey: string;
+  readonly conflictKey: string;
+  readonly orderingIdentity: string;
+  readonly idempotencyKey: string;
+}
+
+export interface PreparedDeliveryReceipt {
+  readonly commitState: "pending" | "committed" | "rolled_back";
+  readonly result: OutboundReply;
+  consumeEffects(): readonly DeliveryRingWork[];
+}
+
+export type PreparedDeliveryReservationInput = Parameters<OutboxStore["enqueueOutboundReply"]>[0] & {
+  laneKeyOverride?: string;
+  bindingGeneration?: number | null;
+  globalDelivery?: true;
+};
+
+export type SemanticDeliveryReservationInput = PreparedDeliveryReservationInput & {
+  projectionKey: string;
+  snapshotRevision: number;
+  subject: DeliverySubject;
+  snapshot: PresentationSnapshot;
+  plannerPolicyVersion: number;
+  rendererPolicyVersion: number;
+  gatewayProfileVersion: number;
+};
+
+export interface PreparedDeliveryReservation {
+  reservePreparedOutboundReply(input: PreparedDeliveryReservationInput): PreparedDeliveryReceipt;
+  reserveSemanticOutboundReply(input: SemanticDeliveryReservationInput): PreparedDeliveryReceipt;
+  previewSemanticOutboundReply(input: SemanticDeliveryReservationInput): DeliveryReservationIdentity;
+  getReservedDeliveryIdentity(replyId: string): DeliveryReservationIdentity | null;
+}
+
+export interface PreparedDeliveryConsumer {
+  enqueuePreparedDelivery(delivery: DeliveryRingWork): void;
+}
+
+export interface PreparedDeliveryProducerConnector {
+  connectPreparedDeliveryProducers(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void;
+}
+
+export interface GatewayPlanPreparerConnector {
+  setGatewayPlanPreparer(preparer: (reply: OutboundReply) => PreparedDeliveryPlan): void;
+}
+
+export interface WorkerThreadDeliveryTarget {
+  threadId: string;
+  workerId: string;
+  workerSessionGeneration: number;
+  chatId: string;
+  topicId: string | null;
+  rootMessageId: string | null;
+  state: "reserving" | "active" | "stale";
+}
+
+export interface OutboxStore extends PreparedDeliveryReservation, GatewayPlanPreparerConnector {
   prepareOutboundGatewayPlan(id: string, input: { gatewayId: string; gatewayProfileId: string; gatewayPlanJson: string }): OutboundReply | null;
-  claimOutboundReply(id: string, dueAt: string | null): OutboundDeliveryClaim | null;
   checkpointOutboundReplyCard(claim: OutboundDeliveryClaim, cardId: string): OutboundReply | null;
-  enqueueOutboundReply(input: Omit<OutboundReply, "gatewayId" | "gatewayProfileId" | "gatewayPlanJson" | "gatewayPlanHash" | "gatewayCheckpointJson" | "laneKey" | "workClass" | "threadAliasId" | "workerThreadId" | "targetChatId" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "cardRole" | "targetRole" | "intentKind" | "intentJson" | "rendererRevision" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "effectCertainty" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt"> & { gatewayId?: string; gatewayProfileId?: string; gatewayPlanJson?: string | null; gatewayPlanHash?: string | null; gatewayCheckpointJson?: string | null; threadAliasId?: string | null; workerThreadId?: string | null; targetChatId?: string | null; workClass?: OutboundWorkClass; promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"]; intentKind?: OutboundReply["intentKind"]; intentJson?: string | null; rendererRevision?: number | null }): OutboundReply;
+  enqueueOutboundReply(input: Omit<OutboundReply, "gatewayId" | "gatewayProfileId" | "gatewayPlanJson" | "gatewayPlanHash" | "gatewayCheckpointJson" | "laneKey" | "conflictKey" | "projectionKey" | "workClass" | "threadAliasId" | "workerThreadId" | "shortcutPanelId" | "targetChatId" | "promptId" | "workerTurnId" | "workerId" | "workerSessionGeneration" | "viewVersion" | "cardSequence" | "selectionId" | "streamPageIndex" | "streamElementId" | "cardRole" | "targetRole" | "intentKind" | "intentJson" | "rendererRevision" | "state" | "attemptCount" | "error" | "deliveredMessageId" | "cardIdCheckpoint" | "failureClass" | "effectCertainty" | "httpStatus" | "larkErrorCode" | "autoRecoveryCount" | "deadLetteredAt" | "nextAttemptAt" | "createdAt" | "updatedAt" | "deliveryScope" | "deliveryOwnerFence" | "deliveryParentPaneId"> & { gatewayId?: string; gatewayProfileId?: string; gatewayPlanJson?: string | null; gatewayPlanHash?: string | null; gatewayCheckpointJson?: string | null; threadAliasId?: string | null; workerThreadId?: string | null; shortcutPanelId?: string | null; targetChatId?: string | null; workClass?: OutboundWorkClass; promptId?: string | null; workerTurnId?: string | null; workerId?: string | null; workerSessionGeneration?: number | null; viewVersion?: number | null; cardSequence?: number | null; selectionId?: string | null; streamPageIndex?: number | null; streamElementId?: string | null; cardRole?: OutboundReply["cardRole"]; targetRole?: OutboundReply["targetRole"]; intentKind?: OutboundReply["intentKind"]; intentJson?: string | null; rendererRevision?: number | null; globalDelivery?: true }): OutboundReply;
   getActiveAnswerPage(promptId: string): AnswerPage | null;
+  getAnswerPage(promptId: string, pageIndex: number): AnswerPage | null;
+  getAnswerTimelinePage(promptId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
+  getWorkerAnswerTimelinePage(turnId: string, pageIndex: number): AnswerTimelinePageCheckpoint;
   getBinding(id: string): Binding | null;
+  getOutboundReply(id: string): OutboundReply | null;
   isActiveBindingThreadAlias(bindingId: string, rootMessageId: string): boolean;
-  getNextOutboundLaneHeadAttemptAt(): string | null;
   getLarkDeliveryCooldown(): LarkDeliveryCooldownSummary;
   getPrompt(id: string): PromptJob | null;
-  listOutboundLaneHeads(limit: number, dueAt: string | null, excludedLaneKeys?: readonly string[], workClass?: OutboundWorkClass): OutboundReply[];
   loadRunCard(promptId: string): RunCardView | null;
-  markOutboundReplyDelivered(claim: OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string): boolean;
+  markOutboundReplyDelivered(claim: OutboundDeliveryClaim, messageId: string, cardId?: string, topicId?: string, messageDeleteOutcome?: "deleted" | "already_absent"): boolean;
   markOutboundReplyFailedWithQuarantine(claim: OutboundDeliveryClaim, error: string, metadata: DeliveryFailureMetadata, retryDelayMs?: number): OutboundFailureTransition | null;
   rejectUnclaimedOutboundReply(id: string, error: string, metadata: DeliveryFailureMetadata): OutboundFailureTransition | null;
   recoverEligibleDeadLetters(cutoff: string, limit: number): OutboundReply[];
@@ -26,25 +91,16 @@ export interface OutboxStore {
   loadWorkerTurnCard(turnId: string): WorkerTurnCardView | null;
   loadWorkerMainView(workerId: string, workerSessionGeneration: number): import("../worker-main-view.js").WorkerMainView | null;
   listWorkerTurnCardPages(turnId: string): WorkerTurnCardPage[];
+  getWorkerThreadTarget(threadId: string): WorkerThreadDeliveryTarget | null;
 }
 
-export type OutboundScanStore = Pick<OutboxStore,
-  "getLarkDeliveryCooldown" | "getNextOutboundLaneHeadAttemptAt" |
-  "listOutboundLaneHeads" | "recoverEligibleDeadLetters"
+export type GatewayIntentPreparationStore = Pick<OutboxStore,
+  "getActiveAnswerPage" | "getAnswerPage" | "getBinding" | "getWorkerThreadTarget" |
+  "getAnswerTimelinePage" | "getWorkerAnswerTimelinePage" | "getPrompt" | "isActiveBindingThreadAlias" |
+  "listWorkerTurnCardPages" | "loadRunCard" | "loadWorkerMainView" | "loadWorkerTurnCard"
 >;
 
-export type OutboundDeliveryStore = Pick<OutboxStore,
-  "checkpointOutboundReplyCard" | "claimOutboundReply" |
-  "dismissSupersededAnswerStream" | "getActiveAnswerPage" | "getBinding" |
-  "getPrompt" | "isActiveBindingThreadAlias" | "listWorkerTurnCardPages" |
-  "loadRunCard" | "loadWorkerMainView" | "loadWorkerTurnCard" |
-  "markOutboundReplyDelivered" | "markOutboundReplyFailedWithQuarantine" |
-  "prepareOutboundGatewayPlan" | "recordBridgeMessage" |
-  "rejectUnclaimedOutboundReply"
->;
-
-export interface OutboundIntentStore {
-  enqueueOutboundReply(input: Parameters<OutboxStore["enqueueOutboundReply"]>[0]): OutboundReply;
+export interface OutboundIntentStore extends PreparedDeliveryReservation {
   getActiveAnswerPage(promptId: string): AnswerPage | null;
   getBinding(id: string): Binding | null;
   loadRunCard(promptId: string): RunCardView | null;
@@ -57,14 +113,14 @@ export interface OutboundIntentPort {
   enqueueStreamContent(bindingId: string, promptId: string, cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
   enqueueStreamCardCreate(input: { bindingId: string; promptId: string; rootMessageId: string; card: object; pageIndex: number; pageStart: number; elementId: string; viewVersion: number }): Promise<void>;
   enqueueStreamFinish(bindingId: string, promptId: string, cardId: string, summary: string, sequence: number): Promise<void>;
+  enqueueMessageDelete(bindingId: string | null, messageId: string, idempotencyKey: string): Promise<void>;
 }
 
 export interface OutboundCheckpointSubscriber {
+  onTurnCardCheckpoint?(listener: (segmentId: string, pageIndex: number, replyId: string, messageId: string, cardId: string | null) => void): () => void;
+  onTurnCardRecoveryCheckpoint?(listener: (segmentId: string) => void): () => void;
   onAnswerCheckpoint(listener: (promptId: string, viewVersion: number) => void): () => void;
   onWorkerTurnCheckpoint(listener: (turnId: string, viewVersion: number) => void): () => void;
   onWorkerMainCheckpoint(listener: (workerId: string, workerSessionGeneration: number, viewVersion: number) => void): () => void;
   onMainCardCheckpoint(listener: (bindingId: string, viewVersion: number) => void): () => void;
-  requestScan(force?: boolean): Promise<void>;
 }
-export interface ImmediateOutboundDispatcher { requestScan(force?: boolean): Promise<void>; }
-export interface OutboxDispatcherControl { start(): () => void; stop(): Promise<void>; requestScan(force?: boolean): Promise<void>; snapshot(): OutboxDispatcherDiagnostics; }

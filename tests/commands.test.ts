@@ -15,6 +15,8 @@ describe("commands", () => {
     expect(parseCommand("/swarm new title --agent pi trailing")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm reset")).toEqual({ kind: "reset", title: null });
     expect(parseCommand("/swarm reset fresh start")).toEqual({ kind: "reset", title: "fresh start" });
+    expect(parseCommand("/swarm clear")).toEqual({ kind: "clear" });
+    expect(parseCommand("/swarm clear now")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm projects")).toEqual({ kind: "projects" });
     expect(parseCommand("/swarm spaces")).toEqual({ kind: "spaces" });
     expect(parseCommand("/swarm spaces extra")).toEqual({ kind: "help" });
@@ -27,14 +29,15 @@ describe("commands", () => {
     expect(parseCommand("/swarm rename better title")).toEqual({ kind: "rename", title: "better title" });
     expect(parseCommand("/swarm status")).toEqual({ kind: "status" });
     expect(parseCommand("/swarm attach datasage_semantic_knowledge w5:p3G")).toEqual({ kind: "attach", spaceName: "datasage_semantic_knowledge", paneId: "w5:p3G" });
-    expect(parseCommand("/swarm attach datasage_semantic_knowledge")).toEqual({ kind: "help" });
+    expect(parseCommand("/swarm attach cum7")).toEqual({ kind: "attach", spaceName: null, paneId: "cum7" });
     expect(parseCommand("/swarm attach datasage_semantic_knowledge w5:p3G extra")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm reattach w1:p9")).toEqual({ kind: "reattach", paneId: "w1:p9" });
     expect(parseCommand("/swarm replace")).toEqual({ kind: "replace" });
     expect(parseCommand("/swarm resume")).toEqual({ kind: "resume" });
+    expect(parseCommand("/swarm archive")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm awake")).toEqual({ kind: "awake" });
     expect(parseCommand("/swarm awake extra")).toEqual({ kind: "help" });
-    expect(parseCommand("/swarm skip")).toEqual({ kind: "skip" });
+    expect(parseCommand("/swarm skip")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm skip prompt-1")).toEqual({ kind: "help" });
     expect(parseCommand("/swarm worker create reviewer")).toEqual({ kind: "worker_create", name: "reviewer", agentKind: "traex", model: null, start: false });
     expect(parseCommand("/swarm worker create reviewer --agent codex --model \"GPT 5\" --start")).toEqual({ kind: "worker_create", name: "reviewer", agentKind: "codex", model: "GPT 5", start: true });
@@ -64,14 +67,16 @@ describe("commands", () => {
 
   it("classifies every Swarm command through one exhaustive policy catalog", () => {
     expect(Object.keys(SWARM_COMMAND_POLICIES).sort()).toEqual([
-      "attach", "awake", "close", "failures", "help", "model", "new", "pane_close_confirm", "pane_close_request", "panes", "projects", "reattach", "rename", "replace", "reset", "resume", "sessions", "skip", "spaces", "status", "steer", "stop", "worker_create"
+      "attach", "awake", "clear", "close", "failures", "help", "model", "new", "pane_close_confirm", "pane_close_request", "panes", "projects", "reattach", "rename", "replace", "reset", "resume", "sessions", "spaces", "status", "steer", "stop", "worker_create"
     ]);
-    expect(swarmCommandPolicy({ kind: "skip" })).toEqual({ mode: "mutation", scope: "active-turn", authorization: "creator", replay: "reconcilable", handler: "prompt-recovery" });
+    expect(swarmCommandPolicy({ kind: "clear" })).toEqual({ mode: "mutation", scope: "primary-session", authorization: "administrator", replay: "non-replayable", handler: "orchestrator-clear" });
+    expect(swarmCommandPolicy({ kind: "archive" })).toEqual({ mode: "mutation", scope: "primary-session", authorization: "creator-and-administrator", replay: "safe-before-effect", handler: "session" });
     expect(swarmCommandPolicy({ kind: "model", name: null })).toMatchObject({ mode: "query", replay: "none" });
     expect(swarmCommandPolicy({ kind: "model", name: "GPT-5" })).toMatchObject({ mode: "mutation", replay: "non-replayable" });
   });
 
   it("defines operator metadata and risk for every Swarm command", () => {
+    expect(Object.keys(SWARM_COMMAND_DEFINITIONS)).not.toContain("archive");
     expect(Object.keys(SWARM_COMMAND_DEFINITIONS).sort()).toEqual(Object.keys(SWARM_COMMAND_POLICIES).sort());
     for (const definition of Object.values(SWARM_COMMAND_DEFINITIONS)) {
       expect(definition.syntax).toMatch(/^\/swarm/);
@@ -80,9 +85,10 @@ describe("commands", () => {
       expect(definition.examples.every((example) => example.startsWith("/swarm"))).toBe(true);
     }
     expect(swarmCommandDefinition({ kind: "stop" }).risk).toBe("destructive-mutation");
-    expect(swarmCommandDefinition({ kind: "skip" }).risk).toBe("destructive-mutation");
+    expect(swarmCommandDefinition({ kind: "clear" }).risk).toBe("destructive-mutation");
     expect(swarmCommandDefinition({ kind: "pane_close_confirm", code: "ABC" }).risk).toBe("destructive-mutation");
     expect(swarmCommandDefinition({ kind: "reset", title: null }).risk).toBe("recoverable-mutation");
+    expect(swarmCommandDefinition({ kind: "archive" })).toMatchObject({ syntax: "CardKit only", examples: [], risk: "recoverable-mutation" });
     expect(swarmCommandDefinition({ kind: "model", name: null })).toMatchObject({ mode: "query", replay: "none", risk: "read-only" });
     expect(swarmCommandDefinition({ kind: "model", name: "GPT-5" })).toMatchObject({ mode: "mutation", replay: "non-replayable", risk: "recoverable-mutation" });
   });
@@ -92,8 +98,13 @@ describe("commands", () => {
     expect(swarmCommandSourceDecision({ kind: "rename", title: "next" }, "natural-language")).toBe("admit");
     expect(swarmCommandSourceDecision({ kind: "stop" }, "natural-language")).toBe("confirm");
     expect(swarmCommandSourceDecision({ kind: "stop" }, "literal")).toBe("admit");
+    expect(swarmCommandSourceDecision({ kind: "clear" }, "literal")).toBe("confirm");
+    expect(swarmCommandSourceDecision({ kind: "clear" }, "natural-language")).toBe("confirm");
     expect(swarmCommandSourceDecision({ kind: "stop" }, "card")).toBe("admit");
     expect(swarmCommandSourceDecision({ kind: "stop" }, "primary-tool")).toBe("unsupported");
+    expect(swarmCommandSourceDecision({ kind: "archive" }, "card")).toBe("admit");
+    expect(swarmCommandSourceDecision({ kind: "archive" }, "literal")).toBe("unsupported");
+    expect(swarmCommandSourceDecision({ kind: "archive" }, "natural-language")).toBe("unsupported");
   });
 
   it("places every command definition in exactly one help group", () => {

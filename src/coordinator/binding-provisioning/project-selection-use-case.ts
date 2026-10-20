@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { projectSpaceName } from "../../config.js";
 import type { BindingProvisioningStore } from "../../domain/ports/binding.js";
-import type { ImmediateOutboundDispatcher, OutboundIntentPort } from "../../domain/ports/outbox.js";
+import type { OutboundIntentPort } from "../../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../../domain/ports/presentation.js";
 import type { Binding, IncomingLarkCardAction, IncomingLarkMessage, ProjectConfig, ProjectSelection } from "../../domain/types.js";
 import type { OutboundWorkNotifier } from "../../events/outbound-work-notifier.js";
@@ -15,14 +15,12 @@ type StatusInput = Parameters<ApplicationPresentation["projectSelectionStatus"]>
 
 export class ProjectSelectionUseCase {
   private readonly projects: ProjectCatalog;
-  constructor(private readonly options: { projects: readonly ProjectConfig[]; store: BindingProvisioningStore; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; immediateOutbound: ImmediateOutboundDispatcher; logger: Logger; presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus">; provision(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> }) { this.projects = new ProjectCatalog(options.projects); }
+  constructor(private readonly options: { projects: readonly ProjectConfig[]; store: BindingProvisioningStore; outbound: OutboundIntentPort; outboundWork: OutboundWorkNotifier; logger: Logger; presentation: Pick<ApplicationPresentation, "projectSelector" | "projectSelectionStatus">; provision(selection: ProjectSelection, project: ProjectConfig, allowPaneCreation: boolean): Promise<Binding> }) { this.projects = new ProjectCatalog(options.projects); }
 
   async begin(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null, agentKind: AgentKind): Promise<void> {
     const selectionId = randomUUID();
     this.options.store.createProjectSelection({ id: selectionId, commandMessageId: message.messageId, chatId: message.chatId, topicId: message.topicId, rootMessageId: message.rootMessageId ?? message.messageId, actorOpenId: message.actorOpenId, requestedTitle, initialPromptText, agentKind, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), card: this.options.presentation.projectSelector({ selectionId, projects: [...this.options.projects] }) });
     this.options.outboundWork.wake();
-    try { await this.options.immediateOutbound.requestScan(); }
-    catch (error) { this.options.logger.warn({ event: "project-selector-immediate-delivery-failed", err: safeLogError(error), selectionId, eventId: message.eventId, outcome: "deferred" }, "immediate project selector delivery failed; durable outbox retry remains scheduled"); }
   }
 
   async beginDefault(message: IncomingLarkMessage, requestedTitle: string | null, initialPromptText: string | null, agentKind: AgentKind, projectId: string): Promise<{ binding: Binding; selection: ProjectSelection } | null> {
@@ -102,7 +100,7 @@ export class ProjectSelectionUseCase {
     }
   }
 
-  success(selectionId: string, messageId: string, project: ProjectConfig, binding: Binding): Promise<void> { return this.status(messageId, selectionId, { status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId } : {}) }); }
+  success(selectionId: string, messageId: string, project: ProjectConfig, binding: Binding): Promise<void> { return this.status(messageId, selectionId, { status: "completed", projectName: project.displayName, spaceName: projectSpaceName(project), ...(binding.rootMessageId ? { bindingId: binding.id } : {}), ...(binding.paneId ? { paneId: binding.paneId, paneToken: binding.paneToken } : {}) }); }
   private status(messageId: string, selectionId: string, input: StatusInput): Promise<void> { return this.options.outbound.enqueueCardUpdate(null, messageId, `selection:${selectionId}:${input.status}`, this.options.presentation.projectSelectionStatus(input)); }
 }
 

@@ -1,29 +1,42 @@
 import { describe, expect, it } from "vitest";
 import type { BridgeEvent } from "../src/domain/events.js";
-import { initialTopicView, mirrorRunCardToTopic, reduceTopicView, updateTopicModelPreference } from "../src/domain/topic-view.js";
+import { applyTopicGoalChanges, initialTopicView, mirrorRunCardToTopic, reduceTopicView, updateTopicModelPreference, updateTopicSessionIdentity, updateTopicView } from "../src/domain/topic-view.js";
 import { createQueuedRunCard, reduceRunCard } from "../src/domain/run-card-view.js";
 import { renderProjectEntryCard } from "../src/cards/run-card.js";
+import { runtimeModelPreference } from "../src/domain/model-selection.js";
 
 function event<T extends BridgeEvent["type"]>(type: T, payload: Extract<BridgeEvent, { type: T }>["payload"]): Extract<BridgeEvent, { type: T }> {
   return { eventId: type, bindingId: "b1", type, origin: "bridge", occurredAt: "2026-08-22T00:00:00Z", payload } as Extract<BridgeEvent, { type: T }>;
 }
 
 describe("topic view reducer", () => {
+  it("owns CurrentGoal at the Primary Session boundary and rejects a foreign session", () => {
+    const initial = initialTopicView("b1");
+    const active = applyTopicGoalChanges(initial, [{
+      goalId: "goal-1", objective: "Finish the release", status: "active", sourceUpdatedAt: 1,
+      occurredAt: "now", sourceId: "source-1", sourceSequence: 1, sourceEventId: "event-1", nativeSessionId: "session-1"
+    }], "session-1");
+    expect(active.currentGoal).toMatchObject({ goalId: "goal-1", status: "active" });
+    expect(applyTopicGoalChanges(active, [{
+      goalId: "foreign", objective: "Wrong session", status: "active", sourceUpdatedAt: 2,
+      occurredAt: "later", sourceId: "source-2", sourceSequence: 2, sourceEventId: "event-2", nativeSessionId: "session-2"
+    }], "session-1")).toBe(active);
+  });
   it("projects model preference separately from confirmed runtime telemetry", () => {
     const observed = { ...initialTopicView("b1"), model: "GPT-5.4" };
-    const pending = updateTopicModelPreference(observed, {
+    const pending = updateTopicModelPreference(observed, runtimeModelPreference.snapshot({
       bindingId: "b1", bindingGeneration: 1, desiredModel: "GPT-5.6-Sol", desiredRevision: 2,
       effectiveModel: "GPT-5.4", effectiveRevision: 1, state: "pending", dispatchPromptId: null, preparedOperationId: null, updatedAt: "now"
-    });
+    }));
 
     expect(pending).toMatchObject({ model: "GPT-5.4", modelPreference: { model: "GPT-5.6-Sol", state: "pending", revision: 2 } });
-    expect(updateTopicModelPreference(pending, null)).toMatchObject({ model: "GPT-5.4", modelPreference: null, viewVersion: pending.viewVersion + 1 });
+    expect(updateTopicModelPreference(pending, runtimeModelPreference.snapshot(null))).toMatchObject({ model: "GPT-5.4", modelPreference: null, viewVersion: pending.viewVersion + 1 });
   });
   it("persists Primary tool unavailability independently from binding health", () => {
     const initial = initialTopicView("b1");
     const unavailable = reduceTopicView(initial, { eventId: "e1", bindingId: "b1", type: "PrimaryToolAvailabilityChanged", origin: "bridge", occurredAt: "2026-08-30T00:00:00.000Z", payload: { available: false, reason: "Primary tools unavailable; use reset or replace" } });
     expect(unavailable).toMatchObject({ phase: "provisioning", primaryToolsAvailable: false, primaryToolsNotice: "Primary tools unavailable; use reset or replace" });
-    expect(JSON.stringify(renderProjectEntryCard(unavailable))).toContain("Primary tools unavailable; use reset or replace");
+    expect(JSON.stringify(renderProjectEntryCard({ ...unavailable, phase: "ready", paneId: "w1:p1" }))).not.toContain("Primary tools unavailable; use reset or replace");
   });
   it("projects lifecycle and turn events deterministically", () => {
     const events: BridgeEvent[] = [
@@ -36,6 +49,25 @@ describe("topic view reducer", () => {
     const reduceAll = () => events.reduce(reduceTopicView, initialTopicView("b1"));
     expect(reduceAll()).toEqual(reduceAll());
     expect(reduceAll()).toMatchObject({ title: "Fix tests", paneId: "w1:p2", phase: "done", answer: "Done", queueDepth: 0 });
+  });
+
+  it("carries authoritative Binding session identity additively", () => {
+    const binding = { generation: 3, sessionEpoch: 4, agentSessionKind: "id" as const, agentSessionValue: "native-4", paneId: "w1:p2", rootMessageId: "root-4" };
+    const projected = updateTopicSessionIdentity(initialTopicView("b1"), binding);
+
+    expect(projected.sessionIdentity).toEqual({ bindingGeneration: 3, sessionEpoch: 4, nativeSessionId: "native-4", paneId: "w1:p2", rootMessageId: "root-4" });
+    expect(updateTopicSessionIdentity(projected, binding)).toBe(projected);
+  });
+
+  it.each([
+    ["a path session", { agentSessionKind: "path" as const, agentSessionValue: "/sessions/4" }],
+    ["a missing id", { agentSessionKind: "id" as const, agentSessionValue: null }]
+  ])("does not treat %s as a native session ID", (_name, session) => {
+    const projected = updateTopicSessionIdentity(initialTopicView("b1"), {
+      generation: 1, sessionEpoch: 1, paneId: "w1:p1", rootMessageId: "root", ...session
+    });
+
+    expect(projected.sessionIdentity?.nativeSessionId).toBeNull();
   });
 
   it("mirrors live output and ignores a stale terminal event", () => {
@@ -52,6 +84,37 @@ describe("topic view reducer", () => {
     const observed = reduceTopicView(running, event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "", progressEvents: [], model: "GPT-5.6-Sol", context: "31.1K tokens" }));
 
     expect(observed).toMatchObject({ model: "GPT-5.6-Sol", context: "31.1K tokens" });
+  });
+
+  it("projects bounded model usage timings and leaves provider token splits unknown", () => {
+    const queued = reduceTopicView(initialTopicView("b1"), { ...event("PromptQueued", { promptId: "p1", queueDepth: 1, actorOpenId: "u1" }), occurredAt: "2026-08-22T00:00:00.000Z" });
+    const started = reduceTopicView(queued, { ...event("TurnStarted", { promptId: "p1", queueDepth: 1 }), occurredAt: "2026-08-22T00:00:02.000Z" });
+    const visible = reduceTopicView(started, { ...event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "hello", progressEvents: [], model: "GPT-5" }), occurredAt: "2026-08-22T00:00:05.000Z" });
+    const completed = reduceTopicView(visible, { ...event("TurnCompleted", { promptId: "p1", answer: "hello", queueDepth: 0 }), occurredAt: "2026-08-22T00:00:09.000Z" });
+    expect(completed.modelUsage).toMatchObject({ model: "GPT-5", queuedAt: "2026-08-22T00:00:00.000Z", firstVisibleAt: "2026-08-22T00:00:05.000Z", completedAt: "2026-08-22T00:00:09.000Z", waitMs: 2000, firstVisibleMs: 5000, inputTokens: null, outputTokens: null });
+  });
+
+  it("resets turn-scoped model usage timing for each sequential turn", () => {
+    let view = reduceTopicView(initialTopicView("b1"), { ...event("PromptQueued", { promptId: "p1", queueDepth: 1, actorOpenId: "u1" }), occurredAt: "2026-08-22T00:00:00.000Z" });
+    view = reduceTopicView(view, { ...event("TurnStarted", { promptId: "p1", queueDepth: 1 }), occurredAt: "2026-08-22T00:00:02.000Z" });
+    view = reduceTopicView(view, { ...event("TurnOutputObserved", { promptId: "p1", answerSnapshot: "first", progressEvents: [] }), occurredAt: "2026-08-22T00:00:05.000Z" });
+    view = reduceTopicView(view, { ...event("TurnCompleted", { promptId: "p1", answer: "first", queueDepth: 0 }), occurredAt: "2026-08-22T00:00:09.000Z" });
+    view = reduceTopicView(view, { ...event("PromptQueued", { promptId: "p2", queueDepth: 1, actorOpenId: "u1" }), occurredAt: "2026-08-22T00:01:00.000Z" });
+    view = reduceTopicView(view, { ...event("TurnStarted", { promptId: "p2", queueDepth: 1 }), occurredAt: "2026-08-22T00:01:03.000Z" });
+    view = reduceTopicView(view, { ...event("TurnOutputObserved", { promptId: "p2", answerSnapshot: "second", progressEvents: [] }), occurredAt: "2026-08-22T00:01:08.000Z" });
+
+    expect(view.modelUsage).toMatchObject({ queuedAt: "2026-08-22T00:01:00.000Z", firstVisibleAt: "2026-08-22T00:01:08.000Z", waitMs: 3000, firstVisibleMs: 8000, completedAt: null });
+  });
+
+  it("retains queuedAt for a prompt admitted behind an active turn", () => {
+    let view = reduceTopicView(initialTopicView("b1"), { ...event("PromptQueued", { promptId: "p1", queueDepth: 1, actorOpenId: "u1" }), occurredAt: "2026-08-22T00:00:00.000Z" });
+    view = reduceTopicView(view, { ...event("TurnStarted", { promptId: "p1", queueDepth: 1 }), occurredAt: "2026-08-22T00:00:01.000Z" });
+    view = reduceTopicView(view, { ...event("PromptQueued", { promptId: "p2", queueDepth: 1, actorOpenId: "u1" }), occurredAt: "2026-08-22T00:00:02.000Z" });
+    view = reduceTopicView(view, { ...event("TurnCompleted", { promptId: "p1", answer: "first", queueDepth: 1 }), occurredAt: "2026-08-22T00:00:10.000Z" });
+    view = reduceTopicView(view, { ...event("TurnStarted", { promptId: "p2", queueDepth: 1 }), occurredAt: "2026-08-22T00:00:12.000Z" });
+    view = reduceTopicView(view, { ...event("TurnOutputObserved", { promptId: "p2", answerSnapshot: "second", progressEvents: [] }), occurredAt: "2026-08-22T00:00:15.000Z" });
+
+    expect(view.modelUsage).toMatchObject({ queuedAt: "2026-08-22T00:00:02.000Z", firstVisibleAt: "2026-08-22T00:00:15.000Z", waitMs: 10000, firstVisibleMs: 13000 });
   });
 
   it("projects Main Card live status independently from Answer Card output", () => {
@@ -100,6 +163,29 @@ describe("topic view reducer", () => {
     const observed = reduceTopicView(running, event("PaneOutputObserved", { worktreeName: "feat-main-card" }));
 
     expect(observed).toMatchObject({ phase: "running", activePromptId: "p1", worktreeName: "feat-main-card" });
+  });
+
+  it("propagates branch and worktree identity idempotently", () => {
+    const initial = initialTopicView("b1");
+    const changed = updateTopicView(initial, {
+      paneIdentity: { workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer", paneId: "w1:p1", paneToken: "prim" }
+    });
+    const repeated = updateTopicView(changed, {
+      paneIdentity: { workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer", paneId: "w1:p1", paneToken: "prim" }
+    });
+
+    expect(changed).toMatchObject({ workspace: "/repo/.worktree/reviewer", worktreeName: "reviewer", branch: "swarm/reviewer", paneId: "w1:p1", paneToken: "prim", viewVersion: initial.viewVersion + 1 });
+    expect(repeated).toBe(changed);
+  });
+
+  it("persists a stable pane name and does not erase it when an observation omits the name", () => {
+    const activated = reduceTopicView(initialTopicView("b1"), event("BindingActivated", { paneId: "w1:p1", paneToken: "yx0c", paneName: " nxmz ", topicId: "t1" }));
+    const omitted = reduceTopicView(activated, event("PaneOutputObserved", { tabId: "w1:t1" }));
+    const renamed = reduceTopicView(omitted, event("PaneOutputObserved", { paneName: "next" }));
+
+    expect(activated).toMatchObject({ paneName: "nxmz" });
+    expect(omitted).toMatchObject({ paneName: "nxmz" });
+    expect(renamed).toMatchObject({ paneName: "next", viewVersion: omitted.viewVersion + 1 });
   });
 
   it("does not update the project card for an identical visible snapshot", () => {
@@ -192,24 +278,26 @@ describe("topic view reducer", () => {
 
   it("restores the primary card state from the latest persisted request", () => {
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "do it", queuePosition: 1, occurredAt: "start" });
-    const output = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "latest answer", progressEvents: [{ key: "test", kind: "test", label: "tests passed", state: "done", occurredAt: "later" }] });
+    const output = reduceRunCard(queued, { type: "output", occurredAt: "later", answerSnapshot: "latest answer", progressEvents: [{ key: "test", kind: "test", label: "tests passed", state: "done", occurredAt: "later" }], timelineDeltas: [{ kind: "tool", id: "tool:test", sequence: 1, category: "test", label: "tests passed", state: "succeeded" }] });
     const completed = reduceRunCard(output, { type: "completed", occurredAt: "done", answer: "finished" });
 
     expect(mirrorRunCardToTopic(initialTopicView("b1"), { ...completed, answer: "x".repeat(9_100), progressEvents: Array.from({ length: 10 }, (_, index) => ({ key: String(index), kind: "test" as const, label: `test-${index}`, state: "done" as const, occurredAt: "later" })) })).toMatchObject({
-      phase: "done", answer: "x".repeat(9_000), activePromptId: null, recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
+      phase: "done", answer: "x".repeat(9_000), activePromptId: null, timelineItems: [{ kind: "tool", id: "tool:test", sequence: 1, category: "test", label: "tests passed", state: "succeeded" }], recentProgress: Array.from({ length: 10 }, (_, index) => expect.objectContaining({ key: String(index) })), viewVersion: 1
     });
   });
 
   it("upserts answer timeline items by stable identity and canonical sequence", () => {
     const queued = createQueuedRunCard({ promptId: "p-timeline", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     const first = reduceRunCard(queued, { type: "output", occurredAt: "one", answerSnapshot: "", progressEvents: [], timelineDeltas: [
-      { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", state: "running" },
-      { kind: "agent_message", id: "message:1", sequence: 1, markdown: "Checking" }
+      { kind: "agent_message", id: "message:1", sequence: 1, markdown: "Checking" },
+      { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", state: "running" }
     ] });
     const updated = reduceRunCard(first, { type: "output", occurredAt: "two", answerSnapshot: "", progressEvents: [], timelineDeltas: [
       { kind: "tool", id: "tool:1", sequence: 2, category: "test", label: "npm test", resultPreview: "2 passed", state: "succeeded" }
     ] });
-    const duplicate = reduceRunCard(updated, { type: "output", occurredAt: "three", answerSnapshot: "", progressEvents: [], timelineDeltas: [updated.timelineItems[1]!] });
+    const duplicateItem = updated.timelineItems.find((item) => item.id === "tool:1");
+    expect(duplicateItem).toBeDefined();
+    const duplicate = reduceRunCard(updated, { type: "output", occurredAt: "three", answerSnapshot: "", progressEvents: [], timelineDeltas: [duplicateItem!] });
 
     expect(updated.timelineItems).toEqual([
       { kind: "agent_message", id: "message:1", sequence: 1, markdown: "Checking" },

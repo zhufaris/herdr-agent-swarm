@@ -6,7 +6,7 @@ export class KeyedSerialWorkQueue<Key> {
   private readonly tails = new Map<Key, Promise<void>>();
   private stopping = false;
 
-  enqueue<Result>(key: Key, work: () => Promise<Result>): Promise<Result> {
+  enqueue<Result>(key: Key, work: () => Result | Promise<Result>): Promise<Result> {
     if (this.stopping) return Promise.resolve(undefined as Result);
     const previous = this.tails.get(key) ?? Promise.resolve();
     const result = previous.catch(() => undefined).then(work);

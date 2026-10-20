@@ -56,6 +56,67 @@ describe("command error redaction", () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
+  it("never exposes versioned Agent Input content through error fields", () => {
+    const secret = "private independent Lark input";
+    const error = new CommandError(
+      "herdr",
+      ["agent", "input", "w1:p1", secret, "--submission-id", "input-1"],
+      `failed to submit ${secret}`,
+      false
+    );
+
+    expect(error.args).toEqual([
+      "agent", "input", "w1:p1", "[REDACTED]", "--submission-id", "input-1"
+    ]);
+    expect(error.message).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
+  });
+
+  it("never exposes typed Agent Input v4 content through error fields", () => {
+    const secret = "private typed Lark input";
+    const error = new CommandError(
+      "herdr",
+      [
+        "agent", "input-v4", "w1:p1", secret,
+        "--submission-id", "input-1",
+        "--action-set-id", "actions-1",
+        "--option-id", "approve",
+        "--source-message-id", "message-1"
+      ],
+      `failed to submit ${secret}`,
+      false
+    );
+
+    expect(error.args).toEqual([
+      "agent", "input-v4", "w1:p1", "[REDACTED]",
+      "--submission-id", "input-1",
+      "--action-set-id", "actions-1",
+      "--option-id", "approve",
+      "--source-message-id", "message-1"
+    ]);
+    expect(error.message).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
+  });
+
+  it("never retains typed Agent Input v4 content in the underlying process error", async () => {
+    const secret = "private typed Lark input in process cause";
+    let observed: unknown;
+
+    try {
+      await new ExecFileCommandRunner(1000).run(process.execPath, [
+        "agent", "input-v4", "w1:p1", secret,
+        "--submission-id", "input-1"
+      ]);
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toBeInstanceOf(CommandError);
+    const cause = (observed as Error & { cause?: { message?: unknown; cmd?: unknown } }).cause;
+    expect(String(cause?.message ?? "")).not.toContain(secret);
+    expect(String(cause?.cmd ?? "")).not.toContain(secret);
+  });
+
   it("never exposes the Primary tool capability from pane environment arguments", () => {
     const capability = "b".repeat(64);
     const environment = "SWARM_PRIMARY_CAPABILITY=" + capability;
@@ -64,5 +125,21 @@ describe("command error redaction", () => {
     expect(error.args).toEqual(["tab", "create", "--env", "SWARM_PRIMARY_CAPABILITY=[REDACTED]"]);
     expect(error.message).not.toContain(capability);
     expect(JSON.stringify(error)).not.toContain(capability);
+  });
+
+  it("never exposes managed Agent launch arguments through command errors", () => {
+    const secret = "secret-launch-argument";
+    const error = new CommandError(
+      "herdr",
+      ["agent", "session-rotate", "--operation-id", "clear-1", "--", "--resume-token", secret],
+      `failed to launch --resume-token ${secret}`,
+      true
+    );
+
+    expect(error.args).toEqual([
+      "agent", "session-rotate", "--operation-id", "clear-1", "--", "[REDACTED]", "[REDACTED]"
+    ]);
+    expect(error.message).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
   });
 });

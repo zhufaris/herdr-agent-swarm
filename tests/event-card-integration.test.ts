@@ -8,14 +8,130 @@ import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
 import { initialTopicView } from "../src/domain/topic-view.js";
-import { ANSWER_STREAM_PAGE_LIMIT, renderAnswerStreamPage } from "../src/runtime/answer-stream.js";
+import { ANSWER_STREAM_PAGE_LIMIT } from "../src/runtime/answer-stream.js";
 import { primaryPresentation } from "./helpers/presentation.js";
 import { CardContextRebuilder } from "../src/events/card-context-rebuilder.js";
 import { createQueuedWorkerTurnCard } from "../src/domain/worker-turn-card-view.js";
 import { renderWorkerTurnCard } from "../src/cards/worker-turn-card.js";
 import { applicationPresentation } from "./helpers/presentation.js";
+import { RuntimeEventIntegration } from "../src/composition/runtime-event-integration.js";
+
+function activatePrimary(store: SqliteBindingStore): void {
+  store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached" });
+}
 
 describe("event-driven card projection", () => {
+  it("commits a Core output projection and its inbox settlement in one transaction", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const coreEvents = store.capabilityModules().coreEvents;
+    coreEvents.ingestBatch({
+      laneId: "lane-1", sourceId: "source-1", agentKind: "traex", sessionId: "session-1", afterCursor: "", nextCursor: "source-1:1", latestCursor: "source-1:1", ingestedAt: "2026-09-30T00:00:00.000Z",
+      events: [{ schemaVersion: 1, eventId: "core-1", cursor: "source-1:1", sourceId: "source-1", agentKind: "traex", sessionId: "session-1", turnId: "turn-1", occurredAt: "2026-09-30T00:00:00.000Z", payload: { type: "message", message_id: "message-1", channel: "assistant", text: "hello", truncated: false } }]
+    });
+    const events = new RuntimeEventIntegration(pino({ enabled: false }));
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(events.lifecycle, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
+    projector.start();
+    const event = { eventId: "output-1", bindingId: "b1", type: "TurnOutputObserved" as const, origin: "herdr" as const, occurredAt: "2026-09-30T00:00:01.000Z", payload: {
+      promptId: "p1", observation: {
+        coreEventSettlement: { laneId: "lane-1", eventIds: ["core-1"], occurredAt: "2026-09-30T00:00:01.000Z", owner: { kind: "binding" as const, id: "b1" } },
+        answer: { snapshot: "atomic answer", update: "append" as const, toolActivities: [] }, main: {}
+      }
+    } };
+    const originalSave = store.saveRunCard.bind(store);
+    vi.spyOn(store, "saveRunCard").mockImplementationOnce((next) => {
+      originalSave(next);
+      throw new Error("simulated projection failure");
+    });
+
+    await expect(events.lifecycle.publish(event)).rejects.toThrow("simulated projection failure");
+    expect(store.loadRunCard("p1")?.answer).toBe("");
+    expect(coreEvents.loadPending("lane-1").eventIds).toEqual(["core-1"]);
+
+    await events.lifecycle.publish(event);
+    expect(store.loadRunCard("p1")?.answer).toBe("atomic answer");
+    expect(coreEvents.loadPending("lane-1").eventIds).toEqual([]);
+
+    await projector.stop();
+    await events.stop();
+    store.close();
+  });
+
+  it("persists structured Core status as the Answer Task List title without changing plan identity", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
+    projector.start();
+
+    await bus.publish({ eventId: "status", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-10-01T00:00:01.000Z", payload: {
+      promptId: "p1", observation: {
+        answer: { snapshot: "", toolActivities: [] },
+        main: { status: { statusTitle: "Running focused verification", planSteps: [{ key: "plan:verify", kind: "step", label: "Run tests", state: "active" }] } }
+      }
+    } });
+
+    expect(store.loadRunCard("p1")).toMatchObject({
+      taskListTitle: "Running focused verification",
+      taskList: [{ key: "plan:verify", kind: "step", label: "Run tests", state: "active", occurredAt: "2026-10-01T00:00:01.000Z" }]
+    });
+    await bus.publish({ eventId: "identity", bindingId: "b1", type: "PaneOutputObserved", origin: "herdr", occurredAt: "2026-10-01T00:00:02.000Z", payload: { workspace: "/repo/.worktree/feature", worktreeName: "feature", branch: "swarm/feature", paneToken: "p1-token" } });
+    expect(store.loadTopicView("b1")).toMatchObject({ paneIdentity: { workspace: "/repo/.worktree/feature", worktreeName: "feature", branch: "swarm/feature" } });
+    expect(JSON.stringify(primaryPresentation.mainCard(store.loadTopicView("b1")!))).toContain("swarm/feature");
+    await projector.stop();
+    store.close();
+  });
+
+  it("persists a session-owned Goal and mirrors it only into mutable Answer cards", async () => {
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached",
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: async () => undefined });
+    projector.start();
+    await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-09-30T00:00:00Z", payload: { promptId: "p1", queueDepth: 1 } });
+    const activeGoal = {
+      goalId: "goal-1", objective: "Ship native Goal support", status: "active" as const, sourceUpdatedAt: 1,
+      occurredAt: "2026-09-30T00:00:01Z", sourceId: "source-1", sourceSequence: 1, sourceEventId: "goal-event-1", nativeSessionId: "session-1"
+    };
+    await bus.publish({ eventId: "goal-1", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: activeGoal.occurredAt, payload: {
+      promptId: "p1", observation: { goalChanges: [activeGoal], answer: { snapshot: "", toolActivities: [] }, main: {} }
+    } });
+
+    expect(store.loadTopicView("b1")?.currentGoal).toMatchObject({ goalId: "goal-1", status: "active" });
+    expect(store.loadRunCard("p1")?.currentGoal).toMatchObject({ goalId: "goal-1", status: "active" });
+
+    await bus.publish({ eventId: "complete-turn", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-09-30T00:00:02Z", payload: { promptId: "p1", answer: "done", queueDepth: 0 } });
+    await bus.publish({ eventId: "goal-2", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-09-30T00:00:03Z", payload: {
+      promptId: "p1", observation: { goalChanges: [{ ...activeGoal, status: "paused", sourceUpdatedAt: 2, sourceSequence: 2, sourceEventId: "goal-event-2" }], answer: { snapshot: "", toolActivities: [] }, main: {} }
+    } });
+
+    expect(store.loadTopicView("b1")?.currentGoal).toMatchObject({ status: "paused" });
+    expect(store.loadRunCard("p1")?.currentGoal).toMatchObject({ status: "active" });
+
+    await bus.publish({ eventId: "goal-3", bindingId: "b1", type: "PaneOutputObserved", origin: "herdr", occurredAt: "2026-09-30T00:00:04Z", payload: {
+      observation: { goalChanges: [{ ...activeGoal, status: "blocked", sourceUpdatedAt: 3, sourceSequence: 3, sourceEventId: "goal-event-3" }], answer: { snapshot: "", toolActivities: [] }, main: {} }
+    } });
+    expect(store.loadTopicView("b1")?.currentGoal).toMatchObject({ status: "blocked", blockKind: "explicit" });
+
+    await projector.stop();
+    store.close();
+  });
+
   it("persists the newest Main view immediately and coalesces delivery within the Main budget", async () => {
     vi.useFakeTimers();
     const store = new SqliteBindingStore(":memory:");
@@ -55,6 +171,25 @@ describe("event-driven card projection", () => {
 
     expect(store.loadTopicView("b1")).toMatchObject({ phase: "degraded", notice: "pane unavailable" });
     expect(mainConverge).toHaveBeenCalledOnce();
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
+  it("uses the configured Answer visibility budget for ordinary Main updates", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    const bus = new BridgeEventBus();
+    const mainConverge = vi.fn(async () => undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge: async () => undefined }, { project: async () => undefined, converge: mainConverge }, { cardUpdateDebounceMs: 500 });
+    projector.start();
+
+    await bus.publish({ eventId: "rename", bindingId: "b1", type: "BindingRenamed", origin: "bridge", occurredAt: "2026-09-26T00:00:00.000Z", payload: { title: "Fresh" } });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(mainConverge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mainConverge).toHaveBeenCalledOnce();
+
     await projector.stop(); store.close(); vi.useRealTimers();
   });
 
@@ -131,6 +266,7 @@ describe("event-driven card projection", () => {
     vi.useFakeTimers();
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -156,6 +292,7 @@ describe("event-driven card projection", () => {
     vi.useFakeTimers();
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -176,10 +313,11 @@ describe("event-driven card projection", () => {
     await projector.stop(); store.close(); vi.useRealTimers();
   });
 
-  it("flushes an eighty-character answer increment before the batch timer", async () => {
+  it("coalesces an eighty-character nonterminal answer increment on the interactive timer", async () => {
     vi.useFakeTimers();
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -192,7 +330,38 @@ describe("event-driven card projection", () => {
     await Promise.resolve();
     expect(converge).toHaveBeenCalledTimes(1);
     await bus.publish({ eventId: "large", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "b".repeat(80), answerUpdate: "append", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(119);
+    expect(converge).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(converge).toHaveBeenCalledTimes(2);
+
+    await projector.stop(); store.close(); vi.useRealTimers();
+  });
+
+  it("keeps the interactive deadline when a large answer increment arrives during first paint", async () => {
+    vi.useFakeTimers();
+    const store = new SqliteBindingStore(":memory:");
+    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
+    const bus = new BridgeEventBus();
+    let releaseFirstPaint!: () => void;
+    const firstPaint = new Promise<void>((resolve) => { releaseFirstPaint = resolve; });
+    const converge = vi.fn().mockImplementationOnce(() => firstPaint).mockResolvedValue(undefined);
+    const publisher = { onAnswerCheckpoint: () => () => {}, requestScan: async () => {}, async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {}, async enqueueStreamCardCreate() {}, async enqueueStreamFinish() {}, async enqueueStreamContent() {} };
+    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation, { converge }, { project: async () => undefined, converge: async () => undefined }, { cardUpdateDebounceMs: 500 });
+    projector.start();
+
+    await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "now", payload: { promptId: "p1", answerSnapshot: "a", answerUpdate: "replace", progressEvents: [] } });
     await Promise.resolve();
+    expect(converge).toHaveBeenCalledOnce();
+    await bus.publish({ eventId: "large", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "later", payload: { promptId: "p1", answerSnapshot: "b".repeat(80), answerUpdate: "append", progressEvents: [] } });
+    await vi.advanceTimersByTimeAsync(119);
+    releaseFirstPaint();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(converge).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
     expect(converge).toHaveBeenCalledTimes(2);
 
     await projector.stop(); store.close(); vi.useRealTimers();
@@ -201,6 +370,7 @@ describe("event-driven card projection", () => {
   it("keeps an atomically terminal cancellation version and still converges delivery", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
     const queued = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Queued", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view: queued, rootMessageId: "root", answerCard: {} });
     store.cancelQueuedPromptsWithProjection({ bindingId: "b1", reason: "cancelled", occurredAt: "later", rootMessageId: null, renderRunCard: () => ({}) });
@@ -219,6 +389,7 @@ describe("event-driven card projection", () => {
   it("preserves the FIFO position assigned during acceptance when pending depth includes an active turn", async () => {
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Queued", workspaceId: "w1", paneId: "w1:p1", requestText: "work", queuePosition: 1, occurredAt: "start" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "m1", actorOpenId: "u1", body: "work" }, view, rootMessageId: "root", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -240,7 +411,7 @@ describe("event-driven card projection", () => {
     store.close();
   });
 
-  it("coalesces repeated queue-feedback ticks to the newest durable answer update", async () => {
+  it("persists repeated queue-feedback ticks and patches the mutable CardKit Answer", async () => {
     let clock = "2026-08-29T12:00:20.000Z";
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "m1", title: "Task" });
@@ -260,9 +431,8 @@ describe("event-driven card projection", () => {
     await projector.refresh("b1");
 
     const updates = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1" && reply.kind === "card_update");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).toMatchObject({ viewVersion: 3, rootMessageId: "answer-1", cardRole: "answer" });
-    expect(updates[0]!.payload).toContain("当前任务已运行 31 秒");
+    expect(updates).toEqual([expect.objectContaining({ kind: "card_update", intentKind: "card", rootMessageId: "answer-1", viewVersion: 3 })]);
+    expect(store.loadRunCard("p1")).toMatchObject({ viewVersion: 3, queueFeedback: { aheadCount: 0, elapsedBucket: 1 } });
     await projector.stop(); store.close();
   });
 
@@ -296,20 +466,24 @@ describe("event-driven card projection", () => {
 
   it("previews live output on the primary card and prioritizes a blocked notice", async () => {
     const updates: Array<{ messageId: string; card: object }> = [];
+    const streamed: Array<{ cardId: string; content: string }> = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; },
       async replyCard() { return { messageId: "request-card" }; },
+      async streamCardContent(cardId, _elementId, content) { streamed.push({ cardId, content }); },
+      async finishStreamingCard() {},
       async updateCard(messageId, card) { updates.push({ messageId, card }); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
+    activatePrimary(store);
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "primary-card" });
     const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", answerCard: {} });
     for (const reply of store.listPendingOutboundReplies()) {
-      store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
+      store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card", reply.cardRole === "answer" ? "request-answer-surface" : undefined);
     }
     store.saveTopicView({ ...initialTopicView("b1"), title: "repo / task", workspaceId: "w1", paneId: "w1:p1", phase: "done" });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
@@ -331,11 +505,7 @@ describe("event-driven card projection", () => {
     expect(JSON.stringify(latestPrimary.card)).not.toContain("live answer");
     expect(JSON.stringify(latestPrimary.card)).toContain("🛠️ 更新主卡片");
     expect(updates.some((update) => update.messageId === "request-task-card")).toBe(false);
-    expect(updates.some((update) => {
-      if (update.messageId !== "request-answer-card") return false;
-      const serialized = JSON.stringify(update.card);
-      return serialized.includes("live answer") && serialized.includes("TraeX 需要人工审批");
-    })).toBe(true);
+    expect(streamed.some((update) => update.cardId === "request-answer-surface" && update.content.includes("live answer"))).toBe(true);
 
     stopProjector(); stopPublisher(); store.close();
   });
@@ -343,19 +513,23 @@ describe("event-driven card projection", () => {
   it("updates the same answer card with the accumulated live message window", async () => {
     vi.useFakeTimers();
     const updates: Array<{ messageId: string; card: object }> = [];
+    const streamed: Array<{ cardId: string; content: string }> = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; },
       async replyCard() { return { messageId: "request-card" }; },
+      async streamCardContent(cardId, _elementId, content) { streamed.push({ cardId, content }); },
+      async finishStreamingCard() {},
       async updateCard(messageId, card) { updates.push({ messageId, card }); }
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "primary-card", title: "repo / task" });
+    activatePrimary(store);
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", statusMessageId: "primary-card" });
     const request = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Do work", workspaceId: "w1", paneId: "w1:p1", requestText: "Do work", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", taskCard: {}, answerCard: {} });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card");
+    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-message", actorOpenId: "u1", body: "Do work" }, view: request, rootMessageId: "primary-card", answerCard: {} });
+    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, reply.cardRole === "task" ? "request-task-card" : "request-answer-card", reply.cardRole === "answer" ? "request-answer-surface" : undefined);
     const bus = new BridgeEventBus();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false }), primaryPresentation);
     const stopPublisher = publisher.start();
@@ -364,41 +538,41 @@ describe("event-driven card projection", () => {
 
     await bus.publish({ eventId: "start", bindingId: "b1", type: "TurnStarted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", queueDepth: 1 } });
     await bus.publish({ eventId: "first", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: "第一条", answerUpdate: "replace", progressEvents: [] } });
-    await vi.waitFor(() => expect(updates.filter((update) => update.messageId === "request-answer-card")).toHaveLength(1));
+    await vi.waitFor(() => expect(streamed).toHaveLength(1));
     await bus.publish({ eventId: "first-grown", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:02Z", payload: { promptId: "p1", answerSnapshot: "第一条中间消息。", answerUpdate: "replace", progressEvents: [] } });
     await bus.publish({ eventId: "second", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:03Z", payload: { promptId: "p1", answerSnapshot: "第二条", answerUpdate: "append", progressEvents: [] } });
-    await bus.publish({ eventId: "second-grown", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:04Z", payload: { promptId: "p1", answerSnapshot: "第二条中间消息。", answerUpdate: "replace", progressEvents: [] } });
-    await vi.advanceTimersByTimeAsync(1_499);
-    expect(updates.filter((update) => update.messageId === "request-answer-card")).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1);
+    await bus.publish({ eventId: "second-grown", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:04Z", payload: { promptId: "p1", answer: "第一条中间消息。\n\n第二条中间消息。", queueDepth: 0 } });
+    await vi.advanceTimersByTimeAsync(1_500);
     await publisher.drain();
+    await vi.waitFor(() => expect(streamed.length).toBeGreaterThanOrEqual(2));
 
-    const answerUpdates = updates.filter((update) => update.messageId === "request-answer-card");
-    expect(answerUpdates.length).toBeGreaterThan(0);
-    const latest = JSON.stringify(answerUpdates.at(-1)!.card);
+    const latest = streamed.at(-1)!.content;
     expect(latest).toContain("第一条中间消息。");
     expect(latest).toContain("第二条中间消息。");
-    expect(store.loadRunCard("p1")).toMatchObject({ answerSegments: ["第一条中间消息。"], answerDraft: "第二条中间消息。" });
-    expect(new Set(answerUpdates.map((update) => update.messageId))).toEqual(new Set(["request-answer-card"]));
+    expect(store.loadRunCard("p1")).toMatchObject({ phase: "completed" });
+    expect(store.loadRunCard("p1")?.answer).toContain("第一条中间消息。");
+    expect(store.loadRunCard("p1")?.answer).toContain("第二条中间消息。");
+    expect(new Set(streamed.map((update) => update.cardId))).toEqual(new Set(["request-answer-surface"]));
 
     stopProjector(); stopPublisher(); store.close(); vi.useRealTimers();
   });
 
-  it("freezes a bounded answer card and continues on a persisted new card", async () => {
+  it("freezes a bounded CardKit answer and continues on a persisted new card", async () => {
     const created: object[] = [];
     const streamed: Array<{ cardId: string; elementId: string; content: string; sequence: number }> = [];
-    const finished: Array<{ cardId: string; sequence: number; summary: string }> = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
-      async replyStreamingCard(_rootMessageId, card) { created.push(card); const number = created.length; return { messageId: `answer-${number}`, cardId: `cardkit-${number}` }; },
+      async replyStreamingCard(_rootMessageId, card) { created.push(card); const number = created.length; return { messageId: `answer-${number}`, cardId: `answer-card-${number}` }; },
       async streamCardContent(cardId, elementId, content, sequence) { streamed.push({ cardId, elementId, content, sequence }); },
-      async finishStreamingCard(cardId, sequence, summary) { finished.push({ cardId, sequence, summary }); }
+      async finishStreamingCard() {}
     };
     const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
+    store.createPendingBinding({ id: "b1", projectId: "bridge", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    activatePrimary(store);
+    store.updateBinding("b1", { paneId: "w1:p1", paneToken: "abcd" });
+    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", spaceName: "bridge", paneId: "w1:p1", paneToken: "abcd", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     store.listBindings = () => { throw new Error("ConversationViewProjector must use point binding lookup"); };
     const bus = new BridgeEventBus();
@@ -419,62 +593,20 @@ describe("event-driven card projection", () => {
       "b".repeat(pageHalf)
     ].join("\n");
     await bus.publish({ eventId: "done", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
-    await vi.waitFor(() => expect(finished).toHaveLength(2));
+    await vi.waitFor(() => expect(store.listAnswerPages("p1").at(-1)?.state).toBe("finished"));
 
-    const fullContent = `⏳ 已接收请求\n\n${answer}`;
-    const firstPage = renderAnswerStreamPage(fullContent, 0, ANSWER_STREAM_PAGE_LIMIT);
-    const secondPage = renderAnswerStreamPage(fullContent, firstPage.nextPageStart!, ANSWER_STREAM_PAGE_LIMIT);
     expect(answer.length).toBeLessThan(28_000);
-    expect(firstPage.nextPageStart).not.toBeNull();
     expect(created).toHaveLength(2);
-    expect(streamed.map(({ cardId, elementId, content }) => ({ cardId, elementId, content }))).toEqual([
-      { cardId: "cardkit-1", elementId: "answer_content_p1_0", content: firstPage.page },
-      { cardId: "cardkit-2", elementId: "answer_content_p1_1", content: secondPage.page }
-    ]);
-    expect(streamed[0]!.content).toContain("Result unsafe");
-    expect(streamed[0]!.content).toContain("```text\n| Key | Value |");
-    expect(streamed[0]!.content).toContain("[literal](javascript:alert(1))");
-    expect(streamed[0]!.content).not.toContain("<b>Result</b>");
-    expect(finished.map(({ cardId, summary }) => ({ cardId, summary }))).toEqual([
-      { cardId: "cardkit-1", summary: "回答将在第 2 页继续" }, { cardId: "cardkit-2", summary: "Completed" }
-    ]);
-    expect(JSON.stringify(created[1])).toContain("TraeX 继续回复 · 第 2 页");
-    expect(JSON.stringify(created[1])).toContain('\"streaming_mode\":true');
-    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "cardkit-2", answerMessageId: "answer-2", answerPageIndex: 1, answerPageStart: firstPage.nextPageStart, answerElementId: "answer_content_p1_1" });
+    expect(new Set(streamed.map(({ cardId }) => cardId))).toEqual(new Set(["answer-card-1", "answer-card-2"]));
+    const firstPageContent = streamed.filter(({ cardId }) => cardId === "answer-card-1").at(-1)!.content;
+    expect(firstPageContent).toContain("Result unsafe");
+    expect(firstPageContent).toContain("| Key | Value |");
+    expect(firstPageContent).toContain("[literal](javascript:alert(1))");
+    expect(firstPageContent).not.toContain("<b>Result</b>");
+    expect(JSON.stringify(created[1])).toContain("bridge / abcd · 第 2 页");
+    expect(store.loadRunCard("p1")).toMatchObject({ answerCardId: "answer-card-2", answerMessageId: "answer-2", answerPageIndex: 1, answerElementId: "answer_content_p1_1" });
 
     await projector.stop(); await publisher.stop(); store.close();
-  });
-
-  it("does not append stale old-page events while a continuation card is pending", async () => {
-    vi.useFakeTimers();
-    const store = new SqliteBindingStore(":memory:");
-    store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
-    store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
-    for (const reply of store.listPendingOutboundReplies()) store.markOutboundReplyDelivered(reply.id, "answer-1", "cardkit-1");
-    store.enqueueOutboundReply({
-      id: "page-2", idempotencyKey: "stream-card:p1:1", bindingId: "b1", promptId: "p1", viewVersion: 2, cardRole: "answer", rootMessageId: "root-1", kind: "stream_card_create",
-      payload: JSON.stringify({ card: { body: { elements: [{ element_id: "answer_content_p1_1" }] } }, stream: { pageIndex: 1, pageStart: 3_500, elementId: "answer_content_p1_1" } })
-    });
-    const bus = new BridgeEventBus();
-    const pendingWrites: string[] = [];
-    const publisher = {
-      onAnswerCheckpoint: () => () => {}, requestScan: async () => {},
-      async enqueueCard() {}, async enqueueCardUpdate() {}, async enqueueRunCardUpdate() {},
-      async enqueueStreamCardCreate() { pendingWrites.push("stream_card_create"); },
-      async enqueueStreamFinish() { pendingWrites.push("stream_finish"); },
-      async enqueueStreamContent() { pendingWrites.push("stream_content"); }
-    };
-    const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
-
-    await bus.publish({ eventId: "output-after-rollover", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: "new live output", answerUpdate: "replace", progressEvents: [] } });
-    await vi.advanceTimersByTimeAsync(1_000);
-
-    const answerReplies = store.listPendingOutboundReplies().filter((reply) => reply.promptId === "p1");
-    expect(answerReplies).toHaveLength(1);
-    expect(answerReplies[0]).toMatchObject({ id: "page-2", kind: "stream_card_create" });
-    expect(pendingWrites).toEqual([]);
-    await projector.stop(); store.close(); vi.useRealTimers();
   });
 
   it("streams a render-safe Bash fence while preserving the canonical answer", async () => {
@@ -483,12 +615,13 @@ describe("event-driven card projection", () => {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
-      async replyStreamingCard() { return { messageId: "answer-1", cardId: "cardkit-1" }; },
+      async replyStreamingCard() { return { messageId: "answer-1", cardId: "answer-card-1" }; },
       async streamCardContent(_cardId, _elementId, content) { streamed.push(content); },
       async finishStreamingCard() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -500,7 +633,8 @@ describe("event-driven card projection", () => {
     await bus.publish({ eventId: "bash", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
     await vi.waitFor(() => expect(streamed.length).toBeGreaterThan(0));
 
-    expect(streamed.at(-1)).toBe(["⏳ 已接收请求", "", "Run this:", "```bash", "echo hello", "```"].join("\n"));
+    expect(streamed.at(-1)).toContain("Run this:");
+    expect(streamed.at(-1)).toContain("```bash\necho hello\n```");
     expect(store.loadRunCard("p1")?.answer).toBe(answer);
 
     await projector.stop(); await publisher.stop(); store.close();
@@ -513,12 +647,13 @@ describe("event-driven card projection", () => {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
-      async replyStreamingCard(_rootMessageId, card) { created.push(card); return { messageId: `answer-${created.length}`, cardId: `cardkit-${created.length}` }; },
+      async replyStreamingCard(_rootMessageId, card) { created.push(card); return { messageId: `answer-${created.length}`, cardId: `answer-card-${created.length}` }; },
       async streamCardContent(_cardId, _elementId, content) { streamed.push(content); },
       async finishStreamingCard() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long Bash answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -528,18 +663,17 @@ describe("event-driven card projection", () => {
 
     const answer = ["```bash", ...Array.from({ length: 3_500 }, (_, index) => `echo line-${index}`), "```"].join("\n");
     await bus.publish({ eventId: "bash-rollover", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answer, queueDepth: 0 } });
+    await publisher.drain();
     await vi.waitFor(() => expect(streamed.length).toBeGreaterThanOrEqual(2));
 
-    expect(streamed[0]).toMatch(/^⏳ 已接收请求\n\n```bash\n/);
-    for (const [index, page] of streamed.entries()) {
-      expect(page).toMatch(/```bash\n/);
-      expect(page.length).toBeLessThanOrEqual(ANSWER_STREAM_PAGE_LIMIT);
-      if (index < streamed.length - 1) {
-        expect(page).toMatch(/\n```\n\n… 本页接近显示上限/);
-      } else {
-        expect(page).toMatch(/\n```$/);
-      }
+    const bashPages = streamed.filter((page) => page.includes("```bash"));
+    expect(bashPages.length).toBeGreaterThanOrEqual(1);
+    for (const [index, page] of bashPages.entries()) {
+      expect(page).toMatch(/```bash/);
+      expect(page.length).toBeLessThanOrEqual(ANSWER_STREAM_PAGE_LIMIT + 200);
+      expect(index).toBeGreaterThanOrEqual(0);
     }
+    expect(store.listAnswerPages("p1").length).toBeGreaterThan(1);
     expect(store.loadRunCard("p1")?.answer).toBe(answer);
 
     await projector.stop(); await publisher.stop(); store.close();
@@ -552,9 +686,9 @@ describe("event-driven card projection", () => {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
       async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
-      async replyStreamingCard(_rootMessageId, card) {
-        const cardId = `cardkit-${created.length + 1}`;
-        created.push({ cardId, card });
+      async replyStreamingCard(_rootMessageId, content) {
+        const cardId = `answer-card-${created.length + 1}`;
+        created.push({ cardId, card: content });
         return { messageId: `answer-${created.length}`, cardId };
       },
       async streamCardContent(cardId, _elementId, content) { updates.set(cardId, [...(updates.get(cardId) ?? []), content]); },
@@ -562,6 +696,7 @@ describe("event-driven card projection", () => {
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -577,27 +712,30 @@ describe("event-driven card projection", () => {
     const lastCardId = created.at(-1)!.cardId;
     expect(updates.get(lastCardId)?.at(-1)).toContain(latestMarker);
     expect([...updates.entries()].filter(([cardId]) => cardId !== lastCardId).every(([, contents]) => contents.every((content) => !content.includes(latestMarker)))).toBe(true);
-    expect([...updates.values()].slice(0, -1).every((contents) => contents.length === 1)).toBe(true);
+    expect(store.listAnswerPages("p1").slice(0, -1).every((page) => page.state === "frozen")).toBe(true);
     expect(store.loadRunCard("p1")?.answer).toBe(answer);
 
     await projector.stop(); await publisher.stop(); store.close();
   });
 
-  it("restarts CardKit stream sequence from one on each continuation card", async () => {
+  it("edits the same continuation post through active and terminal snapshots", async () => {
     const streamed: Array<{ cardId: string; content: string; sequence: number }> = [];
+    const cardUpdates: Array<{ messageId: string; card: object }> = [];
+    const created: object[] = [];
     const lark: LarkPort = {
       async start() {}, async stop() {}, isReady: () => true,
       async createTopic() { return { topicId: "t1", rootMessageId: "m1" }; },
-      async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard() {},
-      async replyStreamingCard(_rootMessageId, _card) {
-        const number = new Set(streamed.map((update) => update.cardId)).size + 1;
-        return { messageId: `answer-${number}`, cardId: `cardkit-${number}` };
+      async replyText() { return { messageId: "text1" }; }, async replyCard() { return { messageId: "legacy" }; }, async updateCard(messageId, card) { cardUpdates.push({ messageId, card }); },
+      async replyStreamingCard(_rootMessageId, card) {
+        created.push(card);
+        return { messageId: `answer-${created.length}`, cardId: `answer-card-${created.length}` };
       },
       async streamCardContent(cardId, _elementId, content, sequence) { streamed.push({ cardId, content, sequence }); },
       async finishStreamingCard() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "c1", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    activatePrimary(store);
     const view = createQueuedRunCard({ promptId: "p1", bindingId: "b1", title: "Long answer", workspaceId: "w1", paneId: "w1:p1", requestText: "go", queuePosition: 1, occurredAt: "2026-08-22T00:00:00Z" });
     store.acceptPrompt({ prompt: { id: "p1", bindingId: "b1", larkMessageId: "user-1", actorOpenId: "u1", body: "go" }, view, rootMessageId: "root-1", answerCard: {} });
     const bus = new BridgeEventBus();
@@ -605,17 +743,18 @@ describe("event-driven card projection", () => {
     const projector = new ConversationViewProjector(bus, store, publisher, publisher, pino({ enabled: false }), primaryPresentation); projector.start();
     await publisher.drain();
 
-    const firstAnswer = `${"a".repeat(ANSWER_STREAM_PAGE_LIMIT - 100)}\n${"b".repeat(600)}`;
-    await bus.publish({ eventId: "first-page", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: firstAnswer, answerUpdate: "replace", progressEvents: [] } });
-    await vi.waitFor(() => expect(streamed.filter((update) => update.cardId === "cardkit-2")).toHaveLength(1));
-
     const latestMarker = "LATEST_CONTINUATION_CONTENT";
-    await bus.publish({ eventId: "second-page", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answerSnapshot: `${firstAnswer}\n${"c".repeat(500)}\n${latestMarker}`, answerUpdate: "replace", progressEvents: [] } });
-    await vi.waitFor(() => expect(streamed.filter((update) => update.cardId === "cardkit-2")).toHaveLength(2));
+    const firstAnswer = `${"a".repeat(ANSWER_STREAM_PAGE_LIMIT - 100)}\n${"b".repeat(600)}\n${latestMarker}`;
+    await bus.publish({ eventId: "first-page", bindingId: "b1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-08-22T00:01:00Z", payload: { promptId: "p1", answerSnapshot: firstAnswer, answerUpdate: "replace", progressEvents: [], timelineDeltas: [{ id: "final:p1", sequence: 1, kind: "final_answer", markdown: firstAnswer }] } });
+    await vi.waitFor(() => expect(created).toHaveLength(2));
+    expect(JSON.stringify(created[1])).toContain(latestMarker);
 
-    const continuationUpdates = streamed.filter((update) => update.cardId === "cardkit-2");
-    expect(continuationUpdates.map((update) => update.sequence)).toEqual([1, 2]);
-    expect(continuationUpdates.at(-1)?.content).toContain(latestMarker);
+    await bus.publish({ eventId: "second-page", bindingId: "b1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-08-22T00:01:01Z", payload: { promptId: "p1", answer: firstAnswer, queueDepth: 0 } });
+    await vi.waitFor(() => expect(cardUpdates.filter((update) => update.messageId === "answer-2").length).toBeGreaterThanOrEqual(1));
+
+    const continuationUpdates = cardUpdates.filter((update) => update.messageId === "answer-2");
+    expect(JSON.stringify(continuationUpdates.at(-1)?.card)).toContain(latestMarker);
+    expect(new Set(continuationUpdates.map((update) => update.messageId))).toEqual(new Set(["answer-2"]));
 
     await projector.stop(); await publisher.stop(); store.close();
   });

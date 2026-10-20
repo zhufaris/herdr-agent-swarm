@@ -1,6 +1,7 @@
 import type { HerdrPort } from "../../domain/ports/external.js";
 import type { HerdrPane, HerdrPaneCreationOptions } from "../../domain/types.js";
 import type { PaneHost } from "../../domain/ports/pane-host.js";
+import type { PaneTopologyLabelRequest, PaneTopologyMoveReceipt, PaneTopologyMoveRequest } from "../../domain/pane-topology-intent.js";
 
 export class HerdrPaneHost implements PaneHost {
   constructor(private readonly herdr: HerdrPort) {}
@@ -9,6 +10,14 @@ export class HerdrPaneHost implements PaneHost {
   listPanes(workspaceId: string): Promise<HerdrPane[]> { return this.herdr.listPanes(workspaceId); }
   allocatePane(workspaceId: string, cwd: string, options: HerdrPaneCreationOptions): Promise<HerdrPane> {
     return this.herdr.createPane(workspaceId, cwd, options);
+  }
+  movePane(input: PaneTopologyMoveRequest): Promise<PaneTopologyMoveReceipt> {
+    if (!this.herdr.movePane) throw new Error("Herdr pane move is unavailable");
+    return this.herdr.movePane(input);
+  }
+  labelPane(input: PaneTopologyLabelRequest): Promise<PaneTopologyMoveReceipt> {
+    if (!this.herdr.labelPane) throw new Error("Herdr pane identity labeling is unavailable");
+    return this.herdr.labelPane(input);
   }
   inspectPane(paneId: string): Promise<HerdrPane | null> { return this.herdr.getPane(paneId); }
   snapshotPanes(): Promise<HerdrPane[]> {

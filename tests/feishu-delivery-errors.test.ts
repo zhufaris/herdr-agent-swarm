@@ -7,12 +7,13 @@ const viewIntent = (purpose: GatewayDeliveryIntent["purpose"] = "operation-resul
 describe("Feishu delivery error normalization", () => {
   it.each([
     [{ response: { status: 429, headers: { "retry-after": "7" } } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 429, retryAfterMs: 7_000 }],
-    [{ response: { status: 408 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 408 }],
+    [{ response: { status: 408 } }, { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: 408 }],
     [{ response: { status: 409 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 409 }],
     [{ response: { status: 425 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 425 }],
-    [{ response: { status: 503 } }, { failureClass: "transient", effectCertainty: "rejected", httpStatus: 503 }],
+    [{ response: { status: 503 } }, { failureClass: "unknown", effectCertainty: "uncertain", httpStatus: 503 }],
     [{ response: { status: 400, data: {} } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400 }],
-    [{ response: { status: 404, data: { code: 230011 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 404, providerCode: "230011" }],
+    [{ response: { status: 404, data: { code: 230011 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 404, providerCode: "230011", recoveryKind: "defunct_target" }],
+    [{ response: { status: 404, data: { code: 230019 } } }, { failureClass: "permanent", effectCertainty: "rejected", httpStatus: 404, providerCode: "230019", recoveryKind: "defunct_target" }],
     [Object.assign(new Error("DNS lookup failed"), { code: "ENOTFOUND" }), { failureClass: "transient", effectCertainty: "not-started" }],
     [Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" }), { failureClass: "transient", effectCertainty: "not-started" }],
     [Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" }), { failureClass: "transient", effectCertainty: "not-started" }],
@@ -29,13 +30,28 @@ describe("Feishu delivery error normalization", () => {
     expect(classifyFeishuFailure(error, viewIntent(), "reply_card")).toMatchObject(expected);
   });
 
+  it("treats Worker Task 300307 finalization as uncertain instead of a proven rejection", () => {
+    const error = { response: { status: 400, data: { code: 300307 } } };
+
+    expect(classifyFeishuFailure(error, viewIntent("worker-turn"), "finish_streaming_card")).toMatchObject({
+      failureClass: "unknown",
+      effectCertainty: "uncertain",
+      providerCode: "300307",
+      providerOperation: "finish_streaming_card"
+    });
+  });
+
   it.each([
     [230099, "update_card", "primary-main", "stale_main_card"],
     [230099, "update_cardkit", "primary-main", "stale_main_card"],
     [300317, "update_cardkit", "primary-main", "stale_main_card"],
-    [300309, "stream_card_content", "primary-answer", "closed_answer_stream"]
-    ,[230031, "update_card", "primary-answer", "expired_view_target"]
-    ,[230031, "update_cardkit", "primary-answer", "expired_view_target"]
+    [300309, "stream_card_content", "primary-answer", "closed_answer_stream"],
+    [230031, "update_card", "worker-main", "expired_worker_view_target"],
+    [230031, "update_cardkit", "worker-main", "expired_worker_view_target"],
+    [230031, "update_card", "worker-turn", "expired_worker_view_target"],
+    [230031, "update_cardkit", "worker-turn", "expired_worker_view_target"],
+    ,[230001, "update_card", "primary-answer", "expired_view_target"]
+    ,[230001, "update_cardkit", "primary-answer", "expired_view_target"]
   ] as const)("derives recovery for Feishu code %s on its exact operation", (providerCode, operation, purpose, recoveryKind) => {
     const error = { response: { status: 400, data: { code: providerCode } } };
     expect(classifyFeishuFailure(error, viewIntent(purpose), operation)).toMatchObject({ failureClass: "permanent", effectCertainty: "rejected", recoveryKind, providerOperation: operation });
@@ -47,9 +63,13 @@ describe("Feishu delivery error normalization", () => {
     [300317, "update_card", "primary-main"],
     [300317, "update_cardkit", "primary-answer"],
     [300309, "stream_card_content", "worker-turn"],
-    [300309, "finish_streaming_card", "primary-answer"]
-    ,[230031, "update_card", "primary-main"]
-    ,[230031, "reply_card", "primary-answer"]
+    [300309, "finish_streaming_card", "primary-answer"],
+    [230031, "update_card", "primary-main"],
+    [230031, "reply_card", "worker-main"],
+    [230031, "reply_card", "worker-turn"],
+    ,[230001, "update_card", "primary-main"]
+    ,[230001, "update_card", "worker-main"]
+    ,[230001, "reply_card", "primary-answer"]
   ] as const)("does not derive recovery for Feishu code %s on a different operation or purpose", (providerCode, operation, purpose) => {
     const error = { response: { status: 400, data: { code: providerCode } } };
     const classified = classifyFeishuFailure(error, viewIntent(purpose), operation);

@@ -13,9 +13,9 @@ The source of truth is deliberately split:
 - Herdr owns pane identity, terminal identity, foreground process, and agent
   state. Treat `herdr api snapshot` and targeted runtime observation as
   authoritative for the live pane.
-- SQLite owns binding lifecycle, per-binding prompt FIFO, run-card and topic
-  projections, delivery intent, idempotency, audit data, and the fenced
-  instance lease.
+- SQLite owns binding lifecycle, immutable Submission Intents, Core projection
+  checkpoints/gaps, run-card and topic projections, delivery intent,
+  idempotency, audit data, and the fenced instance lease.
 - Lark owns only the visible cards and messages. Do not infer workflow state
   from a card, and do not repair SQLite based on Lark output.
 - User systemd owns the service process. The `npm run swarm:*` commands are the
@@ -29,12 +29,12 @@ Herdr snapshot is the convergence path.
 
 ### Invariants that changes must preserve
 
-- A binding dispatches at most one ordinary turn at a time. Later ordinary
-  messages remain FIFO-queued; eligible messages during an active turn can be
-  delivered as steering work.
-- Never automatically replay a prompt after it may have reached TraeX. An
-  interrupted or uncertain observer becomes detached and is observed again; only
-  work that never started remains eligible for later dispatch.
+- Every ordinary human message is an independently eligible Agent Input; an
+  earlier running, detached, recovering, or uncertain item never blocks it.
+  Core JSONL is the sole authority for final conversation order.
+- Never automatically resubmit input after it may have reached Core. Query its
+  durable receipt and recover exact projection evidence; only work durably
+  proven never attempted remains eligible for submission.
 - Persist workflow intent before Lark delivery. The durable outbox supplies
   idempotency, retry, and dead-letter behavior; a delivery retry must not repeat
   a TraeX prompt.
@@ -228,6 +228,37 @@ files before service changes with `npm run config:validate -- <env-file>
 <projects-file>`.
 
 ## Agent skills
+
+### Feishu final trace rendering
+
+For every trace's final assistant message, preserve this exact canonical output
+order for Feishu rendering:
+
+1. Normal final assistant answer.
+2. Trusted actor mention for `@_user_1` when a real requester `open_id` is
+   available. The `@_user_1` text is a structural role marker only; rendered
+   output must use native `<at id=ou_...></at>` markup. Never guess an ID, use a
+   placeholder as the rendered ID, or use plain `@name` text.
+3. Invoke `$herdr-choice-list:herdr-choice-list` once in inline mode.
+4. Append exactly one terminal version-3 `herdr-choice-list` protocol fence. If
+   no review is useful, emit the compact `{"version":3}` shape on one
+   `JSON.stringify` line.
+5. Append one complete terminal memory citation only when memory citation policy
+   requires it.
+
+This collective Final Trace Envelope has one canonical order:
+answer -> requester syntax -> invocation -> choice -> optional terminal memory
+citation. The choice fence is the last protocol member. A complete terminal memory citation may follow the choice fence. No prose or other fence may follow the envelope, and do not create a second
+protocol-only assistant turn. Mention delivery remains
+durable/outbox-backed and must stay tied to the acknowledged final-card
+projection; presentation rules must not bypass actor, owner, generation, or
+card identity fences.
+
+### `show-me` presentation
+
+Use inline ASCII as the default and only presentation format for `show-me`
+reviews. Do not open a browser, generate HTML, or depend on visual-plugin
+availability for a `show-me` decision.
 
 ### Issue tracker
 

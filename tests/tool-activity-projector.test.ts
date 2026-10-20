@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectToolCall, projectToolResult } from "../src/runtime/tool-activity-projector.js";
+import { isAnswerVisibleToolActivity, isStatusVisibleToolActivity, nestedExecCommands, nestedPatchFiles, normalizeToolOutput, normalizeToolResultForDisplay, projectToolCall, projectToolCalls, projectToolResultState, summarizeToolActivity, toolActivityKey } from "../src/runtime/tool-activity-projector.js";
 
 describe("tool activity projector", () => {
   it.each([
@@ -7,13 +7,13 @@ describe("tool activity projector", () => {
     ["search", "search", { query: "renderAnswer", path: "src" }, "Search", "renderAnswer · src"],
     ["edit", "apply_patch", { path: "src/cards/run-card.ts" }, "Edit", "src/cards/run-card.ts"],
     ["command", "exec_command", { cmd: "npm test" }, "Command", "npm test"],
+    ["skill", "exec_command", { cmd: "sed -n 1,200p /tmp/data00/" + "home/alice/.trae/skills/herdr/SKILL.md" }, "Skill", "herdr"],
     ["wait", "wait", { session_id: 42 }, "Wait", "session 42"],
     ["agent", "collaboration__spawn_agent", { task_name: "review_parser", message: "private prompt" }, "Agent", "review_parser"],
     ["fallback", "future_tool", { payload: "private payload" }, "Tool", "future_tool"]
-  ])("classifies a %s call without emitting raw arguments", (_case, name, args, category, target) => {
+  ])("classifies a %s call without retaining raw arguments", (_case, name, args, category, target) => {
     const projected = projectToolCall(name, JSON.stringify(args));
 
-    expect(projected.entry).toBe("");
     expect(projected.descriptor).toMatchObject({ category, target });
     expect(JSON.stringify(projected.descriptor)).not.toMatch(/private prompt|private payload/);
   });
@@ -22,9 +22,151 @@ describe("tool activity projector", () => {
     const command = "const r = await tools.exec_command({cmd: '" + "x".repeat(300) + "'}); text(r.output);";
     const projected = projectToolCall("exec", JSON.stringify({ input: command }));
 
-    expect(projected.entry).toBe("");
     expect(projected.descriptor.category).toBe("Command");
     expect(projected.descriptor.target.length).toBeLessThanOrEqual(160);
+  });
+
+  it("extracts every static command from a Promise.all Code Mode wrapper", () => {
+    const input = [
+      "const results = await Promise.all([",
+      "  tools.exec_command({ cmd: \"sqlite3 bridge.db SELECT-1\" }),",
+      "  tools.exec_command({cmd: 'npm test -- --runInBand'})",
+      "]); text(results);"
+    ].join("\n");
+
+    expect(nestedExecCommands(input)).toEqual([
+      "sqlite3 bridge.db SELECT-1",
+      "npm test -- --runInBand"
+    ]);
+    expect(projectToolCall("exec", JSON.stringify({ input })).descriptor).toMatchObject({
+      category: "Command", target: expect.stringContaining("sqlite3 bridge.db")
+    });
+    expect(projectToolCall("functions.exec", JSON.stringify({ input })).descriptor).toMatchObject({
+      category: "Command", target: expect.stringContaining("sqlite3 bridge.db")
+    });
+  });
+
+  it("projects the raw Code Mode input emitted by Herdr Core events", () => {
+    const input = "const r = await tools.exec_command({cmd: 'git status --short'}); text(r.output);";
+
+    expect(projectToolCall("exec", input).descriptor).toMatchObject({
+      category: "Command",
+      target: "git status --short"
+    });
+  });
+
+  it("extracts edited file identities from a raw Code Mode apply_patch call", () => {
+    const input = "const patch = \"*** Begin Patch\\n*** Update File: /repo/src/main.ts\\n@@\\n-old\\n+new\\n*** Add File: /repo/tests/main.test.ts\\n+test\\n*** End Patch\"; text(await tools.apply_patch(patch));";
+
+    expect(nestedPatchFiles(input)).toEqual(["main.ts", "main.test.ts"]);
+    expect(projectToolCall("exec", input).descriptor).toMatchObject({
+      category: "Edit", target: "main.ts (+1 -1), main.test.ts (+1 -0)",
+      diff: [
+        "*** Update File: /repo/src/main.ts",
+        "@@",
+        "-old",
+        "+new",
+        "*** Add File: /repo/tests/main.test.ts",
+        "+test"
+      ].join("\n")
+    });
+  });
+
+  it("retains the sanitized diff from a direct apply_patch call", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: /repo/.env.example",
+      "@@",
+      "-TOKEN=old-value",
+      "+TOKEN=new-value",
+      "*** End Patch"
+    ].join("\n");
+
+    const projected = projectToolCall("apply_patch", patch);
+
+    expect(projected.descriptor).toMatchObject({
+      category: "Edit",
+      target: "apply_patch",
+      diff: expect.stringContaining("TOKEN=[REDACTED]")
+    });
+    expect(projected.descriptor.diff).not.toMatch(/old-value|new-value/);
+  });
+
+  it("omits diff detail when a Code Mode wrapper contains multiple patches", () => {
+    const input = [
+      'const first = "*** Begin Patch\\n*** Update File: /repo/a.ts\\n@@\\n-old-a\\n+new-a\\n*** End Patch";',
+      "await tools.apply_patch(first);",
+      'const second = "*** Begin Patch\\n*** Update File: /repo/b.ts\\n@@\\n-old-b\\n+new-b\\n*** End Patch";',
+      "await tools.apply_patch(second);"
+    ].join(" ");
+
+    const projected = projectToolCalls("exec", input);
+
+    expect(projected).toHaveLength(3);
+    expect(projected.filter(({ descriptor }) => descriptor.category === "Edit")).toEqual([
+      expect.objectContaining({ descriptor: expect.not.objectContaining({ diff: expect.anything() }) }),
+      expect.objectContaining({ descriptor: expect.not.objectContaining({ diff: expect.anything() }) })
+    ]);
+  });
+
+  it.each([
+    ["malformed apply_patch", "apply_patch", "*** Begin Patch\n*** Update File: /repo/a.ts\n+unfinished"],
+    ["non-patch edit", "write_file", JSON.stringify({ path: "/repo/a.ts", content: "new file" })]
+  ])("omits diff detail for %s input", (_case, name, input) => {
+    expect(projectToolCall(name, input).descriptor).not.toHaveProperty("diff");
+  });
+
+  it("does not project Tool-looking source text inside an apply_patch string", () => {
+    const input = [
+      "const patch = `*** Begin Patch",
+      "*** Update File: /repo/tests/main.test.ts",
+      "@@",
+      "+const image = await tools.view_image({path: '/tmp/not-executed.png'});",
+      "+const search = await tools.web_search({query: 'not executed'});",
+      "*** End Patch`;",
+      "text(await tools.apply_patch(patch));"
+    ].join("\n");
+
+    const projected = projectToolCalls("exec", input);
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toEqual({ descriptor: {
+      category: "Edit",
+      target: "main.test.ts (+2 -0)",
+      skillNames: [],
+      diff: [
+        "*** Update File: /repo/tests/main.test.ts",
+        "@@",
+        "+const image = await tools.view_image({path: '/tmp/not-executed.png'});",
+        "+const search = await tools.web_search({query: 'not executed'});"
+      ].join("\n")
+    } });
+  });
+
+  it.each([
+    ["read", "const r = await tools.view_image({path: '/tmp/screen.png'}); image(r.image_url);", "Read", "/tmp/screen.png"],
+    ["search", "const r = await tools.web_search({query: 'CardKit'}); text(r);", "Search", "CardKit"],
+    ["command", "const r = await tools.exec_command({cmd: 'npm run build'}); text(r.output);", "Command", "npm run build"],
+    ["wait", "const r = await tools.write_stdin({session_id: 42}); text(r.output);", "Wait", "write_stdin"],
+    ["agent", "const r = await tools.collaboration__spawn_agent({task_name: 'reviewer'}); text(r);", "Agent", "reviewer"],
+    ["fallback", "const r = await tools.future_tool({target: 'widget'}); text(r);", "Tool", "future_tool"]
+  ])("classifies a raw Code Mode %s call", (_case, input, category, target) => {
+    expect(projectToolCall("exec", input).descriptor).toMatchObject({ category, target });
+  });
+
+  it("keeps Wait, Command, and Agent tool activity in the Answer timeline", () => {
+    const wait = projectToolCall("write_stdin", JSON.stringify({ session_id: 42 })).descriptor;
+    const command = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" })).descriptor;
+    const agent = projectToolCall("collaboration__list_agents", "{}").descriptor;
+    expect(isStatusVisibleToolActivity(wait)).toBe(true);
+    expect(isAnswerVisibleToolActivity(wait)).toBe(true);
+    expect(summarizeToolActivity(wait)).toBe("Wait · session 42");
+    expect(isStatusVisibleToolActivity(command)).toBe(true);
+    expect(isAnswerVisibleToolActivity(command)).toBe(true);
+    expect(isStatusVisibleToolActivity(agent)).toBe(true);
+    expect(isAnswerVisibleToolActivity(agent)).toBe(true);
+    expect(toolActivityKey("poll-1", wait)).toBe("wait:session 42");
+    expect(toolActivityKey("poll-2", wait)).toBe("wait:session 42");
   });
 
   it("redacts secrets from command targets", () => {
@@ -36,71 +178,21 @@ describe("tool activity projector", () => {
     expect(projected.descriptor.target).not.toMatch(/top-secret|query-secret/);
   });
 
-  it("redacts colon assignments and equals-form authorization from command output", () => {
-    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "inspect failure" }));
-    const output = [
-      "TOKEN: token-value",
-      "password: password-value",
-      "api_key: api-value",
-      "client_secret: client-value",
-      "Authorization=Basic basic-value",
-      "Authorization=Bearer bearer-value"
-    ].join("\n");
+  it("summarizes long database commands without losing the command target", () => {
+    const command = `sqlite3 -readonly -header -column /tmp/bridge.db "SELECT ${"many_columns,".repeat(30)} id FROM outbound_replies"`;
+    const descriptor = projectToolCall("exec_command", JSON.stringify({ cmd: command })).descriptor;
 
-    expect(projectToolResult(descriptor, output)).toContain([
-      "TOKEN: [REDACTED]",
-      "password: [REDACTED]",
-      "api_key: [REDACTED]",
-      "client_secret: [REDACTED]",
-      "Authorization=Basic [REDACTED]",
-      "Authorization=Bearer [REDACTED]"
-    ].join("\n"));
-    expect(projectToolResult(descriptor, output)).not.toMatch(/token-value|password-value|api-value|client-value|basic-value|bearer-value/);
+    expect(summarizeToolActivity(descriptor)).toBe("Query · bridge.db");
+    expect(descriptor.target).toContain("sqlite3 -readonly");
+    expect(summarizeToolActivity(descriptor).length).toBeLessThan(40);
   });
 
-  it("preserves shell backticks inside the fenced command", () => {
-    const projected = projectToolCall("exec_command", JSON.stringify({ cmd: "echo `date`" }));
-
-    expect(projectToolResult(projected.descriptor, "Script completed")).toBe("◆ **Ran**\n\n```bash\necho `date`\n```");
+  it("ignores redacted environment assignments when summarizing a test command", () => {
+    const descriptor = projectToolCall("exec_command", JSON.stringify({ cmd: "TOKEN=top-secret npm test" })).descriptor;
+    expect(summarizeToolActivity(descriptor)).toBe("Test · project");
   });
 
-  it("suppresses an exec wrapper when its command cannot be inspected", () => {
-    const { descriptor } = projectToolCall("exec", JSON.stringify({ input: "opaque orchestration" }));
-
-    expect(projectToolResult(descriptor, "Script completed")).toBe("");
-  });
-
-  it.each([
-    ["read_file", { path: "src/main.ts" }, "✓ Read · src/main.ts"],
-    ["search", { query: "renderAnswer", path: "src" }, "✓ Search · renderAnswer · src"],
-    ["apply_patch", { path: "src/cards/run-card.ts" }, "✓ Edit · src/cards/run-card.ts"],
-    ["collaboration__spawn_agent", { task_name: "review_parser" }, "✓ Agent · review_parser"],
-    ["future_tool", {}, "✓ Tool · future_tool"]
-  ])("renders a unified successful result row for %s", (name, args, expected) => {
-    const { descriptor } = projectToolCall(name, JSON.stringify(args));
-
-    expect(projectToolResult(descriptor, "Script completed")).toBe(expected);
-  });
-
-  it.each([
-    ["write_stdin", { session_id: 263 }, "session 263"],
-    ["wait", { cell_id: "296" }, "session 296"]
-  ])("keeps visible wait checkpoints for %s", (name, args, target) => {
-    const { descriptor } = projectToolCall(name, JSON.stringify(args));
-
-    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 263, output: "private partial output" }))).toBe(`… 等待命令完成 · ${target}`);
-    expect(projectToolResult(descriptor, JSON.stringify({ exit_code: 0, output: "private final output" }))).toBe(`✓ 等待完成 · ${target}`);
-  });
-
-  it("renders one semantic redacted fallback for a failed wait", () => {
-    const { descriptor } = projectToolCall("write_stdin", JSON.stringify({ session_id: 263 }));
-    const result = projectToolResult(descriptor, "Process exited with code 1\nTOKEN=secret\nconnection closed");
-
-    expect(result).toContain("✗ 等待后台任务完成 · exit 1");
-    expect(result).not.toMatch(/write_stdin|session 263|secret/);
-  });
-
-  it("defers trusted skill loads and stores only distinct skill names", () => {
+  it("stores only distinct trusted skill names", () => {
     const userSkillRoot = "/data00/" + "home/alice";
     const projected = projectToolCall("exec", JSON.stringify({ input: [
       userSkillRoot + "/.agents/skills/test/SKILL.md",
@@ -108,86 +200,43 @@ describe("tool activity projector", () => {
       userSkillRoot + "/.agents/skills/test/SKILL.md"
     ].join(" ") }));
 
-    expect(projected.entry).toBe("");
     expect(projected.descriptor).toMatchObject({ category: "Skill", target: "test, plugin-guide", skillNames: ["test", "plugin-guide"] });
     expect(JSON.stringify(projected.descriptor)).not.toContain("SKILL.md");
   });
 
-  it("renders a successful command and its output as fenced Markdown", () => {
-    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
-    const output = [
-      "Script completed", "Wall time 6.8 seconds", "Output:", "private test log",
-      "Test Files  69 passed (69)", "Tests  662 passed (662)"
-    ].join("\n");
-
-    expect(projectToolResult(descriptor, output)).toBe([
-      "◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "private test log",
-      "Test Files  69 passed (69)", "Tests  662 passed (662)", "```"
-    ].join("\n"));
+  it.each([
+    [JSON.stringify({ session_id: 42, output: "partial" }), "active"],
+    [JSON.stringify({ exit_code: 0, output: "done" }), "done"],
+    [JSON.stringify({ exit_code: 2, output: "failed" }), "failed"],
+    ["Script failed\nProcess exited with code 1", "failed"]
+  ])("projects a structured result state", (output, expected) => {
+    expect(projectToolResultState(output)).toBe(expected);
   });
 
-  it("keeps successful command output canonical for display-time folding", () => {
-    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "git diff --stat" }));
-    const line = (index: number) => `file-${index} | changed`;
-    const lines = Array.from({ length: 35 }, (_, index) => line(index + 1));
-    const result = projectToolResult(descriptor, ["Script completed", "Output:", ...lines].join("\n"));
-    const detail = result.match(/```text\n([\s\S]*?)\n```$/)?.[1].split("\n") ?? [];
-
-    expect(detail).toEqual(lines);
-    expect(result.endsWith("```")).toBe(true);
+  it("normalizes text content without rendering Markdown", () => {
+    expect(normalizeToolOutput([{ type: "input_text", text: " first " }, { type: "output_text", text: "second" }])).toBe("first\nsecond");
+    expect(normalizeToolOutput({ private: "payload" })).toBe("");
   });
 
-  it("renders an explicit running result without retaining payload", () => {
-    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
-
-    expect(projectToolResult(descriptor, JSON.stringify({ session_id: 42, output: "private partial output" }))).toBe("◆ **Ran** · 运行中\n\n```bash\nnpm test\n```");
+  it("unwraps standard execution headers and nested structured tool outputs", () => {
+    const nested = JSON.stringify({
+      plan: {},
+      test: { chunk_id: "chunk-1", exit_code: 0, output: "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh", wall_time_seconds: 1.2 }
+    });
+    expect(normalizeToolOutput([
+      { type: "input_text", text: "Script completed\nWall time 0.5 seconds\nOutput:" },
+      { type: "input_text", text: nested }
+    ])).toBe("first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh");
   });
 
-  it("retains only a bounded redacted failure tail", () => {
-    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
-    const lines = Array.from({ length: 30 }, (_, index) => "failure-" + (index + 1));
-    lines[29] = "TOKEN=top-secret";
-    const output = ["Script failed", "Process exited with code 2", ...lines].join("\n");
-    const result = projectToolResult(descriptor, output);
-
-    expect(result).toContain("◆ **Ran** · ✗ exit 2\n\n```bash\nnpm test\n```");
-    expect(result).not.toContain("failure-10\n");
-    expect(result).toContain("failure-11");
-    expect(result).toContain("TOKEN=[REDACTED]");
-    expect(result).not.toContain("top-secret");
-    expect(result.length).toBeLessThanOrEqual(4_000);
+  it("preserves ordinary JSON that is not a standard tool result envelope", () => {
+    expect(normalizeToolOutput(JSON.stringify({ project: "herdr-agent-swarm", healthy: true })))
+      .toBe('{"project":"herdr-agent-swarm","healthy":true}');
   });
 
-  it("drops successful skill output completely", () => {
-    const path = "/data00/" + "home/alice/.agents/skills/test/SKILL.md";
-    const { descriptor } = projectToolCall("read_file", JSON.stringify({ path }));
-
-    expect(projectToolResult(descriptor, [{ type: "input_text", text: "Script completed\nOutput:\nfull skill body" }]))
-      .toBe("✓ Skill · test");
-  });
-
-  it("keeps only bounded diagnostics when a skill load fails", () => {
-    const path = "/data00/" + "home/alice/.agents/skills/test/SKILL.md";
-    const { descriptor } = projectToolCall("read_file", JSON.stringify({ path }));
-    const result = projectToolResult(descriptor, "Script failed\nProcess exited with code 1\npermission denied");
-
-    expect(result).toContain("✗ Skill · test · exit 1");
-    expect(result).toContain("permission denied");
-    expect(result).not.toContain("Script failed");
-  });
-
-  it("keeps the closing fence when a failure reaches the character limit", () => {
-    const { descriptor } = projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" }));
-    const output = "Script failed\nProcess exited with code 1\n" + "x".repeat(5_000);
-    const result = projectToolResult(descriptor, output);
-
-    expect(result.length).toBeLessThanOrEqual(4_000);
-    expect(result.endsWith("```")).toBe(true);
-  });
-
-  it("uses a compact fallback for unknown result shapes", () => {
-    const { descriptor } = projectToolCall("future_tool", "{}");
-
-    expect(projectToolResult(descriptor, { deeply: { nested: "private payload" } })).toBe("✓ Tool · future_tool");
+  it("treats an empty structured Tool result as no displayable output", () => {
+    expect(normalizeToolOutput("{}")).toBe("");
+    expect(normalizeToolResultForDisplay(JSON.stringify({ exit_code: 0, output: "token=live-secret" }), true))
+      .toBe("token=[REDACTED]\n\n… source event truncated");
   });
 });

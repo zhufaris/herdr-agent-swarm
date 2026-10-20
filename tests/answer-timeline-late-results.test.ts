@@ -9,14 +9,14 @@ const fingerprint = createHash("sha256").update(JSON.stringify(running)).digest(
 describe("late Answer timeline results", () => {
   it("links a changed terminal Tool to its frozen source page", () => {
     const completed: AnswerTimelineItem = { ...running, state: "succeeded", resultPreview: "passed" };
-    expect(lateAnswerTimelineResults([completed], [{ pageIndex: 0, id: running.id, fingerprint }], 1)).toEqual([{
-      ...completed, id: "late:tool:one", sequence: -1, label: "npm test（更新自第 1 页）"
+    expect(lateAnswerTimelineResults([completed], [{ pageIndex: 0, id: running.id, fingerprint }])).toEqual([{
+      ...completed, id: "late:tool:one", sequence: -1, continuation: true
     }]);
   });
 
   it("does not duplicate unchanged, running, or unrelated Tool items", () => {
-    expect(lateAnswerTimelineResults([running], [{ pageIndex: 0, id: running.id, fingerprint }], 1)).toEqual([]);
-    expect(lateAnswerTimelineResults([{ ...running, id: "tool:two", state: "failed" }], [{ pageIndex: 0, id: running.id, fingerprint }], 1)).toEqual([]);
+    expect(lateAnswerTimelineResults([running], [{ pageIndex: 0, id: running.id, fingerprint }])).toEqual([]);
+    expect(lateAnswerTimelineResults([{ ...running, id: "tool:two", state: "failed" }], [{ pageIndex: 0, id: running.id, fingerprint }])).toEqual([]);
   });
 
   it("does not repeat a linked completion after a later page delivered it", () => {
@@ -24,6 +24,6 @@ describe("late Answer timeline results", () => {
     expect(lateAnswerTimelineResults([completed], [
       { pageIndex: 0, id: running.id, fingerprint },
       { pageIndex: 1, id: "late:tool:one", fingerprint: "linked" }
-    ], 2)).toEqual([]);
+    ])).toEqual([]);
   });
 });

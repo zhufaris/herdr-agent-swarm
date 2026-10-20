@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -8,9 +8,14 @@ import { loadConfig, validateProjectDirectories } from "../config.js";
 import { readEnvironmentFile } from "../runtime/environment-file.js";
 import { AGENT_SWARM_SERVICE_ID, loadBuildIdentity, type BuildIdentity } from "../runtime/build-identity.js";
 import type { SetupLifecyclePort } from "../setup/setup-types.js";
+import { RestartSafetyEvaluator } from "./service-lifecycle/restart-safety-evaluator.js";
+import { ReleaseActivator } from "./service-lifecycle/release-activator.js";
+import { OwnedTraexChoicePluginActivation, uninstallOwnedTraexChoicePlugin } from "./service-lifecycle/owned-traex-choice-plugin.js";
 
 type Action = "install" | "uninstall" | "start" | "status" | "restart" | "stop" | "logs" | "rotate-logs";
 const SERVICE_NAME = "herdr-agent-swarm.service";
+const restartSafety = new RestartSafetyEvaluator();
+const releaseActivator = new ReleaseActivator();
 export interface LifecycleOptions {
   force?: boolean;
   requireReady?: boolean;
@@ -111,7 +116,7 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
     if (reset !== 0) return reset;
     const started = delegate("systemctl", ["--user", "start", "--no-block", paths.serviceName], environment);
     if (started !== 0) return started;
-    return waitForStartupCompletion(paths, environment, action, restartTimeoutMs(environment), options.requireReady ?? false);
+    return waitForStartupCompletion(paths, environment, action, serviceStartupTimeoutMs(action, environment), options.requireReady ?? false);
   }
   if (action === "start") {
     convergeLogPaths(paths);
@@ -127,7 +132,7 @@ export async function runServiceLifecycle(action: Action, environment: NodeJS.Pr
     : ["--user", action, paths.serviceName];
   const result = delegate("systemctl", argumentsForAction, environment);
   if (result !== 0 || action === "stop") return result;
-  return waitForStartupCompletion(paths, environment, action, startTimeoutMs(environment), options.requireReady ?? false);
+  return waitForStartupCompletion(paths, environment, action, serviceStartupTimeoutMs(action, environment), options.requireReady ?? false);
 }
 
 export async function inspectServiceLifecycle(environment: NodeJS.ProcessEnv = process.env): Promise<LifecycleInspection> {
@@ -169,55 +174,17 @@ async function assertRestartSafe(paths: RuntimePaths, base: NodeJS.ProcessEnv, f
   try {
     status = await getJson(config.http.host, config.http.port, "/status", true);
   } catch (error) {
+    if (force) return;
     throw new Error(`restart blocked: active service status is unreachable (${safeMessage(error)}); verify the running unit or retry with --force`);
   }
-  const record = asRecord(status);
-  const identity = asRecord(record?.identity);
-  if (identity?.serviceId !== AGENT_SWARM_SERVICE_ID) throw new Error(`restart blocked: active service identity is ${typeof identity?.serviceId === "string" ? identity.serviceId : "missing"}, expected ${AGENT_SWARM_SERVICE_ID}; verify the endpoint or retry with --force`);
-  const operational = asRecord(record?.operational);
-  const prompts = asRecord(operational?.prompts);
-  const promptWorker = asRecord(record?.promptWorker);
-  const running = nonNegativeInteger(prompts?.running);
-  const queued = nonNegativeInteger(prompts?.queued);
-  const activeWorkers = nonNegativeInteger(promptWorker?.activeTurnWorkers);
-  const instanceWorker = asRecord(record?.instanceWorker);
-  const instanceDispatchers = nonNegativeInteger(instanceWorker?.activeDispatchWorkers);
-  const instanceObservers = nonNegativeInteger(instanceWorker?.activeObservers);
-  const activeInstanceTurns = nonNegativeInteger(instanceWorker?.activeTurns);
-  const uncertainInstanceTurns = nonNegativeInteger(instanceWorker?.uncertainTurns);
-  const outboxWork = asRecord(operational?.outboxWork);
-  const readyOutbox = nonNegativeInteger(outboxWork?.ready);
-  const inFlightOutbox = nonNegativeInteger(outboxWork?.inFlight);
-  const retryWaitOutbox = nonNegativeInteger(outboxWork?.retryWait);
-  const cooldownWaitOutbox = nonNegativeInteger(outboxWork?.cooldownWait);
-  const waitingBehindLaneOutbox = nonNegativeInteger(outboxWork?.waitingBehindLane);
-  const outboxDispatcher = asRecord(record?.outboxDispatcher);
-  const activeDeliveries = nonNegativeInteger(outboxDispatcher?.activeDeliveries);
-  const startupRecovery = asRecord(record?.startupRecovery);
-  const startupRecoveryState = typeof startupRecovery?.state === "string" ? startupRecovery.state : null;
-  const sqliteIntegrity = asRecord(record?.sqliteIntegrity);
-  const sqliteIntegrityState = typeof sqliteIntegrity?.state === "string" ? sqliteIntegrity.state : null;
-  const sqliteQuickCheck = typeof sqliteIntegrity?.quickCheck === "string" ? sqliteIntegrity.quickCheck : null;
-  if (!force) {
-    if (running! > 0 || queued! > 0 || activeWorkers! > 0 || instanceDispatchers! > 0 || instanceObservers! > 0 || activeInstanceTurns! > 0 || uncertainInstanceTurns! > 0) throw new Error(`restart blocked: ${metric(running)} running prompts, ${metric(queued)} queued prompts, ${metric(activeWorkers)} active turn workers; instance work has ${metric(instanceDispatchers)} dispatchers, ${metric(instanceObservers)} observers, ${metric(activeInstanceTurns)} active turns, ${metric(uncertainInstanceTurns)} uncertain turns; wait for active work to drain or retry with --force`);
-    if (readyOutbox! > 0 || inFlightOutbox! > 0 || retryWaitOutbox! > 0 || cooldownWaitOutbox! > 0) throw new Error(`restart blocked: outbox work has ${metric(readyOutbox)} ready, ${metric(inFlightOutbox)} in-flight, ${metric(retryWaitOutbox)} retry-wait, ${metric(cooldownWaitOutbox)} cooldown-wait, ${metric(waitingBehindLaneOutbox)} waiting behind lanes; wait for actionable delivery work to drain or retry with --force`);
-    if (activeDeliveries! > 0) throw new Error(`restart blocked: ${activeDeliveries} active deliveries; wait for delivery to drain or retry with --force`);
-  }
-  if (startupRecoveryState !== null && startupRecoveryState !== "completed") throw new Error(`restart blocked: startup recovery is ${startupRecoveryState}, expected completed; wait for recovery or retry with --force`);
-  if (sqliteIntegrityState !== null && sqliteIntegrityState !== "healthy" || sqliteQuickCheck !== null && sqliteQuickCheck !== "ok") throw new Error(`restart blocked: SQLite integrity is ${sqliteIntegrityState ?? "missing"} with quickCheck ${sqliteQuickCheck ?? "missing"}; repair integrity or retry with --force`);
-  const workloadIncomplete = !force && [running, queued, activeWorkers, instanceDispatchers, instanceObservers, activeInstanceTurns, uncertainInstanceTurns, readyOutbox, inFlightOutbox, retryWaitOutbox, cooldownWaitOutbox, waitingBehindLaneOutbox, activeDeliveries].some((value) => value === null);
-  if (workloadIncomplete || startupRecoveryState === null || sqliteIntegrityState === null || sqliteQuickCheck === null) throw new Error("restart blocked: active service status has incomplete restart safety metrics; verify the running unit or retry with --force");
+  restartSafety.evaluate(status, { force });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
-
-function nonNegativeInteger(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
-}
-
-function metric(value: number | null): number | "unknown" { return value ?? "unknown"; }
 
 function runtimePaths(environment: NodeJS.ProcessEnv): RuntimePaths {
   const root = requiredDirectory(environment.SWARM_ROOT, "SWARM_ROOT");
@@ -269,7 +236,19 @@ function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv, renameFile
   convergeLogPaths(paths);
   if (unitActivity(paths.serviceName, environment) === "inactive") rotateLogs(paths, renameFile);
   const candidate = environment.SWARM_RELEASE_CANDIDATE;
-  if (candidate) return activateRelease(paths, environment, identity, runtimeEnvironment, candidate, renameActivationLink);
+  if (candidate) {
+    const pluginOptions = ownedTraexChoicePluginOptions(paths, environment, identity);
+    return releaseActivator.activate({
+      paths, environment, identity, candidateValue: candidate,
+      ownedPlugin: new OwnedTraexChoicePluginActivation(pluginOptions),
+      writeUnits: () => writeUnits(paths, identity, runtimeEnvironment),
+      runSystemd: (args, tolerateFailure) => delegate("systemctl", args, environment, tolerateFailure),
+      readEnabledState: () => readEnabledState(paths.serviceName, environment),
+      renameCurrentLink: renameActivationLink,
+      writeStdout: (message) => process.stdout.write(message),
+      writeStderr: (message) => process.stderr.write(message)
+    });
+  }
   mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
   writeUnits(paths, identity, runtimeEnvironment);
   let result = delegate("systemctl", ["--user", "daemon-reload"], environment);
@@ -278,100 +257,7 @@ function install(paths: RuntimePaths, environment: NodeJS.ProcessEnv, renameFile
   return result;
 }
 
-type PriorEnabledState = "enabled" | "disabled" | "absent";
-
-function activateRelease(paths: RuntimePaths, environment: NodeJS.ProcessEnv, identity: BuildIdentity, runtimeEnvironment: NodeJS.ProcessEnv, candidateValue: string, renameActivationLink: typeof renameSync): number {
-  const candidate = validateReleaseCandidate(paths, candidateValue, identity);
-  const keepInactive = releaseRetention(environment);
-  const priorCurrent = readPriorCurrent(paths);
-  const priorUnit = readPriorUnit(paths.unitFile);
-  const priorRotationUnit = readPriorUnit(paths.rotationUnitFile);
-  const priorRotationTimer = readPriorUnit(paths.rotationTimerFile);
-  const priorUnitRelease = priorUnit ? releaseWorkingDirectory(paths, priorUnit.content) : null;
-  const priorEnabled = priorUnit ? readEnabledState(paths.serviceName, environment) : "absent";
-  const priorUnits = [
-    { path: paths.unitFile, backup: paths.activationUnitBackup, prior: priorUnit },
-    { path: paths.rotationUnitFile, backup: paths.activationRotationUnitBackup, prior: priorRotationUnit },
-    { path: paths.rotationTimerFile, backup: paths.activationRotationTimerBackup, prior: priorRotationTimer }
-  ];
-  for (const unit of priorUnits) if (lstatOptional(unit.backup)) throw new Error(`release activation backup already exists: ${unit.backup}`);
-  atomicWrite(paths.activationMarker, JSON.stringify({ version: 1, candidate, priorCurrent, priorUnits: priorUnits.map(({ path, backup, prior }) => ({ path, backup: prior ? backup : null, mode: prior?.mode ?? null })), priorEnabled, phase: "prepared" }) + "\n", 0o600);
-  try {
-    for (const unit of priorUnits) if (unit.prior) writeFileSync(unit.backup, unit.prior.content, { mode: unit.prior.mode, flag: "wx" });
-    mkdirSync(dirname(paths.unitFile), { recursive: true, mode: 0o700 });
-    writeUnits(paths, identity, runtimeEnvironment);
-    let failureCode = delegate("systemctl", ["--user", "daemon-reload"], environment);
-    if (failureCode !== 0) throw new ReleaseActivationCommandError("daemon-reload", failureCode);
-    failureCode = delegate("systemctl", ["--user", "enable", paths.serviceName], environment);
-    if (failureCode !== 0) throw new ReleaseActivationCommandError("enable", failureCode);
-    replaceCurrentLink(paths, candidate, renameActivationLink);
-  } catch (error) {
-    try {
-      restoreActivation(paths, environment, priorCurrent, priorUnits, priorEnabled, renameActivationLink);
-      removeActivationEvidence(paths);
-    } catch (rollbackError) {
-      throw new Error(`release activation failed (${safeMessage(error)}); rollback failed (${safeMessage(rollbackError)}); recovery marker retained at ${paths.activationMarker}`);
-    }
-    if (error instanceof ReleaseActivationCommandError) return error.exitCode;
-    throw error;
-  }
-  try { removeActivationEvidence(paths); } catch (error) {
-    throw new Error(`release activation committed but recovery marker cleanup failed (${safeMessage(error)}); inspect ${paths.activationMarker}`);
-  }
-  try { pruneReleases(paths, new Set([candidate, priorCurrent, priorUnitRelease].filter((path): path is string => path !== null)), keepInactive); } catch (error) {
-    process.stderr.write(`release activation committed but release pruning failed: ${safeMessage(error)}\n`);
-  }
-  process.stdout.write(`installed ${paths.serviceName} at ${paths.unitFile}; activated ${candidate}\n`);
-  return 0;
-}
-
-class ReleaseActivationCommandError extends Error {
-  constructor(operation: string, readonly exitCode: number) { super(`${operation} failed with exit code ${exitCode}`); }
-}
-
-function validateReleaseCandidate(paths: RuntimePaths, value: string, identity: BuildIdentity): string {
-  const unresolvedCandidate = resolve(value);
-  if (lstatSync(unresolvedCandidate).isSymbolicLink()) throw new Error("SWARM_RELEASE_CANDIDATE must not be a symlink");
-  const candidate = realpathSync(unresolvedCandidate);
-  const releases = realpathSync(paths.releasesDirectory);
-  const status = lstatSync(candidate);
-  if (!status.isDirectory() || status.isSymbolicLink() || dirname(candidate) !== releases) throw new Error(`SWARM_RELEASE_CANDIDATE must be a direct release directory under ${releases}`);
-  const commit = identity.gitCommit;
-  if (!commit || !/^[a-f0-9]{40}$/.test(commit)) throw new Error("release activation requires a build identity with a Git commit");
-  const expectedName = `${identity.buildId.replace(/^sha256:/, "")}-${commit.slice(0, 12)}`;
-  if (candidate !== resolve(releases, expectedName)) throw new Error(`release candidate identity mismatch: expected ${expectedName}`);
-  if (candidate !== realpathSync(paths.root)) throw new Error("SWARM_RELEASE_CANDIDATE must resolve to SWARM_ROOT");
-  return candidate;
-}
-
-function readPriorCurrent(paths: RuntimePaths): string | null {
-  const status = lstatOptional(paths.currentLink);
-  if (!status) return null;
-  if (!status.isSymbolicLink()) throw new Error(`current release path must be a symlink: ${paths.currentLink}`);
-  const target = realpathSync(paths.currentLink);
-  if (dirname(target) !== realpathSync(paths.releasesDirectory)) throw new Error(`current release must resolve under ${paths.releasesDirectory}`);
-  if (!statSync(target).isDirectory()) throw new Error(`current release must resolve to a directory: ${target}`);
-  return target;
-}
-
-function readPriorUnit(path: string): { content: string; mode: number } | null {
-  if (!existsSync(path)) return null;
-  const status = lstatSync(path);
-  if (!status.isFile() || status.isSymbolicLink()) throw new Error(`service unit must be a regular file: ${path}`);
-  return { content: readFileSync(path, "utf8"), mode: status.mode & 0o777 };
-}
-
-function releaseWorkingDirectory(paths: RuntimePaths, unit: string): string | null {
-  const value = unit.split("\n").map((line) => line.trim()).find((line) => line.startsWith("WorkingDirectory="))?.slice("WorkingDirectory=".length);
-  if (!value || !existsSync(value)) return null;
-  const candidate = realpathSync(value);
-  const releases = realpathSync(paths.releasesDirectory);
-  const status = lstatSync(candidate);
-  if (!status.isDirectory() || status.isSymbolicLink() || dirname(candidate) !== releases) return null;
-  return /^[a-f0-9]{64}-[a-f0-9]{12}$/.test(candidate.slice(releases.length + 1)) ? candidate : null;
-}
-
-function readEnabledState(serviceName: string, environment: NodeJS.ProcessEnv): Exclude<PriorEnabledState, "absent"> {
+function readEnabledState(serviceName: string, environment: NodeJS.ProcessEnv): "enabled" | "disabled" {
   const result = spawnSync("systemctl", ["--user", "is-enabled", serviceName], { env: userSystemdEnvironment(environment), encoding: "utf8", timeout: 5_000 });
   const state = result.stdout.trim();
   if (result.status === 0 && ["enabled", "enabled-runtime", "linked", "linked-runtime", "alias"].includes(state)) return "enabled";
@@ -379,60 +265,10 @@ function readEnabledState(serviceName: string, environment: NodeJS.ProcessEnv): 
   throw new Error(`cannot determine whether ${serviceName} is enabled; refusing release activation`);
 }
 
-function replaceCurrentLink(paths: RuntimePaths, target: string | null, renameLink: typeof renameSync = renameSync): void {
-  const temporary = `${paths.currentLink}.tmp-${process.pid}`;
-  if (lstatOptional(temporary)) unlinkSync(temporary);
-  if (target === null) {
-    if (lstatOptional(paths.currentLink)) unlinkSync(paths.currentLink);
-    return;
-  }
-  symlinkSync(target, temporary);
-  try { renameLink(temporary, paths.currentLink); } catch (error) { unlinkSync(temporary); throw error; }
-}
-
-function restoreActivation(paths: RuntimePaths, environment: NodeJS.ProcessEnv, priorCurrent: string | null, priorUnits: readonly { path: string; prior: { content: string; mode: number } | null }[], priorEnabled: PriorEnabledState, renameActivationLink: typeof renameSync): void {
-  replaceCurrentLink(paths, priorCurrent, renameActivationLink);
-  if (priorEnabled !== "enabled") {
-    const disabled = delegate("systemctl", ["--user", "disable", paths.serviceName], environment, true);
-    if (disabled !== 0) throw new Error(`rollback disable failed with exit code ${disabled}`);
-  }
-  for (const unit of priorUnits) {
-    if (unit.prior) atomicWrite(unit.path, unit.prior.content, unit.prior.mode);
-    else if (existsSync(unit.path)) unlinkSync(unit.path);
-  }
-  const reload = delegate("systemctl", ["--user", "daemon-reload"], environment, true);
-  if (reload !== 0) throw new Error(`rollback daemon-reload failed with exit code ${reload}`);
-  if (priorEnabled === "enabled") {
-    const enabled = delegate("systemctl", ["--user", "enable", paths.serviceName], environment, true);
-    if (enabled !== 0) throw new Error(`rollback enable failed with exit code ${enabled}`);
-  }
-}
-
-function removeActivationEvidence(paths: RuntimePaths): void {
-  for (const backup of [paths.activationUnitBackup, paths.activationRotationUnitBackup, paths.activationRotationTimerBackup]) if (lstatOptional(backup)) unlinkSync(backup);
-  if (lstatOptional(paths.activationMarker)) unlinkSync(paths.activationMarker);
-}
-
-function releaseRetention(environment: NodeJS.ProcessEnv): number {
-  const value = environment.SWARM_RELEASE_RETENTION ?? "3";
-  if (!/^\d+$/.test(value)) throw new Error("SWARM_RELEASE_RETENTION must be a non-negative integer");
-  return Number(value);
-}
-
-function pruneReleases(paths: RuntimePaths, retained: ReadonlySet<string>, keepInactive: number): void {
-  let kept = 0;
-  const candidates = readdirSync(paths.releasesDirectory, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /^[a-f0-9]{64}-[a-f0-9]{12}$/.test(entry.name))
-    .map((entry) => resolve(paths.releasesDirectory, entry.name))
-    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-  for (const candidate of candidates) {
-    if (retained.has(candidate)) continue;
-    if (kept++ < keepInactive) continue;
-    rmSync(candidate, { recursive: true });
-  }
-}
-
 function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number {
+  const identity = existsSync(paths.buildInfo) ? loadBuildIdentity(paths.buildInfo) : null;
+  const pluginResult = uninstallOwnedTraexChoicePlugin(ownedTraexChoicePluginOptions(paths, environment, identity?.buildId ?? "uninstall"));
+  if (pluginResult !== 0) return pluginResult;
   delegate("systemctl", ["--user", "disable", "--now", paths.serviceName], environment, true);
   delegate("systemctl", ["--user", "disable", "--now", "herdr-agent-swarm-log-rotate.timer"], environment, true);
   if (existsSync(paths.unitFile)) unlinkSync(paths.unitFile);
@@ -441,6 +277,16 @@ function uninstall(paths: RuntimePaths, environment: NodeJS.ProcessEnv): number 
   const result = delegate("systemctl", ["--user", "daemon-reload"], environment);
   if (result === 0) process.stdout.write(`removed ${paths.serviceName}; configuration and state were preserved\n`);
   return result;
+}
+
+function ownedTraexChoicePluginOptions(paths: RuntimePaths, environment: NodeJS.ProcessEnv, identity: BuildIdentity | string) {
+  return {
+    releaseRoot: paths.root,
+    stateDirectory: paths.stateDirectory,
+    traeHome: resolve(environment.TRAECLI_HOME || `${homedir()}/.trae`),
+    buildId: typeof identity === "string" ? identity : identity.buildId,
+    run: (args: string[], tolerateFailure?: boolean) => delegate("traecli", args, environment, tolerateFailure)
+  };
 }
 
 function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: NodeJS.ProcessEnv): string {
@@ -456,6 +302,7 @@ function renderUnit(paths: RuntimePaths, identity: BuildIdentity, environment: N
     "",
     "[Service]",
     "Type=simple",
+    "UMask=0077",
     `WorkingDirectory=${systemdEscape(paths.root)}`,
     `EnvironmentFile=${systemdEscape(paths.environmentFile)}`,
     `Environment=PROJECTS_CONFIG_PATH=${systemdEscape(resolve(paths.configDirectory, "projects.json"))}`,
@@ -767,7 +614,7 @@ function requireInstalled(paths: RuntimePaths): void {
   if (!existsSync(paths.unitFile)) throw new Error(`service is not installed: ${paths.unitFile}; run the setup action first`);
 }
 
-async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number, requireReady: boolean): Promise<number> {
+async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.ProcessEnv, action: "start" | "restart", timeoutMs: number, requireReady: boolean, quiet = false): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
   const config = loadConfig(loadRuntimeEnvironment(paths, base));
   const deadline = Date.now() + timeoutMs;
@@ -776,6 +623,7 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
   let observedBuildId = "unavailable";
   let observedStartupState = "unavailable";
   let observedOwnership = "unavailable";
+  let observedReadiness = "unavailable";
   let unitState = "inactive";
   let unsuccessfulPolls = 0;
   let firstPoll = true;
@@ -797,11 +645,14 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
     consecutiveHealthyChecks = healthy ? consecutiveHealthyChecks + 1 : 0;
     if (consecutiveHealthyChecks >= 2) {
       const readiness = await probeStatus(config.http.host, config.http.port, "/ready", remainingProbeBudget(deadline, 1_500));
+      observedReadiness = readiness.status;
       if (Date.now() >= deadline) break;
-      process.stdout.write(`bridge startup completed (${paths.serviceName}); readiness=${readiness.status}\n`);
-      if (readiness.status !== "ready") process.stdout.write(`bridge dependencies are degraded: ${readiness.detail}\n`);
-      if (requireReady && readiness.status !== "ready") throw new Error(`bridge ${action} completed but readiness is ${readiness.status}; inspect swarm:status and swarm:logs`);
-      return 0;
+      if (!requireReady || readiness.status === "ready") {
+        if (!quiet) process.stdout.write(`bridge startup completed (${paths.serviceName}); readiness=${readiness.status}\n`);
+        if (!quiet && readiness.status !== "ready") process.stdout.write(`bridge dependencies are degraded: ${readiness.detail}\n`);
+        return 0;
+      }
+      consecutiveHealthyChecks = 0;
     }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
@@ -809,21 +660,24 @@ async function waitForStartupCompletion(paths: RuntimePaths, base: NodeJS.Proces
     unsuccessfulPolls = healthy ? 0 : unsuccessfulPolls + 1;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(retryDelayMs, remainingMs)));
   }
-  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; status ${observedStatus}; observed build ${observedBuildId}; startup ${observedStartupState}; listener ownership ${observedOwnership}; configured listener PID must belong to canonical unit MainPID; inspect systemctl --user status ${paths.serviceName}`);
+  throw new Error(`bridge ${action} did not complete startup with expected build ${expected.buildId} within ${timeoutMs}ms; unit ${unitState}; status ${observedStatus}; observed build ${observedBuildId}; startup ${observedStartupState}; readiness ${observedReadiness}; listener ownership ${observedOwnership}; configured listener PID must belong to canonical unit MainPID; inspect systemctl --user status ${paths.serviceName}`);
 }
 
 function remainingProbeBudget(deadline: number, maximumMs: number): number {
   return Math.max(1, Math.min(maximumMs, deadline - Date.now()));
 }
 
-function startTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.SWARM_SERVICE_START_TIMEOUT_MS, 15_000); }
-
-function restartTimeoutMs(environment: NodeJS.ProcessEnv): number { return positiveMilliseconds(environment.SWARM_SERVICE_RESTART_TIMEOUT_MS, 90_000); }
+export function serviceStartupTimeoutMs(action: "start" | "restart", environment: NodeJS.ProcessEnv): number {
+  const override = action === "start"
+    ? environment.SWARM_SERVICE_START_TIMEOUT_MS
+    : environment.SWARM_SERVICE_RESTART_TIMEOUT_MS;
+  return positiveMilliseconds(override, 90_000);
+}
 
 async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promise<number> {
   const expected = loadBuildIdentity(paths.buildInfo);
   const unit = sampleUnitRuntime(paths.serviceName, base);
-  const active = unit.active;
+  const active = unit.activeState === "unavailable" ? null : unit.active;
   let bridge: unknown = null;
   let ownership: ListenerOwnership | null = null;
   try {
@@ -838,7 +692,7 @@ async function printStatus(paths: RuntimePaths, base: NodeJS.ProcessEnv): Promis
   const observedIdentity = asRecord(observed);
   const identityMatches = observedIdentity?.serviceId === expected.serviceId && observedIdentity?.buildId === expected.buildId;
   process.stdout.write(JSON.stringify({ service: paths.serviceName, active, unitState: unit.activeState, unitStatusDetail: unit.detail, unitFile: paths.unitFile, expectedIdentity: expected, observedIdentity: observed, ownership, bridge }) + "\n");
-  return active && identityMatches && ownership?.matches === true ? 0 : 1;
+  return active === true && identityMatches && ownership?.matches === true ? 0 : 1;
 }
 
 interface ListenerOwnership {
@@ -940,7 +794,11 @@ function unitActivity(serviceName: string, environment: NodeJS.ProcessEnv): "act
 
 function delegate(command: string, args: string[], environment: NodeJS.ProcessEnv, tolerateFailure = false): number {
   const commandEnvironment = command === "systemctl" && args[0] === "--user" ? userSystemdEnvironment(environment) : environment;
-  const result = spawnSync(command, args, { env: commandEnvironment, encoding: "utf8", timeout: 30_000, stdio: "inherit" });
+  // The managed unit permits up to 50 seconds for graceful shutdown. Keep the
+  // client deadline above that boundary so systemctl, rather than spawnSync,
+  // reports the authoritative stop result.
+  const timeout = command === "systemctl" ? 60_000 : 30_000;
+  const result = spawnSync(command, args, { env: commandEnvironment, encoding: "utf8", timeout, stdio: "inherit" });
   if (result.error) { if (tolerateFailure) return 1; throw result.error; }
   return result.status ?? 1;
 }

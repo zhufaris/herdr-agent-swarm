@@ -2,18 +2,32 @@ import { createConnection, type Socket } from "node:net";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { extractHerdrEventIds } from "./herdr-event-ids.js";
-import { mergeHerdrRuntimeHints, normalizeHerdrEvent, type HerdrRuntimeHint } from "./herdr-event-hint.js";
+import {
+  mergeCoreSessionEventsAvailableHints,
+  mergeHerdrRuntimeHints,
+  normalizeHerdrEvent,
+  type CoreSessionEventsAvailableHint,
+  type HerdrNativeEventHint,
+  type HerdrRuntimeHint
+} from "./herdr-event-hint.js";
 import { safeLogError } from "./safe-error.js";
 import { FailureLogGate } from "./failure-log-gate.js";
 import type { ShutdownContext } from "./shutdown-context.js";
 
-const MAX_FRAME_BYTES = 256 * 1024;
+// Match Core's bounded protocol frame budget. Session-event readers request a
+// smaller page as an additional guard, but a valid Core response may still be
+// larger than the former 256 KiB client-only ceiling.
+const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_FRAMES_PER_TICK = 256;
 const eventSchema = z.object({ event: z.string(), data: z.unknown() });
 const responseSchema = z.object({ id: z.string(), result: z.unknown() }).refine((value) => Object.hasOwn(value, "result"));
-const errorResponseSchema = z.object({ id: z.string(), error: z.object({ code: z.string(), message: z.string() }) });
+const errorResponseSchema = z.object({ id: z.string(), error: z.object({ code: z.string(), message: z.string() }).passthrough() });
+const sessionEventsAvailableSchema = z.object({
+  stream_id: z.string().min(1).max(512),
+  latest_cursor: z.string().min(1).max(512)
+});
 
-export type HerdrNativeEventHint = HerdrRuntimeHint;
+export type { HerdrNativeEventHint } from "./herdr-event-hint.js";
 
 export interface HerdrSocketStatus {
   connected: boolean;
@@ -26,7 +40,7 @@ export interface HerdrSocketStatus {
 }
 
 export class HerdrSocketRequestError extends Error {
-  constructor(readonly code: string, readonly written: boolean, message = code) {
+  constructor(readonly code: string, readonly written: boolean, message = code, readonly details?: Readonly<Record<string, unknown>>) {
     super(message);
     this.name = "HerdrSocketRequestError";
   }
@@ -55,7 +69,8 @@ export class HerdrSocketSubscriber {
   private hintDrain: Promise<void> | null = null;
   private ingressClose: Promise<void> | null = null;
   private readonly eventAbort = new AbortController();
-  private pendingHint: HerdrNativeEventHint | null = null;
+  private pendingRuntimeHint: HerdrRuntimeHint | null = null;
+  private pendingCoreHint: CoreSessionEventsAvailableHint | null = null;
   private stableTimer: NodeJS.Timeout | null = null;
   private subscriptionAckTimer: NodeJS.Timeout | null = null;
   private subscriptionRefreshTimer: NodeJS.Timeout | null = null;
@@ -64,6 +79,10 @@ export class HerdrSocketSubscriber {
   private nextRequestId = 1;
   private nextSubscriptionId = 1;
   private subscriptionRequestId: string | null = null;
+  private subscriptionAcknowledged = false;
+  private globalStatusSubscription = false;
+  private bufferedRuntimeHint: HerdrRuntimeHint | null = null;
+  private bufferedCoreHint: CoreSessionEventsAvailableHint | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly paneWaiters = new Map<string, Set<PaneWaiter>>();
   private readonly subscribedPaneIds = new Set<string>();
@@ -81,7 +100,8 @@ export class HerdrSocketSubscriber {
     private readonly reconnectBaseMs = 250,
     private readonly reconnectMaxMs = 10_000,
     private readonly maxFrameBytes = MAX_FRAME_BYTES,
-    private readonly subscriptionAckTimeoutMs = 5_000
+    private readonly subscriptionAckTimeoutMs = 5_000,
+    private readonly supportsPaneAgentStatusAll: () => Promise<boolean> = async () => false
   ) {}
 
   start(): void {
@@ -93,6 +113,7 @@ export class HerdrSocketSubscriber {
   }
 
   async stop(): Promise<void> {
+    this.eventAbort.abort("socket_stopped");
     this.stopIngress();
     await this.ingressClose;
     await this.drainEvents();
@@ -109,6 +130,10 @@ export class HerdrSocketSubscriber {
     this.stableTimer = null;
     this.subscriptionAckTimer = null;
     this.subscriptionRequestId = null;
+    this.subscriptionAcknowledged = false;
+    this.globalStatusSubscription = false;
+    this.bufferedRuntimeHint = null;
+    this.bufferedCoreHint = null;
     this.subscriptionRefreshTimer = null;
     this.connected = false;
     this.eventsConnected = false;
@@ -175,7 +200,7 @@ export class HerdrSocketSubscriber {
           if (response.success) this.resolveRequest(response.data.id, response.data.result);
           else {
             const failure = errorResponseSchema.parse(value);
-            this.rejectRequest(failure.id, failure.error.code, failure.error.message, true);
+            this.rejectRequest(failure.id, failure.error.code, failure.error.message, true, failure.error);
           }
         } catch { this.rejectRequest(id, "socket_response_invalid", "invalid Herdr RPC response"); }
         socket.end();
@@ -206,10 +231,19 @@ export class HerdrSocketSubscriber {
 
   private async connect(): Promise<void> {
     if (this.stopped || this.socket) return;
-    let paneIds: readonly string[];
-    try { paneIds = await this.paneIds(); }
-    catch (error) { this.failed(error); return; }
+    let globalStatusSubscription = false;
+    try { globalStatusSubscription = await this.supportsPaneAgentStatusAll(); }
+    catch { globalStatusSubscription = false; }
+    let paneIds: readonly string[] = [];
+    if (!globalStatusSubscription) {
+      try { paneIds = await this.paneIds(); }
+      catch (error) { this.failed(error); return; }
+    }
     if (this.stopped) return;
+    this.globalStatusSubscription = globalStatusSubscription;
+    this.subscriptionAcknowledged = false;
+    this.bufferedRuntimeHint = null;
+    this.bufferedCoreHint = null;
     this.subscribedPaneIds.clear();
     for (const paneId of paneIds) this.subscribedPaneIds.add(paneId);
     const socket = createConnection({ path: this.socketPath });
@@ -217,9 +251,12 @@ export class HerdrSocketSubscriber {
     socket.setEncoding("utf8");
     socket.once("connect", () => {
       const subscriptions: object[] = [
+        { type: "session.events.available" },
         { type: "pane.created" }, { type: "pane.updated" }, { type: "pane.closed" },
         { type: "pane.exited" }, { type: "pane.moved" }, { type: "pane.agent_detected" },
-        ...[...this.subscribedPaneIds].map((pane_id) => ({ type: "pane.agent_status_changed", pane_id }))
+        ...(this.globalStatusSubscription
+          ? [{ type: "pane.agent_status_all" }]
+          : [...this.subscribedPaneIds].map((pane_id) => ({ type: "pane.agent_status_changed", pane_id })))
       ];
       const subscriptionRequestId = `herdr-agent-swarm-events:${this.nextSubscriptionId++}`;
       this.subscriptionRequestId = subscriptionRequestId;
@@ -237,6 +274,10 @@ export class HerdrSocketSubscriber {
       if (this.socket === socket) this.socket = null;
       this.eventsConnected = false;
       this.subscriptionRequestId = null;
+      this.subscriptionAcknowledged = false;
+      this.globalStatusSubscription = false;
+      this.bufferedRuntimeHint = null;
+      this.bufferedCoreHint = null;
       if (this.subscriptionAckTimer) clearTimeout(this.subscriptionAckTimer);
       this.subscriptionAckTimer = null;
       this.resolveAllPaneWaiters(false);
@@ -267,7 +308,7 @@ export class HerdrSocketSubscriber {
         const response = responseSchema.safeParse(value);
         if (response.success) {
           if (response.data.id === this.subscriptionRequestId) {
-            this.acknowledgeSubscription(this.socket);
+            if (!this.subscriptionAcknowledged) this.acknowledgeSubscription(this.socket);
             continue;
           }
           this.resolveRequest(response.data.id, response.data.result);
@@ -276,11 +317,16 @@ export class HerdrSocketSubscriber {
         const failure = errorResponseSchema.safeParse(value);
         if (failure.success) {
           if (failure.data.id === this.subscriptionRequestId) {
-            this.logConnectionFailure(new Error(`${failure.data.error.code}: ${failure.data.error.message}`), "herdr-socket-subscribe-failed", "Herdr native event subscription was rejected");
+            const eventsLost = failure.data.error.code === "events_lost";
+            this.logConnectionFailure(
+              new Error(`${failure.data.error.code}: ${failure.data.error.message}`),
+              eventsLost ? "herdr-socket-events-lost" : "herdr-socket-subscribe-failed",
+              eventsLost ? "Herdr native event subscription lost retained events" : "Herdr native event subscription was rejected"
+            );
             this.socket?.destroy();
             continue;
           }
-          this.rejectRequest(failure.data.id, failure.data.error.code, failure.data.error.message);
+          this.rejectRequest(failure.data.id, failure.data.error.code, failure.data.error.message, false, failure.data.error);
           continue;
         }
         const parsed = eventSchema.safeParse(value);
@@ -288,24 +334,36 @@ export class HerdrSocketSubscriber {
         this.attempt = 0;
         if (this.stableTimer) clearTimeout(this.stableTimer);
         this.stableTimer = null;
+        if (parsed.data.event === "session.events.available") {
+          const available = sessionEventsAvailableSchema.safeParse(parsed.data.data);
+          if (available.success) {
+            this.emitOrBuffer({
+              kind: "session-events-available",
+              sources: [{ sourceId: available.data.stream_id, latestCursor: available.data.latest_cursor }]
+            });
+          } else {
+            this.invalidFrame("herdr-socket-session-events-available-invalid", "discarded invalid Core session availability event");
+          }
+          continue;
+        }
         const ids = extractHerdrEventIds(parsed.data.data);
         for (const paneId of ids.paneIds) this.resolvePaneWaiters(paneId, true);
         const hint = normalizeHerdrEvent(parsed.data.event, ids);
-        this.emit(hint);
-        if (hint.kind === "pane-created" || hint.kind === "pane-moved") {
+        this.emitOrBuffer(hint);
+        if (!this.globalStatusSubscription && (hint.kind === "pane-created" || hint.kind === "pane-moved")) {
           const newPaneIds = ids.paneIds.filter((paneId) => !this.subscribedPaneIds.has(paneId));
           if (newPaneIds.length > 0) {
             for (const paneId of newPaneIds) this.subscribedPaneIds.add(paneId);
             this.scheduleSubscriptionRefresh();
           }
-        } else if (hint.kind === "pane-closed" || hint.kind === "pane-exited") {
+        } else if (!this.globalStatusSubscription && (hint.kind === "pane-closed" || hint.kind === "pane-exited")) {
           const removed = ids.paneIds.filter((paneId) => this.subscribedPaneIds.delete(paneId));
           if (removed.length > 0) this.scheduleSubscriptionRefresh();
         }
       } catch (error) {
         this.logger.warn({ event: "herdr-socket-frame-invalid", err: safeLogError(error), outcome: "full_reconciliation" }, "ignored malformed Herdr socket frame");
-        this.emit({ kind: "invalid", scope: "all", workspaceIds: [], paneIds: [] });
-        if (this.subscriptionRequestId) this.socket?.destroy();
+        this.emitOrBuffer({ kind: "invalid", scope: "all", workspaceIds: [], paneIds: [] });
+        if (this.subscriptionRequestId && !this.subscriptionAcknowledged) this.socket?.destroy();
       }
     }
     if (cursor > 0) this.buffer = this.buffer.slice(cursor);
@@ -319,12 +377,28 @@ export class HerdrSocketSubscriber {
 
   private invalidFrame(event: string, message: string): void {
     this.logger.warn({ event, outcome: "full_reconciliation" }, message);
-    this.emit({ kind: "invalid", scope: "all", workspaceIds: [], paneIds: [] });
+    this.emitOrBuffer({ kind: "invalid", scope: "all", workspaceIds: [], paneIds: [] });
+  }
+
+  private emitOrBuffer(hint: HerdrNativeEventHint): void {
+    if (!this.globalStatusSubscription || this.subscriptionAcknowledged) {
+      this.emit(hint);
+      return;
+    }
+    if (hint.kind === "session-events-available") {
+      this.bufferedCoreHint = mergeCoreSessionEventsAvailableHints(this.bufferedCoreHint, hint);
+    } else {
+      this.bufferedRuntimeHint = mergeHerdrRuntimeHints(this.bufferedRuntimeHint, hint);
+    }
   }
 
   private emit(hint: HerdrNativeEventHint): void {
     if (this.stopped) return;
-    this.pendingHint = mergeHerdrRuntimeHints(this.pendingHint, hint);
+    if (hint.kind === "session-events-available") {
+      this.pendingCoreHint = mergeCoreSessionEventsAvailableHints(this.pendingCoreHint, hint);
+    } else {
+      this.pendingRuntimeHint = mergeHerdrRuntimeHints(this.pendingRuntimeHint, hint);
+    }
     if (this.dispatching) return;
     this.dispatching = true;
     const drain = this.drainHints();
@@ -334,20 +408,23 @@ export class HerdrSocketSubscriber {
 
   private async drainHints(): Promise<void> {
     try {
-      while (this.pendingHint) {
-        if (this.eventAbort.signal.aborted) { this.pendingHint = null; break; }
-        const hint = this.pendingHint;
-        this.pendingHint = null;
+      while (this.pendingRuntimeHint || this.pendingCoreHint) {
+        if (this.eventAbort.signal.aborted) {
+          this.pendingRuntimeHint = null;
+          this.pendingCoreHint = null;
+          break;
+        }
+        const hint = this.pendingCoreHint ?? this.pendingRuntimeHint;
+        if (!hint) break;
+        if (hint.kind === "session-events-available") this.pendingCoreHint = null;
+        else this.pendingRuntimeHint = null;
         try { await this.onEvent(hint, this.eventAbort.signal); }
         catch (error) { this.logger.warn({ event: "herdr-socket-event-handler-failed", err: safeLogError(error), sourceEvent: hint.kind, outcome: "periodic_reconciliation_fallback" }, "Herdr native event handler failed"); }
       }
     } finally {
       this.dispatching = false;
-      if (this.pendingHint && !this.stopped) {
-        const pending = this.pendingHint;
-        this.pendingHint = null;
-        this.emit(pending);
-      }
+      const pending = this.pendingCoreHint ?? this.pendingRuntimeHint;
+      if (pending && !this.stopped) this.emit(pending);
     }
   }
 
@@ -359,8 +436,8 @@ export class HerdrSocketSubscriber {
   }
 
   private acknowledgeSubscription(socket: Socket | null): void {
-    if (!socket || this.socket !== socket || !this.subscriptionRequestId) return;
-    this.subscriptionRequestId = null;
+    if (!socket || this.socket !== socket || !this.subscriptionRequestId || this.subscriptionAcknowledged) return;
+    this.subscriptionAcknowledged = true;
     if (this.subscriptionAckTimer) clearTimeout(this.subscriptionAckTimer);
     this.subscriptionAckTimer = null;
     this.eventsConnected = true;
@@ -369,6 +446,12 @@ export class HerdrSocketSubscriber {
     const recovery = this.failureLogs.recover("event-stream");
     this.logger.info({ event: recovery ? "herdr-socket-recovered" : "herdr-socket-connected", paneCount: this.subscribedPaneIds.size, ...(recovery ?? {}), outcome: "subscribed" }, recovery ? "Herdr native event stream recovered" : "subscribed to Herdr native event stream");
     this.emit({ kind: "socket-recovered", scope: "all", workspaceIds: [], paneIds: [] });
+    const bufferedCoreHint = this.bufferedCoreHint;
+    const bufferedRuntimeHint = this.bufferedRuntimeHint;
+    this.bufferedCoreHint = null;
+    this.bufferedRuntimeHint = null;
+    if (bufferedCoreHint) this.emit(bufferedCoreHint);
+    if (bufferedRuntimeHint) this.emit(bufferedRuntimeHint);
   }
 
   private scheduleSubscriptionRefresh(): void {
@@ -390,7 +473,7 @@ export class HerdrSocketSubscriber {
     pending.resolve(result);
   }
 
-  private rejectRequest(id: string, code: string, message: string, transportReachable = false): void {
+  private rejectRequest(id: string, code: string, message: string, transportReachable = false, details?: Readonly<Record<string, unknown>>): void {
     const pending = this.pendingRequests.get(id);
     if (!pending) return;
     this.pendingRequests.delete(id);
@@ -398,7 +481,7 @@ export class HerdrSocketSubscriber {
     this.requestFailures += 1;
     this.connected = transportReachable;
     if (!transportReachable) this.transportFailures += 1;
-    pending.reject(new HerdrSocketRequestError(code, pending.written, message));
+    pending.reject(new HerdrSocketRequestError(code, pending.written, message, details));
   }
 
   private rejectPending(code: string): void {

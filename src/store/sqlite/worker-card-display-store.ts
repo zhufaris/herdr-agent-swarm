@@ -1,21 +1,29 @@
 import { randomUUID } from "node:crypto";
 import type { WorkerCardDisplayReceipt, WorkerCardDisplayStore } from "../../domain/ports/worker-card-display.js";
 import { selectWorkerMainView } from "../../domain/worker-main-selector.js";
+import type { PreparedDeliveryConsumer, PreparedDeliveryReceipt, PreparedDeliveryReservation } from "../../domain/ports/outbox.js";
 import type { SqliteContext } from "./context.js";
 
 export class SqliteWorkerCardDisplayStore implements WorkerCardDisplayStore {
+  private preparedDeliveryReservation: PreparedDeliveryReservation | null = null;
+  private preparedDeliveryConsumer: PreparedDeliveryConsumer | null = null;
   constructor(private readonly context: SqliteContext, private readonly dependencies: {
     loadWorkerMainProjectionSource(workerId: string, workerSessionGeneration: number): import("../../domain/worker-main-selector.js").WorkerMainProjectionSource | null;
     loadWorkerMainView(workerId: string, workerSessionGeneration: number): import("../../domain/worker-main-view.js").WorkerMainView | null;
     enqueueOutboundReply(input: Parameters<import("../../domain/ports/outbox.js").OutboxStore["enqueueOutboundReply"]>[0] & { laneKeyOverride?: string }): unknown;
   }) {}
 
+  setPreparedDeliveryReservation(reservation: PreparedDeliveryReservation, consumer: PreparedDeliveryConsumer): void {
+    this.preparedDeliveryReservation = reservation;
+    this.preparedDeliveryConsumer = consumer;
+  }
+
   reserveWorkerCardDisplay(input: Parameters<WorkerCardDisplayStore["reserveWorkerCardDisplay"]>[0]): WorkerCardDisplayReceipt {
     const workerName = input.workerName.trim();
     const idempotencyKey = input.idempotencyKey.trim();
     if (!workerName || workerName.length > 128) throw new Error("Worker name must contain 1 to 128 characters");
     if (!idempotencyKey || idempotencyKey.length > 256) throw new Error("Idempotency key must contain 1 to 256 characters");
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.worker-card-display-store.write", () => {
       const binding = this.context.database.prepare("SELECT project_id, pane_id, root_message_id, generation FROM bindings WHERE id = ?").get(input.bindingId) as { project_id: string | null; pane_id: string | null; root_message_id: string | null; generation: number } | undefined;
       const prompt = this.context.database.prepare("SELECT id FROM prompt_jobs WHERE id = ? AND binding_id = ? AND state = 'running'").get(input.parentPromptId, input.bindingId);
       if (!binding || binding.project_id !== input.projectId || binding.generation !== input.bindingGeneration || binding.root_message_id !== input.rootMessageId || !binding.pane_id || !prompt) throw new Error("Caller is not the authorized current thread Primary");
@@ -37,9 +45,18 @@ export class SqliteWorkerCardDisplayStore implements WorkerCardDisplayStore {
       const receipt: WorkerCardDisplayReceipt = { accepted: true, delivery: "queued", worker: { id: worker.id, name: worker.name, workerSessionGeneration: worker.worker_session_generation }, cards: ["worker-snapshot"], taskTurnId: main.currentTask?.turnId ?? null };
       this.context.database.prepare("INSERT INTO worker_card_display_requests(id, binding_id, binding_generation, parent_prompt_id, idempotency_key, worker_id, worker_session_generation, worker_name, receipt_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(requestId, input.bindingId, input.bindingGeneration, input.parentPromptId, idempotencyKey, worker.id, worker.worker_session_generation, worker.name, JSON.stringify(receipt), generatedAt);
       const laneKey = `worker-display:${requestId}`;
-      this.dependencies.enqueueOutboundReply({ id: randomUUID(), idempotencyKey: `worker-display:${requestId}:snapshot`, bindingId: input.bindingId, rootMessageId: input.rootMessageId, kind: "card_reply", payload: JSON.stringify(input.renderSnapshot(main, generatedAt)), laneKeyOverride: laneKey });
+      if (!this.preparedDeliveryReservation || !this.preparedDeliveryConsumer) throw new Error("Worker Card Display prepared delivery is not connected");
+      this.handoffAfterCommit(this.preparedDeliveryReservation.reservePreparedOutboundReply({
+        id: randomUUID(), idempotencyKey: `worker-display:${requestId}:snapshot`, bindingId: input.bindingId,
+        bindingGeneration: input.bindingGeneration, workerId: worker.id, workerSessionGeneration: worker.worker_session_generation,
+        rootMessageId: input.rootMessageId, kind: "card_reply", payload: JSON.stringify(input.renderSnapshot(main, generatedAt)), laneKeyOverride: laneKey
+      }));
       return receipt;
     });
+  }
+
+  private handoffAfterCommit(receipt: PreparedDeliveryReceipt): void {
+    queueMicrotask(() => { for (const delivery of receipt.consumeEffects()) this.preparedDeliveryConsumer!.enqueuePreparedDelivery(delivery); });
   }
 }
 

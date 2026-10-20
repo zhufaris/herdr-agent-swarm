@@ -10,18 +10,16 @@ import { formatProjectPaneTitle } from "../domain/thread-title.js";
 import type { Binding, IncomingLarkMessage } from "../domain/types.js";
 import type { LifecycleEventPublisher } from "../events/bridge-event-bus.js";
 import type { OutboundWorkNotifier } from "../events/outbound-work-notifier.js";
-import type { PromptWorkScheduler } from "../events/prompt-work-scheduler.js";
 import { requireMatchingPane } from "./pane-runtime-identity.js";
 import { ProjectCatalog } from "./project-catalog.js";
 
 interface Options {
   config: BridgeConfig;
   store: SessionAdministrationStore;
-  herdr: Pick<HerdrPort, "observeRuntime" | "renamePane">;
+  herdr: Pick<HerdrPort, "observeRuntime">;
   lifecycleEvents: LifecycleEventPublisher;
   outbound: Pick<OutboundIntentPort, "enqueueCard">;
   outboundWork: OutboundWorkNotifier;
-  scheduler: PromptWorkScheduler;
   isBindingBusy(bindingId: string): boolean;
   presentation: Pick<PrimaryPresentation, "mainCard" | "paneEntryCard" | "answerCard" | "requestRejected">;
 }
@@ -38,13 +36,13 @@ export class SessionAdministrationWorkflow implements SessionAdministrationWorkf
     this.projects = new ProjectCatalog(options.config.projects);
   }
 
-  async emitStatus(binding: Binding): Promise<void> { await this.publish(binding.id, "AgentStateChanged", "bridge", { state: binding.lastAgentState, queueDepth: this.options.store.countPendingPrompts(binding.id) }); }
+  async emitStatus(binding: Binding): Promise<void> { await this.publish(binding.id, "AgentStateChanged", "bridge", { state: binding.lastAgentState, queueDepth: 0 }); }
 
   async rename(message: IncomingLarkMessage, binding: Binding | null, title: string): Promise<boolean> {
     if (!binding?.paneId || binding.state !== "active" || binding.lifecycle !== "active") { await this.reject(message, "这个话题没有可重命名的活动 Pane。请进入活动项目话题，或发送 /swarm new。"); return false; }
     const pane = await requireMatchingPane(this.options.herdr, this.projects, binding, binding.paneId); const project = binding.projectId ? this.projects.projectById(binding.projectId) : undefined;
     const displayTitle = formatProjectPaneTitle(project ? projectSpaceName(project) : null, pane.cwd ?? this.options.config.herdr.workspaceCwd, title, binding.paneId);
-    await this.options.herdr.renamePane(binding.paneId, title, { tabTitle: title }); this.options.store.updateBindingMetadata(binding.id, { title: displayTitle }); await this.publish(binding.id, "BindingRenamed", "lark", { title: displayTitle }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" }); return true;
+    this.options.store.updateBindingMetadata(binding.id, { title: displayTitle }); await this.publish(binding.id, "BindingRenamed", "lark", { title: displayTitle }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.rename", target: binding.id, outcome: "success" }); return true;
   }
 
   async archive(message: IncomingLarkMessage, binding: Binding | null): Promise<boolean> {
@@ -64,7 +62,7 @@ export class SessionAdministrationWorkflow implements SessionAdministrationWorkf
     if (!binding?.paneId || binding.lifecycle !== "archived") { await this.reject(message, "只有已归档且仍保留 Pane 的会话可以恢复。"); return false; }
     const pane = await requireMatchingPane(this.options.herdr, this.projects, binding, binding.paneId);
     const resumed = this.options.store.transitionBinding(binding.id, { type: "activate", runtime: pane.agentState });
-    await this.publish(resumed.id, "BindingActivated", "lark", { paneId: pane.paneId, tabId: pane.tabId ?? null, topicId: resumed.topicId! }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.resume", target: binding.id, outcome: "success" }); this.options.scheduler.wake({ kind: "prompt-ready", bindingId: binding.id }); return true;
+    await this.publish(resumed.id, "BindingActivated", "lark", { paneId: pane.paneId, paneToken: pane.paneToken ?? null, paneName: pane.paneName ?? null, tabId: pane.tabId ?? null, topicId: resumed.topicId! }); this.options.store.audit({ actorOpenId: message.actorOpenId, action: "binding.resume", target: binding.id, outcome: "success" }); return true;
   }
 
   private async transitionAndPublish(binding: Binding, transition: import("../domain/pane-thread-lifecycle.js").SessionTransition, type: "BindingDraining" | "BindingArchived", reason: string): Promise<{ binding: Binding; outboxReserved: boolean }> {

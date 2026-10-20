@@ -1,7 +1,8 @@
 import type { ReconciliationDiagnostics, ReconciliationPassResult } from "../domain/types.js";
 import { PriorityReconciliationRunner, type PriorityReconciliationScope } from "../runtime/priority-reconciliation-runner.js";
-import { BindingReconciliationPass, type BindingReconciliationPassOptions } from "./binding-reconciliation-pass.js";
+import { BindingReconciliationPass, type BindingReconciliationPassOptions, type BindingReconciliationPassResult } from "./binding-reconciliation-pass.js";
 import { reconciliationCooldownCovers } from "./reconciliation-scope-policy.js";
+import type { SemanticSnapshotCursor } from "../domain/runtime-observation.js";
 
 const EVENT_RECONCILIATION_COOLDOWN_MS = 1_000;
 
@@ -24,18 +25,20 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   private readonly reconciliationRunner: PriorityReconciliationRunner;
   private readonly lastReconciledAt = new Map<string, number>();
   private readonly pass: BindingReconciliationPass;
+  private semanticCursor: SemanticSnapshotCursor | null = null;
   private phaseDiagnostics: ReconciliationPhaseDiagnostics = {
     snapshotDurationMs: null, missingPaneDurationMs: null, existingBindingDurationMs: null, discoveryDurationMs: null,
     existingBindingCount: null, discoveryCandidateCount: null
   };
 
-  constructor(options: BindingReconciliationPassOptions) {
+  constructor(private readonly options: BindingReconciliationPassOptions) {
     this.configuredWorkspaceIds = new Set(options.projects.map((project) => project.workspaceId));
     this.pass = new BindingReconciliationPass(options);
     this.reconciliationRunner = new PriorityReconciliationRunner({ execute: (scope) => this.execute(scope) });
   }
 
   captureBaselines(): Promise<void> {
+    if (this.options.runtimeObservations) return this.captureSemanticBaselines();
     return this.pass.captureBaselines();
   }
 
@@ -68,7 +71,7 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
   }
 
   private async execute(scope: PriorityReconciliationScope): Promise<ReconciliationPassResult | void> {
-    const result = await this.pass.execute(scope);
+    const result = this.options.runtimeObservations ? await this.executeSemantic() : await this.pass.execute(scope);
     if (!result) return;
     const {
       reconciledWorkspaceIds, failures, snapshotDurationMs, missingPaneDurationMs,
@@ -81,6 +84,20 @@ export class HerdrRuntimeReconciler implements HerdrRuntimeReconcilerPort {
     const completedAt = performance.now();
     for (const workspaceId of reconciledWorkspaceIds) this.lastReconciledAt.set(workspaceId, completedAt);
     return { reconciledWorkspaceIds, failures };
+  }
+
+  private async captureSemanticBaselines(): Promise<void> {
+    const evidence = await this.options.runtimeObservations!.readSemanticSnapshot({ cursor: null, workspaceIds: [...this.configuredWorkspaceIds] });
+    await this.pass.captureBaselines(evidence.kind === "current" ? [] : evidence.kind === "rebuild-required" ? evidence.panes : [...evidence.added, ...evidence.changed]);
+  }
+
+  private async executeSemantic(): Promise<BindingReconciliationPassResult | void> {
+    const observations = this.options.runtimeObservations!;
+    const evidence = await observations.readSemanticSnapshot({ cursor: this.semanticCursor, workspaceIds: [...this.configuredWorkspaceIds] });
+    if (evidence.kind === "current") return;
+    const result = await this.pass.executeSemantic(evidence);
+    if (observations.canAcknowledgeSemanticGeneration(evidence.cursor)) this.semanticCursor = evidence.cursor;
+    return result;
   }
 }
 

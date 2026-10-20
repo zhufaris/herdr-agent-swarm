@@ -62,4 +62,20 @@ describe("RuntimeEventIntegration", () => {
 
     expect(handle).toHaveBeenCalledWith(hint, signal);
   });
+
+  it("requires Core output projections to settle while isolating other lifecycle notification failures", async () => {
+    const events = new RuntimeEventIntegration(pino({ enabled: false }));
+    events.lifecycle.onBridgeEvent("projection", ({ type }) => {
+      if (type === "TurnOutputObserved" || type === "TurnCompleted") throw new Error("projection failed");
+    });
+
+    await expect(events.lifecycle.publish({
+      eventId: "output-1", bindingId: "binding-1", type: "TurnOutputObserved", origin: "herdr", occurredAt: "2026-09-30T00:00:00.000Z",
+      payload: { promptId: "prompt-1", answerSnapshot: "answer", progressEvents: [] }
+    })).rejects.toThrow("projection failed");
+    await expect(events.lifecycle.publish({
+      eventId: "completed-1", bindingId: "binding-1", type: "TurnCompleted", origin: "herdr", occurredAt: "2026-09-30T00:00:01.000Z",
+      payload: { promptId: "prompt-1", answer: "answer", queueDepth: 0 }
+    })).resolves.toBeUndefined();
+  });
 });

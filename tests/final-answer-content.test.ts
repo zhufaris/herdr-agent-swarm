@@ -17,88 +17,17 @@ describe("final answer content", () => {
     expect(foldFinalAnswerContent("```ts\nconst incomplete = true;")).toEqual([{ tag: "markdown", content: "```ts\nconst incomplete = true;" }]);
   });
 
-  it("renders exact command activities as compact live rows and collapsed final details", () => {
+  it("renders literal legacy command Markdown without special handling", () => {
     const source = ["before", "", "◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "12 tests passed", "```", "", "after"].join("\n");
 
-    expect(compactAnswerToolActivity(source)).toBe(["before", "", "⚙️ **Ran** · `npm test` · ✓ 完成", "", "after"].join("\n"));
+    expect(compactAnswerToolActivity(source)).toBe(source);
     const elements = foldFinalAnswerContent(source);
-    expect(elements.map(({ tag }) => tag)).toEqual(["markdown", "collapsible_panel", "markdown"]);
-    expect(elements[1]).toMatchObject({
-      expanded: false, header: { title: { content: "⚙️ Ran · npm test · ✓ 完成" } },
-      elements: [{ content: expect.stringContaining("```text\n12 tests passed\n```") }]
-    });
-  });
-
-  it("folds completed commands without output, including the final Answer element", () => {
-    const command = ["◆ **Ran**", "", "```bash", "npm test", "```"].join("\n");
-    expect(foldFinalAnswerContent(`before\n\n${command}`)).toEqual([
-      { tag: "markdown", content: "before" },
-      {
-        tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
-        header: { title: { tag: "plain_text", content: "⚙️ Ran · npm test · ✓ 完成" } },
-        elements: [{ tag: "markdown", content: "```bash\nnpm test\n```\n\n命令已完成，无可展示输出。" }]
-      }
+    expect(elements).toEqual([
+      { tag: "markdown", content: "before\n\n◆ **Ran**" },
+      { tag: "markdown", content: "```bash\nnpm test\n```" },
+      { tag: "markdown", content: "```text\n12 tests passed\n```" },
+      { tag: "markdown", content: "after" }
     ]);
-  });
-
-  it("folds failed commands without detail but keeps running commands compact", () => {
-    const failed = ["◆ **Ran** · ✗ exit 2", "", "```bash", "npm test", "```"].join("\n");
-    expect(foldFinalAnswerContent(failed)[0]).toMatchObject({
-      tag: "collapsible_panel", header: { title: { content: "⚙️ Ran · npm test · ✗ exit 2" } }
-    });
-    const running = ["◆ **Ran** · 运行中", "", "```bash", "npm test", "```"].join("\n");
-    expect(foldFinalAnswerContent(running)).toEqual([{ tag: "markdown", content: "⚙️ **Ran** · `npm test` · … 运行中" }]);
-  });
-
-  it("falls back to compact Markdown when an empty-output command panel exceeds the payload budget", () => {
-    const command = ["◆ **Ran**", "", "```bash", "npm test", "```"].join("\n");
-    expect(foldFinalAnswerContent(command, 100)).toEqual([{ tag: "markdown", content: "⚙️ **Ran** · `npm test` · ✓ 完成" }]);
-  });
-
-  it("keeps a command expandable by truncating output to the remaining payload budget", () => {
-    const source = [
-      "p".repeat(900),
-      "", "◆ **Ran** · command 7", "", "```bash", "npm test", "```", "", "```text",
-      "output line\n".repeat(400).trimEnd(),
-      "```"
-    ].join("\n");
-
-    const elements = foldFinalAnswerContent(source, 2_400);
-    const panel = elements.find((element) => element.tag === "collapsible_panel") as { elements: Array<{ content: string }> } | undefined;
-
-    expect(panel).toBeDefined();
-    expect(panel?.elements[0]!.content).toContain("```bash\nnpm test\n```");
-    expect(panel?.elements[0]!.content).toContain("…（命令输出已截断）");
-    expect(JSON.stringify(elements).length + 800).toBeLessThanOrEqual(2_400);
-  });
-
-  it("does not describe an empty command output as truncated", () => {
-    const command = ["◆ **Ran**", "", "```bash", "npm test", "```", "", "```text", "```"].join("\n");
-    const elements = foldFinalAnswerContent(command, 1_200);
-
-    expect(elements).toEqual([{
-      tag: "collapsible_panel", expanded: false, border: { color: "grey", corner_radius: "6px" },
-      header: { title: { tag: "plain_text", content: "⚙️ Ran · npm test · ✓ 完成" } },
-      elements: [{ tag: "markdown", content: "```bash\nnpm test\n```\n\n命令已完成，无可展示输出。" }]
-    }]);
-  });
-
-  it("preserves command lookalike prose", () => {
-    const lookalike = ["◆ **Ran**", "not a bridge command block"].join("\n");
-    expect(compactAnswerToolActivity(lookalike)).toBe(lookalike);
-  });
-
-  it("bounds command titles and expanded output", () => {
-    const source = ["◆ **Ran**", "", "```bash", `echo ${"x".repeat(200)}`, "```", "", "```text", "y".repeat(5_000), "```"].join("\n");
-    const [panel] = foldFinalAnswerContent(source);
-
-    const title = (panel?.header as { title: { content: string } }).title.content;
-    expect(title).toBe(`⚙️ Ran · echo ${"x".repeat(154)}… · ✓ 完成`);
-    const detail = (panel?.elements as Array<{ content: string }>)[0]!.content;
-    expect(detail).toContain(`\n${`echo ${"x".repeat(154)}…`}\n`);
-    expect(detail).not.toContain("x".repeat(155));
-    expect(detail).toContain(`\n${"y".repeat(3_999)}…\n`);
-    expect(detail).not.toContain("y".repeat(4_001));
   });
 
   it("adds one type emoji to recognized activity rows without touching prose or fenced literals", () => {

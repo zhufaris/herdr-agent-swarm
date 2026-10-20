@@ -6,7 +6,7 @@ interface CooldownRow { blocked_until: string; trigger_count: number; last_http_
 
 /** Durable application-wide gate for Lark delivery quota responses. */
 export class SqliteLarkDeliveryCooldownStore {
-  constructor(private readonly context: SqliteContext) {}
+  constructor(private readonly context: Pick<SqliteContext, "database">) {}
 
   activeUntil(at = now()): string | null {
     const row = this.row();

@@ -3,18 +3,36 @@ import pino from "pino";
 import { TranscriptObserver } from "../src/coordinator/transcript-observer.js";
 import { TURN_OUTPUT_TRUNCATION_MARKER } from "../src/runtime/bounded-turn-output.js";
 import type { Binding, PromptJob } from "../src/domain/types.js";
-import type { TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import type { AgentTranscriptReaderPort } from "../src/domain/ports.js";
+import { CoreSessionCursorExpiredError } from "../src/runtime/herdr-events-reader.js";
 
 const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
 const startedAt = "2026-09-13T00:00:00.000Z";
 
 describe("TranscriptObserver detached output recovery", () => {
+  it("surfaces an expired Core session cursor as an explicit recovery outcome", async () => {
+    const reader: AgentTranscriptReaderPort = {
+      async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
+      async openAtTurn() { return { mode: "typed", cursor: {
+        async readDelta() { return ""; },
+        async readObservation() { throw new CoreSessionCursorExpiredError("cursor-4", "cursor-10"); }
+      } }; }
+    };
+    const observer = new TranscriptObserver({ allowLegacySettlementForTests: true,
+      store: { getBinding: () => binding(), getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => ({ answer: "" }) as never },
+      reader, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
+      isBindingActive: () => true, isStopping: () => false, publishObservation: vi.fn()
+    });
+
+    await expect(observer.openDetached(binding(), prompt())).resolves.toEqual({ mode: "unavailable", reason: "cursor_expired" });
+  });
+
   it("replaces a legacy-truncated snapshot from the exact replayed turn", async () => {
     const prefix = "x".repeat(64 * 1024 - TURN_OUTPUT_TRUNCATION_MARKER.length);
     const persisted = `${prefix}${TURN_OUTPUT_TRUNCATION_MARKER}`;
     const replayed = `${prefix}\n\ncontinued after the old boundary`;
     let read = false;
-    const reader: TraexTranscriptReaderPort = {
+    const reader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
       async openAtTurn() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
@@ -26,7 +44,7 @@ describe("TranscriptObserver detached output recovery", () => {
       } }; }
     };
     const publishObservation = vi.fn(async () => {});
-    const observer = new TranscriptObserver({
+    const observer = new TranscriptObserver({ allowLegacySettlementForTests: true,
       store: {
         getBinding: () => binding(), getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(),
         loadRunCard: () => ({ answer: persisted }) as never
@@ -46,7 +64,7 @@ describe("TranscriptObserver detached output recovery", () => {
   it("keeps a legacy-truncated snapshot when exact replay does not match its prefix", async () => {
     const persisted = `${"x".repeat(64 * 1024 - TURN_OUTPUT_TRUNCATION_MARKER.length)}${TURN_OUTPUT_TRUNCATION_MARKER}`;
     let read = false;
-    const reader: TraexTranscriptReaderPort = {
+    const reader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
       async openAtTurn() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
@@ -58,7 +76,7 @@ describe("TranscriptObserver detached output recovery", () => {
       } }; }
     };
     const publishObservation = vi.fn(async () => {});
-    const observer = new TranscriptObserver({
+    const observer = new TranscriptObserver({ allowLegacySettlementForTests: true,
       store: {
         getBinding: () => binding(), getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(),
         loadRunCard: () => ({ answer: persisted }) as never
@@ -76,7 +94,7 @@ describe("TranscriptObserver detached output recovery", () => {
   it("replays a durable timeline even when legacy answer text is unchanged", async () => {
     let read = false;
     const timelineDeltas = [{ kind: "agent_message" as const, id: "message:1", sequence: 1, markdown: "Recovered" }];
-    const reader: TraexTranscriptReaderPort = {
+    const reader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; },
       async openAtTurn() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
@@ -88,7 +106,7 @@ describe("TranscriptObserver detached output recovery", () => {
       } }; }
     };
     const publishObservation = vi.fn(async () => {});
-    const observer = new TranscriptObserver({
+    const observer = new TranscriptObserver({ allowLegacySettlementForTests: true,
       store: { getBinding: () => binding(), getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => ({ answer: "" }) as never },
       reader, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
       isBindingActive: () => true, isStopping: () => false, publishObservation
@@ -97,6 +115,51 @@ describe("TranscriptObserver detached output recovery", () => {
     await observer.openDetached(binding(), prompt());
 
     expect(publishObservation).toHaveBeenCalledWith("b1", "p1", expect.objectContaining({ answer: expect.objectContaining({ timelineDeltas }) }));
+  });
+});
+
+describe("TranscriptObserver first-turn acquisition", () => {
+  it("opens once without polling identity for an explicit sessionless bootstrap", async () => {
+    const sessionless = {
+      ...binding(), hasCompletedTurn: false,
+      agentSessionSource: null, agentSessionAgent: null, agentSessionKind: null, agentSessionValue: null
+    };
+    const open = vi.fn(async () => ({ mode: "unavailable" as const, reason: "missing_session_identity" as const }));
+    const getBinding = vi.fn(() => sessionless);
+    const observer = new TranscriptObserver({ allowLegacySettlementForTests: true,
+      store: { getBinding, getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => ({ answer: "" }) as never },
+      reader: { open }, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
+      isBindingActive: () => true, isStopping: () => false, publishObservation: vi.fn()
+    });
+
+    await expect(observer.acquire(sessionless, new AbortController().signal, "sessionless-bootstrap"))
+      .resolves.toEqual({ mode: "unavailable", reason: "missing_session_identity" });
+
+    expect(open).toHaveBeenCalledOnce();
+    expect(getBinding).not.toHaveBeenCalled();
+  });
+
+  it("retains delayed identity acquisition for an ordinary first turn", async () => {
+    const sessionless = {
+      ...binding(), hasCompletedTurn: false,
+      agentSessionSource: null, agentSessionAgent: null, agentSessionKind: null, agentSessionValue: null
+    };
+    const upgraded = { ...sessionless, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-created" };
+    const cursor = { async readDelta() { return ""; } };
+    const open = vi.fn(async (source: Parameters<AgentTranscriptReaderPort["open"]>[0]) => source.nativeSession
+      ? { mode: "typed" as const, cursor }
+      : { mode: "unavailable" as const, reason: "missing_session_identity" as const });
+    const getBinding = vi.fn(() => upgraded);
+    const observer = new TranscriptObserver({ allowLegacySettlementForTests: true,
+      store: { getBinding, getPrompt: () => prompt(), claimPromptTranscriptTurn: vi.fn(), loadRunCard: () => ({ answer: "" }) as never },
+      reader: { open }, herdr: { observeRuntime: vi.fn() }, adoptRuntimeIdentity: vi.fn(), logger: pino({ enabled: false }),
+      isBindingActive: () => true, isStopping: () => false, publishObservation: vi.fn()
+    });
+
+    await expect(observer.acquire(sessionless, new AbortController().signal)).resolves.toMatchObject({ mode: "typed" });
+
+    expect(getBinding).toHaveBeenCalledWith("b1");
+    expect(open).toHaveBeenCalledTimes(2);
   });
 });
 

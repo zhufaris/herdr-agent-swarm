@@ -13,6 +13,35 @@ describe("InProcessOutboundWorkNotifier", () => {
     await new Promise((resolve) => queueMicrotask(resolve));
 
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith({ kind: "recovery" });
+  });
+
+  it("coalesces duplicate scope hints without escalating them to recovery", async () => {
+    const listener = vi.fn();
+    const notifier = new InProcessOutboundWorkNotifier();
+    const scope = { kind: "pane" as const, workspaceId: "workspace", paneId: "pane" };
+    notifier.subscribe(listener);
+
+    notifier.wake({ kind: "scope", scope });
+    notifier.wake({ kind: "scope", scope });
+    await new Promise((resolve) => queueMicrotask(resolve));
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith({ kind: "scope", scope });
+  });
+
+  it("uses an exact scope hint instead of a coalesced generic recovery wake", async () => {
+    const listener = vi.fn();
+    const notifier = new InProcessOutboundWorkNotifier();
+    const scope = { kind: "pane" as const, workspaceId: "workspace", paneId: "exact" };
+    notifier.subscribe(listener);
+
+    notifier.wake();
+    notifier.wake({ kind: "scope", scope });
+    await new Promise((resolve) => queueMicrotask(resolve));
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith({ kind: "scope", scope });
   });
 
   it("isolates listener failures from producers", async () => {

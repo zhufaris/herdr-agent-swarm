@@ -6,9 +6,16 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createSetupLifecycleAdapter, inspectServiceLifecycle, isServiceLifecycleEntrypoint, parseLogQueryArgs, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
+import { createSetupLifecycleAdapter, inspectServiceLifecycle, isServiceLifecycleEntrypoint, parseLogQueryArgs, resolveUserSystemdFallbackEnvironment, runServiceLifecycle, serviceStartupTimeoutMs, validatePrivateLogMetadata } from "../src/cli/service-lifecycle.js";
 
 describe("service lifecycle", () => {
+  it("uses the same bounded default startup budget for start and restart", () => {
+    expect(serviceStartupTimeoutMs("start", {})).toBe(90_000);
+    expect(serviceStartupTimeoutMs("restart", {})).toBe(90_000);
+    expect(serviceStartupTimeoutMs("start", { SWARM_SERVICE_START_TIMEOUT_MS: "1234" })).toBe(1_234);
+    expect(serviceStartupTimeoutMs("restart", { SWARM_SERVICE_RESTART_TIMEOUT_MS: "2345" })).toBe(2_345);
+  });
+
   it("recognizes a CLI entrypoint reached through a symlinked home path", () => {
     const fixture = mkdtempSync(join(tmpdir(), "service-entrypoint-"));
     const real = join(fixture, "real.js");
@@ -32,6 +39,17 @@ describe("service lifecycle", () => {
       "--user daemon-reload",
       "--user enable herdr-agent-swarm.service"
     ]);
+    expect(readFileSync(fixture.traeCalls, "utf8").trim().split("\n")).toEqual([
+      `plugin validate --path ${join(fixture.candidate, "plugins/herdr-choice-list")}`,
+      "plugin validate herdr-choice-list",
+      `plugin install ${join(fixture.candidate, "plugins/herdr-choice-list")} --type local --name herdr-choice-list --yes`,
+      "plugin enable herdr-choice-list",
+      "plugin validate herdr-choice-list"
+    ]);
+    expect(JSON.parse(readFileSync(fixture.activationPath, "utf8"))).toMatchObject({
+      schemaVersion: 1, pluginName: "herdr-choice-list", pluginVersion: "1.0.0",
+      sourcePath: join(fixture.candidate, "plugins/herdr-choice-list")
+    });
   });
 
   it("prunes only after activation while retaining current, previous, and configured inactive releases", async () => {
@@ -257,13 +275,15 @@ describe("service lifecycle", () => {
     expect(packageJson.scripts).not.toHaveProperty("swarm:migrate");
     expect(packageJson.scripts["swarm:setup"]).toBe("node dist/cli/setup.js");
     expect(packageJson.scripts["swarm:doctor"]).toBe("node dist/cli/doctor.js");
-    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:setup", "swarm:doctor", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs"]);
+    expect(packageJson.scripts["swarm:maintenance"]).toBe("bash scripts/swarm-service.sh maintenance");
+    expect(Object.keys(packageJson.scripts).filter((name) => name.startsWith("swarm:"))).toEqual(["swarm:init", "swarm:setup", "swarm:doctor", "swarm:install", "swarm:start", "swarm:status", "swarm:restart", "swarm:stop", "swarm:logs", "swarm:maintenance"]);
     expect(Object.keys(packageJson.scripts).some((name) => name.startsWith("herdr:traex:"))).toBe(false);
     const script = readFileSync(join(process.cwd(), "scripts/swarm-service.sh"), "utf8");
     expect(script).not.toContain("migrate)");
     expect(script).not.toContain("swarm-service-cutover");
     expect(script).toContain('setup) exec node "$ROOT/dist/cli/setup.js"');
     expect(script).toContain('doctor) exec node "$ROOT/dist/cli/doctor.js"');
+    expect(script).toContain('maintenance) exec node "$ROOT/dist/cli/sqlite-maintenance-cycle.js"');
     expect(script).toContain('exec node "$ROOT/dist/cli/service-lifecycle.js" "$ACTION" "${@:2}"');
     expect(packageJson.scripts.service).toBe("node dist/cli/service-lifecycle.js");
     expect(packageJson.scripts.plugin).toBeUndefined();
@@ -284,6 +304,7 @@ describe("service lifecycle", () => {
     expect(unit).toContain("Restart=on-failure");
     expect(unit).toContain("RestartSec=5");
     expect(unit).toContain("TimeoutStopSec=50");
+    expect(unit).toContain("UMask=0077");
     expect(unit).toContain("Also=herdr-agent-swarm-log-rotate.timer");
     expect(unit).toContain("StandardOutput=null");
     expect(unit).toContain("StandardError=null");
@@ -673,6 +694,20 @@ describe("service lifecycle", () => {
     expect(readFileSync(fixture.calls, "utf8")).toContain("--user disable --now herdr-agent-swarm.service");
   });
 
+  it("uninstalls only the lifecycle-owned TraeX choice plugin", async () => {
+    const fixture = createActivationFixture();
+    await runServiceLifecycle("install", fixture.environment);
+    const unrelated = join(fixture.traeHome, "plugins/data/unrelated-plugin");
+    mkdirSync(unrelated, { recursive: true });
+    writeFileSync(join(unrelated, "keep"), "preserve\n");
+
+    await expect(runServiceLifecycle("uninstall", fixture.environment)).resolves.toBe(0);
+
+    expect(readFileSync(fixture.traeCalls, "utf8")).toContain("plugin uninstall herdr-choice-list\n");
+    expect(existsSync(fixture.activationPath)).toBe(false);
+    expect(readFileSync(join(unrelated, "keep"), "utf8")).toBe("preserve\n");
+  });
+
   it("refreshes the unit identity before restarting a rebuilt service", async () => {
     const fixture = createFixture({ active: false });
     await runServiceLifecycle("install", fixture.environment);
@@ -745,11 +780,11 @@ describe("service lifecycle", () => {
     expect(calls).not.toContain("--user start --no-block herdr-agent-swarm.service");
   });
 
-  it("refuses an unforced restart while the running service reports active turns", async () => {
+  it("refuses an unforced restart while the running service reports active Worker turns", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/status") {
-        response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:old-build" }, operational: { prompts: { running: 2, queued: 3 } } }));
+        response.end(JSON.stringify(completedStartupStatus({ instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 2, uncertainTurns: 0 } })));
         return;
       }
       response.end(JSON.stringify({ status: "ok", serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" }));
@@ -759,21 +794,21 @@ describe("service lifecycle", () => {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
       writeFileSync(fixture.calls, "");
-      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/2 running.*3 queued.*unknown active.*--force/);
+      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/2 active turns.*--force/);
       expect(readFileSync(fixture.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
-  it("refuses restart when an active worker remains after durable running work clears", async () => {
+  it("refuses restart when a Worker dispatcher remains active", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ identity: { serviceId: "herdr-agent-swarm" }, operational: { prompts: { running: 0, queued: 1 } }, promptWorker: { activeTurnWorkers: 1 } }));
+      response.end(JSON.stringify(completedStartupStatus({ instanceWorker: { activeDispatchWorkers: 1, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 } })));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
-      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/0 running.*1 queued.*1 active/);
+      await expect(runServiceLifecycle("restart", fixture.environment)).rejects.toThrow(/1 dispatchers/);
       expect(readFileSync(fixture.calls, "utf8")).not.toContain("restart --no-block");
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
@@ -828,6 +863,21 @@ describe("service lifecycle", () => {
     expect(readFileSync(unavailable.calls, "utf8")).toBe("--user is-active herdr-agent-swarm.service\n");
   });
 
+  it("allows a forced restart when the active unit status is unavailable", async () => {
+    const fixture = createFixture({ port: 1 });
+    await runServiceLifecycle("install", fixture.environment);
+    writeFileSync(fixture.calls, "");
+
+    await expect(runServiceLifecycle("restart", {
+      ...fixture.environment,
+      SWARM_SERVICE_RESTART_TIMEOUT_MS: "100"
+    }, { force: true })).rejects.toThrow(/did not complete startup/i);
+
+    const calls = readFileSync(fixture.calls, "utf8");
+    expect(calls).toContain("--user stop herdr-agent-swarm.service");
+    expect(calls).toContain("--user start --no-block herdr-agent-swarm.service");
+  });
+
   it("refuses an unforced restart when active-unit work metrics are incomplete", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
@@ -843,12 +893,10 @@ describe("service lifecycle", () => {
   });
 
   it.each([
-    ["queued prompts", { operational: { prompts: { running: 0, queued: 1 }, pendingOutbox: 0 } }, /queued prompts/i],
-    ["ready outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 1, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0 } } }, /1 ready/i],
-    ["in-flight outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 0, inFlight: 1, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0 } } }, /1 in-flight/i],
-    ["retry-wait outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 0, inFlight: 0, retryWait: 1, cooldownWait: 0, waitingBehindLane: 0 } } }, /1 retry-wait/i],
-    ["cooldown-wait outbox work", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 1, outboxWork: { ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 1, waitingBehindLane: 0 } } }, /1 cooldown-wait/i],
-    ["active deliveries", { outboxDispatcher: { activeDeliveries: 1 } }, /active deliveries/i],
+    ["ready Ring work", { operational: { deliveryRings: { ready: 1 } } }, /1 Ring-ready/i],
+    ["claimed Ring work", { operational: { deliveryRings: { activeClaims: 1 } } }, /1 active claims/i],
+    ["retry-wait Ring work", { operational: { deliveryRings: { retryWait: 1 } } }, /1 retry-wait/i],
+    ["active Ring deliveries", { deliveryEngine: { activeDeliveries: 1 } }, /active Ring deliveries/i],
     ["incomplete startup recovery", { startupRecovery: { state: "running" } }, /startup recovery/i],
     ["unhealthy SQLite integrity state", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /sqlite integrity/i],
     ["failed SQLite quick check", { sqliteIntegrity: { state: "healthy", quickCheck: "failed" } }, /sqlite integrity/i]
@@ -867,8 +915,8 @@ describe("service lifecycle", () => {
   });
 
   it.each([
-    ["outboxWork", { operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 0 } }],
-    ["activeDeliveries", { outboxDispatcher: {} }],
+    ["deliveryRings", { operational: { deliveryRings: null } }],
+    ["active Ring deliveries", { deliveryEngine: {} }],
     ["startupRecovery", { startupRecovery: {} }],
     ["sqliteIntegrity", { sqliteIntegrity: {} }]
   ])("fails closed when restart safety field %s is missing", async (_name, override) => {
@@ -884,14 +932,15 @@ describe("service lifecycle", () => {
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
-  it("allows an unforced restart when pending outbox rows are safely quarantined", async () => {
+  it("allows an unforced restart when pending Ring rows are safely quarantined", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
       response.end(JSON.stringify(completedStartupStatus({
         operational: {
           prompts: { running: 0, queued: 0 }, pendingOutbox: 22,
-          outboxWork: { ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 22 }
+          promptExecution: { queued: 0, submittedAttached: 0, exactRunning: 0, unbatchedInputs: 0, collectingBatches: 0, formedBatches: 0, nativeQueuedBatches: 0 },
+          deliveryRings: { ready: 0, activeClaims: 0, retryWait: 0, waitingBehindScope: 22 }
         }
       })));
     });
@@ -939,10 +988,27 @@ describe("service lifecycle", () => {
     } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
   });
 
+  it("allows a forced restart when only the business-integrity audit is degraded", async () => {
+    let statusRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/ready") { response.end(JSON.stringify({ status: "ready" })); return; }
+      statusRequests += 1;
+      response.end(JSON.stringify(completedStartupStatus({ sqliteIntegrity: { state: "degraded", quickCheck: "ok" } })));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "1000" }, { force: true })).resolves.toBe(0);
+      expect(statusRequests).toBeGreaterThanOrEqual(2);
+    } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  });
+
   it.each([
     ["foreign identity", { identity: { serviceId: "another-service", buildId: "sha256:test-build" } }, /identity.*another-service/i],
     ["incomplete recovery", { startupRecovery: { state: "running" } }, /startup recovery.*running/i],
-    ["unhealthy SQLite", { sqliteIntegrity: { state: "degraded", quickCheck: "ok" } }, /SQLite integrity/i]
+    ["failed SQLite quick check", { sqliteIntegrity: { state: "degraded", quickCheck: "failed" } }, /SQLite integrity/i]
   ])("does not let force bypass %s validation", async (_name, override, expected) => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
@@ -1071,6 +1137,30 @@ describe("service lifecycle", () => {
     }
   });
 
+  it("waits for readiness after startup recovery completes when readiness is required", async () => {
+    let readinessRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/ready") {
+        readinessRequests += 1;
+        const status = readinessRequests < 3 ? "not_ready" : "ready";
+        response.statusCode = status === "ready" ? 200 : 503;
+        response.end(JSON.stringify({ status }));
+        return;
+      }
+      response.end(JSON.stringify(completedStartupStatus()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const fixture = createFixture({ port: (server.address() as AddressInfo).port });
+      await runServiceLifecycle("install", fixture.environment);
+      await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "1500" }, { requireReady: true })).resolves.toBe(0);
+      expect(readinessRequests).toBe(3);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("refreshes the unit identity before starting a rebuilt stopped service", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
@@ -1153,8 +1243,8 @@ describe("service lifecycle", () => {
 
       await expect(runServiceLifecycle("status", fixture.environment)).resolves.toBe(1);
 
-      const status = JSON.parse(output) as { active: boolean; unitState?: string; unitStatusDetail?: string | null; ownership?: { detail?: string } };
-      expect(status.active).toBe(false);
+      const status = JSON.parse(output) as { active: boolean | null; unitState?: string; unitStatusDetail?: string | null; ownership?: { detail?: string } };
+      expect(status.active).toBeNull();
       expect(status.unitState).toBe("unavailable");
       expect(status.unitStatusDetail).toBe("Failed to connect to bus: No data available");
       expect(status.ownership?.detail).toContain("systemd unavailable: Failed to connect to bus: No data available");
@@ -1395,11 +1485,10 @@ describe("service lifecycle", () => {
     let statusRequests = 0;
     const server = createServer((_request, response) => {
       statusRequests += 1;
-      const delayMs = statusRequests === 2 ? 100 : 0;
       setTimeout(() => {
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify(completedStartupStatus()));
-      }, delayMs);
+      }, 200);
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -1409,7 +1498,7 @@ describe("service lifecycle", () => {
       await expect(runServiceLifecycle("start", { ...fixture.environment, SWARM_SERVICE_START_TIMEOUT_MS: "150" }))
         .rejects.toThrow(/did not complete startup/);
 
-      expect(statusRequests).toBe(2);
+      expect(statusRequests).toBe(1);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -1457,7 +1546,7 @@ describe("service lifecycle", () => {
       const fixture = createFixture({ port: (server.address() as AddressInfo).port });
       await runServiceLifecycle("install", fixture.environment);
       await expect(runServiceLifecycle("restart", { ...fixture.environment, SWARM_SERVICE_RESTART_TIMEOUT_MS: "300" }))
-        .rejects.toThrow(/restart did not complete startup with expected build sha256:test-build.*unit active.*observed build sha256:stale-build.*startup completed/);
+        .rejects.toThrow(/restart did not complete startup with expected build sha256:test-build.*unit (?:active|unavailable).*observed build sha256:stale-build.*startup completed/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
@@ -1465,12 +1554,22 @@ describe("service lifecycle", () => {
 });
 
 function completedStartupStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const operationalOverrides = overrides.operational as Record<string, unknown> | undefined;
+  const deliveryRingOverrides = operationalOverrides?.deliveryRings as Record<string, unknown> | null | undefined;
   return {
     status: "ok", identity: { serviceId: "herdr-agent-swarm", buildId: "sha256:test-build" },
-    startupRecovery: { state: "completed" }, operational: { prompts: { running: 0, queued: 0 }, pendingOutbox: 0, outboxWork: { ready: 0, inFlight: 0, retryWait: 0, cooldownWait: 0, waitingBehindLane: 0 } },
-    promptWorker: { activeTurnWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 },
-    outboxDispatcher: { activeDeliveries: 0 }, sqliteIntegrity: { state: "healthy", quickCheck: "ok" },
-    ...overrides
+    startupRecovery: { state: "completed" },
+    promptWorker: { activeTurnWorkers: 0, nativeSubmissionWorkers: 0 }, instanceWorker: { activeDispatchWorkers: 0, activeObservers: 0, activeTurns: 0, uncertainTurns: 0 },
+    deliveryEngine: { activeDeliveries: 0 }, sqliteIntegrity: { state: "healthy", quickCheck: "ok" },
+    ...overrides,
+    operational: {
+      prompts: { running: 0, queued: 0 }, pendingOutbox: 0,
+      promptExecution: { queued: 0, submittedAttached: 0, exactRunning: 0, unbatchedInputs: 0, collectingBatches: 0, formedBatches: 0, nativeQueuedBatches: 0 },
+      ...operationalOverrides,
+      deliveryRings: deliveryRingOverrides === null
+        ? null
+        : { ready: 0, activeClaims: 0, retryWait: 0, waitingBehindScope: 0, ...deliveryRingOverrides }
+    }
   };
 }
 
@@ -1483,16 +1582,39 @@ function createActivationFixture(options: { previous?: boolean; failFirstReload?
   mkdirSync(join(candidate, "dist"), { recursive: true });
   writeFileSync(join(candidate, "dist/main.js"), "// candidate\n");
   writeFileSync(join(candidate, "dist/build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.4.0", buildId: `sha256:${hash}`, gitCommit: commit }));
+  createChoicePluginRelease(candidate);
   const current = join(base.state, "current");
   const unit = join(base.units, "herdr-agent-swarm.service");
   let previous = "";
   if (options.previous) {
     previous = join(releases, `${"c".repeat(64)}-${"d".repeat(12)}`);
     mkdirSync(previous, { recursive: true });
+    createChoicePluginRelease(previous);
     symlinkSync(previous, current);
     writeFileSync(unit, "previous unit\n", { mode: 0o640 });
   }
   const bin = base.environment.PATH!.split(":")[0]!;
+  const traeHome = join(base.root, "trae-home");
+  const traeCalls = join(base.root, "traecli.calls");
+  const installedMarker = join(base.root, "traecli-installed");
+  const activationPath = join(traeHome, "plugins/data/herdr-choice-list/activation.json");
+  if (options.previous) {
+    mkdirSync(join(traeHome, "plugins/data/herdr-choice-list"), { recursive: true });
+    writeFileSync(activationPath, `${JSON.stringify({
+      schemaVersion: 1, pluginName: "herdr-choice-list", pluginVersion: "1.0.0", buildId: "sha256:previous",
+      sourcePath: join(previous, "plugins/herdr-choice-list"), helperPath: join(previous, "dist/cli/completion-choice-stop-hook.js"),
+      socketPath: join(base.state, "completion-choice-eligibility.sock")
+    })}\n`, { mode: 0o600 });
+    writeFileSync(installedMarker, "installed\n");
+  }
+  writeFileSync(join(bin, "traecli"), `#!/bin/sh
+printf '%s\n' "$*" >> ${JSON.stringify(traeCalls)}
+if [ "$1 $2" = "plugin validate" ] && [ "$3" != "--path" ]; then [ -f ${JSON.stringify(installedMarker)} ]; exit $?; fi
+if [ "$1 $2" = "plugin install" ]; then touch ${JSON.stringify(installedMarker)}; exit 0; fi
+if [ "$1 $2" = "plugin uninstall" ]; then rm -f ${JSON.stringify(installedMarker)}; exit 0; fi
+exit 0
+`);
+  chmodSync(join(bin, "traecli"), 0o755);
   writeFileSync(join(bin, "systemctl"), `#!/bin/sh
 printf '%s\n' "$*" >> ${JSON.stringify(base.calls)}
 if [ "$2" = "is-active" ]; then echo inactive; exit 3; fi
@@ -1505,10 +1627,28 @@ if [ "$2" = "enable" ] && ${options.failEnable ? "true" : "false"}; then exit 8;
 exit 0
 `);
   chmodSync(join(bin, "systemctl"), 0o755);
-  return { ...base, candidate, previous, current, unit, marker: join(base.state, ".release-activation.json"), environment: { ...base.environment, SWARM_ROOT: candidate, SWARM_RELEASE_CANDIDATE: candidate } };
+  return {
+    ...base, candidate, previous, current, unit, traeHome, traeCalls, activationPath,
+    marker: join(base.state, ".release-activation.json"),
+    environment: { ...base.environment, SWARM_ROOT: candidate, SWARM_RELEASE_CANDIDATE: candidate, TRAECLI_HOME: traeHome }
+  };
 }
 
-function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; resetFailedExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number; systemctlError?: string } = {}) {
+function createChoicePluginRelease(root: string): void {
+  const plugin = join(root, "plugins/herdr-choice-list");
+  mkdirSync(join(plugin, ".codex-plugin"), { recursive: true });
+  mkdirSync(join(plugin, "hooks"), { recursive: true });
+  mkdirSync(join(plugin, "skills/herdr-choice-list"), { recursive: true });
+  mkdirSync(join(plugin, "scripts"), { recursive: true });
+  mkdirSync(join(root, "dist/cli"), { recursive: true });
+  writeFileSync(join(plugin, ".codex-plugin/plugin.json"), JSON.stringify({ name: "herdr-choice-list", version: "1.0.0" }));
+  writeFileSync(join(plugin, "hooks/hooks.json"), "{}\n");
+  writeFileSync(join(plugin, "skills/herdr-choice-list/SKILL.md"), "# choice\n");
+  writeFileSync(join(plugin, "scripts/herdr-choice-stop-hook.mjs"), "// wrapper\n");
+  writeFileSync(join(root, "dist/cli/completion-choice-stop-hook.js"), "// helper\n");
+}
+
+function createFixture(options: { active?: boolean; activeStatus?: "unknown"; stopExit?: number; secondStopExit?: number; resetFailedExit?: number; port?: number; mainPid?: number; listenerPid?: number; host?: string; ssOutput?: string; ssExit?: number; systemctlError?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "agent-swarm-root-"));
   const config = join(root, "config");
   const state = join(root, "state");
@@ -1528,7 +1668,7 @@ function createFixture(options: { active?: boolean; activeStatus?: "unknown"; st
   writeFileSync(join(dist, "build-info.json"), JSON.stringify({ serviceId: "herdr-agent-swarm", version: "0.2.0", buildId: "sha256:test-build", gitCommit: null }));
   const active = options.active ?? true;
   const activity = options.activeStatus === "unknown" ? "echo unknown; exit 4" : active ? "echo active; exit 0" : "echo inactive; exit 3";
-  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n${options.systemctlError ? `printf '%s\n' ${JSON.stringify(options.systemctlError)} >&2; exit 1` : ""}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then exit ${options.stopExit ?? 0}; fi\nif [ "$2" = "reset-failed" ]; then exit ${options.resetFailedExit ?? 0}; fi\nexit 0\n`);
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(calls)}\n${options.systemctlError ? `printf '%s\n' ${JSON.stringify(options.systemctlError)} >&2; exit 1` : ""}\nif [ "$2" = "is-active" ]; then ${activity}; fi\nif [ "$2" = "show" ]; then\n  if [ "$5" = "ActiveState" ]; then printf 'ActiveState=%s\nMainPID=%s\n' ${active ? "active" : "inactive"} ${options.mainPid ?? process.pid}; else echo ${options.mainPid ?? process.pid}; fi\n  exit 0\nfi\nif [ "$2" = "stop" ]; then\n  count=$(grep -c '^--user stop ' ${JSON.stringify(calls)})\n  if [ "$count" -ge 2 ]; then exit ${options.secondStopExit ?? options.stopExit ?? 0}; fi\n  exit ${options.stopExit ?? 0}\nfi\nif [ "$2" = "reset-failed" ]; then exit ${options.resetFailedExit ?? 0}; fi\nexit 0\n`);
   const ssOutput = options.ssOutput ?? `LISTEN 0 511 127.0.0.1:${options.port ?? 39001} 0.0.0.0:* users:(("node",pid=${options.listenerPid ?? process.pid},fd=20))`;
   writeFileSync(join(bin, "ss"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(ssCalls)}\nprintf '%b\n' ${JSON.stringify(ssOutput)}\nexit ${options.ssExit ?? 0}\n`);
   writeFileSync(join(bin, "journalctl"), `#!/bin/sh\nprintf '%s\n' "$*" >> ${JSON.stringify(journalCalls)}\nexit 0\n`);
@@ -1538,6 +1678,7 @@ function createFixture(options: { active?: boolean; activeStatus?: "unknown"; st
   return { root, config, state, units, calls, ssCalls, journalCalls, environment: {
     PATH: `${bin}:${process.env.PATH}`,
     SWARM_ROOT: root, SWARM_CONFIG_DIR: config, SWARM_STATE_DIR: state,
-    BRIDGE_SYSTEMD_UNIT_DIR: units, HERDR_SOCKET_PATH: "/tmp/test-herdr.sock"
+    BRIDGE_SYSTEMD_UNIT_DIR: units, HERDR_SOCKET_PATH: "/tmp/test-herdr.sock",
+    TRAECLI_HOME: join(root, "trae-home")
   } };
 }

@@ -4,15 +4,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { createTestRouter } from "./helpers/create-test-router.js";
-import type { HerdrPort, LarkPort, TraexTranscriptReaderPort } from "../src/domain/ports.js";
+import { createTestRouter, queueLegacyCollectedBatchForTest, queueLegacyPromptForTest } from "./helpers/create-test-router.js";
+import type { HerdrPort, LarkPort, AgentTranscriptReaderPort } from "../src/domain/ports.js";
 import { BridgeEventBus } from "../src/events/bridge-event-bus.js";
 import { InProcessInboundWorkNotifier } from "../src/events/inbound-work-notifier.js";
 import { createTestPublisher } from "./helpers/create-test-outbound.js";
 import { SqliteBindingStore } from "./helpers/sqlite-binding-store.js";
 import { createQueuedRunCard } from "../src/domain/run-card-view.js";
+import { formatNativeInputBatch } from "../src/domain/native-input-batch.js";
 import type { BridgeEvent } from "../src/domain/events.js";
 import { TraexTranscriptReader } from "../src/runtime/traex-transcript.js";
+import { PiTranscriptReader } from "../src/runtime/pi-transcript.js";
+import { piTranscriptDescriptor } from "../src/runtime/agents/pi-transcript-identity.js";
 
 const STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE = "⚠️ 暂时无法读取 TraeX 结构化输出。任务可能仍在运行，请查看 Herdr pane。";
 
@@ -34,7 +37,7 @@ describe("coordinator concurrency controls", () => {
       store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
       store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true });
       store.markPromptDispatched = () => { throw new Error("dispatch checkpoint failed"); };
-      await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+      queueLegacyPromptForTest(store, { eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
 
       await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce(), { timeout: 4_000 });
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "failed", notice: "dispatch checkpoint failed" }));
@@ -72,7 +75,7 @@ describe("coordinator concurrency controls", () => {
       await coordinator.start();
       store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
       store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true });
-      await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+      queueLegacyPromptForTest(store, { eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
 
       await vi.waitFor(() => expect(dispatchResult).toMatchObject({ state: "claimed" }));
       expect(dispatchResult).toMatchObject({ prompt: { dispatchedAt: expect.any(String), transcriptTurnStartedAt: "2026-08-30T12:00:00.250Z" } });
@@ -211,32 +214,35 @@ describe("coordinator concurrency controls", () => {
     const second = coordinator.handleMessage(message(2));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(store.database.prepare("SELECT state FROM inbound_messages WHERE event_id = 'e2'").get()).toMatchObject({ state: "accepted" });
-    await vi.waitFor(() => expect(replies).toEqual(["m2"]));
+    expect(replies).toEqual([]);
 
     releaseFirst();
     await Promise.all([first, second]);
-    await vi.waitFor(() => expect(replies).toEqual(["m2", "m1"]));
+    await publisher.drain();
+    expect(replies).toEqual(["m1", "m2"]);
     expect(store.database.prepare("SELECT state FROM inbound_messages ORDER BY created_at, event_id").all()).toEqual([{ state: "accepted" }, { state: "accepted" }]);
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("routes an alias-thread reply to the existing Binding while keeping its Answer in the alias thread", async () => {
+  it("routes an alias-thread reply to the existing Binding as Agent Input", async () => {
     const herdr = emptyHerdr();
     const { coordinator, publisher, store } = fixture(herdr);
     try {
       await coordinator.start();
       store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "canonical-topic", rootMessageId: "canonical-root", title: "Task" });
-      store.updateBinding("b1", { paneId: "w1:p1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+      store.updateBinding("b1", {
+        paneId: "w1:p1", traexSessionId: "terminal-1", statusMessageId: "canonical-root", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle",
+        agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+      });
       store.reservePaneThreadAlias({ publicationKey: "publish-alias", actionMessageId: "directory-card", bindingId: "b1", bindingGeneration: 1, paneId: "w1:p1", sourceMainMessageId: "canonical-root", targetChatId: "chat", card: {} });
       const creation = store.listPendingOutboundReplies().find((reply) => reply.kind === "group_card_create")!;
       store.markOutboundReplyDelivered(creation.id, "alias-root", undefined, "alias-topic");
 
       await coordinator.handleMessage({ eventId: "alias-e1", messageId: "alias-m1", chatId: "chat", topicId: "alias-topic", rootMessageId: "alias-root", actorOpenId: "user", text: "continue here", mentionsBot: false, isRootMessage: false });
-      const prompt = store.listRunCards("b1").find((view) => view.requestText === "continue here")!;
-      expect(prompt).toBeDefined();
-      const answerCreate = store.database.prepare("SELECT prompt_id, kind, root_message_id, state FROM outbound_replies WHERE prompt_id = ? AND kind = 'stream_card_create'").get(prompt.promptId) as { prompt_id: string; kind: string; root_message_id: string; state: string };
-      expect(answerCreate).toMatchObject({ prompt_id: prompt.promptId, kind: "stream_card_create", root_message_id: "alias-root" });
-      expect(answerCreate.state).not.toBe("dead_letter");
+      expect(store.database.prepare("SELECT text, owner_id, state FROM submission_intents WHERE source_message_key = ?").get("alias-m1")).toEqual({
+        text: "continue here", owner_id: "b1", state: "prepared"
+      });
+      expect(store.getPromptInputBySource("feishu", "alias-m1")).toBeNull();
       expect(store.getBinding("b1")).toMatchObject({ rootMessageId: "canonical-root", topicId: "canonical-topic" });
     } finally { await coordinator.stop(); await publisher.stop(); store.close(); }
   });
@@ -338,13 +344,10 @@ describe("coordinator concurrency controls", () => {
       async replyText() { return { messageId: "text" }; },
       async replyCard() { return { messageId: "legacy" }; },
       async updateCard() {},
-      async createStreamingCard() { return { cardId: "cardkit-1" }; },
-      async replyStreamingCardReference() {
-        if (failReply) { failReply = false; throw Object.assign(new Error("temporary"), { response: { status: 503 } }); }
-        return { messageId: "answer-1" };
-      },
-      async streamCardContent() {},
-      async finishStreamingCard() {}
+      async replyStreamingCard() {
+        if (failReply) { failReply = false; throw Object.assign(new Error("rate limited"), { response: { status: 429 } }); }
+        return { messageId: "answer-1", cardId: "card-1" };
+      }
     };
     const { coordinator, publisher, store } = fixture(herdr, lark);
     try {
@@ -352,10 +355,13 @@ describe("coordinator concurrency controls", () => {
       store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
       await coordinator.start();
 
-      await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+      queueLegacyPromptForTest(store, { eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
 
       await vi.waitFor(() => expect(runCount).toBe(1));
       await vi.advanceTimersByTimeAsync(1_300);
+      const draining = publisher.drain(true);
+      await vi.advanceTimersByTimeAsync(20);
+      await draining;
       await vi.waitFor(() => expect(store.loadRunCard(store.listRunCards("b1")[0]!.promptId)?.answerMessageId).toBe("answer-1"));
       expect(store.listRunCards("b1")[0]).toMatchObject({ sessionTitle: "Task" });
       expect(runCount).toBe(1);
@@ -384,7 +390,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "prompt-e1", messageId: "prompt-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
 
     const promptId = store.listRunCards("b1")[0]!.promptId;
@@ -405,11 +411,12 @@ describe("coordinator concurrency controls", () => {
       "```bash\nnpm test\n```\n\n```text\n12 tests passed\n```",
       "```diff\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n```"
     ];
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
-        expect(session).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
+    const startedAt = new Date().toISOString();
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        expect(source.nativeSession).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
         return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
-          return { turnId, freshTurnStart: true, answerDelta: deltas.shift() ?? "", turnLifecycle: { turnId, state: "active", startedAt: new Date().toISOString() } };
+          return { turnId, freshTurnStart: true, answerDelta: deltas.shift() ?? "", turnLifecycle: { turnId, state: "active", startedAt } };
         } } };
       }
     };
@@ -436,7 +443,7 @@ describe("coordinator concurrency controls", () => {
 
     await coordinator.start();
     const terminalReadsBeforePrompt = terminalReads;
-    await coordinator.handleMessage({ eventId: "typed-e1", messageId: "typed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do typed work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "typed-e1", messageId: "typed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do typed work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
     const answer = store.listRunCards("b1")[0]!.answer;
     expect(answer).toContain("Typed **analysis**");
@@ -452,7 +459,7 @@ describe("coordinator concurrency controls", () => {
   it("routes one typed observation to independent Answer and Main Card projections", async () => {
     let reads = 0;
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -485,7 +492,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "split-e1", messageId: "split-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "split output", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "split-e1", messageId: "split-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "split output", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
     expect(observed[0]?.payload.observation.answer).toMatchObject({ snapshot: "Visible answer", toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "done" }] });
     expect(observed[0]?.payload.observation.main.status).toMatchObject({ statusTitle: "Verifying deployment", tokenCount: 1_234, planSteps: [{ key: "plan:0", kind: "step", state: "active" }] });
@@ -498,7 +505,7 @@ describe("coordinator concurrency controls", () => {
     const turnA = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     const turnB = "01a052d3-9c14-70e1-a375-397e2ecb55ea";
     let reads = 0;
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -531,7 +538,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "owned-e1", messageId: "owned-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "owned work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "owned-e1", messageId: "owned-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "owned work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }), { timeout: 4_000 });
     expect(runPrompt).toHaveBeenCalledOnce();
     expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)?.transcriptTurnId).toBe(turnA);
@@ -547,7 +554,7 @@ describe("coordinator concurrency controls", () => {
     let reads = 0;
     let releasePrompt!: () => void;
     const promptCompletion = new Promise<void>((resolve) => { releasePrompt = resolve; });
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -580,7 +587,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "live-e1", messageId: "live-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "stream while waiting", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "live-e1", messageId: "live-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "stream while waiting", mentionsBot: false, isRootMessage: false });
 
     await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce(), { timeout: 2_000 });
     await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
@@ -615,7 +622,7 @@ describe("coordinator concurrency controls", () => {
         return { turnId, answerDelta: "", turnLifecycle: { turnId, state: "completed" as const, startedAt, finalAnswer: "First commentary after stall" } };
       }
     } }));
-    const transcriptReader: TraexTranscriptReaderPort = { open };
+    const transcriptReader: AgentTranscriptReaderPort = { open };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       await onDispatched?.();
       await new Promise((resolve) => setTimeout(resolve, 350));
@@ -637,8 +644,8 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "handoff-e1", messageId: "handoff-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "handoff cursor", mentionsBot: false, isRootMessage: false });
-    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "handoff cursor")!;
+    queueLegacyPromptForTest(store, { eventId: "handoff-e1", messageId: "handoff-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "handoff cursor", mentionsBot: false, isRootMessage: false });
+    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === formatNativeInputBatch(["handoff cursor"]))!;
     await vi.waitFor(() => expect(observed.map((event) => event.payload.observation.answer.snapshot)).toEqual(["First commentary after stall"]), { timeout: 2_000 });
     expect(store.getPrompt(target().promptId)).toMatchObject({ state: "running", observationState: "detached", wasDetached: true, transcriptTurnId: turnId });
     finishTurn = true;
@@ -658,7 +665,7 @@ describe("coordinator concurrency controls", () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let startedAt = "";
     let reads = 0;
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() {
@@ -686,10 +693,10 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "stalled-e1", messageId: "stalled-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "recover me", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "stalled-e1", messageId: "stalled-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "recover me", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce());
     expect(runPrompt.mock.calls[0]?.[1]).toBe("recover me");
-    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "recover me")!;
+    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === formatNativeInputBatch(["recover me"]))!;
     await vi.waitFor(() => expect(target()).toMatchObject({ phase: "completed", answer: "Recovered answer" }), { timeout: 7_000 });
     expect(runPrompt).toHaveBeenCalledOnce();
     expect(store.getPrompt(target().promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: startedAt });
@@ -699,7 +706,7 @@ describe("coordinator concurrency controls", () => {
 
   it("does not recover an old transcript turn after Herdr reports stalled", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
         return { turnId, freshTurnStart: true, answerDelta: "Old answer", turnLifecycle: { turnId, state: "completed" as const, startedAt: "2020-01-01T00:00:00.000Z", finalAnswer: "Old answer" } };
       } } }; }
@@ -715,9 +722,9 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true, agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "old-stalled-e1", messageId: "old-stalled-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do not recover old", mentionsBot: false, isRootMessage: false });
-    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === "do not recover old")!;
-    await vi.waitFor(() => expect(store.getPrompt(target().promptId)).toMatchObject({ state: "running", observationState: "detached" }));
+    queueLegacyPromptForTest(store, { eventId: "old-stalled-e1", messageId: "old-stalled-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "do not recover old", mentionsBot: false, isRootMessage: false });
+    const target = () => store.listRunCards("b1").find(({ requestText }) => requestText === formatNativeInputBatch(["do not recover old"]))!;
+    await vi.waitFor(() => expect(store.getPrompt(target().promptId)).toMatchObject({ state: "recovering", observationState: "detached" }));
     expect(store.getPrompt(target().promptId)?.transcriptTurnId).toBeNull();
     expect(target().answer).toBe("");
     expect(runPrompt).toHaveBeenCalledOnce();
@@ -725,48 +732,139 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("fails a prompt proven not started and continues the binding FIFO", async () => {
-    let rejectFirst!: () => void;
-    const firstMayFinish = new Promise<void>((resolve) => { rejectFirst = resolve; });
-    const runPrompt = vi.fn(async (_paneId: string, text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
-      if (text === "/ti") {
-        await firstMayFinish;
-        throw new Error('{"error":{"code":"agent_prompt_not_started","message":"No matching TraeX turn started"}}');
+  it("forms a durable batch beside an active turn and submits it once only after the turn settles", async () => {
+    const queuePrompt = vi.fn(async (_paneId: string, _text: string, input: { submissionId: string }) => ({
+      submissionId: input.submissionId,
+      receipt: {
+        submissionId: input.submissionId, terminalId: "terminal-1", agentKind: "traex" as const,
+        sessionId: "session-1", state: "accepted" as const, createdAt: 10, updatedAt: 11
       }
+    }));
+    const runPrompt = vi.fn(async () => { throw new Error("legacy waiter must not run"); });
+    const observerOpened = vi.fn();
+    let observedTurnState: "active" | "completed" = "active";
+    let paneState: "working" | "idle" = "working";
+    const pane = () => ({
+      paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: paneState,
+      agentSession: { source: "herdr:traex", agent: "traex", kind: "id" as const, value: "session-1" }
+    });
+    const herdr: HerdrPort = {
+      ...emptyHerdr(), runPrompt, queuePrompt, async supportsPromptQueue() { return true; }, async getPane() { return pane(); }, async listPanes() { return [pane()]; },
+      async observeRuntime() { return { pane: pane(), traexProcess: true, composerReady: false, evidenceSource: "structured" }; },
+      async waitForRuntimeChange() { await new Promise((resolve) => setTimeout(resolve, 10)); }
+    };
+    const transcriptReader: AgentTranscriptReaderPort = { async open() {
+      observerOpened();
+      return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
+        return { turnId: "active-turn", answerDelta: "", turnLifecycle: { turnId: "active-turn", state: observedTurnState, startedAt: "2026-09-28T15:00:01.000Z", ...(observedTurnState === "completed" ? { finalAnswer: "active answer" } : {}) } };
+      } } };
+    } };
+    const { coordinator, publisher, store } = fixture(herdr, quietLark(), transcriptReader);
+    store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true,
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
+    const activeView = createQueuedRunCard({ promptId: "active", bindingId: "b1", title: "Task", workspaceId: "w1", paneId: "w1:p1", requestText: "active turn", queuePosition: 1, occurredAt: "2026-09-28T15:00:00.000Z" });
+    store.acceptPrompt({ prompt: { id: "active", bindingId: "b1", larkMessageId: "active-message", actorOpenId: "user", body: "active turn" }, view: activeView, rootMessageId: "root-1", answerCard: {} });
+    expect(store.claimNextDispatchablePrompt("b1")?.prompt.id).toBe("active");
+    store.markPromptDispatched("active", "2026-09-28T15:00:00.500Z");
+    expect(store.claimPromptTranscriptTurn({ promptId: "active", bindingId: "b1", turnId: "active-turn", startedAt: "2026-09-28T15:00:01.000Z" })).toMatchObject({ state: "claimed" });
+    store.markPromptObservationDetached("active", "observer restart");
+    store.updateBinding("b1", { lastAgentState: "working" });
+
+    try {
+      await coordinator.start();
+      await vi.waitFor(() => expect(observerOpened).toHaveBeenCalledOnce());
+      queueLegacyCollectedBatchForTest(store, [
+        { eventId: "queued-e1", messageId: "queued-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first queued", mentionsBot: false, isRootMessage: false },
+        { eventId: "queued-e2", messageId: "queued-m2", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "second queued", mentionsBot: false, isRootMessage: false }
+      ]);
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const combinedBody = formatNativeInputBatch(["first queued", "second queued"]);
+      const batch = store.listRunCards("b1").find(({ requestText }) => requestText === combinedBody)!;
+      expect(queuePrompt).not.toHaveBeenCalled();
+      expect(store.getPromptInputBySource("feishu", "queued-m1")).toMatchObject({ state: "batched", batchId: batch.promptId });
+      expect(store.getPromptInputBySource("feishu", "queued-m2")).toMatchObject({ state: "batched", batchId: batch.promptId });
+      expect(store.getPrompt(batch.promptId)).toMatchObject({
+        id: batch.promptId, state: "queued", observationState: "not_started", body: combinedBody,
+        nativeSubmissionId: batch.promptId, dispatchedAt: null, transcriptTurnId: null
+      });
+      expect(store.listNativeInputBatchMembers(batch.promptId)).toEqual([
+        { batchId: batch.promptId, promptInputId: store.getPromptInputBySource("feishu", "queued-m1")!.id, ordinal: 0 },
+        { batchId: batch.promptId, promptInputId: store.getPromptInputBySource("feishu", "queued-m2")!.id, ordinal: 1 }
+      ]);
+      expect(runPrompt).not.toHaveBeenCalled();
+
+      observedTurnState = "completed";
+      paneState = "idle";
+      store.updateBinding("b1", { lastAgentState: "idle" });
+      await vi.waitFor(() => expect(store.getPrompt("active")).toMatchObject({ state: "delivered" }));
+      await vi.waitFor(() => expect(queuePrompt).toHaveBeenCalledWith("w1:p1", "first queued\n\nsecond queued", {
+        submissionId: batch.promptId, expectedSessionId: "session-1"
+      }));
+      expect(store.getPrompt(batch.promptId)).toMatchObject({
+        id: batch.promptId, state: "recovering", observationState: "detached", body: combinedBody,
+        nativeSubmissionId: batch.promptId, transcriptTurnId: null
+      });
+      expect(store.listNativeInputBatchMembers(batch.promptId)).toEqual([
+        { batchId: batch.promptId, promptInputId: store.getPromptInputBySource("feishu", "queued-m1")!.id, ordinal: 0 },
+        { batchId: batch.promptId, promptInputId: store.getPromptInputBySource("feishu", "queued-m2")!.id, ordinal: 1 }
+      ]);
+      expect(queuePrompt).toHaveBeenCalledOnce();
+      expect(runPrompt).not.toHaveBeenCalled();
+    } finally {
+      observedTurnState = "completed";
+      paneState = "idle";
+      store.updateBinding("b1", { lastAgentState: "idle" });
+      await vi.waitFor(() => expect(store.getPrompt("active")).toMatchObject({ state: "delivered" }));
+      await coordinator.stop(); await publisher.stop(); store.close();
+    }
+  });
+
+  it("routes non-reserved slash and ordinary text as independent Agent Input without Prompt state", async () => {
+    const runPrompt = vi.fn(async (_paneId: string, text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       await onDispatched?.();
       return "done" as const;
     });
-    const herdr: HerdrPort = { ...emptyHerdr(), runPrompt, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; } };
+    const herdr: HerdrPort = { ...emptyHerdr(), runPrompt, async listPanes() { return [{ paneId: "w1:p1", terminalId: "terminal-1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentKind: "traex", agentState: "idle", agentSession: { source: "herdr:traex", agent: "traex", kind: "id", value: "session-1" } }]; } };
     const store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
     const lark = quietLark();
     const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
-    store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true });
+    store.updateBinding("b1", {
+      paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", hasCompletedTurn: true,
+      agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "session-1"
+    });
 
     try {
       await coordinator.start();
       await coordinator.handleMessage({ eventId: "not-started-e1", messageId: "not-started-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "/ti", mentionsBot: false, isRootMessage: false });
-      await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledOnce());
-      await coordinator.handleMessage({ eventId: "not-started-e2", messageId: "not-started-m2", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "second queued work", mentionsBot: false, isRootMessage: false });
-      rejectFirst();
+      expect(store.database.prepare("SELECT text, state FROM submission_intents WHERE source_message_key = ?").get("not-started-m1")).toEqual({ text: "/ti", state: "prepared" });
+      expect(store.getPromptInputBySource("feishu", "not-started-m1")).toBeNull();
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_inputs").get()).toEqual({ count: 0 });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM native_input_batches").get()).toEqual({ count: 0 });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual({ count: 0 });
+      expect(store.listRunCards("b1")).toEqual([]);
+      expect(runPrompt).not.toHaveBeenCalled();
 
-      await vi.waitFor(() => expect(runPrompt).toHaveBeenCalledTimes(2));
-      const cards = () => store.listRunCards("b1");
-      await vi.waitFor(() => expect(cards().find(({ requestText }) => requestText === "second queued work")).toMatchObject({ phase: "completed" }));
-      const first = cards().find(({ requestText }) => requestText === "/ti")!;
-      expect(store.getPrompt(first.promptId)).toMatchObject({ state: "failed", observationState: "completed", dispatchedAt: null, transcriptTurnId: null });
-      expect(runPrompt.mock.calls.map((call) => call[1])).toEqual(["/ti", "second queued work"]);
+      await coordinator.handleMessage({ eventId: "not-started-e2", messageId: "not-started-m2", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "second queued work", mentionsBot: false, isRootMessage: false });
+      expect(store.database.prepare("SELECT text, state FROM submission_intents WHERE source_message_key = ?").get("not-started-m2")).toEqual({ text: "second queued work", state: "prepared" });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_inputs").get()).toEqual({ count: 0 });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM native_input_batches").get()).toEqual({ count: 0 });
+      expect(store.database.prepare("SELECT COUNT(*) AS count FROM prompt_jobs").get()).toEqual({ count: 0 });
+      expect(runPrompt).not.toHaveBeenCalled();
     } finally {
-      rejectFirst();
       await coordinator.stop(); await publisher.stop(); store.close();
     }
   });
 
   it("rejects transcript output whose lifecycle predates dispatch tolerance", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() { return { turnId, freshTurnStart: true, answerDelta: "baseline answer", turnLifecycle: { turnId, state: "active" as const, startedAt: "2020-01-01T00:00:00.000Z" } }; }
@@ -790,7 +888,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "old-e1", messageId: "old-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "old-e1", messageId: "old-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
     expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)?.transcriptTurnId).toBeNull();
     expect(observed).toEqual([]);
@@ -800,7 +898,7 @@ describe("coordinator concurrency controls", () => {
 
   it("does not claim an inherited baseline lifecycle near the dispatch boundary", async () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: {
         async readDelta() { return ""; },
         async readObservation() { return { turnId, answerDelta: "baseline answer", turnLifecycle: { turnId, state: "active" as const, startedAt: new Date(Date.now() - 500).toISOString() } }; }
@@ -824,7 +922,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "baseline-e1", messageId: "baseline-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "baseline-e1", messageId: "baseline-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
     expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)?.transcriptTurnId).toBeNull();
     expect(observed).toEqual([]);
@@ -865,9 +963,71 @@ describe("coordinator concurrency controls", () => {
       store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Task" });
       store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: sessionId });
       await coordinator.start();
-      await coordinator.handleMessage({ eventId: "drain-e1", messageId: "drain-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new B work", mentionsBot: false, isRootMessage: false });
+      queueLegacyPromptForTest(store, { eventId: "drain-e1", messageId: "drain-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "new B work", mentionsBot: false, isRootMessage: false });
       await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Owned B answer" }));
       expect(store.getPrompt(store.listRunCards("b1")[0]!.promptId)?.transcriptTurnId).toBe(turnB);
+      expect(runPrompt).toHaveBeenCalledOnce();
+    } finally {
+      await coordinator.stop(); await publisher.stop(); store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("projects a Pi JSONL turn into the durable Answer Card without terminal fallback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-answer-integration-"));
+    const descriptor = piTranscriptDescriptor(root, "b1", 1);
+    const path = join(descriptor.sessionDir, `2026-09-25T12-00-00_${descriptor.sessionId}.jsonl`);
+    const turnId = "7f6eef5c-887d-4d40-81f9-0068ba979a45";
+    const sources: Parameters<AgentTranscriptReaderPort["open"]>[0][] = [];
+    const reader = new PiTranscriptReader({ root });
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) { sources.push(source); return reader.open(source); },
+      async openActiveTurn(source) { return reader.openActiveTurn!(source); },
+      async openFirstTurn(source) { return reader.openFirstTurn!(source); },
+      async openAtTurn(source, id, startedAt) { return reader.openAtTurn!(source, id, startedAt); },
+      async openAfterTurn(source, id, startedAt) { return reader.openAfterTurn!(source, id, startedAt); }
+    };
+    const runPrompt = vi.fn(async (_paneId: string, text: string, _timeoutMs: number, onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await onDispatched?.();
+      await mkdir(descriptor.sessionDir, { recursive: true });
+      const startedAt = new Date().toISOString();
+      const completedAt = new Date(Date.now() + 1).toISOString();
+      const lines = [
+        { type: "session", id: descriptor.sessionId, timestamp: startedAt, cwd: "/repo" },
+        { type: "message", id: turnId, parentId: null, timestamp: startedAt, message: { role: "user", content: text, timestamp: Date.now() } },
+        { type: "message", id: "56d49143-881a-4563-aa93-8bf6539ecfac", parentId: turnId, timestamp: completedAt, message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "private chain of thought" }, { type: "text", text: "Pi durable answer" }],
+          stopReason: "stop",
+          usage: { totalTokens: 42 },
+          timestamp: Date.now() + 1
+        } }
+      ];
+      await writeFile(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+      await onObservation?.({ state: "working", stateSource: "herdr", output: "SECRET_TERMINAL_SENTINEL" });
+      return "done" as const;
+    });
+    const herdr: HerdrPort = {
+      ...emptyHerdr(),
+      async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", agentKind: "pi", foregroundExecutables: ["pi"], agentState: "idle" }]; },
+      async getPane() { return { paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", agentKind: "pi", foregroundExecutables: ["pi"], agentState: "idle" }; },
+      runPrompt
+    };
+    const store = new SqliteBindingStore(":memory:");
+    const bus = new BridgeEventBus();
+    const lark = quietLark();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader, false, undefined, root);
+    try {
+      store.createPendingBinding({ id: "b1", projectId: "repo", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", title: "Pi task", agentKind: "pi" });
+      store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
+      await coordinator.start();
+      queueLegacyPromptForTest(store, { eventId: "pi-jsonl-e1", messageId: "pi-jsonl-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "analyze CI", mentionsBot: false, isRootMessage: false });
+      await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "Pi durable answer" }));
+
+      const card = store.listRunCards("b1")[0]!;
+      expect(sources[0]).toEqual({ agentKind: "pi", bindingId: "b1", generation: 1, paneId: "w1:p1", nativeSession: null });
+      expect(store.getPrompt(card.promptId)).toMatchObject({ state: "delivered", transcriptTurnId: turnId, transcriptTurnStartedAt: expect.any(String) });
+      expect(card.answer).not.toMatch(/不支持结构化输出|private chain of thought|SECRET_TERMINAL_SENTINEL/);
       expect(runPrompt).toHaveBeenCalledOnce();
     } finally {
       await coordinator.stop(); await publisher.stop(); store.close(); await rm(root, { recursive: true, force: true });
@@ -878,7 +1038,7 @@ describe("coordinator concurrency controls", () => {
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let reads = 0;
     const repeated = { turnId, freshTurnStart: true, answerDelta: "Owned once", turnLifecycle: { turnId, state: "active" as const, startedAt: new Date().toISOString() } };
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() { reads += 1; return repeated; } } }; }
     };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
@@ -896,7 +1056,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "repeat-e1", messageId: "repeat-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "repeat work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "repeat-e1", messageId: "repeat-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "repeat work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
     expect(reads).toBe(2);
     expect(observed).toHaveLength(1);
@@ -906,9 +1066,9 @@ describe("coordinator concurrency controls", () => {
   });
 
   it("keeps terminal text out of the Answer when no session identity exists", async () => {
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
-        expect(session).toBeNull();
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        expect(source.nativeSession).toBeNull();
         return { mode: "unavailable", reason: "missing_session_identity" };
       }
     };
@@ -927,7 +1087,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "terminal-e1", messageId: "terminal-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "terminal work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "terminal-e1", messageId: "terminal-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "terminal work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }), { timeout: 4_000 });
     expect(store.listRunCards("b1")[0]!.answer).not.toContain("SECRET_TERMINAL_SENTINEL");
     expect(records).toContainEqual(expect.objectContaining({ event: "turn-started", outputMode: "unavailable", unavailableReason: "missing_session_identity" }));
@@ -935,13 +1095,14 @@ describe("coordinator concurrency controls", () => {
     await coordinator.stop(); await publisher.stop(); store.close();
   });
 
-  it("waits for a first-turn Herdr session identity before marking structured output unavailable", async () => {
+  it("does not wait for a first-turn Herdr session identity before submitting a Native Input Batch", async () => {
     const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let store!: SqliteBindingStore;
     const opens: Array<string | null> = [];
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        const session = source.nativeSession;
         opens.push(session?.value ?? null);
         if (!session) {
           store.updateBindingMetadata("b1", { agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: sessionId });
@@ -955,14 +1116,15 @@ describe("coordinator concurrency controls", () => {
         } } };
       }
     };
+    const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
+      await onDispatched?.();
+      await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ ignored terminal text" });
+      return "done" as const;
+    });
     const herdr: HerdrPort = {
       async assertWorkspace() {}, async listPanes() { return [{ paneId: "w1:p1", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
       async getPane() { return null; }, async createPane() { throw new Error("not used"); }, async startTraex() {},
-      async runPrompt(_paneId, _text, _timeoutMs, onObservation, _signal, onDispatched) {
-        await onDispatched?.();
-        await onObservation?.({ state: "working", stateSource: "herdr", output: "◆ ignored terminal text" });
-        return "done";
-      }, async renamePane() {}
+      runPrompt, async renamePane() {}
     };
     store = new SqliteBindingStore(":memory:");
     const bus = new BridgeEventBus();
@@ -974,12 +1136,13 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "late-session-e1", messageId: "late-session-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "late-session-e1", messageId: "late-session-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
 
-    expect(opens).toEqual([null, sessionId]);
-    expect(store.listRunCards("b1")[0]!.answer).toBe("authoritative JSONL answer");
-    expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
+    expect(runPrompt).toHaveBeenCalledOnce();
+    expect(opens).toEqual([null]);
+    expect(store.listRunCards("b1")[0]!.answer).toBe(STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE);
+    expect(records).not.toContainEqual(expect.objectContaining({ event: "traex-transcript-source-upgraded", outcome: "typed" }));
 
     await coordinator.stop(); await publisher.stop(); store.close();
   });
@@ -991,8 +1154,9 @@ describe("coordinator concurrency controls", () => {
     let dispatched = false;
     let transcriptAvailable = false;
     const opens: Array<string | null> = [];
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
+        const session = source.nativeSession;
         opens.push(session?.value ?? null);
         if (!session) return { mode: "unavailable", reason: "missing_session_identity" };
         if (!transcriptAvailable) return { mode: "unavailable", reason: "transcript_not_found" };
@@ -1003,7 +1167,7 @@ describe("coordinator concurrency controls", () => {
           return { turnId, freshTurnStart: true, requestText: "first native turn", answerDelta: "authoritative first-turn answer", turnLifecycle: { turnId, state: "completed", startedAt, finalAnswer: "authoritative first-turn answer" } };
         } } };
       },
-      async openFirstTurn(session) { return this.open(session); }
+      async openFirstTurn(source) { return this.open(source); }
     };
     const runPrompt = vi.fn(async (_paneId: string, _text: string, _timeoutMs: number, _onObservation: Parameters<HerdrPort["runPrompt"]>[3], _signal: AbortSignal | undefined, onDispatched: Parameters<HerdrPort["runPrompt"]>[5]) => {
       dispatched = true;
@@ -1030,7 +1194,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", traexSessionId: "terminal-1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "first-native-e1", messageId: "first-native-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first native turn", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "first-native-e1", messageId: "first-native-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first native turn", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "authoritative first-turn answer" }), { timeout: 8_000 });
 
     expect(runPrompt).toHaveBeenCalledOnce();
@@ -1045,9 +1209,10 @@ describe("coordinator concurrency controls", () => {
     const sessionId = "01a04440-4348-78a1-ac78-60927a085826";
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
     let opens = 0;
-    const transcriptReader: TraexTranscriptReaderPort = {
-      async open(session) {
+    const transcriptReader: AgentTranscriptReaderPort = {
+      async open(source) {
         opens += 1;
+        const session = source.nativeSession;
         expect(session).toEqual({ source: "herdr:traex", agent: "traex", kind: "id", value: sessionId });
         if (opens === 1) return { mode: "unavailable", reason: "transcript_not_found" };
         let read = false;
@@ -1076,7 +1241,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: sessionId });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "late-transcript-e1", messageId: "late-transcript-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "late-transcript-e1", messageId: "late-transcript-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "first turn", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
 
     expect(opens).toBe(2);
@@ -1087,7 +1252,7 @@ describe("coordinator concurrency controls", () => {
   });
 
   it("keeps terminal output out of the Answer when typed transcript reading fails", async () => {
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { throw new Error("transcript unavailable"); } } }; }
     };
     const herdr: HerdrPort = {
@@ -1109,7 +1274,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "fallback-e1", messageId: "fallback-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "fallback work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "fallback-e1", messageId: "fallback-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "fallback work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE }));
     expect(store.listRunCards("b1")[0]!.answer).not.toContain("SECRET_TRANSCRIPT_FAILURE_TERMINAL");
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", unavailableReason: "transcript_read_failed", outcome: "structured_output_unavailable" }));
@@ -1118,7 +1283,7 @@ describe("coordinator concurrency controls", () => {
   });
 
   it("ignores terminal redraws when structured output is unavailable", async () => {
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "unavailable", reason: "transcript_not_found" }; }
     };
     const herdr: HerdrPort = {
@@ -1140,7 +1305,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "redraw-e1", messageId: "redraw-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "redraw work", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "redraw-e1", messageId: "redraw-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "redraw work", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed" }));
     const answer = store.listRunCards("b1")[0]!.answer;
     expect(answer).toBe(STRUCTURED_OUTPUT_UNAVAILABLE_NOTICE);
@@ -1152,7 +1317,7 @@ describe("coordinator concurrency controls", () => {
   it("does not mix terminal text into an answer after typed output was established", async () => {
     let reads = 0;
     const turnId = "01a052d3-9c14-70e1-a375-397e2ecb55e9";
-    const transcriptReader: TraexTranscriptReaderPort = {
+    const transcriptReader: AgentTranscriptReaderPort = {
       async open() { return { mode: "typed", cursor: { async readDelta() { return ""; }, async readObservation() {
         reads += 1;
         if (reads === 1) return { turnId, freshTurnStart: true, answerDelta: "authoritative typed answer", turnLifecycle: { turnId, state: "active" as const, startedAt: new Date().toISOString() } };
@@ -1179,7 +1344,7 @@ describe("coordinator concurrency controls", () => {
     store.updateBinding("b1", { paneId: "w1:p1", state: "active", lifecycle: "active", attachment: "attached", lastAgentState: "idle", agentSessionSource: "herdr:traex", agentSessionAgent: "traex", agentSessionKind: "id", agentSessionValue: "01a03eb1-c193-7531-83c0-e6c6f70143d4" });
 
     await coordinator.start();
-    await coordinator.handleMessage({ eventId: "mixed-e1", messageId: "mixed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "typed then fail", mentionsBot: false, isRootMessage: false });
+    queueLegacyPromptForTest(store, { eventId: "mixed-e1", messageId: "mixed-m1", chatId: "chat", topicId: "t1", rootMessageId: "root-1", actorOpenId: "user", text: "typed then fail", mentionsBot: false, isRootMessage: false });
     await vi.waitFor(() => expect(store.listRunCards("b1")[0]).toMatchObject({ phase: "completed", answer: "authoritative typed answer" }));
     expect(store.listRunCards("b1")[0]!.answer).not.toContain("terminal");
     expect(records).toContainEqual(expect.objectContaining({ event: "traex-transcript-read-failed", unavailableReason: "transcript_read_failed", outcome: "typed_output_preserved" }));
@@ -1188,11 +1353,11 @@ describe("coordinator concurrency controls", () => {
   });
 });
 
-function fixture(herdr: HerdrPort, lark: LarkPort = quietLark()) {
+function fixture(herdr: HerdrPort, lark: LarkPort = quietLark(), transcriptReader?: AgentTranscriptReaderPort) {
   const store = new SqliteBindingStore(":memory:");
   const bus = new BridgeEventBus();
   const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
-  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
+  const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }), 30_000, undefined, undefined, transcriptReader);
   return { coordinator, publisher, store, bus };
 }
 

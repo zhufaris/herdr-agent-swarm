@@ -13,6 +13,10 @@ const projectSchema = z.object({
   workspaceId: z.string().trim().min(1),
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
   maxInstances: z.number().int().min(1).max(64).default(8),
+  orchestrator: z.object({
+    enabled: z.boolean(),
+    cwd: z.string().refine(isAbsolute, "cwd must be an absolute path")
+  }).strict().optional(),
   paneRetention: z.object({ mode: z.enum(["persistent", "ephemeral"]), idleAfterMs: z.number().int().positive().optional(), graceMs: z.number().int().positive().optional() }).strict().optional()
 }).strict();
 const projectRegistrySchema = z.object({
@@ -46,6 +50,7 @@ const environmentSchema = z.object({
   BRIDGE_HTTP_HOST: z.enum(["127.0.0.1", "localhost", "::1"]).default("127.0.0.1"),
   BRIDGE_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   HERDR_BIN: z.string().min(1).default("herdr"),
+  HERDR_REPLY_OBSERVATION: z.enum(["events", "jsonl", "shadow"]).default("events"),
   TRAEX_BIN: z.string().min(1).default("traex"),
   TRAEX_PERMISSION_MODE: z.enum(["default", "bypass_permissions", "auto"]).default("auto"),
   TRAEX_SESSIONS_ROOT: z.string().min(1).default(resolve(homedir(), ".trae/cli/sessions")),
@@ -60,16 +65,25 @@ const environmentSchema = z.object({
   CONTROLLER_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(300_000).default(60_000),
   CONTROLLER_MODEL: z.string().trim().min(1).optional(),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(30_000),
+  DETACHED_PROMPT_AUTO_SKIP_MS: z.coerce.number().int().min(0).max(86_400_000).default(1_800_000)
+    .refine((value) => value === 0 || value >= 60_000, "must be 0 or at least 60000"),
   OUTBOX_SAFETY_SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
   HERDR_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(3),
   HERDR_CIRCUIT_OPEN_MS: z.coerce.number().int().min(100).max(300_000).default(15_000),
   INSTANCE_LEASE_TTL_MS: z.coerce.number().int().min(3_000).default(15_000),
   INSTANCE_LEASE_HEARTBEAT_MS: z.coerce.number().int().min(500).default(5_000),
+  SQLITE_BUSY_TIMEOUT_MS: z.coerce.number().int().min(1).max(60_000).default(250),
+  SQLITE_BUSY_RETRY_BUDGET_MS: z.coerce.number().int().min(0).max(60_000).default(1_000),
+  SQLITE_SLOW_TRANSACTION_MS: z.coerce.number().int().min(0).max(60_000).default(100),
   MAX_QUEUE_DEPTH: z.coerce.number().int().positive().default(20),
   LARK_MESSAGE_CHUNK_SIZE: z.coerce.number().int().min(500).max(20_000).default(3_500),
   OUTBOX_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(14),
   OUTBOX_RETENTION_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(500),
   OUTBOX_RETENTION_MAX_BATCHES: z.coerce.number().int().min(1).max(100).default(20),
+  RETENTION_PAYLOAD_COMPACTION_ENABLED: z.enum(["true", "false"]).default("false"),
+  CORE_EVENT_RETENTION_MODE: z.enum(["off", "audit", "compact"]).default("off"),
+  CORE_EVENT_RETENTION_HOURS: z.coerce.number().int().min(1).max(8_760).default(24),
+  RETENTION_COMPACTION_TIME_BUDGET_MS: z.coerce.number().int().min(10).max(10_000).default(250),
   SQLITE_INTEGRITY_AUDIT_INTERVAL_MS: z.coerce.number().int().min(60_000).max(86_400_000).default(900_000)
 });
 
@@ -90,6 +104,9 @@ function buildConfig(
   if (value.INSTANCE_LEASE_HEARTBEAT_MS * 2 >= value.INSTANCE_LEASE_TTL_MS) {
     throw new Error("INSTANCE_LEASE_HEARTBEAT_MS must be less than half of INSTANCE_LEASE_TTL_MS");
   }
+  if (value.SQLITE_BUSY_TIMEOUT_MS + value.SQLITE_BUSY_RETRY_BUDGET_MS >= value.INSTANCE_LEASE_HEARTBEAT_MS) {
+    throw new Error("SQLite synchronous lock wait plus retry allowance must stay inside the instance lease heartbeat safety budget");
+  }
   const allowedOpenIds = parseOpenIds(value.LARK_ALLOWED_OPEN_IDS, "LARK_ALLOWED_OPEN_IDS");
   const adminOpenIds = parseOpenIds(value.LARK_ADMIN_OPEN_IDS, "LARK_ADMIN_OPEN_IDS");
   const allowedSet = new Set(allowedOpenIds);
@@ -99,7 +116,7 @@ function buildConfig(
   return {
     gateway: { kind: value.GATEWAY_KIND, id: value.GATEWAY_ID },
     lark: { appId: value.LARK_APP_ID, appSecret: value.LARK_APP_SECRET, chatId: value.LARK_CHAT_ID, botOpenId: value.LARK_BOT_OPEN_ID, requestTimeoutMs: value.LARK_REQUEST_TIMEOUT_MS, allowedOpenIds, adminOpenIds },
-    herdr: { workspaceId: defaultProject.workspaceId, workspaceCwd: defaultProject.cwd, executable: value.HERDR_BIN },
+    herdr: { workspaceId: defaultProject.workspaceId, workspaceCwd: defaultProject.cwd, executable: value.HERDR_BIN, replyObservation: value.HERDR_REPLY_OBSERVATION },
     projects: registry.projects,
     defaultProjectId: registry.defaultProjectId,
     projectsConfigPath: value.PROJECTS_CONFIG_PATH,
@@ -113,14 +130,25 @@ function buildConfig(
     turnTimeoutMs: value.TURN_TIMEOUT_MS,
     controller: { enabled: value.CONTROLLER_ENABLED === "true", timeoutMs: value.CONTROLLER_TIMEOUT_MS, model: value.CONTROLLER_MODEL ?? null },
     reconcileIntervalMs: value.RECONCILE_INTERVAL_MS,
+    detachedPromptAutoSkipMs: value.DETACHED_PROMPT_AUTO_SKIP_MS,
     runtimeTuning: {
       ...runtime, outboxSafetyScanIntervalMs: value.OUTBOX_SAFETY_SCAN_INTERVAL_MS
     },
     herdrCircuitBreaker: { failureThreshold: value.HERDR_CIRCUIT_FAILURE_THRESHOLD, openMs: value.HERDR_CIRCUIT_OPEN_MS },
     instanceLease: { ttlMs: value.INSTANCE_LEASE_TTL_MS, heartbeatMs: value.INSTANCE_LEASE_HEARTBEAT_MS },
+    sqlite: {
+      busyTimeoutMs: value.SQLITE_BUSY_TIMEOUT_MS,
+      busyRetryBudgetMs: value.SQLITE_BUSY_RETRY_BUDGET_MS,
+      slowTransactionThresholdMs: value.SQLITE_SLOW_TRANSACTION_MS
+    },
     maxQueueDepth: value.MAX_QUEUE_DEPTH,
     larkMessageChunkSize: value.LARK_MESSAGE_CHUNK_SIZE,
-    outboxRetention: { days: value.OUTBOX_RETENTION_DAYS, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE, maxBatches: value.OUTBOX_RETENTION_MAX_BATCHES },
+    outboxRetention: {
+      days: value.OUTBOX_RETENTION_DAYS, payloadDays: 30, batchSize: value.OUTBOX_RETENTION_BATCH_SIZE,
+      maxBatches: value.OUTBOX_RETENTION_MAX_BATCHES, timeBudgetMs: value.RETENTION_COMPACTION_TIME_BUDGET_MS,
+      payloadCompactionEnabled: value.RETENTION_PAYLOAD_COMPACTION_ENABLED === "true",
+      coreEventMode: value.CORE_EVENT_RETENTION_MODE, coreEventRetentionHours: value.CORE_EVENT_RETENTION_HOURS
+    },
     sqliteIntegrityAudit: { intervalMs: value.SQLITE_INTEGRITY_AUDIT_INTERVAL_MS, issueLimit: 20 }
   } as const;
 }
@@ -165,6 +193,11 @@ export function validateProjectDirectories(projects: readonly ProjectConfig[]): 
     let isDirectory = false;
     try { isDirectory = statSync(project.cwd).isDirectory(); } catch {}
     if (!isDirectory) throw new Error(`Project directory is not accessible: ${project.id} (${project.cwd})`);
+    if (project.orchestrator?.enabled) {
+      let orchestratorIsDirectory = false;
+      try { orchestratorIsDirectory = statSync(project.orchestrator.cwd).isDirectory(); } catch {}
+      if (!orchestratorIsDirectory) throw new Error(`Orchestrator directory is not accessible: ${project.id} (${project.orchestrator.cwd})`);
+    }
   }
 }
 

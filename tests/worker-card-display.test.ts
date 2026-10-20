@@ -10,12 +10,15 @@ afterEach(() => { store?.close(); store = undefined; });
 
 function setup(withTask = true) {
   store = new SqliteBindingStore(":memory:");
+  const lease = store.acquireInstanceLease("worker-card-display-test", "2026-10-06T00:00:00.000Z", "2099-01-01T00:00:00.000Z")!;
+  store.activateWriteFence(lease.ownerId, lease.fencingToken);
   store.createPendingBinding({ id: "binding", projectId: "p1", workspaceId: "w", chatId: "c", topicId: "t", rootMessageId: "root", title: "Primary" });
   store.updateBinding("binding", { state: "active", lifecycle: "active", attachment: "attached", paneId: "primary:pane" });
   const run = createQueuedRunCard({ promptId: "parent", bindingId: "binding", title: "parent", workspaceId: "w", paneId: "primary:pane", requestText: "show reviewer", queuePosition: 1, occurredAt: "2026-09-06T00:00:00.000Z" });
   store.acceptPrompt({ prompt: { id: "parent", bindingId: "binding", larkMessageId: "message", actorOpenId: "u", body: "show reviewer" }, view: run, rootMessageId: "root", answerCard: {} });
   store.updatePrompt("parent", "running");
   const worker = store.createAgentInstance({ id: "worker", projectId: "p1", name: "reviewer", role: "worker", agentKind: "traex", model: null, parent: { bindingId: "binding", bindingGeneration: 1, paneId: "primary:pane", nativeSessionId: null }, workerSessionLifecycle: "active", desiredState: "running", workspace: { id: "worker-ws", kind: "shared-read-only", cwd: "/repo", branch: null, baseCommit: "base" } });
+  store.database.prepare("UPDATE agent_instances SET herdr_workspace_id='w', pane_id='worker:pane', native_session_id='worker-session', observed_state='idle', provisioning_checkpoint='verified' WHERE id=?").run(worker.id);
   if (withTask) {
     store.acceptInstanceTurn({ id: "turn", idempotencyKey: "task", actor: { kind: "human", userId: "u" }, projectId: "p1", instanceId: worker.id, instanceGeneration: worker.generation, kind: "turn", text: "review" });
     const view = createQueuedWorkerTurnCard({ turnId: "turn", instanceId: worker.id, instanceGeneration: worker.generation, workerSessionGeneration: worker.workerSessionGeneration, workerName: worker.name, parentTurnId: null, rootMessageId: "root", requestText: "review", queuePosition: 1, occurredAt: "2026-09-06T00:00:01.000Z" });
@@ -30,8 +33,9 @@ describe("WorkerCardDisplayWorkflow", () => {
   it("atomically reserves one consolidated Worker snapshot without creating a turn", () => {
     const { workflow, input } = setup(); const before = store!.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get() as { count: number };
     expect(workflow.show(input)).toMatchObject({ accepted: true, delivery: "queued", worker: { name: "reviewer" }, cards: ["worker-snapshot"], taskTurnId: "turn" });
-    const rows = store!.database.prepare("SELECT idempotency_key, lane_key, kind, payload FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%' ORDER BY delivery_order").all() as Array<{ idempotency_key: string; lane_key: string; kind: string; payload: string }>;
+    const rows = store!.database.prepare("SELECT idempotency_key, lane_key, kind, payload, scope_kind, scope_workspace_id, scope_pane_id, delivery_owner_kind, delivery_parent_id, gateway_plan_hash FROM outbound_replies WHERE idempotency_key LIKE 'worker-display:%' ORDER BY delivery_order").all() as Array<{ idempotency_key: string; lane_key: string; kind: string; payload: string; scope_kind: string; scope_workspace_id: string; scope_pane_id: string; delivery_owner_kind: string; delivery_parent_id: string; gateway_plan_hash: string }>;
     expect(rows).toHaveLength(1); expect(rows[0]!.idempotency_key).toMatch(/:snapshot$/); expect(rows[0]!.kind).toBe("card_reply");
+    expect(rows[0]).toMatchObject({ scope_kind: "pane", scope_workspace_id: "w", scope_pane_id: "worker:pane", delivery_owner_kind: "worker", delivery_parent_id: "binding", gateway_plan_hash: expect.any(String) });
     expect(JSON.parse(rows[0]!.payload)).toMatchObject({ header: { title: { content: "📸 Worker 状态快照 · reviewer" } } });
     expect(rows[0]!.payload).toContain("一次性快照，不会自动更新"); expect(rows[0]!.payload).toContain("review"); expect(rows[0]!.payload).not.toContain("worker_task_instruction_form");
     expect((store!.database.prepare("SELECT COUNT(*) AS count FROM instance_turns").get() as { count: number }).count).toBe(before.count);

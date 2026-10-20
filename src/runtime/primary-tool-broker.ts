@@ -2,6 +2,8 @@ import type { ControlActor } from "../domain/commands.js";
 import type { PrimaryToolMessagingPort } from "../domain/primary-tool-messaging.js";
 import type { WorkerCardDisplayPort } from "../domain/ports/worker-card-display.js";
 import type { AgentKind, CreateWorkerResult } from "../domain/agent-instance.js";
+import type { BindingKind } from "../domain/binding.js";
+import type { PrimaryTopologyQueryPort } from "../domain/primary-topology.js";
 
 export interface PrimaryIdentity { projectId: string; bindingId: string; bindingGeneration: number; parentPromptId: string; sourceMessageId: string; rootMessageId: string }
 export interface PrimaryWorkerCreationPort {
@@ -11,7 +13,7 @@ export const MAX_PRIMARY_WAIT_MS = 29_000;
 
 export class PrimaryToolBroker {
   private readonly actor: Extract<ControlActor, { kind: "thread-primary" }>;
-  constructor(private readonly identity: PrimaryIdentity, private readonly messaging: PrimaryToolMessagingPort, private readonly workerCards?: WorkerCardDisplayPort, private readonly workerCreation?: PrimaryWorkerCreationPort) { this.actor = { kind: "thread-primary", projectId: identity.projectId, bindingId: identity.bindingId, bindingGeneration: identity.bindingGeneration, parentPromptId: identity.parentPromptId }; }
+  constructor(private readonly identity: PrimaryIdentity, private readonly messaging: PrimaryToolMessagingPort, private readonly workerCards?: WorkerCardDisplayPort, private readonly workerCreation?: PrimaryWorkerCreationPort, private readonly topology?: PrimaryTopologyQueryPort, private readonly bindingKind: BindingKind = "task") { this.actor = { kind: "thread-primary", projectId: identity.projectId, bindingId: identity.bindingId, bindingGeneration: identity.bindingGeneration, parentPromptId: identity.parentPromptId }; }
   listInstances(input: { state?: string } = {}) { const all = this.messaging.list(this.actor, this.actor.projectId); return input.state ? all.filter(({ observedState }) => observedState === input.state) : all; }
   promptInstance(input: { instanceId: string; task: string; idempotencyKey: string }) { return this.messaging.submit({ idempotencyKey: input.idempotencyKey, actor: this.actor, projectId: this.actor.projectId, targetInstanceId: input.instanceId, content: { kind: "turn", text: input.task }, source: { messageId: this.identity.sourceMessageId, rootMessageId: this.identity.rootMessageId } }); }
   followUpInstance(input: { instanceId: string; parentTurnId: string; text: string; idempotencyKey: string }) { return this.messaging.submit({ idempotencyKey: input.idempotencyKey, actor: this.actor, projectId: this.actor.projectId, targetInstanceId: input.instanceId, content: { kind: "followup", text: input.text }, source: { messageId: this.identity.sourceMessageId, rootMessageId: this.identity.rootMessageId, parentTurnId: input.parentTurnId } }); }
@@ -37,6 +39,13 @@ export class PrimaryToolBroker {
     if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey) throw new Error("Worker creation requires an idempotencyKey");
     return this.workerCreation.createWorkerFromPrimaryTool({ ...this.identity, idempotencyKey: input.idempotencyKey, command: { kind: "worker_create", name: input.name, agentKind: input.agentKind, model: input.model ?? null, start: input.start ?? true } });
   }
+  listSpaces() { assertOrchestratorTopology(this.bindingKind, this.topology); return this.topology!.listSpaces(this.identity.projectId); }
+  listPanes() { assertOrchestratorTopology(this.bindingKind, this.topology); return this.topology!.listPanes(this.identity.projectId); }
+}
+
+function assertOrchestratorTopology(bindingKind: BindingKind, topology?: PrimaryTopologyQueryPort): void {
+  if (bindingKind !== "orchestrator") throw new Error("Topology tools require an active Orchestrator binding");
+  if (!topology) throw new Error("Orchestrator topology inspection is unavailable");
 }
 
 function nonNegativeInteger(value: string | number, name: string): number {

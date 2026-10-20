@@ -4,6 +4,7 @@ import type { OutboundIntentPort } from "../domain/ports/outbox.js";
 import type { ApplicationPresentation } from "../domain/ports/presentation.js";
 import type { Binding, InstanceCommand, IncomingLarkCardAction, IncomingLarkMessage, LarkCardActionResult, ProjectConfig } from "../domain/types.js";
 import type { AgentInstance } from "../domain/agent-instance.js";
+import type { ResolvedCommandTarget } from "../domain/natural-language-command-confirmation.js";
 import type { AgentDriverCatalog } from "../domain/agent-runtime.js";
 import type { WorkerSessionThreadWorkflowPort } from "../domain/ports/worker-session-thread.js";
 import type { InstanceControlPort, InstanceMessagingPort } from "../domain/ports/instance-workflows.js";
@@ -18,16 +19,16 @@ export type { InstanceCardActionCommand } from "./card-action-command.js";
 
 export interface InstanceInteractionWorkflowPort {
   handleCommand(message: IncomingLarkMessage, command: InstanceCommand): Promise<void>;
-  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: AgentInstance; binding: Binding | null } | { outcome: "rejected"; message: string };
+  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: AgentInstance; binding: Binding; target: ResolvedCommandTarget } | { outcome: "rejected"; message: string };
   handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean>;
-  handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand): Promise<LarkCardActionResult>;
+  handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand | Extract<import("./card-action-command.js").CardActionCommand, { kind: "completion-action" }>): Promise<LarkCardActionResult>;
 }
 
 interface Options {
   projects: readonly ProjectConfig[]; adminOpenIds: readonly string[]; store: InstanceStore;
   control: Pick<InstanceControlPort, "createWorker" | "start" | "stop" | "planRemoval" | "confirmRemoval" | "inspect" | "listWorkersForParent">;
-  messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt">; drivers: AgentDriverCatalog; outbound: OutboundIntentPort;
-  presentation: Pick<ApplicationPresentation, "answerCard" | "commandResult" | "projectDirectory" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerStatusSnapshot" | "workerThreadEntry" | "workerThreadAccepted" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">;
+  messaging: Pick<InstanceMessagingPort, "submit" | "steer" | "interrupt" | "acceptWorkerCompletionAction" | "ignoreWorkerCompletionAction">; drivers: AgentDriverCatalog; outbound: OutboundIntentPort;
+  presentation: Pick<ApplicationPresentation, "answerCard" | "commandResult" | "projectDirectory" | "instanceCreate" | "instanceDetail" | "instanceDirectory" | "instanceRemovalPlan" | "instanceSteer" | "mainCard" | "requestRejected" | "workerMain" | "workerStatusSnapshot" | "workerThreadEntry" | "workerNewTask" | "workerTaskInstruction" | "workerTurn">;
   workerCreation?: WorkerCreationGateway; idFactory?: () => string;
   wakeOutbound?: () => void;
   workerSessionThreads?: Pick<WorkerSessionThreadWorkflowPort, "publishFromCard">;
@@ -54,12 +55,16 @@ export class InstanceInteractionWorkflow implements InstanceInteractionWorkflowP
     return this.commands.handle(message, command);
   }
 
-  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: AgentInstance; binding: Binding | null } | { outcome: "rejected"; message: string } {
+  resolveNaturalLanguageMutationTarget(message: IncomingLarkMessage, command: Extract<InstanceCommand, { kind: "to" | "steer_instance" | "stop_instance" }>): { outcome: "resolved"; instance: AgentInstance; binding: Binding; target: ResolvedCommandTarget } | { outcome: "rejected"; message: string } {
     if (!this.isOperator(message.actorOpenId)) return { outcome: "rejected", message: "你没有 Agent 管理权限。" };
     const context = this.context.resolve(message);
     const binding = context.conversationKey.startsWith("binding:") ? this.options.store.getBinding(context.conversationKey.slice(8)) : null;
     const instance = this.context.findByName(context.conversationKey, command.name);
-    return instance ? { outcome: "resolved", instance, binding } : { outcome: "rejected", message: `实例不存在或不属于当前 Primary：${command.name}` };
+    if (!instance) return { outcome: "rejected", message: `实例不存在或不属于当前 Primary：${command.name}` };
+    if (!binding || !binding.paneId || !instance.parent || instance.parent.bindingId !== binding.id || instance.parent.bindingGeneration !== binding.generation || instance.parent.paneId !== binding.paneId) {
+      return { outcome: "rejected", message: `实例身份不完整或已过期：${command.name}` };
+    }
+    return { outcome: "resolved", instance, binding, target: { version: 1, kind: "worker", instanceId: instance.id, instanceGeneration: instance.generation, workerSessionGeneration: instance.workerSessionGeneration, parentBindingId: binding.id, parentBindingGeneration: binding.generation, parentPaneId: instance.parent.paneId } };
   }
 
   async handleOrdinaryMessage(message: IncomingLarkMessage): Promise<boolean> {
@@ -85,13 +90,34 @@ export class InstanceInteractionWorkflow implements InstanceInteractionWorkflowP
     return true;
   }
 
-  async handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand): Promise<LarkCardActionResult> {
+  async handleCardAction(action: IncomingLarkCardAction, command: InstanceCardActionCommand | Extract<import("./card-action-command.js").CardActionCommand, { kind: "completion-action" }>): Promise<LarkCardActionResult> {
+    if (command.kind === "completion-action") return this.submitWorkerCompletionAction(action, command);
     if (!this.isOperator(action.operatorOpenId)) return { toast: { type: "error", content: "你没有 Agent 管理权限。" } };
     if (command.action === "worker_thread_send" && this.options.workerSessionThreads) return this.options.workerSessionThreads.publishFromCard(action, { instanceId: command.instanceId, runtimeGeneration: command.generation, workerSessionGeneration: command.workerSessionGeneration, conversationKey: command.conversationKey, ...(command.bindingId ? { bindingId: command.bindingId, bindingGeneration: command.bindingGeneration } : {}), ...(command.parentPaneId && command.sourceMainMessageId ? { parentPaneId: command.parentPaneId, sourceMainMessageId: command.sourceMainMessageId } : {}) });
     if (command.action === "worker_thread_send") return this.workerLifecycle.handle(action, command);
     if ("turnId" in command && "workerSessionGeneration" in command) return this.workerCards.handleTask(action, command);
     if ("workerSessionGeneration" in command) return this.workerCards.handleNewTask(action, command);
     return this.workerLifecycle.handle(action, command);
+  }
+
+  private async submitWorkerCompletionAction(action: IncomingLarkCardAction, command: Extract<import("./card-action-command.js").CardActionCommand, { kind: "completion-action" }>): Promise<LarkCardActionResult> {
+    if (command.ownerKind !== "worker-turn" || action.messageId !== command.cardMessageId) return { toast: { type: "warning", content: "该快捷操作已失效，请发送新的消息。" } };
+    try {
+      if ("ignore" in command) {
+        await this.options.messaging.ignoreWorkerCompletionAction({
+          actionSetId: command.actionSetId, ownerTurnId: command.ownerId, ownerGeneration: command.ownerGeneration,
+          cardMessageId: command.cardMessageId, chatId: action.chatId, actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }
+        });
+        return { toast: { type: "success", content: "已忽略。" } };
+      }
+      const receipt = await this.options.messaging.acceptWorkerCompletionAction({
+        actionSetId: command.actionSetId, ...("selection" in command ? { selection: command.selection } : { optionId: command.optionId }), ownerTurnId: command.ownerId, ownerGeneration: command.ownerGeneration,
+        cardMessageId: command.cardMessageId, chatId: action.chatId, actor: { kind: "human", userId: action.operatorOpenId, channel: "feishu" }
+      });
+      return { toast: { type: "success", content: receipt.inserted ? `快捷消息已提交，当前队列第 ${receipt.card.queuePosition} 位。` : "这条快捷消息已提交。" } };
+    } catch {
+      return { toast: { type: "warning", content: "该快捷操作已失效，请发送新的消息。" } };
+    }
   }
 
   private isOperator(openId: string): boolean { return this.options.adminOpenIds.includes(openId); }

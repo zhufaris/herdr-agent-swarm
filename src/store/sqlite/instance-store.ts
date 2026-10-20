@@ -1,4 +1,5 @@
 import type { AgentInstance, CreateAgentInstanceInput, InstanceProvisioningCheckpoint, InstanceRemovalPlan, WorkspaceLease, WorkspaceLeaseState } from "../../domain/agent-instance.js";
+import type { UpdateAgentInstanceObservationInput, UpdateAgentInstanceObservationResult } from "../../domain/ports/instance.js";
 import { mapAgentInstance, mapWorkspaceLease, type AgentInstanceRow, type WorkspaceLeaseRow } from "../instance-records.js";
 import type { SqliteContext } from "./context.js";
 
@@ -14,7 +15,7 @@ export class SqliteInstanceStore {
 
   createAgentInstance(input: CreateAgentInstanceInput): AgentInstance {
     const timestamp = now();
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       this.database.prepare(`
         INSERT INTO agent_instances(
           id, project_id, name, role, agent_kind, model, source_primary_pane_label, parent_binding_id, parent_binding_generation, parent_pane_id, parent_native_session_id, worker_session_lifecycle, desired_state, observed_state, workspace_lease_id, generation, created_at, updated_at,
@@ -33,7 +34,7 @@ export class SqliteInstanceStore {
     if (!input.parent) throw new Error("Worker parent identity is required");
     const parent = input.parent;
     const timestamp = now();
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const count = this.database.prepare("SELECT COUNT(*) AS count FROM agent_instances WHERE project_id = ? AND role = 'worker' AND worker_session_lifecycle = 'active'").get(input.projectId) as { count: number };
       if (count.count >= maxWorkers) return { outcome: "limit-reached" };
       const duplicate = this.database.prepare("SELECT 1 FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? AND parent_pane_id = ? AND name = ? LIMIT 1").get(parent.bindingId, parent.paneId, input.name);
@@ -73,6 +74,10 @@ export class SqliteInstanceStore {
     return row ? mapAgentInstance(row) : null;
   }
 
+  findWorkerAgentInstancesByPane(paneId: string): AgentInstance[] {
+    return (this.database.prepare("SELECT * FROM agent_instances WHERE role = 'worker' AND pane_id = ? ORDER BY created_at, id").all(paneId) as AgentInstanceRow[]).map(mapAgentInstance);
+  }
+
   listWorkerInstancesByParent(input: { bindingId: string; paneId: string }): AgentInstance[] {
     return (this.database.prepare("SELECT * FROM agent_instances WHERE role = 'worker' AND worker_session_lifecycle = 'active' AND parent_binding_id = ? AND parent_pane_id = ? ORDER BY created_at, id").all(input.bindingId, input.paneId) as AgentInstanceRow[]).map(mapAgentInstance);
   }
@@ -82,7 +87,7 @@ export class SqliteInstanceStore {
   }
 
   setPrimaryAgentInstance(projectId: string, instanceId: string): AgentInstance {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const target = this.database.prepare("SELECT project_id FROM agent_instances WHERE id = ?").get(instanceId) as { project_id: string } | undefined;
       if (!target || target.project_id !== projectId) throw new Error(`Agent instance not found in project: ${instanceId}`);
       const timestamp = now();
@@ -92,18 +97,18 @@ export class SqliteInstanceStore {
     });
   }
 
-  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string | null }): AgentInstance | null {
+  attachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; paneToken?: string | null; nativeSessionId: string | null }): AgentInstance | null {
     const nextGeneration = input.expectedGeneration + 1;
-    return this.context.transaction(() => {
-      const result = this.database.prepare(`UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, native_session_id = ?, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, generation = ?, observed_state = 'idle', provisioning_checkpoint = 'verified', last_error = NULL, updated_at = ? WHERE id = ? AND generation = ?`)
-        .run(input.herdrWorkspaceId, input.paneId, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
+    return this.context.transaction("sqlite.instance-store.write", () => {
+      const result = this.database.prepare(`UPDATE agent_instances SET herdr_workspace_id = ?, pane_id = ?, pane_token = ?, native_session_id = ?, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, generation = ?, observed_state = 'idle', provisioning_checkpoint = 'verified', last_error = NULL, updated_at = ? WHERE id = ? AND generation = ?`)
+        .run(input.herdrWorkspaceId, input.paneId, input.paneToken ?? null, input.nativeSessionId, nextGeneration, now(), input.instanceId, input.expectedGeneration);
       return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(input.instanceId) : null, "worker.runtime-attached");
     });
   }
 
   refreshAgentInstanceRuntimeSession(input: { instanceId: string; expectedGeneration: number; herdrWorkspaceId: string; paneId: string; nativeSessionId: string }): AgentInstance | null {
     if (!input.nativeSessionId) return null;
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const result = this.database.prepare(`UPDATE agent_instances
         SET native_session_id = ?, updated_at = ?
         WHERE id = ? AND generation = ? AND role = 'worker'
@@ -113,8 +118,20 @@ export class SqliteInstanceStore {
     });
   }
 
+  adoptAgentInstanceRuntimeMove(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceId: string; expectedPaneId: string; expectedNativeSessionId: string | null; paneId: string; paneToken?: string | null }): AgentInstance | null {
+    return this.context.transaction("sqlite.instance-store.write", () => {
+      const result = this.database.prepare(`UPDATE agent_instances SET pane_id=?,pane_token=?,updated_at=?
+        WHERE id=? AND generation=? AND role='worker' AND worker_session_lifecycle='active' AND desired_state='running'
+          AND herdr_workspace_id=? AND pane_id=? AND native_session_id IS ?`).run(
+        input.paneId, input.paneToken ?? null, now(), input.instanceId, input.expectedGeneration,
+        input.expectedWorkspaceId, input.expectedPaneId, input.expectedNativeSessionId
+      );
+      return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(input.instanceId) : null, "worker.topology-moved");
+    });
+  }
+
   checkpointAgentInstance(input: { instanceId: string; expectedGeneration: number; checkpoint: InstanceProvisioningCheckpoint; observedState?: AgentInstance["observedState"]; pendingPaneId?: string | null; pendingWorkspaceId?: string | null; lastError?: string | null }): AgentInstance | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const result = this.database.prepare(`UPDATE agent_instances SET provisioning_checkpoint = ?, observed_state = COALESCE(?, observed_state), pending_pane_id = COALESCE(?, pending_pane_id), pending_herdr_workspace_id = COALESCE(?, pending_herdr_workspace_id), last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
         .run(input.checkpoint, input.observedState ?? null, input.pendingPaneId ?? null, input.pendingWorkspaceId ?? null, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
       return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(input.instanceId) : null, "worker.provisioning-changed");
@@ -122,23 +139,31 @@ export class SqliteInstanceStore {
   }
 
   updateAgentInstanceLifecycle(input: { instanceId: string; expectedGeneration: number; desiredState: AgentInstance["desiredState"]; observedState: AgentInstance["observedState"]; clearRuntime?: boolean; lastError?: string | null }): AgentInstance | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const clear = input.clearRuntime ? 1 : 0;
-      const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
-        .run(input.desiredState, input.observedState, clear, clear, clear, clear, clear, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
+      const result = this.database.prepare(`UPDATE agent_instances SET desired_state = ?, observed_state = ?, herdr_workspace_id = CASE WHEN ? THEN NULL ELSE herdr_workspace_id END, pane_id = CASE WHEN ? THEN NULL ELSE pane_id END, pane_token = CASE WHEN ? THEN NULL ELSE pane_token END, native_session_id = CASE WHEN ? THEN NULL ELSE native_session_id END, pending_herdr_workspace_id = CASE WHEN ? THEN NULL ELSE pending_herdr_workspace_id END, pending_pane_id = CASE WHEN ? THEN NULL ELSE pending_pane_id END, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`)
+        .run(input.desiredState, input.observedState, clear, clear, clear, clear, clear, clear, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
       return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(input.instanceId) : null, "worker.lifecycle-changed");
     });
   }
 
-  updateAgentInstanceObservation(input: { instanceId: string; expectedGeneration: number; observedState: AgentInstance["observedState"]; lastError?: string | null }): AgentInstance | null {
-    return this.context.transaction(() => {
-      const result = this.database.prepare("UPDATE agent_instances SET observed_state = ?, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.observedState, input.lastError ?? null, now(), input.instanceId, input.expectedGeneration);
-      return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(input.instanceId) : null, "worker.runtime-observed");
+  updateAgentInstanceObservation(input: UpdateAgentInstanceObservationInput): UpdateAgentInstanceObservationResult {
+    return this.context.transaction("sqlite.instance-store.write", () => {
+      const instance = this.getAgentInstance(input.instanceId);
+      if (!instance || instance.generation !== input.expectedGeneration || !sameRuntime(instance.runtimeRef, input.expectedRuntime) || !sameParent(instance.parent, input.expectedParent)) return { outcome: "stale" };
+      const paneToken = input.paneToken ?? instance.runtimeRef.paneToken ?? null;
+      const lastError = input.lastError ?? null;
+      if (instance.observedState === input.observedState && (instance.runtimeRef.paneToken ?? null) === paneToken && instance.lastError === lastError) return { outcome: "unchanged", instance };
+      const result = this.database.prepare("UPDATE agent_instances SET observed_state = ?, pane_token = ?, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(input.observedState, paneToken, lastError, now(), input.instanceId, input.expectedGeneration);
+      const updated = result.changes === 1 ? this.getAgentInstance(input.instanceId) : null;
+      if (!updated) return { outcome: "stale" };
+      this.dependencies.invalidateWorkerInstanceContexts(updated, "worker.runtime-observed");
+      return { outcome: "updated", instance: updated };
     });
   }
 
   reserveAgentInstanceStop(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const instance = this.getAgentInstance(instanceId);
       if (!instance || instance.generation !== expectedGeneration) return { outcome: "stale" };
       const active = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(instanceId, expectedGeneration);
@@ -150,7 +175,7 @@ export class SqliteInstanceStore {
   }
 
   reserveWorkerPaneClose(instanceId: string, expectedGeneration: number): { outcome: "reserved"; instance: AgentInstance } | { outcome: "busy" | "stale" } {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const instance = this.getAgentInstance(instanceId);
       if (!instance || instance.role !== "worker" || instance.generation !== expectedGeneration || instance.workerSessionLifecycle !== "active" || instance.desiredState !== "running") return { outcome: "stale" };
       const pending = this.database.prepare("SELECT 1 FROM instance_turns WHERE instance_id = ? AND instance_generation = ? AND state IN ('queued','claimed','dispatching','running','blocked','dispatch-uncertain') LIMIT 1").get(instanceId, expectedGeneration);
@@ -162,8 +187,8 @@ export class SqliteInstanceStore {
   }
 
   finishAgentInstanceStop(instanceId: string, expectedGeneration: number): AgentInstance | null {
-    return this.context.transaction(() => {
-      const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);
+    return this.context.transaction("sqlite.instance-store.write", () => {
+      const result = this.database.prepare(`UPDATE agent_instances SET observed_state = 'stopped', herdr_workspace_id = NULL, pane_id = NULL, pane_token = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = NULL, updated_at = ? WHERE id = ? AND generation = ? AND desired_state = 'stopped'`).run(now(), instanceId, expectedGeneration);
       return this.invalidateChanged(result.changes === 1 ? this.getAgentInstance(instanceId) : null, "worker.stopped");
     });
   }
@@ -174,19 +199,19 @@ export class SqliteInstanceStore {
   }
 
   detachAgentInstanceRuntime(input: { instanceId: string; expectedGeneration: number; reason: string }): AgentInstance | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const instance = this.getAgentInstance(input.instanceId);
       if (!instance || instance.generation !== input.expectedGeneration) return null;
       const nextGeneration = input.expectedGeneration + 1;
       this.database.prepare(`UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')`).run(input.reason, now(), instance.id, input.expectedGeneration);
       this.database.prepare(`UPDATE instance_turns SET instance_generation = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'`).run(nextGeneration, now(), instance.id, input.expectedGeneration);
-      const changed = this.database.prepare(`UPDATE agent_instances SET generation = ?, observed_state = 'detached', herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`).run(nextGeneration, input.reason, now(), instance.id, input.expectedGeneration);
+      const changed = this.database.prepare(`UPDATE agent_instances SET generation = ?, observed_state = 'detached', herdr_workspace_id = NULL, pane_id = NULL, pane_token = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?`).run(nextGeneration, input.reason, now(), instance.id, input.expectedGeneration);
       return this.invalidateChanged(changed.changes === 1 ? this.getAgentInstance(instance.id) : null, "worker.runtime-detached");
     });
   }
 
   terminateWorkerSession(input: { instanceId: string; expectedGeneration: number; reason: string }): { instance: AgentInstance; cancelledTurnIds: string[]; uncertainTurnIds: string[] } | null {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const instance = this.getAgentInstance(input.instanceId);
       if (!instance || instance.role !== "worker" || instance.generation !== input.expectedGeneration) return null;
       const turns = this.database.prepare("SELECT id, state FROM instance_turns WHERE instance_id = ? AND instance_generation = ? ORDER BY created_at, rowid").all(instance.id, instance.generation) as Array<{ id: string; state: string }>;
@@ -196,7 +221,7 @@ export class SqliteInstanceStore {
       const nextGeneration = instance.generation + 1;
       this.database.prepare("UPDATE instance_turns SET state = 'cancelled', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state = 'queued'").run(input.reason, timestamp, instance.id, instance.generation);
       this.database.prepare("UPDATE instance_turns SET state = 'dispatch-uncertain', error = ?, updated_at = ? WHERE instance_id = ? AND instance_generation = ? AND state IN ('claimed','dispatching','running','blocked')").run(input.reason, timestamp, instance.id, instance.generation);
-      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = ?, herdr_workspace_id = NULL, pane_id = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(nextGeneration, input.reason, timestamp, instance.id, instance.generation);
+      const changed = this.database.prepare("UPDATE agent_instances SET desired_state = 'stopped', observed_state = 'stopped', worker_session_lifecycle = 'terminated', generation = ?, herdr_workspace_id = NULL, pane_id = NULL, pane_token = NULL, native_session_id = NULL, pending_herdr_workspace_id = NULL, pending_pane_id = NULL, last_error = ?, updated_at = ? WHERE id = ? AND generation = ?").run(nextGeneration, input.reason, timestamp, instance.id, instance.generation);
       if (changed.changes === 1) this.dependencies.retireWorkerSession(instance.id, instance.workerSessionGeneration, timestamp);
       const terminated = this.invalidateChanged(changed.changes === 1 ? this.getAgentInstance(instance.id) : null, "worker.terminated");
       return terminated ? { instance: terminated, cancelledTurnIds, uncertainTurnIds } : null;
@@ -231,7 +256,7 @@ export class SqliteInstanceStore {
   }
 
   removeAgentInstance(input: { instanceId: string; expectedGeneration: number; expectedWorkspaceGeneration: number }): boolean {
-    return this.context.transaction(() => {
+    return this.context.transaction("sqlite.instance-store.write", () => {
       const instance = this.getAgentInstance(input.instanceId);
       if (!instance || instance.generation !== input.expectedGeneration || instance.desiredState !== "stopped" || instance.runtimeRef || instance.pendingRuntimeRef) return false;
       const lease = this.getWorkspaceLease(instance.workspaceLeaseId);
@@ -250,3 +275,19 @@ export class SqliteInstanceStore {
 }
 
 function now(): string { return new Date().toISOString(); }
+
+function sameRuntime(actual: AgentInstance["runtimeRef"], expected: NonNullable<AgentInstance["runtimeRef"]>): actual is NonNullable<AgentInstance["runtimeRef"]> {
+  return actual !== null
+    && actual.generation === expected.generation
+    && actual.herdrWorkspaceId === expected.herdrWorkspaceId
+    && actual.paneId === expected.paneId
+    && actual.nativeSessionId === expected.nativeSessionId;
+}
+
+function sameParent(actual: AgentInstance["parent"], expected: AgentInstance["parent"]): boolean {
+  if (!actual || !expected) return actual === expected;
+  return actual.bindingId === expected.bindingId
+    && (actual.bindingGeneration ?? null) === (expected.bindingGeneration ?? null)
+    && actual.paneId === expected.paneId
+    && actual.nativeSessionId === expected.nativeSessionId;
+}

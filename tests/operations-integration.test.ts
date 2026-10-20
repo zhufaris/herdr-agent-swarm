@@ -19,18 +19,25 @@ describe("operational commands", () => {
       replyCard, async shareThread() { return { messageId: "shared" }; }, async updateCard(_id, card) { updates.push(card); }
     };
     const herdr: HerdrPort = {
-      async assertWorkspace() {}, async listPanes() { return []; }, async getPane() { return null; }, async createPane() { throw new Error("unused"); },
+      async assertWorkspace() {},
+      async listPanes() { return [{ paneId: "w1:primary", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }]; },
+      async getPane() { return { paneId: "w1:primary", workspaceId: "w1", cwd: "/repo", foregroundExecutables: ["traex"], agentState: "idle" }; },
+      async createPane() { throw new Error("unused"); },
       async startTraex() {}, async runPrompt() { return "done"; }, async renamePane() {}
     };
     const store = new SqliteBindingStore(":memory:");
     store.createPendingBinding({ id: "b1", workspaceId: "w1", chatId: "chat", topicId: "t1", rootMessageId: "root", title: "Visible" });
+    store.updateBinding("b1", { state: "active", lifecycle: "active", attachment: "attached", paneId: "w1:primary" });
     store.createPendingBinding({ id: "b2", workspaceId: "w1", chatId: "other", topicId: "t2", rootMessageId: "other-root", title: "Hidden" });
     store.enqueuePrompt({ id: "p1", bindingId: "b1", larkMessageId: "prompt-message", actorOpenId: "u1", body: "must not replay" });
     store.updatePrompt("p1", "failed", "run failed");
-    store.enqueueOutboundReply({ id: "o1", idempotencyKey: "failed-output", bindingId: "b1", promptId: "p1", rootMessageId: "root", kind: "card_reply", payload: "{}" });
-    for (let attempt = 0; attempt < 5; attempt += 1) store.markOutboundReplyFailed("o1", "send failed");
     const bus = new BridgeEventBus();
-    const publisher = createTestPublisher(store, lark, pino({ enabled: false })); publisher.start();
+    const publisher = createTestPublisher(store, lark, pino({ enabled: false }));
+    store.reservePreparedOutboundReply({ id: "o1", idempotencyKey: "failed-output", bindingId: "b1", bindingGeneration: 1, promptId: "p1", rootMessageId: "root", kind: "card_reply", payload: "{}" });
+    store.markOutboundReplyDeadLetter("o1", "send rejected", {
+      failureClass: "permanent", effectCertainty: "rejected", httpStatus: 400, larkErrorCode: "rejected"
+    });
+    publisher.start();
     const coordinator = createTestRouter(config(), store, herdr, lark, bus, publisher, pino({ enabled: false }));
     await coordinator.start();
 
@@ -42,11 +49,11 @@ describe("operational commands", () => {
     expect(JSON.stringify(failureCard)).toContain("retry_dead_letter");
     const value = findAction(failureCard, "retry_dead_letter");
     await onAction!({ messageId: "failure-card", chatId: "chat", operatorOpenId: "u1", value });
-    await publisher.drain(true);
+    await publisher.drain();
 
     expect(store.getOutboundReply("o1")).toMatchObject({ state: "delivered" });
     expect(replyCard).toHaveBeenCalledWith("root", {}, "failed-output");
-    expect(store.getOperationalSummary().prompts.failed).toBe(1);
+    expect(store.getPrompt("p1")).toMatchObject({ state: "failed" });
     expect(store.countPendingPrompts("b1")).toBe(0);
     expect(JSON.stringify(updates.at(-1))).toContain("不会重放 TraeX 任务");
 

@@ -73,7 +73,7 @@ export class PriorityReconciliationRunner {
     this.all.requested = false;
     this.all.acceptedAt = null;
     for (const waiter of this.all.waiters.splice(0)) waiter.resolve();
-    if (this.active) await this.active;
+    if (this.active) await this.active.catch(() => undefined);
   }
 
   snapshot(): PriorityReconciliationRunnerSnapshot {

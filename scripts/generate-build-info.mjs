@@ -16,7 +16,8 @@ const buildId = calculateBuildId({
 });
 const git = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
 const gitCommit = git.status === 0 && /^[a-f0-9]{40}$/.test(git.stdout.trim()) ? git.stdout.trim() : null;
-const identity = { serviceId: "herdr-agent-swarm", version: packageJson.version, buildId, gitCommit };
+const gitBranch = resolveGitBranch(root);
+const identity = { serviceId: "herdr-agent-swarm", version: packageJson.version, buildId, gitCommit, gitBranch };
 const output = join(dist, "build-info.json");
 writeFileSync(output, `${JSON.stringify(identity, null, 2)}\n`, { mode: 0o644 });
 const { loadBuildIdentity } = await import(pathToFileURL(join(dist, "runtime/build-identity.js")).href);
@@ -28,4 +29,13 @@ function javascriptFiles(directory) {
     const path = join(directory, entry.name);
     return entry.isDirectory() ? javascriptFiles(path) : entry.isFile() && entry.name.endsWith(".js") ? [path] : [];
   });
+}
+
+function resolveGitBranch(directory) {
+  const symbolic = spawnSync("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: directory, encoding: "utf8" });
+  if (symbolic.status === 0 && symbolic.stdout.trim()) return symbolic.stdout.trim();
+  const pointed = spawnSync("git", ["for-each-ref", "--points-at", "HEAD", "--format=%(refname:short)", "refs/heads"], { cwd: directory, encoding: "utf8" });
+  if (pointed.status !== 0) return null;
+  const branches = pointed.stdout.split("\n").map((value) => value.trim()).filter(Boolean).sort();
+  return branches.find((branch) => branch === "main") ?? branches.find((branch) => branch === "master") ?? branches[0] ?? null;
 }
