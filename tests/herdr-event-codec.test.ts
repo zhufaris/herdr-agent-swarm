@@ -1,8 +1,89 @@
 import { describe, expect, it } from "vitest";
 import { decodePersistedAgentEvent, encodePersistedAgentEvent } from "../src/runtime/herdr-events/event-codec.js";
-import { MAX_FREEFORM_EVENT_TEXT_BYTES } from "../src/domain/herdr-event-payload-schema.js";
+import {
+  MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES,
+  MAX_FREEFORM_EVENT_TEXT_BYTES
+} from "../src/domain/herdr-event-payload-schema.js";
 
 describe("persisted Herdr event codec", () => {
+  it("round-trips an allowlisted context snapshot", () => {
+    const event = {
+      schemaVersion: 1 as const,
+      eventId: "event-context-snapshot",
+      cursor: "source-1:context-snapshot",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      payload: {
+        type: "context_snapshot" as const,
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        cwd: "/repo",
+        collaborationMode: "default",
+        permissionMode: "managed",
+        currentDate: "2026-10-22",
+        timezone: "Etc/UTC",
+        worktreePath: "/repo/.worktrees/task",
+        worktreeState: "clean",
+        modelContextWindow: 4_000,
+        autoCompactLimit: 3_000
+      }
+    };
+
+    expect(decodePersistedAgentEvent(encodePersistedAgentEvent(event))).toEqual(event);
+  });
+
+  it("rejects an empty context snapshot payload", () => {
+    expect(() => decodePersistedAgentEvent({
+      schemaVersion: 1,
+      eventId: "event-context-empty",
+      cursor: "source-1:context-empty",
+      sourceId: "source-1",
+      agentKind: "traex",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      payload: { type: "context_snapshot" }
+    })).toThrow();
+  });
+
+  it("rejects unknown or private context snapshot fields", () => {
+    expect(() => decodePersistedAgentEvent({
+      schemaVersion: 1,
+      eventId: "event-context-private",
+      cursor: "source-1:context-private",
+      sourceId: "source-1",
+      agentKind: "traex",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      payload: {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        private_prompt: "never persist this"
+      }
+    })).toThrow();
+  });
+
+  it("rejects an oversized context snapshot identifier", () => {
+    expect(() => decodePersistedAgentEvent({
+      schemaVersion: 1,
+      eventId: "event-context-oversized",
+      cursor: "source-1:context-oversized",
+      sourceId: "source-1",
+      agentKind: "traex",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      payload: {
+        type: "context_snapshot",
+        model: "x".repeat(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES + 1)
+      }
+    })).toThrow();
+  });
+
   it("round-trips normalized response token usage", () => {
     const event = {
       schemaVersion: 1 as const,

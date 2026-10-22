@@ -219,7 +219,7 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
         const shouldProjectNewEvent = stored.admission === "new" && !stored.skipProjection && !isSettledLaneItem(laneState ?? undefined);
         const shouldProjectExactReplay = insertedLaneItem
           && stored.admission === "duplicate"
-          && isTokenUsagePayload(stored.event.payload)
+          && isExactReplayProjectedPayload(stored.event.payload)
           && !stored.skipProjection;
         if (shouldProjectNewEvent || shouldProjectExactReplay) {
           let projection: { segmentId?: string | null; outcome?: string } | void = undefined;
@@ -868,6 +868,14 @@ function isSourceErrorPayload(payload: unknown): boolean {
 
 function isTokenUsagePayload(payload: unknown): payload is Record<string, unknown> & { type: "token_usage" } {
   return typeof payload === "object" && payload !== null && (payload as { type?: unknown }).type === "token_usage";
+}
+
+function isContextSnapshotPayload(payload: unknown): payload is Record<string, unknown> & { type: "context_snapshot" } {
+  return typeof payload === "object" && payload !== null && (payload as { type?: unknown }).type === "context_snapshot";
+}
+
+function isExactReplayProjectedPayload(payload: unknown): boolean {
+  return isTokenUsagePayload(payload) || isContextSnapshotPayload(payload);
 }
 
 function validateBatch(batch: CoreEventInboxBatch): void {

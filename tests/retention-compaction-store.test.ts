@@ -249,6 +249,104 @@ describe("SQLite retention payload compaction", () => {
     context.close();
   });
 
+  it("keeps context-snapshot events on the unchanged generic Core compaction path", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    const coreOld = new Date(Date.parse(now) - CORE_EVENT_RETENTION_WINDOW_MS - 1).toISOString();
+    const snapshot = {
+      schemaVersion: 1 as const,
+      eventId: "audit-context",
+      cursor: "cursor:context",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: coreOld,
+      payload: {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        permission_mode: "managed",
+        current_date: "2026-10-22",
+        timezone: "Etc/UTC",
+        auto_compact_limit: 3_000
+      }
+    };
+    const human = {
+      schemaVersion: 1 as const,
+      eventId: "audit-human-context",
+      cursor: "cursor:human-context",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: coreOld,
+      payload: { type: "human_message", message_id: "message-1", text: "hello", truncated: false, submission_id: "submission-1" }
+    };
+    const snapshotJson = JSON.stringify(snapshot);
+    const humanJson = JSON.stringify(human);
+    context.database.prepare(`INSERT INTO core_event_inbox(
+      event_id,source_id,agent_kind,session_id,turn_id,source_cursor,occurred_at,event_json,ingested_at,event_type,submission_id
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+      snapshot.eventId, snapshot.sourceId, snapshot.agentKind, snapshot.sessionId, snapshot.turnId, snapshot.cursor,
+      snapshot.occurredAt, snapshotJson, coreOld, "context_snapshot"
+    );
+    context.database.prepare(`INSERT INTO core_event_inbox(
+      event_id,source_id,agent_kind,session_id,turn_id,source_cursor,occurred_at,event_json,ingested_at,event_type,submission_id
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+      human.eventId, human.sourceId, human.agentKind, human.sessionId, human.turnId, human.cursor,
+      human.occurredAt, humanJson, coreOld, "human_message", "submission-1"
+    );
+    context.database.prepare(`INSERT INTO conversation_segments(
+      id,producer_key,owner_kind,owner_id,owner_generation,submission_id,human_event_id,agent_kind,session_id,
+      request_text,state,view_version,root_message_id,created_at,updated_at
+    ) VALUES('context-segment','lane:audit-context-lane','primary','binding-1',1,'submission-1','audit-human-context','traex','session-1',
+      'hello','completed',1,'root-1',?,?)`).run(coreOld, coreOld);
+    context.database.prepare(`INSERT INTO core_event_lane_items(lane_id,event_id,sequence,state,created_at,updated_at)
+      VALUES('audit-context-lane',?,1,'projected',?,?),('audit-context-lane',?,2,'projected',?,?)`)
+      .run(snapshot.eventId, coreOld, coreOld, human.eventId, coreOld, coreOld);
+    context.database.prepare(`INSERT INTO core_event_lane_checkpoints(
+      lane_id,source_id,source_epoch,agent_kind,session_id,read_cursor,latest_cursor,updated_at
+    ) VALUES('audit-context-lane','source-1','epoch-1','traex','session-1','cursor:human-context','cursor:human-context',?)`).run(coreOld);
+
+    const audit = graph.retentionCompaction.auditPage({
+      kind: "core_event",
+      evaluatedAt: now,
+      retentionWindowMs: CORE_EVENT_RETENTION_WINDOW_MS,
+      limit: 10
+    });
+
+    expect(audit).toMatchObject({
+      source: "core_event",
+      scanned: 2,
+      eligible: 1,
+      alreadyVerified: 0,
+      eligibleBytes: Buffer.byteLength(snapshotJson),
+      refusals: { human_input_retained: 1 }
+    });
+
+    const compact = graph.retentionCompaction.compactPage({
+      kind: "core_event",
+      evaluatedAt: now,
+      retentionWindowMs: CORE_EVENT_RETENTION_WINDOW_MS,
+      limit: 10
+    });
+
+    expect(compact).toMatchObject({
+      source: "core_event",
+      scanned: 2,
+      compacted: 1,
+      alreadyCompacted: 0,
+      refusals: { human_input_retained: 1 }
+    });
+    expect(context.database.prepare("SELECT event_json,payload_compacted_at FROM core_event_inbox WHERE event_id='audit-context'").get())
+      .toEqual({ event_json: "null", payload_compacted_at: now });
+    expect(context.database.prepare("SELECT event_json,payload_compacted_at FROM core_event_inbox WHERE event_id='audit-human-context'").get())
+      .toEqual({ event_json: humanJson, payload_compacted_at: null });
+
+    context.close();
+  });
+
   it("resumes the bounded Core audit cursor after SQLite restart without clearing payloads", () => {
     const directory = mkdtempSync(join(tmpdir(), "swarm-core-audit-restart-"));
     const databasePath = join(directory, "bridge.db");

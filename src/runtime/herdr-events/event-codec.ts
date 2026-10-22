@@ -4,6 +4,7 @@ import { snakeCaseAgentEventPayloadSchema, type SnakeCaseAgentEventPayload } fro
 
 type PersistedPayload = SnakeCaseAgentEventPayload;
 type PersistedTokenUsagePayload = Extract<PersistedPayload, { type: "token_usage" }>;
+type PersistedContextSnapshotPayload = Extract<PersistedPayload, { type: "context_snapshot" }>;
 
 export function decodePersistedAgentEvent(event: CoreEventEnvelope): AgentEvent {
   return {
@@ -70,6 +71,22 @@ function normalizePayload(payload: PersistedPayload): AgentEventPayload {
       ...(payload.model_context_window ? { modelContextWindow: payload.model_context_window } : {}),
       ...(payload.auto_compact_limit ? { autoCompactLimit: payload.auto_compact_limit } : {})
     };
+    case "context_snapshot": return {
+      type: payload.type,
+      ...(payload.model ? { model: payload.model } : {}),
+      ...(payload.provider ? { provider: payload.provider } : {}),
+      ...(payload.backend_variant ? { backendVariant: payload.backend_variant } : {}),
+      ...(payload.effort ? { effort: payload.effort } : {}),
+      ...(payload.cwd ? { cwd: payload.cwd } : {}),
+      ...(payload.collaboration_mode ? { collaborationMode: payload.collaboration_mode } : {}),
+      ...(payload.permission_mode ? { permissionMode: payload.permission_mode } : {}),
+      ...(payload.current_date ? { currentDate: payload.current_date } : {}),
+      ...(payload.timezone ? { timezone: payload.timezone } : {}),
+      ...(payload.worktree_path ? { worktreePath: payload.worktree_path } : {}),
+      ...(payload.worktree_state ? { worktreeState: payload.worktree_state } : {}),
+      ...(payload.model_context_window ? { modelContextWindow: payload.model_context_window } : {}),
+      ...(payload.auto_compact_limit ? { autoCompactLimit: payload.auto_compact_limit } : {})
+    };
     case "tool_call": return { type: payload.type, callId: payload.call_id, name: payload.name, arguments: payload.arguments, truncated: payload.truncated };
     case "tool_result": return { type: payload.type, callId: payload.call_id, text: payload.text, isError: payload.is_error, truncated: payload.truncated };
     case "goal_changed": return {
@@ -126,6 +143,7 @@ function serializePayload(payload: AgentEventPayload): PersistedPayload {
       ...(payload.modelContextWindow ? { model_context_window: payload.modelContextWindow } : {}),
       ...(payload.autoCompactLimit ? { auto_compact_limit: payload.autoCompactLimit } : {})
     };
+    case "context_snapshot": return serializeContextSnapshotPayload(payload);
     case "tool_call": return { type: payload.type, call_id: payload.callId, name: payload.name, arguments: payload.arguments, truncated: payload.truncated };
     case "tool_result": return { type: payload.type, call_id: payload.callId, text: payload.text, is_error: payload.isError, truncated: payload.truncated };
     case "goal_changed": return {
@@ -164,5 +182,26 @@ function serializeTokenUsageGroup(group: AgentTokenUsageGroup): PersistedTokenUs
     output_tokens: group.outputTokens,
     reasoning_output_tokens: group.reasoningOutputTokens,
     total_tokens: group.totalTokens
+  };
+}
+
+function serializeContextSnapshotPayload(
+  payload: Extract<AgentEventPayload, { type: "context_snapshot" }>
+): PersistedContextSnapshotPayload {
+  return {
+    type: payload.type,
+    ...(payload.model ? { model: payload.model } : {}),
+    ...(payload.provider ? { provider: payload.provider } : {}),
+    ...(payload.backendVariant ? { backend_variant: payload.backendVariant } : {}),
+    ...(payload.effort ? { effort: payload.effort } : {}),
+    ...(payload.cwd ? { cwd: payload.cwd } : {}),
+    ...(payload.collaborationMode ? { collaboration_mode: payload.collaborationMode } : {}),
+    ...(payload.permissionMode ? { permission_mode: payload.permissionMode } : {}),
+    ...(payload.currentDate ? { current_date: payload.currentDate } : {}),
+    ...(payload.timezone ? { timezone: payload.timezone } : {}),
+    ...(payload.worktreePath ? { worktree_path: payload.worktreePath } : {}),
+    ...(payload.worktreeState ? { worktree_state: payload.worktreeState } : {}),
+    ...(payload.modelContextWindow ? { model_context_window: payload.modelContextWindow } : {}),
+    ...(payload.autoCompactLimit ? { auto_compact_limit: payload.autoCompactLimit } : {})
   };
 }

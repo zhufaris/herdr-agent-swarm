@@ -4,6 +4,43 @@ import { MAX_FREEFORM_EVENT_TEXT_BYTES } from "../src/domain/herdr-event-payload
 import { agentEvent } from "./helpers/herdr-events.js";
 
 describe("Herdr Human Message adapter", () => {
+  it("preserves allowlisted context snapshots from Core", () => {
+    const event = parseHerdrAgentEvent(agentEvent(
+      "source-1:context-snapshot",
+      "turn-1",
+      "2026-10-22T00:00:00.000Z",
+      {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        cwd: "/repo",
+        collaboration_mode: "default",
+        permission_mode: "managed",
+        current_date: "2026-10-22",
+        timezone: "Etc/UTC",
+        worktree_path: "/repo/.worktrees/task",
+        worktree_state: "clean",
+        model_context_window: 4_000,
+        auto_compact_limit: 3_000
+      }
+    ));
+
+    expect(event.payload).toEqual({
+      type: "context_snapshot",
+      model: "GPT-5.6-Sol",
+      provider: "trae",
+      cwd: "/repo",
+      collaborationMode: "default",
+      permissionMode: "managed",
+      currentDate: "2026-10-22",
+      timezone: "Etc/UTC",
+      worktreePath: "/repo/.worktrees/task",
+      worktreeState: "clean",
+      modelContextWindow: 4_000,
+      autoCompactLimit: 3_000
+    });
+  });
+
   it("preserves normalized token usage from Core", () => {
     const event = parseHerdrAgentEvent(agentEvent(
       "source-1:token-usage",
@@ -96,6 +133,21 @@ describe("Herdr Human Message adapter", () => {
       text: "Use the repository contract.",
       truncated: false
     });
+  });
+
+  it("fails closed for malformed context snapshots from Core", () => {
+    expect(() => parseHerdrAgentEvent(agentEvent(
+      "source-1:context-empty",
+      "turn-1",
+      "2026-10-22T00:00:00.000Z",
+      { type: "context_snapshot" }
+    ))).toThrow();
+    expect(() => parseHerdrAgentEvent(agentEvent(
+      "source-1:context-private",
+      "turn-1",
+      "2026-10-22T00:00:01.000Z",
+      { type: "context_snapshot", model: "GPT-5.6-Sol", raw_context: "secret" }
+    ))).toThrow();
   });
 
   it("preserves the selected choice reference from Core", () => {

@@ -82,6 +82,33 @@ describe("authoritative Turn snapshot staging", () => {
     stores.lifecycle.close();
   });
 
+  it("accepts context snapshots in authoritative snapshot pages without changing the generic staging path", () => {
+    const stores = createTestStoreBundle(":memory:");
+    const start = coreEvent("context-start", "snapshot:1", { type: "turn_started" });
+    const snapshot = coreEvent("context-snapshot", "snapshot:2", {
+      type: "context_snapshot",
+      model: "GPT-5.6-Sol",
+      provider: "trae",
+      permission_mode: "managed",
+      current_date: "2026-10-22",
+      timezone: "Etc/UTC",
+      auto_compact_limit: 3_000
+    });
+
+    expect(stores.turnSnapshots.stageAuthoritativeTurnSnapshotPage({
+      identity,
+      owner: { kind: "binding", id: "b1" },
+      afterCursor: "",
+      batch: { outcome: "recovered", canonicalStartedAt, nextCursor: "snapshot:2", complete: false, events: [start, snapshot] },
+      observedAt: "2026-10-01T10:05:00.000Z"
+    })).toMatchObject({ outcome: "staged", nextCursor: "snapshot:2" });
+    expect(stores.turnSnapshots.loadAuthoritativeTurnSnapshot(identity)).toMatchObject({
+      eventCount: 2,
+      events: [start, snapshot]
+    });
+    stores.lifecycle.close();
+  });
+
   it("uses semantic identity when a skipped-record snapshot page is replayed with a new generated time", () => {
     const stores = createTestStoreBundle(":memory:");
     const start = coreEvent("start", "snapshot:1", { type: "turn_started" });

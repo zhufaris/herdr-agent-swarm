@@ -13,6 +13,22 @@ export interface AgentTokenUsageGroup {
   totalTokens: number;
 }
 
+export interface AgentContextSnapshot {
+  model?: string;
+  provider?: string;
+  backendVariant?: string;
+  effort?: string;
+  cwd?: string;
+  collaborationMode?: string;
+  permissionMode?: string;
+  currentDate?: string;
+  timezone?: string;
+  worktreePath?: string;
+  worktreeState?: string;
+  modelContextWindow?: number;
+  autoCompactLimit?: number;
+}
+
 export type AgentEventPayload =
   | { type: "turn_started" }
   | { type: "turn_completed" }
@@ -23,6 +39,7 @@ export type AgentEventPayload =
   | { type: "model_changed"; model: string }
   | { type: "context_compacted" }
   | { type: "token_usage"; responseId: string; response: AgentTokenUsageGroup; turn?: AgentTokenUsageGroup; thread?: AgentTokenUsageGroup; modelContextWindow?: number; autoCompactLimit?: number }
+  | ({ type: "context_snapshot" } & AgentContextSnapshot)
   | { type: "tool_call"; callId: string; name: string; arguments: string; truncated: boolean }
   | { type: "tool_result"; callId: string; text: string; isError: boolean; truncated: boolean }
   | { type: "goal_changed"; goalId: string; objective: string; status: "active" | "paused" | "blocked" | "completed" | "budget_limited" | "usage_limited"; sourceUpdatedAt: number; truncated: boolean }

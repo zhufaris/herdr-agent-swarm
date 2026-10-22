@@ -4,6 +4,9 @@ import type { ChoiceSelectionRef } from "./inbound.js";
 
 export const MAX_FREEFORM_EVENT_TEXT_BYTES = 1024 * 1024;
 export const MAX_NON_ASSISTANT_MESSAGE_TEXT_BYTES = 64 * 1024;
+export const MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES = 512;
+export const MAX_CONTEXT_SNAPSHOT_PATH_BYTES = 4_096;
+export const MAX_CONTEXT_SNAPSHOT_DATETIME_BYTES = 128;
 
 const MAX_EVENT_IDENTIFIER_LENGTH = 512;
 const MAX_EVENT_REASON_LENGTH = 1_024;
@@ -14,6 +17,12 @@ const MAX_AGENT_ACTIVITY_CONTENT_BYTES = 16 * 1024;
 
 function boundedUtf8String(maxBytes: number) {
   return z.string().refine((value) => Buffer.byteLength(value, "utf8") <= maxBytes, {
+    message: `must not exceed ${maxBytes} UTF-8 bytes`
+  });
+}
+
+function nonEmptyBoundedUtf8String(maxBytes: number) {
+  return z.string().min(1).refine((value) => Buffer.byteLength(value, "utf8") <= maxBytes, {
     message: `must not exceed ${maxBytes} UTF-8 bytes`
   });
 }
@@ -36,6 +45,41 @@ const tokenUsageGroupSchema = z.object({
   reasoning_output_tokens: safeNonNegativeIntegerSchema,
   total_tokens: safeNonNegativeIntegerSchema
 }).strict();
+const contextSnapshotSchema = z.object({
+  type: z.literal("context_snapshot"),
+  model: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  provider: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  backend_variant: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  effort: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  cwd: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_PATH_BYTES).optional(),
+  collaboration_mode: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  permission_mode: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  current_date: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_DATETIME_BYTES).optional(),
+  timezone: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_DATETIME_BYTES).optional(),
+  worktree_path: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_PATH_BYTES).optional(),
+  worktree_state: nonEmptyBoundedUtf8String(MAX_CONTEXT_SNAPSHOT_IDENTIFIER_BYTES).optional(),
+  model_context_window: safePositiveIntegerSchema.optional(),
+  auto_compact_limit: safePositiveIntegerSchema.optional()
+}).strict().superRefine((value, context) => {
+  const hasAllowedField = [
+    value.model,
+    value.provider,
+    value.backend_variant,
+    value.effort,
+    value.cwd,
+    value.collaboration_mode,
+    value.permission_mode,
+    value.current_date,
+    value.timezone,
+    value.worktree_path,
+    value.worktree_state,
+    value.model_context_window,
+    value.auto_compact_limit
+  ].some((field) => field !== undefined);
+  if (!hasAllowedField) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "context_snapshot requires at least one allowlisted field" });
+  }
+});
 const choiceSelectionRefSchema = z.object({
   actionSetId: requiredIdentifierSchema,
   optionId: requiredIdentifierSchema,
@@ -83,6 +127,7 @@ export const snakeCaseAgentEventPayloadSchema = z.union([
     model_context_window: safePositiveIntegerSchema.optional(),
     auto_compact_limit: safePositiveIntegerSchema.optional()
   }).strict(),
+  contextSnapshotSchema,
   z.object({ type: z.literal("tool_call"), call_id: identifierSchema, name: z.string().max(MAX_TOOL_NAME_LENGTH), arguments: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), truncated: z.boolean() }),
   z.object({ type: z.literal("tool_result"), call_id: identifierSchema, text: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), is_error: z.boolean(), truncated: z.boolean() }),
   z.object({

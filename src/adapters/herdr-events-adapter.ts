@@ -55,7 +55,7 @@ const eventEnvelopeSchema = z.object({
 const eventSchema = eventEnvelopeSchema.extend({ payload: snakeCaseAgentEventPayloadSchema });
 const knownPayloadTypes = new Set<string>([
   "turn_started", "turn_completed", "turn_aborted", "human_message", "message", "agent_activity", "model_changed",
-  "context_compacted", "token_usage", "tool_call", "tool_result", "goal_changed", "branch_changed", "submission_receipt",
+  "context_compacted", "token_usage", "context_snapshot", "tool_call", "tool_result", "goal_changed", "branch_changed", "submission_receipt",
   "runtime_status_changed", "runtime_agent_changed", "runtime_ended", "source_error", "record_skipped"
 ]);
 const batchSchema = z.object({ result: z.object({
@@ -212,6 +212,7 @@ interface HerdrSessionRpc {
 type RawAgentEvent = z.infer<typeof eventSchema>;
 type RawAgentEventEnvelope = z.infer<typeof eventEnvelopeSchema>;
 type RawTokenUsagePayload = Extract<RawAgentEvent["payload"], { type: "token_usage" }>;
+type RawContextSnapshotPayload = Extract<RawAgentEvent["payload"], { type: "context_snapshot" }>;
 
 export function parseHerdrAgentEvent(value: unknown): AgentEvent {
   return normalizeEvent(eventSchema.parse(value));
@@ -560,6 +561,7 @@ function normalizePayload(payload: RawAgentEvent["payload"]): AgentEventPayload 
       ...(payload.model_context_window ? { modelContextWindow: payload.model_context_window } : {}),
       ...(payload.auto_compact_limit ? { autoCompactLimit: payload.auto_compact_limit } : {})
     };
+    case "context_snapshot": return normalizeContextSnapshotPayload(payload);
     case "tool_call": return { type: payload.type, callId: payload.call_id, name: payload.name, arguments: payload.arguments, truncated: payload.truncated };
     case "tool_result": return { type: payload.type, callId: payload.call_id, text: payload.text, isError: payload.is_error, truncated: payload.truncated };
     case "goal_changed": return {
@@ -587,5 +589,24 @@ function normalizeTokenUsageGroup(group: RawTokenUsagePayload["response"]) {
     outputTokens: group.output_tokens,
     reasoningOutputTokens: group.reasoning_output_tokens,
     totalTokens: group.total_tokens
+  };
+}
+
+function normalizeContextSnapshotPayload(payload: RawContextSnapshotPayload): AgentEventPayload {
+  return {
+    type: payload.type,
+    ...(payload.model ? { model: payload.model } : {}),
+    ...(payload.provider ? { provider: payload.provider } : {}),
+    ...(payload.backend_variant ? { backendVariant: payload.backend_variant } : {}),
+    ...(payload.effort ? { effort: payload.effort } : {}),
+    ...(payload.cwd ? { cwd: payload.cwd } : {}),
+    ...(payload.collaboration_mode ? { collaborationMode: payload.collaboration_mode } : {}),
+    ...(payload.permission_mode ? { permissionMode: payload.permission_mode } : {}),
+    ...(payload.current_date ? { currentDate: payload.current_date } : {}),
+    ...(payload.timezone ? { timezone: payload.timezone } : {}),
+    ...(payload.worktree_path ? { worktreePath: payload.worktree_path } : {}),
+    ...(payload.worktree_state ? { worktreeState: payload.worktree_state } : {}),
+    ...(payload.model_context_window ? { modelContextWindow: payload.model_context_window } : {}),
+    ...(payload.auto_compact_limit ? { autoCompactLimit: payload.auto_compact_limit } : {})
   };
 }

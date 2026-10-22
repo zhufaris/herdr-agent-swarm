@@ -161,6 +161,31 @@ describe("HerdrEventProjector", () => {
     expect(projector.snapshot().completionChoiceSource).toBeUndefined();
   });
 
+  it("suppresses context-snapshot telemetry from answers, timeline deltas, and completion choices", () => {
+    const projector = new HerdrEventProjector();
+    const projected = projector.project([
+      parseHerdrAgentEvent(agentEvent("source-context:start", "turn-context", "2026-10-22T00:00:00Z", { type: "turn_started" })),
+      parseHerdrAgentEvent(agentEvent("source-context:snapshot", "turn-context", "2026-10-22T00:00:01Z", {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        permission_mode: "managed",
+        current_date: "2026-10-22",
+        timezone: "Etc/UTC",
+        auto_compact_limit: 3_000
+      })),
+      parseHerdrAgentEvent(agentEvent("source-context:done", "turn-context", "2026-10-22T00:00:02Z", { type: "turn_completed" }))
+    ]);
+
+    expect(projected.answerDelta).toBe("");
+    expect(projected.timelineDeltas).toBeUndefined();
+    expect(projected.turnLifecycle).toMatchObject({ state: "completed" });
+    expect(projected.turnLifecycle?.finalAnswer).toBeUndefined();
+    expect(projected.turnLifecycle?.completionChoice).toBeUndefined();
+    expect(projector.snapshot().completionChoice).toBeUndefined();
+    expect(projector.snapshot().completionChoiceSource).toBeUndefined();
+  });
+
   it("recovers a structured choice from commentary when the final keeps only the invocation marker", () => {
     const completionChoice = {
       version: 2 as const, intent: "human_review" as const, question: "Approve Gate 2?", default: "approve",

@@ -963,6 +963,19 @@ function projectChange(input: SessionActivityProjectionInput, current?: Snapshot
       contextUsage = nextContextUsage;
       changed = true;
     }
+  } else if (type === "context_snapshot") {
+    const model = bounded(text(payload, "model"), 512);
+    if (model && model !== currentModel) {
+      currentModel = model;
+      changed = true;
+    }
+    if (tokenUsage !== null) {
+      const nextContextUsage = projectedContextUsage(payload, tokenUsage);
+      if (nextContextUsage !== null && nextContextUsage !== contextUsage) {
+        contextUsage = nextContextUsage;
+        changed = true;
+      }
+    }
   }
   else if (type === "goal_changed") {
     const goal = { goalId: text(payload, "goal_id", "goalId"), objective: bounded(text(payload, "objective"), 2_000), status: text(payload, "status"), sourceUpdatedAt: number(payload, "source_updated_at", "sourceUpdatedAt") };
@@ -1070,7 +1083,10 @@ function projectedTokenUsage(payload: Record<string, unknown>): number | null {
     ?? tokenUsageGroupTotal(record(payload.response));
 }
 function projectedContextUsage(payload: Record<string, unknown>, tokenUsage: number): number | null {
-  const limit = safePositiveInteger(payload.auto_compact_limit) ?? safePositiveInteger(payload.model_context_window);
+  const limit = safePositiveInteger(payload.auto_compact_limit)
+    ?? safePositiveInteger(payload.autoCompactLimit)
+    ?? safePositiveInteger(payload.model_context_window)
+    ?? safePositiveInteger(payload.modelContextWindow);
   if (limit === null) return null;
   return Math.max(0, Math.min(100, Math.floor((100 * tokenUsage) / limit)));
 }

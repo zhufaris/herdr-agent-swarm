@@ -42,6 +42,39 @@ function tokenUsagePayload(input: {
   };
 }
 
+function contextSnapshotPayload(input: {
+  model?: string;
+  provider?: string;
+  backendVariant?: string;
+  effort?: string;
+  cwd?: string;
+  collaborationMode?: string;
+  permissionMode?: string;
+  currentDate?: string;
+  timezone?: string;
+  worktreePath?: string;
+  worktreeState?: string;
+  modelContextWindow?: number;
+  autoCompactLimit?: number;
+}): Record<string, unknown> {
+  return {
+    type: "context_snapshot",
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.provider === undefined ? {} : { provider: input.provider }),
+    ...(input.backendVariant === undefined ? {} : { backend_variant: input.backendVariant }),
+    ...(input.effort === undefined ? {} : { effort: input.effort }),
+    ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+    ...(input.collaborationMode === undefined ? {} : { collaboration_mode: input.collaborationMode }),
+    ...(input.permissionMode === undefined ? {} : { permission_mode: input.permissionMode }),
+    ...(input.currentDate === undefined ? {} : { current_date: input.currentDate }),
+    ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+    ...(input.worktreePath === undefined ? {} : { worktree_path: input.worktreePath }),
+    ...(input.worktreeState === undefined ? {} : { worktree_state: input.worktreeState }),
+    ...(input.modelContextWindow === undefined ? {} : { model_context_window: input.modelContextWindow }),
+    ...(input.autoCompactLimit === undefined ? {} : { auto_compact_limit: input.autoCompactLimit })
+  };
+}
+
 function primaryContext(overrides: Partial<SessionActivityProjectionContext> = {}): SessionActivityProjectionContext {
   return {
     scope: { kind: "pane", workspaceId: "workspace-1", paneId: "primary-pane" },
@@ -1821,6 +1854,128 @@ describe("Session Activity projection", () => {
     })).toBe("accepted");
 
     expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: 34 });
+    context.close();
+  });
+
+  it("projects context snapshots by latest lane and recomputes usage from stored tokens without regression", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    activatePrimary(graph);
+
+    expect(project(graph, primaryContext(), 1, event("token-context-base", tokenUsagePayload({ responseTotal: 171, threadTotal: 171 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: null, currentModel: null });
+
+    expect(project(graph, primaryContext(), 2, event("context-live", contextSnapshotPayload({
+      model: "GPT-5.6-Sol",
+      provider: "trae",
+      collaborationMode: "default",
+      permissionMode: "managed",
+      currentDate: "2026-10-22",
+      timezone: "Etc/UTC",
+      modelContextWindow: 500
+    })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ currentModel: "GPT-5.6-Sol", tokenUsage: 171, contextUsage: 34 });
+
+    expect(graph.sessionActivity.projectCanonicalEvent({
+      context: primaryContext(),
+      laneId: "lane-1",
+      laneSequence: 2,
+      sourceId: "ring-1",
+      sourceEpoch: "epoch-1",
+      event: event("context-live", contextSnapshotPayload({ model: "GPT-5.6-Sol", modelContextWindow: 500 })),
+      observedAt: "2026-10-08T00:00:01.000Z"
+    }).outcome).toBe("duplicate");
+    expect(load(graph)?.snapshot).toMatchObject({ currentModel: "GPT-5.6-Sol", tokenUsage: 171, contextUsage: 34 });
+
+    expect(graph.sessionActivity.projectCanonicalEvent({
+      context: primaryContext(),
+      laneId: "lane-1",
+      laneSequence: 1,
+      sourceId: "ring-1",
+      sourceEpoch: "epoch-1",
+      event: event("context-old", contextSnapshotPayload({ model: "GPT-5.6-Terra", autoCompactLimit: 300 })),
+      observedAt: "2026-10-08T00:00:01.000Z"
+    }).outcome).toBe("stale");
+    expect(load(graph)?.snapshot).toMatchObject({ currentModel: "GPT-5.6-Sol", tokenUsage: 171, contextUsage: 34 });
+    context.close();
+  });
+
+  it("reopens from disk with persisted context snapshot model and recomputed percentage", () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-session-activity-context-"));
+    const path = join(directory, "state.sqlite");
+    const firstContext = new SqliteContext(path);
+    const first = new SqliteCapabilityGraph(firstContext);
+    activatePrimary(first);
+    project(first, primaryContext(), 1, event("token-persisted-context", tokenUsagePayload({ responseTotal: 171, threadTotal: 171 })));
+    project(first, primaryContext(), 2, event("context-persisted", contextSnapshotPayload({
+      model: "GPT-5.6-Sol",
+      autoCompactLimit: 500
+    })));
+    firstContext.close();
+
+    const secondContext = new SqliteContext(path);
+    try {
+      const second = new SqliteCapabilityGraph(secondContext);
+      expect(load(second)?.snapshot).toMatchObject({ currentModel: "GPT-5.6-Sol", tokenUsage: 171, contextUsage: 34 });
+    } finally {
+      secondContext.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rebuilds context snapshot facts from exact replay after deleting the derived snapshot row", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    activatePrimary(graph);
+    const token = event("token-live-context", tokenUsagePayload({ responseTotal: 171, threadTotal: 171 }));
+    const snapshot = event("context-live-context", contextSnapshotPayload({
+      model: "GPT-5.6-Sol",
+      provider: "trae",
+      permissionMode: "managed",
+      autoCompactLimit: 500
+    }));
+
+    expect(graph.coreEvents.ingestBatch({
+      laneId: "lane-live-context",
+      sourceId: token.sourceId,
+      sourceEpoch: "epoch-1",
+      agentKind: token.agentKind,
+      sessionId: token.sessionId,
+      sessionActivityContext: primaryContext(),
+      afterCursor: "start",
+      nextCursor: snapshot.cursor,
+      latestCursor: snapshot.cursor,
+      events: [token, snapshot],
+      ingestedAt: "2026-10-08T00:00:01.000Z"
+    })).toBe("accepted");
+    expect(load(graph)?.snapshot).toMatchObject({ currentModel: "GPT-5.6-Sol", tokenUsage: 171, contextUsage: 34 });
+
+    context.database.prepare("DELETE FROM session_activity_snapshots WHERE producer_kind='primary' AND producer_id='binding-1'").run();
+    expect(load(graph)).toBeNull();
+
+    const replayToken = { ...token, sourceId: "replay-source-context", cursor: "replay-context:1" };
+    const replaySnapshot = { ...snapshot, sourceId: "replay-source-context", cursor: "replay-context:2" };
+    expect(graph.coreEvents.ingestBatch({
+      laneId: "lane-replay-context",
+      sourceId: "replay-source-context",
+      sourceEpoch: "epoch-replay",
+      agentKind: replayToken.agentKind,
+      sessionId: replayToken.sessionId,
+      sessionActivityContext: primaryContext(),
+      afterCursor: "start",
+      nextCursor: replaySnapshot.cursor,
+      latestCursor: replaySnapshot.cursor,
+      events: [replayToken, replaySnapshot],
+      ingestedAt: "2026-10-08T00:00:02.000Z"
+    })).toBe("accepted");
+
+    expect(load(graph)?.snapshot).toMatchObject({ currentModel: "GPT-5.6-Sol", tokenUsage: 171, contextUsage: 34 });
     context.close();
   });
 });

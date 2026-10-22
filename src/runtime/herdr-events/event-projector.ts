@@ -174,6 +174,7 @@ export class HerdrEventProjector {
         });
         continue;
       }
+      if (payload.type === "token_usage" || payload.type === "context_snapshot") continue;
       if (payload.type === "tool_call") {
         const agentRequest = spawnedAgentRequest(payload.name, payload.arguments);
         if (agentRequest) {

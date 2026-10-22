@@ -1276,6 +1276,46 @@ describe("Core event inbox store", () => {
     stores.lifecycle.close();
   });
 
+  it("persists context snapshots in the generic inbox with the existing discriminator columns and accepts exact replay", () => {
+    const stores = createTestStoreBundle(":memory:");
+    const original = event({
+      eventId: "context-snapshot",
+      cursor: "context:1",
+      payload: {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        permission_mode: "managed",
+        current_date: "2026-10-22",
+        timezone: "Etc/UTC",
+        auto_compact_limit: 3_000
+      }
+    });
+    const replay = event({
+      eventId: "context-snapshot",
+      cursor: "context:2",
+      sourceId: "replay:source",
+      payload: {
+        timezone: "Etc/UTC",
+        current_date: "2026-10-22",
+        permission_mode: "managed",
+        provider: "trae",
+        auto_compact_limit: 3_000,
+        model: "GPT-5.6-Sol",
+        type: "context_snapshot"
+      }
+    });
+
+    expect(stores.coreEvents.ingestBatch(batch("lane-context", original, "start", original.cursor))).toBe("accepted");
+    expect(JSON.parse((stores.driver.database.prepare(`SELECT event_json FROM core_event_inbox WHERE event_id=?`).get(original.eventId) as { event_json: string }).event_json))
+      .toMatchObject({ payload: { type: "context_snapshot", model: "GPT-5.6-Sol", auto_compact_limit: 3_000 } });
+    expect(stores.driver.database.prepare(`SELECT event_type,submission_id,channel,call_id FROM core_event_inbox WHERE event_id=?`).get(original.eventId))
+      .toEqual({ event_type: "context_snapshot", submission_id: null, channel: null, call_id: null });
+    expect(() => stores.coreEvents.ingestBatch(batch("lane-context-replay", replay, "", replay.cursor))).not.toThrow();
+
+    stores.lifecycle.close();
+  });
+
   it("treats a missing legacy Turn identity as the canonical null identity", () => {
     const stores = createTestStoreBundle(":memory:");
     const legacy = event({ turnId: null });

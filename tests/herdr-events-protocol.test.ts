@@ -142,6 +142,36 @@ describe("HerdrEventsAdapter", () => {
     });
   });
 
+  it("accepts allowlisted context snapshots in a Core batch", async () => {
+    const adapter = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch",
+      events: [agentEvent("source-1:1", "turn-1", "2026-10-22T00:00:00Z", {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        permission_mode: "managed",
+        current_date: "2026-10-22",
+        timezone: "Etc/UTC",
+        auto_compact_limit: 3_000
+      })],
+      next_cursor: "source-1:1",
+      earliest_cursor: "source-1:1",
+      latest_cursor: "source-1:1"
+    }) }, "herdr");
+
+    await expect(adapter.read("source-1", "start")).resolves.toMatchObject({
+      events: [{ payload: {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        permissionMode: "managed",
+        currentDate: "2026-10-22",
+        timezone: "Etc/UTC",
+        autoCompactLimit: 3_000
+      } }]
+    });
+  });
+
   it("fails closed for malformed token usage payloads", async () => {
     const invalidBounds = new HerdrEventsAdapter({ run: async () => coreEventResponse({
       type: "agent_events_batch",
@@ -183,6 +213,32 @@ describe("HerdrEventsAdapter", () => {
 
     await expect(invalidBounds.read("source-1", "start")).rejects.toThrow();
     await expect(invalidUnknownField.read("source-1", "start")).rejects.toThrow();
+  });
+
+  it("fails closed for malformed context snapshot payloads", async () => {
+    const emptyContext = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch",
+      events: [agentEvent("source-1:3", "turn-1", "2026-10-22T00:00:02Z", {
+        type: "context_snapshot"
+      })],
+      next_cursor: "source-1:3",
+      earliest_cursor: "source-1:3",
+      latest_cursor: "source-1:3"
+    }) }, "herdr");
+    const privateField = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch",
+      events: [agentEvent("source-1:4", "turn-1", "2026-10-22T00:00:03Z", {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        private_prompt: "secret"
+      })],
+      next_cursor: "source-1:4",
+      earliest_cursor: "source-1:4",
+      latest_cursor: "source-1:4"
+    }) }, "herdr");
+
+    await expect(emptyContext.read("source-1", "start")).rejects.toThrow();
+    await expect(privateField.read("source-1", "start")).rejects.toThrow();
   });
 
   it("preserves structured completion Choice metadata on the same final message", async () => {

@@ -173,6 +173,36 @@ describe("Core event semantic identity", () => {
     expect(sameCoreEventSemantics(canonical, replay)).toBe(true);
   });
 
+  it("treats normalized context snapshots as part of semantic identity while ignoring transport fields", () => {
+    const canonical = event({
+      payload: {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
+        permission_mode: "managed",
+        current_date: "2026-10-22",
+        timezone: "Etc/UTC",
+        auto_compact_limit: 3_000
+      }
+    });
+    const replay = event({
+      sourceId: "replay",
+      cursor: "replay:1",
+      payload: {
+        timezone: "Etc/UTC",
+        current_date: "2026-10-22",
+        permission_mode: "managed",
+        provider: "trae",
+        auto_compact_limit: 3_000,
+        model: "GPT-5.6-Sol",
+        type: "context_snapshot"
+      }
+    });
+
+    expect(coreEventSemanticHash(canonical)).toBe(coreEventSemanticHash(replay));
+    expect(sameCoreEventSemantics(canonical, replay)).toBe(true);
+  });
+
   it.each([
     ["changed response id", {
       type: "token_usage",
@@ -240,6 +270,32 @@ describe("Core event semantic identity", () => {
           reasoning_output_tokens: 50,
           total_tokens: 1_050
         },
+        auto_compact_limit: 3_000
+      }
+    });
+
+    expect(sameCoreEventSemantics(canonical, event({ sourceId: "replay", cursor: "replay:1", payload: changedPayload }))).toBe(false);
+  });
+
+  it.each([
+    ["changed model", {
+      type: "context_snapshot",
+      model: "GPT-5.6-Terra",
+      provider: "trae",
+      auto_compact_limit: 3_000
+    }],
+    ["changed compact limit", {
+      type: "context_snapshot",
+      model: "GPT-5.6-Sol",
+      provider: "trae",
+      auto_compact_limit: 2_500
+    }]
+  ])("treats %s as a context-snapshot semantic conflict", (_label, changedPayload) => {
+    const canonical = event({
+      payload: {
+        type: "context_snapshot",
+        model: "GPT-5.6-Sol",
+        provider: "trae",
         auto_compact_limit: 3_000
       }
     });
