@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CoreEventEnvelope } from "../src/domain/core-event-inbox.js";
 import type { SessionActivityProjectionContext } from "../src/domain/session-activity.js";
 import { SqliteCapabilityGraph } from "../src/store/sqlite/capability-graph.js";
@@ -1853,6 +1853,57 @@ describe("Session Activity projection", () => {
       ingestedAt: "2026-10-08T00:00:02.000Z"
     })).toBe("accepted");
 
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: 34 });
+    context.close();
+  });
+
+  it("retries an exact token replay after transient Session Activity projection failure", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    activatePrimary(graph);
+    const live = event("token-retry", tokenUsagePayload({ responseTotal: 171, modelContextWindow: 500 }));
+
+    expect(graph.coreEvents.ingestBatch({
+      laneId: "lane-live-retry",
+      sourceId: live.sourceId,
+      sourceEpoch: "epoch-live-retry",
+      agentKind: live.agentKind,
+      sessionId: live.sessionId,
+      sessionActivityContext: primaryContext(),
+      afterCursor: "start",
+      nextCursor: live.cursor,
+      latestCursor: live.cursor,
+      events: [live],
+      ingestedAt: "2026-10-08T00:00:01.000Z"
+    })).toBe("accepted");
+    context.database.prepare("DELETE FROM session_activity_snapshots WHERE producer_kind='primary' AND producer_id='binding-1'").run();
+    expect(load(graph)).toBeNull();
+
+    const projectCanonicalEvent = graph.sessionActivity.projectCanonicalEvent.bind(graph.sessionActivity);
+    const projection = vi.spyOn(graph.sessionActivity, "projectCanonicalEvent")
+      .mockImplementationOnce(() => { throw new Error("simulated Session Activity projection failure"); })
+      .mockImplementation((input) => projectCanonicalEvent(input));
+    const replay = { ...live, sourceId: "replay-source-retry", cursor: "replay:1" };
+    const replayBatch = {
+      laneId: "lane-replay-retry",
+      sourceId: replay.sourceId,
+      sourceEpoch: "epoch-replay-retry",
+      agentKind: replay.agentKind,
+      sessionId: replay.sessionId,
+      sessionActivityContext: primaryContext(),
+      afterCursor: "start",
+      nextCursor: replay.cursor,
+      latestCursor: replay.cursor,
+      events: [replay],
+      ingestedAt: "2026-10-08T00:00:02.000Z"
+    } as const;
+
+    expect(() => graph.coreEvents.ingestBatch(replayBatch)).toThrow("SQLite savepoint operation failed");
+    expect(load(graph)).toBeNull();
+    expect(graph.coreEvents.getCheckpoint(replayBatch.laneId)).toBeNull();
+
+    expect(graph.coreEvents.ingestBatch(replayBatch)).toBe("accepted");
+    expect(projection).toHaveBeenCalledTimes(2);
     expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: 34 });
     context.close();
   });

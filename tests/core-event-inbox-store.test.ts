@@ -110,6 +110,56 @@ function countStatementPreparations(context: SqliteContext): Map<string, number>
 }
 
 describe("Core event inbox store", () => {
+  it("rolls back a failed exact telemetry replay so projection retries with the batch", () => {
+    const context = new SqliteContext(":memory:");
+    new SqliteMigrations(context).run();
+    let failReplay = true;
+    const projectionAttempts: string[] = [];
+    const inbox = new SqliteCoreEventInboxStore(context, {
+      projectCanonicalEvent: ({ laneId }) => {
+        projectionAttempts.push(laneId);
+        if (laneId === "lane-replay" && failReplay) throw new Error("simulated exact replay projection failure");
+        return { outcome: "projected" };
+      }
+    });
+    const original = event({
+      eventId: "token-retry",
+      cursor: "live:1",
+      payload: {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        }
+      }
+    });
+    const replay = event({
+      ...original,
+      sourceId: "replay-source",
+      cursor: "replay:1"
+    });
+
+    expect(inbox.ingestBatch(batch("lane-live", original, "start", original.cursor))).toBe("accepted");
+    expect(() => inbox.ingestBatch(batch("lane-replay", replay, "start", replay.cursor)))
+      .toThrow("SQLite savepoint operation failed");
+    expect(context.database.prepare("SELECT state FROM core_event_lane_items WHERE lane_id=? AND event_id=?")
+      .get("lane-replay", replay.eventId)).toBeUndefined();
+    expect(inbox.getCheckpoint("lane-replay")).toBeNull();
+
+    failReplay = false;
+    expect(inbox.ingestBatch(batch("lane-replay", replay, "start", replay.cursor))).toBe("accepted");
+    expect(projectionAttempts).toEqual(["lane-live", "lane-replay", "lane-replay"]);
+    expect(inbox.loadPending("lane-replay")).toMatchObject({ eventIds: [], events: [] });
+    expect(context.database.prepare("SELECT state FROM core_event_lane_items WHERE lane_id=? AND event_id=?")
+      .get("lane-replay", replay.eventId)).toEqual({ state: "ignored" });
+    context.close();
+  });
+
   it("signals committed pending lane work only after the outer transaction commits", () => {
     const context = new SqliteContext(":memory:"); new SqliteMigrations(context).run();
     const inbox = new SqliteCoreEventInboxStore(context);

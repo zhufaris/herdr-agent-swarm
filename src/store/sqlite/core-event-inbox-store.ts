@@ -201,13 +201,16 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
         let laneSequence = evidence?.sequence ?? null;
         let laneState = evidence?.state ?? null;
         let insertedLaneItem = false;
+        const shouldProjectExactReplay = stored.admission === "duplicate"
+          && isExactReplayProjectedPayload(stored.event.payload)
+          && !stored.skipProjection;
         if (laneSequence === null) {
           sequence += 1;
           this.statements.insertLaneItem.run(batch.laneId, event.eventId, sequence, batch.ingestedAt, batch.ingestedAt);
           laneSequence = sequence;
           insertedLaneItem = true;
           laneState = "pending";
-          if (stored.admission !== "new" || stored.skipProjection) {
+          if ((stored.admission !== "new" || stored.skipProjection) && !shouldProjectExactReplay) {
             this.statements.ignoreLaneItem.run(batch.ingestedAt, batch.laneId, event.eventId);
             laneState = "ignored";
           }
@@ -217,11 +220,8 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
           this.settleConflict(batch.laneId, event.eventId, event, batch.ingestedAt);
         }
         const shouldProjectNewEvent = stored.admission === "new" && !stored.skipProjection && !isSettledLaneItem(laneState ?? undefined);
-        const shouldProjectExactReplay = insertedLaneItem
-          && stored.admission === "duplicate"
-          && isExactReplayProjectedPayload(stored.event.payload)
-          && !stored.skipProjection;
-        if (shouldProjectNewEvent || shouldProjectExactReplay) {
+        const shouldProjectInsertedExactReplay = insertedLaneItem && shouldProjectExactReplay;
+        if (shouldProjectNewEvent || shouldProjectInsertedExactReplay) {
           let projection: { segmentId?: string | null; outcome?: string } | void = undefined;
           let savepointCommitted = false;
           try {
@@ -233,6 +233,11 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
             savepointCommitted = true;
           } catch (error) {
             if (!(error instanceof SqliteSavepointOperationError)) throw error;
+            if (shouldProjectInsertedExactReplay) throw error;
+          }
+          if (savepointCommitted && shouldProjectInsertedExactReplay) {
+            this.statements.ignoreLaneItem.run(batch.ingestedAt, batch.laneId, event.eventId);
+            laneState = "ignored";
           }
           const payload = stored.event.payload as Record<string, unknown>;
           if (savepointCommitted && payload.type === "human_message" && projection?.segmentId) projected.push({
