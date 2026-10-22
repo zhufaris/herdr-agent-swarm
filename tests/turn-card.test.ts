@@ -288,19 +288,25 @@ describe("unified turn card", () => {
       lastTurnState: "active",
       tokenUsage: 1_500,
       contextUsage: 58,
+      compactionCount: 1,
       activeSubagents: [{ label: "Runner", state: "running" }]
     } } as never) as RenderedTurnCard;
     const rendered = text(card.body.elements);
 
     expect(rendered).toContain("Session State");
-    expect(rendered).toContain("reviewer");
-    expect(rendered).toContain("swarm/reviewer");
+    const sessionSummary = (card.body.elements as Array<{ tag?: string; content?: string }>).find((element) => element.tag === "markdown" && element.content?.includes("Session State"));
+    expect(sessionSummary?.content).toContain("🟢 运行中");
     expect(rendered).toContain("GPT\\-5\\.6\\-Sol");
-    expect(rendered).toContain("42%");
-    expect(rendered).toContain("1.20K");
-    expect(rendered).toContain("2.50s");
-    expect(rendered).toContain("🟢 运行中");
-    const subagentsPanel = (card.body.elements as Array<{ tag?: string; header?: { title?: { content?: string } }; elements?: Array<{ tag?: string; content?: string }> }>).find((element) => element.tag === "collapsible_panel" && element.header?.title?.content?.includes("Subagents"));
+    expect(sessionSummary?.content).toContain("ctx 42%");
+    expect(sessionSummary?.content).toContain("1.20K in · 300 out");
+    expect(sessionSummary?.content).toContain("🧹 1x");
+    const detailsPanel = (card.body.elements as Array<{ tag?: string; expanded?: boolean; header?: { title?: { content?: string } }; elements?: Array<{ tag?: string; content?: string }> }>).find((element) => element.tag === "collapsible_panel" && element.header?.title?.content?.includes("Session details"));
+    expect(detailsPanel).toMatchObject({ tag: "collapsible_panel", expanded: false });
+    expect(detailsPanel?.elements?.[0]?.content).toContain("reviewer");
+    expect(detailsPanel?.elements?.[0]?.content).toContain("swarm/reviewer");
+    expect(detailsPanel?.elements?.[0]?.content).toContain("2.50s");
+    const subagentsPanel = (card.body.elements as Array<{ tag?: string; expanded?: boolean; header?: { title?: { content?: string } }; elements?: Array<{ tag?: string; content?: string }> }>).find((element) => element.tag === "collapsible_panel" && element.header?.title?.content?.includes("Subagents"));
+    expect(subagentsPanel).toMatchObject({ tag: "collapsible_panel", expanded: false });
     expect(subagentsPanel?.elements).toHaveLength(1);
     expect(subagentsPanel?.elements?.[0]?.content).toContain("- 🟢 Runner · 运行中");
     expect(subagentsPanel?.elements?.[0]?.content).not.toContain("🟢 Runner · 🟢");
