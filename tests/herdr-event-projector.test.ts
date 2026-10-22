@@ -92,6 +92,38 @@ describe("HerdrEventProjector", () => {
     expect(projected.answerDelta).not.toContain("$herdr-choice-list:herdr-choice-list");
   });
 
+  it.each(["developer", "system"] as const)("suppresses %s messages from answers, timeline deltas, and recovered completion choices", (role) => {
+    const projector = new HerdrEventProjector();
+    const projected = projector.project([
+      parseHerdrAgentEvent(agentEvent(`source-${role}:start`, "turn-role", "2026-10-22T00:00:00Z", { type: "turn_started" })),
+      parseHerdrAgentEvent(agentEvent(`source-${role}:commentary`, "turn-role", "2026-10-22T00:00:01Z", {
+        type: "message",
+        message_id: `${role}-commentary`,
+        role,
+        channel: "commentary",
+        text: `Internal guidance\n\n\`\`\`herdr-choice-list\n{"version":2,"intent":"none"}\n\`\`\``,
+        truncated: false
+      })),
+      parseHerdrAgentEvent(agentEvent(`source-${role}:final`, "turn-role", "2026-10-22T00:00:02Z", {
+        type: "message",
+        message_id: `${role}-final`,
+        role,
+        channel: "final",
+        text: "Internal final answer.",
+        truncated: false
+      })),
+      parseHerdrAgentEvent(agentEvent(`source-${role}:done`, "turn-role", "2026-10-22T00:00:03Z", { type: "turn_completed" }))
+    ]);
+
+    expect(projected.answerDelta).toBe("");
+    expect(projected.timelineDeltas).toBeUndefined();
+    expect(projected.turnLifecycle).toMatchObject({ state: "completed" });
+    expect(projected.turnLifecycle?.finalAnswer).toBeUndefined();
+    expect(projected.turnLifecycle?.completionChoice).toBeUndefined();
+    expect(projector.snapshot().completionChoice).toBeUndefined();
+    expect(projector.snapshot().completionChoiceSource).toBeUndefined();
+  });
+
   it("recovers a structured choice from commentary when the final keeps only the invocation marker", () => {
     const completionChoice = {
       version: 2 as const, intent: "human_review" as const, question: "Approve Gate 2?", default: "approve",

@@ -92,6 +92,33 @@ describe("Core event semantic identity", () => {
     expect(sameCoreEventSemantics(canonical, changed)).toBe(false);
   });
 
+  it("treats message role as part of semantic identity", () => {
+    const canonical = event({
+      payload: {
+        type: "message",
+        message_id: "message-1",
+        role: "developer",
+        channel: "commentary",
+        text: "Repository-only guidance",
+        truncated: false
+      }
+    });
+    const replay = event({
+      sourceId: "replay",
+      cursor: "replay:1",
+      payload: {
+        type: "message",
+        message_id: "message-1",
+        channel: "commentary",
+        text: "Repository-only guidance",
+        truncated: false
+      }
+    });
+
+    expect(coreEventSemanticHash(canonical)).not.toBe(coreEventSemanticHash(replay));
+    expect(sameCoreEventSemantics(canonical, replay)).toBe(false);
+  });
+
   it.each([
     ["missing payload type", {}],
     ["primitive payload", 42],

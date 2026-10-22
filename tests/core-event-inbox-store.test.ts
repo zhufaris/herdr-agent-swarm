@@ -1176,6 +1176,42 @@ describe("Core event inbox store", () => {
     stores.lifecycle.close();
   });
 
+  it("persists an explicit message role in the generic inbox and accepts exact replay", () => {
+    const stores = createTestStoreBundle(":memory:");
+    const original = event({
+      eventId: "role-message",
+      cursor: "role:1",
+      payload: {
+        type: "message",
+        message_id: "message-1",
+        role: "developer",
+        channel: "commentary",
+        text: "Repository-only guidance",
+        truncated: false
+      }
+    });
+    const replay = event({
+      eventId: "role-message",
+      cursor: "role:2",
+      sourceId: "replay:source",
+      payload: {
+        role: "developer",
+        text: "Repository-only guidance",
+        channel: "commentary",
+        message_id: "message-1",
+        truncated: false,
+        type: "message"
+      }
+    });
+
+    expect(stores.coreEvents.ingestBatch(batch("lane-role", original, "start", original.cursor))).toBe("accepted");
+    expect(JSON.parse((stores.driver.database.prepare(`SELECT event_json FROM core_event_inbox WHERE event_id=?`).get(original.eventId) as { event_json: string }).event_json))
+      .toMatchObject({ payload: { type: "message", role: "developer", channel: "commentary" } });
+    expect(() => stores.coreEvents.ingestBatch(batch("lane-role-replay", replay, "start", replay.cursor))).not.toThrow();
+
+    stores.lifecycle.close();
+  });
+
   it("treats a missing legacy Turn identity as the canonical null identity", () => {
     const stores = createTestStoreBundle(":memory:");
     const legacy = event({ turnId: null });

@@ -532,7 +532,15 @@ function normalizePayload(payload: RawAgentEvent["payload"]): AgentEventPayload 
       ...(payload.submission_id ? { submissionId: payload.submission_id } : {}),
       ...(payload.choice ? { choice: payload.choice } : {})
     };
-    case "message": return { type: payload.type, messageId: payload.message_id, channel: payload.channel, text: payload.text, truncated: payload.truncated, ...(payload.completion_choice ? { completionChoice: payload.completion_choice } : {}) };
+    case "message": return {
+      type: payload.type,
+      messageId: payload.message_id,
+      ...(payload.role ? { role: payload.role } : {}),
+      channel: payload.channel,
+      text: payload.text,
+      truncated: payload.truncated,
+      ...(payload.completion_choice ? { completionChoice: payload.completion_choice } : {})
+    };
     case "agent_activity": return {
       type: payload.type,
       agentId: payload.agent_id,

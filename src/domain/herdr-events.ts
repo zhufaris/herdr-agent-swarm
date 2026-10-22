@@ -2,12 +2,14 @@ import type { AgentTranscriptSubmissionReceipt, AgentTranscriptTurnList } from "
 import type { FinalMessageCompletionChoice } from "./completion-choice.js";
 import type { ChoiceSelectionRef } from "./inbound.js";
 
+export type AgentMessageRole = "assistant" | "developer" | "system";
+
 export type AgentEventPayload =
   | { type: "turn_started" }
   | { type: "turn_completed" }
   | { type: "turn_aborted"; reason: string }
   | { type: "human_message"; messageId: string; text: string; truncated: boolean; submissionId?: string; choice?: ChoiceSelectionRef }
-  | { type: "message"; messageId: string; channel: string; text: string; truncated: boolean; completionChoice?: FinalMessageCompletionChoice }
+  | { type: "message"; messageId: string; role?: AgentMessageRole; channel: string; text: string; truncated: boolean; completionChoice?: FinalMessageCompletionChoice }
   | { type: "agent_activity"; agentId: string; displayName?: string; model?: string; content?: string; contentTruncated?: boolean; resultHandoff?: "delivered_to_parent"; state: "started" | "running" | "completed" | "failed" | "interrupted" | "blocked" }
   | { type: "model_changed"; model: string }
   | { type: "context_compacted" }

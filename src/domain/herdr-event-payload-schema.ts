@@ -3,6 +3,7 @@ import { isFinalMessageCompletionChoice, type FinalMessageCompletionChoice } fro
 import type { ChoiceSelectionRef } from "./inbound.js";
 
 export const MAX_FREEFORM_EVENT_TEXT_BYTES = 1024 * 1024;
+export const MAX_NON_ASSISTANT_MESSAGE_TEXT_BYTES = 64 * 1024;
 
 const MAX_EVENT_IDENTIFIER_LENGTH = 512;
 const MAX_EVENT_REASON_LENGTH = 1_024;
@@ -19,6 +20,7 @@ function boundedUtf8String(maxBytes: number) {
 
 const identifierSchema = z.string().max(MAX_EVENT_IDENTIFIER_LENGTH);
 const requiredIdentifierSchema = identifierSchema.min(1);
+const messageRoleSchema = z.enum(["assistant", "developer", "system"]);
 const completionChoiceSchema = z.custom<FinalMessageCompletionChoice>(isFinalMessageCompletionChoice, "invalid completion_choice");
 const choiceSelectionRefSchema = z.object({
   actionSetId: requiredIdentifierSchema,
@@ -31,8 +33,17 @@ export const snakeCaseAgentEventPayloadSchema = z.union([
   z.object({ type: z.literal("turn_completed") }),
   z.object({ type: z.literal("turn_aborted"), reason: z.string().max(MAX_EVENT_REASON_LENGTH) }),
   z.object({ type: z.literal("human_message"), message_id: identifierSchema, text: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), truncated: z.boolean(), submission_id: identifierSchema.optional(), choice: choiceSelectionRefSchema.optional() }),
-  z.object({ type: z.literal("message"), message_id: identifierSchema, channel: z.string().max(MAX_CHANNEL_LENGTH), text: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), truncated: z.boolean(), completion_choice: completionChoiceSchema.optional() }).superRefine((value, context) => {
+  z.object({ type: z.literal("message"), message_id: identifierSchema, role: messageRoleSchema.optional(), channel: z.string().max(MAX_CHANNEL_LENGTH), text: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), truncated: z.boolean(), completion_choice: completionChoiceSchema.optional() }).superRefine((value, context) => {
     if (value.completion_choice && value.channel !== "final") context.addIssue({ code: z.ZodIssueCode.custom, message: "completion_choice is final-only" });
+    if (value.role && value.role !== "assistant" && Buffer.byteLength(value.text, "utf8") > MAX_NON_ASSISTANT_MESSAGE_TEXT_BYTES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `non-assistant message text must not exceed ${MAX_NON_ASSISTANT_MESSAGE_TEXT_BYTES} UTF-8 bytes`
+      });
+    }
+    if (value.completion_choice && value.role && value.role !== "assistant") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "completion_choice is assistant-only" });
+    }
   }),
   z.object({
     type: z.literal("agent_activity"),

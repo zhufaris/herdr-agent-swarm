@@ -42,7 +42,15 @@ function normalizePayload(payload: PersistedPayload): AgentEventPayload {
       ...(payload.submission_id ? { submissionId: payload.submission_id } : {}),
       ...(payload.choice ? { choice: payload.choice } : {})
     };
-    case "message": return { type: payload.type, messageId: payload.message_id, channel: payload.channel, text: payload.text, truncated: payload.truncated, ...(payload.completion_choice ? { completionChoice: payload.completion_choice } : {}) };
+    case "message": return {
+      type: payload.type,
+      messageId: payload.message_id,
+      ...(payload.role ? { role: payload.role } : {}),
+      channel: payload.channel,
+      text: payload.text,
+      truncated: payload.truncated,
+      ...(payload.completion_choice ? { completionChoice: payload.completion_choice } : {})
+    };
     case "agent_activity": return {
       type: payload.type,
       agentId: payload.agent_id,
@@ -81,7 +89,15 @@ function serializePayload(payload: AgentEventPayload): PersistedPayload {
       ...(payload.submissionId ? { submission_id: payload.submissionId } : {}),
       ...(payload.choice ? { choice: payload.choice } : {})
     };
-    case "message": return { type: payload.type, message_id: payload.messageId, channel: payload.channel, text: payload.text, truncated: payload.truncated, ...(payload.completionChoice ? { completion_choice: payload.completionChoice } : {}) };
+    case "message": return {
+      type: payload.type,
+      message_id: payload.messageId,
+      ...(payload.role ? { role: payload.role } : {}),
+      channel: payload.channel,
+      text: payload.text,
+      truncated: payload.truncated,
+      ...(payload.completionChoice ? { completion_choice: payload.completionChoice } : {})
+    };
     case "agent_activity": return {
       type: payload.type,
       agent_id: payload.agentId,

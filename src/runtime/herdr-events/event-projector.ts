@@ -111,6 +111,11 @@ export class HerdrEventProjector {
       }
       if (payload.type === "message") {
         if (payload.channel === "analysis" || payload.channel === "reasoning") continue;
+        const visibleAssistantRole = payload.role === undefined || payload.role === "assistant";
+        if (!visibleAssistantRole) {
+          this.emittedMessages.add(payload.messageId);
+          continue;
+        }
         const visibleReasoning = payload.channel === "reasoning_visible";
         if (this.emittedMessages.has(payload.messageId) && !visibleReasoning) {
           if (isChoiceRecoveryChannel(payload.channel)) this.captureCompletionChoice(payload);

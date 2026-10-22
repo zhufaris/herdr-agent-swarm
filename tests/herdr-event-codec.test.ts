@@ -3,6 +3,72 @@ import { decodePersistedAgentEvent, encodePersistedAgentEvent } from "../src/run
 import { MAX_FREEFORM_EVENT_TEXT_BYTES } from "../src/domain/herdr-event-payload-schema.js";
 
 describe("persisted Herdr event codec", () => {
+  it("round-trips an explicit developer message role", () => {
+    const event = {
+      schemaVersion: 1 as const,
+      eventId: "event-developer",
+      cursor: "source-1:developer",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      payload: {
+        type: "message" as const,
+        messageId: "message-developer",
+        role: "developer" as const,
+        channel: "commentary",
+        text: "Use the repository contract.",
+        truncated: false
+      }
+    };
+
+    expect(decodePersistedAgentEvent(encodePersistedAgentEvent(event))).toEqual(event);
+  });
+
+  it("keeps a legacy assistant message role absent when round-tripped", () => {
+    const event = {
+      schemaVersion: 1 as const,
+      eventId: "event-legacy-assistant",
+      cursor: "source-1:legacy-assistant",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:01.000Z",
+      payload: {
+        type: "message" as const,
+        messageId: "message-legacy-assistant",
+        channel: "assistant",
+        text: "Still visible to users.",
+        truncated: false
+      }
+    };
+
+    expect(decodePersistedAgentEvent(encodePersistedAgentEvent(event))).toEqual(event);
+  });
+
+  it("rejects a developer message above the 64 KiB UTF-8 boundary", () => {
+    expect(() => decodePersistedAgentEvent({
+      schemaVersion: 1,
+      eventId: "event-developer-oversized",
+      cursor: "source-1:developer-oversized",
+      sourceId: "source-1",
+      agentKind: "traex",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:02.000Z",
+      payload: {
+        type: "message",
+        message_id: "message-developer-oversized",
+        role: "developer",
+        channel: "commentary",
+        text: "x".repeat(64 * 1024 + 1),
+        truncated: true
+      }
+    })).toThrow();
+  });
+
   it("round-trips a Human Message choice selection reference", () => {
     const event = {
       schemaVersion: 1 as const,
@@ -101,6 +167,29 @@ describe("persisted Herdr event codec", () => {
         callId: "call-1",
         name: "read_file",
         arguments: "x".repeat(MAX_FREEFORM_EVENT_TEXT_BYTES),
+        truncated: false
+      }
+    };
+
+    expect(decodePersistedAgentEvent(encodePersistedAgentEvent(event))).toEqual(event);
+  });
+
+  it("keeps assistant message text valid at the shared 1 MiB byte boundary", () => {
+    const event = {
+      schemaVersion: 1 as const,
+      eventId: "event-assistant-boundary",
+      cursor: "source-1:assistant-boundary",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:03.000Z",
+      payload: {
+        type: "message" as const,
+        role: "assistant" as const,
+        messageId: "message-assistant-boundary",
+        channel: "final",
+        text: "x".repeat(MAX_FREEFORM_EVENT_TEXT_BYTES),
         truncated: false
       }
     };

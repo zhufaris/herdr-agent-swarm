@@ -206,6 +206,26 @@ describe("HerdrEventsAdapter", () => {
     await expect(invalid.read("source-1", "start")).rejects.toThrow();
   });
 
+  it("fails closed for an unknown message role or a non-assistant final completion choice", async () => {
+    const invalidRole = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch", events: [agentEvent("source-1:1", "turn-1", "2026-10-22T00:00:00Z", {
+        type: "message", message_id: "answer-1", role: "reviewer", channel: "final", text: "Clean answer", truncated: false
+      })], next_cursor: "source-1:1", earliest_cursor: "source-1:1", latest_cursor: "source-1:1"
+    }) }, "herdr");
+    const developerChoice = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch", events: [agentEvent("source-1:2", "turn-1", "2026-10-22T00:00:01Z", {
+        type: "message", message_id: "answer-2", role: "developer", channel: "final", text: "Internal guidance", truncated: false,
+        completion_choice: {
+          version: 2, intent: "human_review", question: "Continue?", default: "continue",
+          options: [{ id: "continue", label: "Continue", message: "default" }]
+        }
+      })], next_cursor: "source-1:2", earliest_cursor: "source-1:2", latest_cursor: "source-1:2"
+    }) }, "herdr");
+
+    await expect(invalidRole.read("source-1", "start")).rejects.toThrow();
+    await expect(developerChoice.read("source-1", "start")).rejects.toThrow();
+  });
+
   it("advertises Pane-visible reasoning and defaults older Core responses safely", async () => {
     const current = new HerdrEventsAdapter({ run: async () => coreEventResponse({
       type: "agent_events_capabilities",
