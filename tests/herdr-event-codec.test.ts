@@ -3,6 +3,43 @@ import { decodePersistedAgentEvent, encodePersistedAgentEvent } from "../src/run
 import { MAX_FREEFORM_EVENT_TEXT_BYTES } from "../src/domain/herdr-event-payload-schema.js";
 
 describe("persisted Herdr event codec", () => {
+  it("round-trips normalized response token usage", () => {
+    const event = {
+      schemaVersion: 1 as const,
+      eventId: "event-token-usage",
+      cursor: "source-1:token-usage",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: "2026-10-22T00:00:00.000Z",
+      payload: {
+        type: "token_usage" as const,
+        responseId: "response-1",
+        response: {
+          inputTokens: 80,
+          cachedInputTokens: 10,
+          cacheCreationInputTokens: 0,
+          outputTokens: 20,
+          reasoningOutputTokens: 5,
+          totalTokens: 105
+        },
+        thread: {
+          inputTokens: 800,
+          cachedInputTokens: 100,
+          cacheCreationInputTokens: 0,
+          outputTokens: 200,
+          reasoningOutputTokens: 50,
+          totalTokens: 1_050
+        },
+        modelContextWindow: 4_000,
+        autoCompactLimit: 3_000
+      }
+    };
+
+    expect(decodePersistedAgentEvent(encodePersistedAgentEvent(event))).toEqual(event);
+  });
+
   it("round-trips an explicit developer message role", () => {
     const event = {
       schemaVersion: 1 as const,

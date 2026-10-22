@@ -119,6 +119,134 @@ describe("Core event semantic identity", () => {
     expect(sameCoreEventSemantics(canonical, replay)).toBe(false);
   });
 
+  it("treats normalized token usage as part of semantic identity while ignoring transport fields", () => {
+    const canonical = event({
+      payload: {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        },
+        thread: {
+          input_tokens: 800,
+          cached_input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          output_tokens: 200,
+          reasoning_output_tokens: 50,
+          total_tokens: 1_050
+        },
+        auto_compact_limit: 3_000
+      }
+    });
+    const replay = event({
+      sourceId: "replay",
+      cursor: "replay:1",
+      payload: {
+        auto_compact_limit: 3_000,
+        thread: {
+          total_tokens: 1_050,
+          reasoning_output_tokens: 50,
+          output_tokens: 200,
+          cache_creation_input_tokens: 0,
+          cached_input_tokens: 100,
+          input_tokens: 800
+        },
+        response: {
+          total_tokens: 105,
+          reasoning_output_tokens: 5,
+          output_tokens: 20,
+          cache_creation_input_tokens: 0,
+          cached_input_tokens: 10,
+          input_tokens: 80
+        },
+        response_id: "response-1",
+        type: "token_usage"
+      }
+    });
+
+    expect(coreEventSemanticHash(canonical)).toBe(coreEventSemanticHash(replay));
+    expect(sameCoreEventSemantics(canonical, replay)).toBe(true);
+  });
+
+  it.each([
+    ["changed response id", {
+      type: "token_usage",
+      response_id: "response-2",
+      response: {
+        input_tokens: 80,
+        cached_input_tokens: 10,
+        cache_creation_input_tokens: 0,
+        output_tokens: 20,
+        reasoning_output_tokens: 5,
+        total_tokens: 105
+      }
+    }],
+    ["changed thread total", {
+      type: "token_usage",
+      response_id: "response-1",
+      response: {
+        input_tokens: 80,
+        cached_input_tokens: 10,
+        cache_creation_input_tokens: 0,
+        output_tokens: 20,
+        reasoning_output_tokens: 5,
+        total_tokens: 105
+      },
+      thread: {
+        input_tokens: 800,
+        cached_input_tokens: 100,
+        cache_creation_input_tokens: 0,
+        output_tokens: 200,
+        reasoning_output_tokens: 50,
+        total_tokens: 1_051
+      }
+    }],
+    ["changed compact limit", {
+      type: "token_usage",
+      response_id: "response-1",
+      response: {
+        input_tokens: 80,
+        cached_input_tokens: 10,
+        cache_creation_input_tokens: 0,
+        output_tokens: 20,
+        reasoning_output_tokens: 5,
+        total_tokens: 105
+      },
+      auto_compact_limit: 2_500
+    }]
+  ])("treats %s as a token-usage semantic conflict", (_label, changedPayload) => {
+    const canonical = event({
+      payload: {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        },
+        thread: {
+          input_tokens: 800,
+          cached_input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          output_tokens: 200,
+          reasoning_output_tokens: 50,
+          total_tokens: 1_050
+        },
+        auto_compact_limit: 3_000
+      }
+    });
+
+    expect(sameCoreEventSemantics(canonical, event({ sourceId: "replay", cursor: "replay:1", payload: changedPayload }))).toBe(false);
+  });
+
   it.each([
     ["missing payload type", {}],
     ["primitive payload", 42],

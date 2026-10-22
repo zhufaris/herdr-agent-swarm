@@ -530,12 +530,13 @@ export class SqliteSessionActivityStore implements SessionActivityStore {
       binding_id=excluded.binding_id,binding_generation=excluded.binding_generation,session_epoch=excluded.session_epoch,native_session_id=excluded.native_session_id,agent_kind=excluded.agent_kind,
       lane_id=excluded.lane_id,source_id=excluded.source_id,source_epoch=excluded.source_epoch,source_lane_sequence=excluded.source_lane_sequence,source_event_id=excluded.source_event_id,
       reducer_revision=excluded.reducer_revision,revision=excluded.revision,current_model=excluded.current_model,current_goal_json=excluded.current_goal_json,
-      last_turn_id=excluded.last_turn_id,last_turn_state=excluded.last_turn_state,compaction_count=excluded.compaction_count,updated_at=excluded.updated_at`).run(
+      last_turn_id=excluded.last_turn_id,last_turn_state=excluded.last_turn_state,compaction_count=excluded.compaction_count,
+      token_usage=excluded.token_usage,context_usage=excluded.context_usage,updated_at=excluded.updated_at`).run(
       scopeKey, input.context.scope.workspaceId, input.context.scope.paneId,
       input.context.producer.kind, input.context.producer.id, input.context.producer.runtimeGeneration, input.context.producer.sessionGeneration, input.context.producer.runtimePaneId,
       identity.bindingId, identity.bindingGeneration, identity.sessionEpoch, input.event.sessionId, input.event.agentKind,
       input.laneId, input.sourceId, input.sourceEpoch, input.laneSequence, input.event.eventId, REDUCER_REVISION, revision,
-      change.currentModel, change.currentGoalJson, change.lastTurnId, change.lastTurnState, change.compactionCount, null, null, input.observedAt
+      change.currentModel, change.currentGoalJson, change.lastTurnId, change.lastTurnState, change.compactionCount, change.tokenUsage, change.contextUsage, input.observedAt
     );
     if (input.taskList !== undefined) {
       const retained = new Set(input.taskList.flatMap((task) => task.id ? [task.id] : []));
@@ -934,7 +935,8 @@ function consistentProjectionContext(input: SessionActivityProjectionInput): boo
 
 function projectChange(input: SessionActivityProjectionInput, current?: SnapshotRow): {
   changed: boolean; currentModel: string | null; currentGoalJson: string | null; lastTurnId: string | null;
-  lastTurnState: "active" | "completed" | "aborted" | null; compactionCount: number; items: ItemMutation[];
+  lastTurnState: "active" | "completed" | "aborted" | null; compactionCount: number; tokenUsage: number | null;
+  contextUsage: number | null; items: ItemMutation[];
 } {
   const payload = input.event.payload as Record<string, unknown>;
   const type = payload.type;
@@ -943,6 +945,8 @@ function projectChange(input: SessionActivityProjectionInput, current?: Snapshot
   let lastTurnId = current?.last_turn_id ?? null;
   let lastTurnState = current?.last_turn_state ?? null;
   let compactionCount = current?.compaction_count ?? 0;
+  let tokenUsage = current?.token_usage ?? null;
+  let contextUsage = current?.context_usage ?? null;
   const items: ItemMutation[] = [];
   let changed = false;
   if (type === "turn_started") { lastTurnId = input.event.turnId; lastTurnState = "active"; changed = true; }
@@ -951,6 +955,15 @@ function projectChange(input: SessionActivityProjectionInput, current?: Snapshot
   } else if (type === "model_changed") {
     const model = bounded(text(payload, "model"), 256); if (model && model !== currentModel) { currentModel = model; changed = true; }
   } else if (type === "context_compacted") { compactionCount += 1; changed = true; }
+  else if (type === "token_usage") {
+    const nextTokenUsage = projectedTokenUsage(payload);
+    const nextContextUsage = nextTokenUsage === null ? null : projectedContextUsage(payload, nextTokenUsage);
+    if (nextTokenUsage !== null && (nextTokenUsage !== tokenUsage || nextContextUsage !== contextUsage)) {
+      tokenUsage = nextTokenUsage;
+      contextUsage = nextContextUsage;
+      changed = true;
+    }
+  }
   else if (type === "goal_changed") {
     const goal = { goalId: text(payload, "goal_id", "goalId"), objective: bounded(text(payload, "objective"), 2_000), status: text(payload, "status"), sourceUpdatedAt: number(payload, "source_updated_at", "sourceUpdatedAt") };
     const next = JSON.stringify(goal); if (goal.goalId && goal.objective && currentGoalJson !== next) { currentGoalJson = next; changed = true; }
@@ -994,7 +1007,7 @@ function projectChange(input: SessionActivityProjectionInput, current?: Snapshot
     input.taskList.forEach((task, ordinal) => { if (task.id) items.push({ kind: "task", itemId: task.id, ordinal, label: task.label, state: task.state ?? "pending", terminal: task.state === "completed" || task.state === "done" }); });
     changed = true;
   }
-  return { changed, currentModel, currentGoalJson, lastTurnId, lastTurnState, compactionCount, items };
+  return { changed, currentModel, currentGoalJson, lastTurnId, lastTurnState, compactionCount, tokenUsage, contextUsage, items };
 }
 
 function sameIdentity(row: SnapshotRow, input: SessionActivityProjectionInput, identity: { bindingId: string; bindingGeneration: number; sessionEpoch: number }): boolean {
@@ -1050,6 +1063,26 @@ function terminalAgent(state: string): boolean { return ["completed", "failed", 
 function bounded(value: string, max: number): string { return value.replace(/\s+/g, " ").trim().slice(0, max); }
 function newerEvidence(sequence: number, eventId: string, currentSequence: number | null, currentEventId: string | null): boolean {
   return currentSequence === null || sequence > currentSequence || (sequence === currentSequence && eventId > (currentEventId ?? ""));
+}
+function projectedTokenUsage(payload: Record<string, unknown>): number | null {
+  return tokenUsageGroupTotal(record(payload.thread))
+    ?? tokenUsageGroupTotal(record(payload.turn))
+    ?? tokenUsageGroupTotal(record(payload.response));
+}
+function projectedContextUsage(payload: Record<string, unknown>, tokenUsage: number): number | null {
+  const limit = safePositiveInteger(payload.auto_compact_limit) ?? safePositiveInteger(payload.model_context_window);
+  if (limit === null) return null;
+  return Math.max(0, Math.min(100, Math.floor((100 * tokenUsage) / limit)));
+}
+function tokenUsageGroupTotal(group: Record<string, unknown> | null): number | null {
+  const totalTokens = safeNonNegativeInteger(group?.total_tokens);
+  return totalTokens;
+}
+function safeNonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+function safePositiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 function agentIdentityLabel(identity: SessionAgentIdentity | null, fallback: string): string {
   const displayName = identity?.displayName ?? fallback;

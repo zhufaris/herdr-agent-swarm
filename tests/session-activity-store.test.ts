@@ -16,6 +16,32 @@ function event(eventId: string, payload: Record<string, unknown>, turnId: string
   return { schemaVersion: 1, eventId, cursor: `cursor:${eventId}`, sourceId: "ring-1", agentKind: "traex", sessionId: "session-1", turnId, occurredAt: "2026-10-08T00:00:00.000Z", payload };
 }
 
+function tokenUsagePayload(input: {
+  responseTotal: number;
+  turnTotal?: number;
+  threadTotal?: number;
+  modelContextWindow?: number;
+  autoCompactLimit?: number;
+}): Record<string, unknown> {
+  const group = (totalTokens: number) => ({
+    input_tokens: Math.max(totalTokens - 25, 0),
+    cached_input_tokens: 10,
+    cache_creation_input_tokens: 0,
+    output_tokens: 20,
+    reasoning_output_tokens: 5,
+    total_tokens: totalTokens
+  });
+  return {
+    type: "token_usage",
+    response_id: "response-1",
+    response: group(input.responseTotal),
+    ...(input.turnTotal === undefined ? {} : { turn: group(input.turnTotal) }),
+    ...(input.threadTotal === undefined ? {} : { thread: group(input.threadTotal) }),
+    ...(input.modelContextWindow === undefined ? {} : { model_context_window: input.modelContextWindow }),
+    ...(input.autoCompactLimit === undefined ? {} : { auto_compact_limit: input.autoCompactLimit })
+  };
+}
+
 function primaryContext(overrides: Partial<SessionActivityProjectionContext> = {}): SessionActivityProjectionContext {
   return {
     scope: { kind: "pane", workspaceId: "workspace-1", paneId: "primary-pane" },
@@ -1666,6 +1692,135 @@ describe("Session Activity projection", () => {
     expect(graph.projections.loadTopicView("binding-1")?.viewVersion).toBe(projected.viewVersion);
     expect(context.database.prepare(`SELECT COUNT(*) AS count FROM outbound_replies
       WHERE binding_id='binding-1' AND target_role='session_status'`).get()).toEqual({ count: 1 });
+    context.close();
+  });
+
+  it("projects token usage by latest lane with response-turn-thread fallback, floor/clamp, and stale-limit clearing", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    activatePrimary(graph);
+
+    expect(project(graph, primaryContext(), 1, event("token-response", tokenUsagePayload({ responseTotal: 105, modelContextWindow: 400 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 105, contextUsage: 26 });
+
+    expect(graph.sessionActivity.projectCanonicalEvent({
+      context: primaryContext(),
+      laneId: "lane-1",
+      laneSequence: 1,
+      sourceId: "ring-1",
+      sourceEpoch: "epoch-1",
+      event: event("token-response", tokenUsagePayload({ responseTotal: 105, modelContextWindow: 400 })),
+      observedAt: "2026-10-08T00:00:01.000Z"
+    }).outcome).toBe("duplicate");
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 105, contextUsage: 26 });
+
+    expect(graph.sessionActivity.projectCanonicalEvent({
+      context: primaryContext(),
+      laneId: "lane-1",
+      laneSequence: 0,
+      sourceId: "ring-1",
+      sourceEpoch: "epoch-1",
+      event: event("token-old", tokenUsagePayload({ responseTotal: 999, modelContextWindow: 1_000 })),
+      observedAt: "2026-10-08T00:00:01.000Z"
+    }).outcome).toBe("stale");
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 105, contextUsage: 26 });
+
+    expect(project(graph, primaryContext(), 2, event("token-turn", tokenUsagePayload({ responseTotal: 110, turnTotal: 150, autoCompactLimit: 300 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 150, contextUsage: 50 });
+
+    expect(project(graph, primaryContext(), 3, event("token-thread", tokenUsagePayload({ responseTotal: 120, turnTotal: 150, threadTotal: 1_050, autoCompactLimit: 3_000 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 1_050, contextUsage: 35 });
+
+    expect(project(graph, primaryContext(), 4, event("token-clear-limit", tokenUsagePayload({ responseTotal: 171, threadTotal: 171 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: null });
+
+    expect(project(graph, primaryContext(), 5, event("token-floor", tokenUsagePayload({ responseTotal: 171, modelContextWindow: 500 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: 34 });
+
+    expect(project(graph, primaryContext(), 6, event("token-clamp", tokenUsagePayload({ responseTotal: 5_000, autoCompactLimit: 3_000 })))).toMatchObject({
+      outcome: "projected",
+      visibleChanged: true
+    });
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 5_000, contextUsage: 100 });
+    context.close();
+  });
+
+  it("reopens from disk with persisted token usage and context percentage", () => {
+    const directory = mkdtempSync(join(tmpdir(), "herdr-session-activity-token-"));
+    const path = join(directory, "state.sqlite");
+    const firstContext = new SqliteContext(path);
+    const first = new SqliteCapabilityGraph(firstContext);
+    activatePrimary(first);
+    project(first, primaryContext(), 1, event("token-persisted", tokenUsagePayload({ responseTotal: 1_050, autoCompactLimit: 3_000 })));
+    firstContext.close();
+
+    const secondContext = new SqliteContext(path);
+    try {
+      const second = new SqliteCapabilityGraph(secondContext);
+      expect(load(second)?.snapshot).toMatchObject({ tokenUsage: 1_050, contextUsage: 35 });
+    } finally {
+      secondContext.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rebuilds token usage from replay after deleting the derived snapshot row", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    activatePrimary(graph);
+    const first = event("token-live-1", tokenUsagePayload({ responseTotal: 105, modelContextWindow: 400 }));
+    const second = event("token-live-2", tokenUsagePayload({ responseTotal: 171, threadTotal: 171, modelContextWindow: 500 }));
+
+    expect(graph.coreEvents.ingestBatch({
+      laneId: "lane-live",
+      sourceId: first.sourceId,
+      sourceEpoch: "epoch-1",
+      agentKind: first.agentKind,
+      sessionId: first.sessionId,
+      sessionActivityContext: primaryContext(),
+      afterCursor: "start",
+      nextCursor: second.cursor,
+      latestCursor: second.cursor,
+      events: [first, second],
+      ingestedAt: "2026-10-08T00:00:01.000Z"
+    })).toBe("accepted");
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: 34 });
+
+    context.database.prepare("DELETE FROM session_activity_snapshots WHERE producer_kind='primary' AND producer_id='binding-1'").run();
+    expect(load(graph)).toBeNull();
+
+    const replayFirst = { ...event("token-live-1", tokenUsagePayload({ responseTotal: 105, modelContextWindow: 400 })), sourceId: "replay-source-1", cursor: "replay:1" };
+    const replaySecond = { ...event("token-live-2", tokenUsagePayload({ responseTotal: 171, threadTotal: 171, modelContextWindow: 500 })), sourceId: "replay-source-1", cursor: "replay:2" };
+    expect(graph.coreEvents.ingestBatch({
+      laneId: "lane-replay",
+      sourceId: "replay-source-1",
+      sourceEpoch: "epoch-replay",
+      agentKind: replayFirst.agentKind,
+      sessionId: replayFirst.sessionId,
+      sessionActivityContext: primaryContext(),
+      afterCursor: "start",
+      nextCursor: replaySecond.cursor,
+      latestCursor: replaySecond.cursor,
+      events: [replayFirst, replaySecond],
+      ingestedAt: "2026-10-08T00:00:02.000Z"
+    })).toBe("accepted");
+
+    expect(load(graph)?.snapshot).toMatchObject({ tokenUsage: 171, contextUsage: 34 });
     context.close();
   });
 });

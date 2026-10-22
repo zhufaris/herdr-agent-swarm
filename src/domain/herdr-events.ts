@@ -4,6 +4,15 @@ import type { ChoiceSelectionRef } from "./inbound.js";
 
 export type AgentMessageRole = "assistant" | "developer" | "system";
 
+export interface AgentTokenUsageGroup {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+
 export type AgentEventPayload =
   | { type: "turn_started" }
   | { type: "turn_completed" }
@@ -13,6 +22,7 @@ export type AgentEventPayload =
   | { type: "agent_activity"; agentId: string; displayName?: string; model?: string; content?: string; contentTruncated?: boolean; resultHandoff?: "delivered_to_parent"; state: "started" | "running" | "completed" | "failed" | "interrupted" | "blocked" }
   | { type: "model_changed"; model: string }
   | { type: "context_compacted" }
+  | { type: "token_usage"; responseId: string; response: AgentTokenUsageGroup; turn?: AgentTokenUsageGroup; thread?: AgentTokenUsageGroup; modelContextWindow?: number; autoCompactLimit?: number }
   | { type: "tool_call"; callId: string; name: string; arguments: string; truncated: boolean }
   | { type: "tool_result"; callId: string; text: string; isError: boolean; truncated: boolean }
   | { type: "goal_changed"; goalId: string; objective: string; status: "active" | "paused" | "blocked" | "completed" | "budget_limited" | "usage_limited"; sourceUpdatedAt: number; truncated: boolean }

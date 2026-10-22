@@ -124,6 +124,43 @@ describe("HerdrEventProjector", () => {
     expect(projector.snapshot().completionChoiceSource).toBeUndefined();
   });
 
+  it("suppresses token-usage telemetry from answers, timeline deltas, and completion choices", () => {
+    const projector = new HerdrEventProjector();
+    const projected = projector.project([
+      parseHerdrAgentEvent(agentEvent("source-token:start", "turn-token", "2026-10-22T00:00:00Z", { type: "turn_started" })),
+      parseHerdrAgentEvent(agentEvent("source-token:usage", "turn-token", "2026-10-22T00:00:01Z", {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        },
+        thread: {
+          input_tokens: 800,
+          cached_input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          output_tokens: 200,
+          reasoning_output_tokens: 50,
+          total_tokens: 1_050
+        },
+        auto_compact_limit: 3_000
+      })),
+      parseHerdrAgentEvent(agentEvent("source-token:done", "turn-token", "2026-10-22T00:00:02Z", { type: "turn_completed" }))
+    ]);
+
+    expect(projected.answerDelta).toBe("");
+    expect(projected.timelineDeltas).toBeUndefined();
+    expect(projected.turnLifecycle).toMatchObject({ state: "completed" });
+    expect(projected.turnLifecycle?.finalAnswer).toBeUndefined();
+    expect(projected.turnLifecycle?.completionChoice).toBeUndefined();
+    expect(projector.snapshot().completionChoice).toBeUndefined();
+    expect(projector.snapshot().completionChoiceSource).toBeUndefined();
+  });
+
   it("recovers a structured choice from commentary when the final keeps only the invocation marker", () => {
     const completionChoice = {
       version: 2 as const, intent: "human_review" as const, question: "Approve Gate 2?", default: "approve",

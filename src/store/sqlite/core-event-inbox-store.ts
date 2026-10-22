@@ -200,10 +200,12 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
         const stored = this.storeEvent(event, batch.ingestedAt, evidence ?? null);
         let laneSequence = evidence?.sequence ?? null;
         let laneState = evidence?.state ?? null;
+        let insertedLaneItem = false;
         if (laneSequence === null) {
           sequence += 1;
           this.statements.insertLaneItem.run(batch.laneId, event.eventId, sequence, batch.ingestedAt, batch.ingestedAt);
           laneSequence = sequence;
+          insertedLaneItem = true;
           laneState = "pending";
           if (stored.admission !== "new" || stored.skipProjection) {
             this.statements.ignoreLaneItem.run(batch.ingestedAt, batch.laneId, event.eventId);
@@ -214,13 +216,18 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
         if (stored.admission === "conflict") {
           this.settleConflict(batch.laneId, event.eventId, event, batch.ingestedAt);
         }
-        if (stored.admission === "new" && !stored.skipProjection && !isSettledLaneItem(laneState ?? undefined)) {
+        const shouldProjectNewEvent = stored.admission === "new" && !stored.skipProjection && !isSettledLaneItem(laneState ?? undefined);
+        const shouldProjectExactReplay = insertedLaneItem
+          && stored.admission === "duplicate"
+          && isTokenUsagePayload(stored.event.payload)
+          && !stored.skipProjection;
+        if (shouldProjectNewEvent || shouldProjectExactReplay) {
           let projection: { segmentId?: string | null; outcome?: string } | void = undefined;
           let savepointCommitted = false;
           try {
             projection = this.context.savepoint("sqlite.core-event-inbox-store.project-event", () => {
               const projected = this.dependencies?.projectCanonicalEvent?.({ laneId: batch.laneId, laneSequence, sourceId: batch.sourceId, sourceEpoch: batch.sourceEpoch ?? null, ...(batch.sessionActivityContext ? { sessionActivityContext: batch.sessionActivityContext } : {}), event: fromStoredEvent(stored.event), observedAt: batch.ingestedAt });
-              this.observeCanonicalHumanMessage(stored.event, batch.ingestedAt);
+              if (stored.admission === "new") this.observeCanonicalHumanMessage(stored.event, batch.ingestedAt);
               return projected;
             });
             savepointCommitted = true;
@@ -477,7 +484,8 @@ export class SqliteCoreEventInboxStore implements CoreEventInboxStore {
     }
     if (existingEvent) {
       const existing = JSON.parse(existingEvent.event_json) as StoredCoreEvent;
-      return { event: existing, admission: sameCoreEventSemantics(existing, incoming) ? "duplicate" : "conflict", skipProjection: true };
+      const admission = sameCoreEventSemantics(existing, incoming) ? "duplicate" : "conflict";
+      return { event: existing, admission, skipProjection: admission === "conflict" || isSourceErrorPayload(existing.payload) };
     }
     const normalizedEventJson = JSON.stringify(incoming);
     const discriminators = coreEventDiscriminators(incoming);
@@ -856,6 +864,10 @@ function isHumanMessagePayload(payload: unknown): payload is Record<string, unkn
 
 function isSourceErrorPayload(payload: unknown): boolean {
   return typeof payload === "object" && payload !== null && (payload as { type?: unknown }).type === "source_error";
+}
+
+function isTokenUsagePayload(payload: unknown): payload is Record<string, unknown> & { type: "token_usage" } {
+  return typeof payload === "object" && payload !== null && (payload as { type?: unknown }).type === "token_usage";
 }
 
 function validateBatch(batch: CoreEventInboxBatch): void {

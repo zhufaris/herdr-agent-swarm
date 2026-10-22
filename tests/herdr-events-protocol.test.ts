@@ -88,6 +88,103 @@ describe("HerdrEventsAdapter", () => {
     await expect(adapter.read("source-1", "start")).rejects.toThrow();
   });
 
+  it("accepts normalized token usage in a Core batch", async () => {
+    const adapter = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch",
+      events: [agentEvent("source-1:1", "turn-1", "2026-10-22T00:00:00Z", {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        },
+        thread: {
+          input_tokens: 800,
+          cached_input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          output_tokens: 200,
+          reasoning_output_tokens: 50,
+          total_tokens: 1_050
+        },
+        auto_compact_limit: 3_000
+      })],
+      next_cursor: "source-1:1",
+      earliest_cursor: "source-1:1",
+      latest_cursor: "source-1:1"
+    }) }, "herdr");
+
+    await expect(adapter.read("source-1", "start")).resolves.toMatchObject({
+      events: [{ payload: {
+        type: "token_usage",
+        responseId: "response-1",
+        response: {
+          inputTokens: 80,
+          cachedInputTokens: 10,
+          cacheCreationInputTokens: 0,
+          outputTokens: 20,
+          reasoningOutputTokens: 5,
+          totalTokens: 105
+        },
+        thread: {
+          inputTokens: 800,
+          cachedInputTokens: 100,
+          cacheCreationInputTokens: 0,
+          outputTokens: 200,
+          reasoningOutputTokens: 50,
+          totalTokens: 1_050
+        },
+        autoCompactLimit: 3_000
+      } }]
+    });
+  });
+
+  it("fails closed for malformed token usage payloads", async () => {
+    const invalidBounds = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch",
+      events: [agentEvent("source-1:1", "turn-1", "2026-10-22T00:00:00Z", {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: Number.MAX_SAFE_INTEGER + 1
+        }
+      })],
+      next_cursor: "source-1:1",
+      earliest_cursor: "source-1:1",
+      latest_cursor: "source-1:1"
+    }) }, "herdr");
+    const invalidUnknownField = new HerdrEventsAdapter({ run: async () => coreEventResponse({
+      type: "agent_events_batch",
+      events: [agentEvent("source-1:2", "turn-1", "2026-10-22T00:00:01Z", {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105,
+          mystery_tokens: 1
+        }
+      })],
+      next_cursor: "source-1:2",
+      earliest_cursor: "source-1:2",
+      latest_cursor: "source-1:2"
+    }) }, "herdr");
+
+    await expect(invalidBounds.read("source-1", "start")).rejects.toThrow();
+    await expect(invalidUnknownField.read("source-1", "start")).rejects.toThrow();
+  });
+
   it("preserves structured completion Choice metadata on the same final message", async () => {
     const run = vi.fn<CommandRunner["run"]>(async () => coreEventResponse({
       type: "agent_events_batch",

@@ -1,8 +1,9 @@
 import type { CoreEventEnvelope } from "../../domain/core-event-inbox.js";
-import type { AgentEvent, AgentEventPayload } from "../../domain/herdr-events.js";
+import type { AgentEvent, AgentEventPayload, AgentTokenUsageGroup } from "../../domain/herdr-events.js";
 import { snakeCaseAgentEventPayloadSchema, type SnakeCaseAgentEventPayload } from "../../domain/herdr-event-payload-schema.js";
 
 type PersistedPayload = SnakeCaseAgentEventPayload;
+type PersistedTokenUsagePayload = Extract<PersistedPayload, { type: "token_usage" }>;
 
 export function decodePersistedAgentEvent(event: CoreEventEnvelope): AgentEvent {
   return {
@@ -60,6 +61,15 @@ function normalizePayload(payload: PersistedPayload): AgentEventPayload {
       ...(payload.result_handoff ? { resultHandoff: payload.result_handoff } : {}),
       state: payload.state
     };
+    case "token_usage": return {
+      type: payload.type,
+      responseId: payload.response_id,
+      response: normalizeTokenUsageGroup(payload.response),
+      ...(payload.turn ? { turn: normalizeTokenUsageGroup(payload.turn) } : {}),
+      ...(payload.thread ? { thread: normalizeTokenUsageGroup(payload.thread) } : {}),
+      ...(payload.model_context_window ? { modelContextWindow: payload.model_context_window } : {}),
+      ...(payload.auto_compact_limit ? { autoCompactLimit: payload.auto_compact_limit } : {})
+    };
     case "tool_call": return { type: payload.type, callId: payload.call_id, name: payload.name, arguments: payload.arguments, truncated: payload.truncated };
     case "tool_result": return { type: payload.type, callId: payload.call_id, text: payload.text, isError: payload.is_error, truncated: payload.truncated };
     case "goal_changed": return {
@@ -107,6 +117,15 @@ function serializePayload(payload: AgentEventPayload): PersistedPayload {
       ...(payload.resultHandoff ? { result_handoff: payload.resultHandoff } : {}),
       state: payload.state
     };
+    case "token_usage": return {
+      type: payload.type,
+      response_id: payload.responseId,
+      response: serializeTokenUsageGroup(payload.response),
+      ...(payload.turn ? { turn: serializeTokenUsageGroup(payload.turn) } : {}),
+      ...(payload.thread ? { thread: serializeTokenUsageGroup(payload.thread) } : {}),
+      ...(payload.modelContextWindow ? { model_context_window: payload.modelContextWindow } : {}),
+      ...(payload.autoCompactLimit ? { auto_compact_limit: payload.autoCompactLimit } : {})
+    };
     case "tool_call": return { type: payload.type, call_id: payload.callId, name: payload.name, arguments: payload.arguments, truncated: payload.truncated };
     case "tool_result": return { type: payload.type, call_id: payload.callId, text: payload.text, is_error: payload.isError, truncated: payload.truncated };
     case "goal_changed": return {
@@ -124,4 +143,26 @@ function serializePayload(payload: AgentEventPayload): PersistedPayload {
     case "runtime_ended": return { type: payload.type, pane_id: payload.paneId, reason: payload.reason };
     default: return payload;
   }
+}
+
+function normalizeTokenUsageGroup(group: PersistedTokenUsagePayload["response"]): AgentTokenUsageGroup {
+  return {
+    inputTokens: group.input_tokens,
+    cachedInputTokens: group.cached_input_tokens,
+    cacheCreationInputTokens: group.cache_creation_input_tokens,
+    outputTokens: group.output_tokens,
+    reasoningOutputTokens: group.reasoning_output_tokens,
+    totalTokens: group.total_tokens
+  };
+}
+
+function serializeTokenUsageGroup(group: AgentTokenUsageGroup): PersistedTokenUsagePayload["response"] {
+  return {
+    input_tokens: group.inputTokens,
+    cached_input_tokens: group.cachedInputTokens,
+    cache_creation_input_tokens: group.cacheCreationInputTokens,
+    output_tokens: group.outputTokens,
+    reasoning_output_tokens: group.reasoningOutputTokens,
+    total_tokens: group.totalTokens
+  };
 }

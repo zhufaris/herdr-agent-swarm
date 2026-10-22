@@ -139,6 +139,116 @@ describe("SQLite retention payload compaction", () => {
     context.close();
   });
 
+  it("keeps token-usage events on the unchanged generic Core compaction path", () => {
+    const context = new SqliteContext(":memory:");
+    const graph = new SqliteCapabilityGraph(context);
+    const coreOld = new Date(Date.parse(now) - CORE_EVENT_RETENTION_WINDOW_MS - 1).toISOString();
+    const token = {
+      schemaVersion: 1 as const,
+      eventId: "audit-token",
+      cursor: "cursor:token",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: coreOld,
+      payload: {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        },
+        thread: {
+          input_tokens: 800,
+          cached_input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          output_tokens: 200,
+          reasoning_output_tokens: 50,
+          total_tokens: 1_050
+        },
+        auto_compact_limit: 3_000
+      }
+    };
+    const human = {
+      schemaVersion: 1 as const,
+      eventId: "audit-human",
+      cursor: "cursor:human",
+      sourceId: "source-1",
+      agentKind: "traex" as const,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      occurredAt: coreOld,
+      payload: { type: "human_message", message_id: "message-1", text: "hello", truncated: false, submission_id: "submission-1" }
+    };
+    const tokenJson = JSON.stringify(token);
+    const humanJson = JSON.stringify(human);
+    context.database.prepare(`INSERT INTO core_event_inbox(
+      event_id,source_id,agent_kind,session_id,turn_id,source_cursor,occurred_at,event_json,ingested_at,event_type,submission_id
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+      token.eventId, token.sourceId, token.agentKind, token.sessionId, token.turnId, token.cursor,
+      token.occurredAt, tokenJson, coreOld, "token_usage"
+    );
+    context.database.prepare(`INSERT INTO core_event_inbox(
+      event_id,source_id,agent_kind,session_id,turn_id,source_cursor,occurred_at,event_json,ingested_at,event_type,submission_id
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+      human.eventId, human.sourceId, human.agentKind, human.sessionId, human.turnId, human.cursor,
+      human.occurredAt, humanJson, coreOld, "human_message", "submission-1"
+    );
+    context.database.prepare(`INSERT INTO conversation_segments(
+      id,producer_key,owner_kind,owner_id,owner_generation,submission_id,human_event_id,agent_kind,session_id,
+      request_text,state,view_version,root_message_id,created_at,updated_at
+    ) VALUES('token-segment','lane:audit-lane','primary','binding-1',1,'submission-1','audit-human','traex','session-1',
+      'hello','completed',1,'root-1',?,?)`).run(coreOld, coreOld);
+    context.database.prepare(`INSERT INTO core_event_lane_items(lane_id,event_id,sequence,state,created_at,updated_at)
+      VALUES('audit-lane',?,1,'projected',?,?),('audit-lane',?,2,'projected',?,?)`)
+      .run(token.eventId, coreOld, coreOld, human.eventId, coreOld, coreOld);
+    context.database.prepare(`INSERT INTO core_event_lane_checkpoints(
+      lane_id,source_id,source_epoch,agent_kind,session_id,read_cursor,latest_cursor,updated_at
+    ) VALUES('audit-lane','source-1','epoch-1','traex','session-1','cursor:human','cursor:human',?)`).run(coreOld);
+
+    const audit = graph.retentionCompaction.auditPage({
+      kind: "core_event",
+      evaluatedAt: now,
+      retentionWindowMs: CORE_EVENT_RETENTION_WINDOW_MS,
+      limit: 10
+    });
+
+    expect(audit).toMatchObject({
+      source: "core_event",
+      scanned: 2,
+      eligible: 1,
+      alreadyVerified: 0,
+      eligibleBytes: Buffer.byteLength(tokenJson),
+      refusals: { human_input_retained: 1 }
+    });
+
+    const compact = graph.retentionCompaction.compactPage({
+      kind: "core_event",
+      evaluatedAt: now,
+      retentionWindowMs: CORE_EVENT_RETENTION_WINDOW_MS,
+      limit: 10
+    });
+
+    expect(compact).toMatchObject({
+      source: "core_event",
+      scanned: 2,
+      compacted: 1,
+      alreadyCompacted: 0,
+      refusals: { human_input_retained: 1 }
+    });
+    expect(context.database.prepare("SELECT event_json,payload_compacted_at FROM core_event_inbox WHERE event_id='audit-token'").get())
+      .toEqual({ event_json: "null", payload_compacted_at: now });
+    expect(context.database.prepare("SELECT event_json,payload_compacted_at FROM core_event_inbox WHERE event_id='audit-human'").get())
+      .toEqual({ event_json: humanJson, payload_compacted_at: null });
+
+    context.close();
+  });
+
   it("resumes the bounded Core audit cursor after SQLite restart without clearing payloads", () => {
     const directory = mkdtempSync(join(tmpdir(), "swarm-core-audit-restart-"));
     const databasePath = join(directory, "bridge.db");

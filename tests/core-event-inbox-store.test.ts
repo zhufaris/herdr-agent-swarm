@@ -1212,6 +1212,70 @@ describe("Core event inbox store", () => {
     stores.lifecycle.close();
   });
 
+  it("persists token usage in the generic inbox with the existing discriminator columns and accepts exact replay", () => {
+    const stores = createTestStoreBundle(":memory:");
+    const original = event({
+      eventId: "token-usage",
+      cursor: "token:1",
+      payload: {
+        type: "token_usage",
+        response_id: "response-1",
+        response: {
+          input_tokens: 80,
+          cached_input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          output_tokens: 20,
+          reasoning_output_tokens: 5,
+          total_tokens: 105
+        },
+        thread: {
+          input_tokens: 800,
+          cached_input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          output_tokens: 200,
+          reasoning_output_tokens: 50,
+          total_tokens: 1_050
+        },
+        auto_compact_limit: 3_000
+      }
+    });
+    const replay = event({
+      eventId: "token-usage",
+      cursor: "token:2",
+      sourceId: "replay:source",
+      payload: {
+        auto_compact_limit: 3_000,
+        thread: {
+          total_tokens: 1_050,
+          reasoning_output_tokens: 50,
+          output_tokens: 200,
+          cache_creation_input_tokens: 0,
+          cached_input_tokens: 100,
+          input_tokens: 800
+        },
+        response: {
+          total_tokens: 105,
+          reasoning_output_tokens: 5,
+          output_tokens: 20,
+          cache_creation_input_tokens: 0,
+          cached_input_tokens: 10,
+          input_tokens: 80
+        },
+        response_id: "response-1",
+        type: "token_usage"
+      }
+    });
+
+    expect(stores.coreEvents.ingestBatch(batch("lane-token", original, "start", original.cursor))).toBe("accepted");
+    expect(JSON.parse((stores.driver.database.prepare(`SELECT event_json FROM core_event_inbox WHERE event_id=?`).get(original.eventId) as { event_json: string }).event_json))
+      .toMatchObject({ payload: { type: "token_usage", response_id: "response-1", auto_compact_limit: 3_000 } });
+    expect(stores.driver.database.prepare(`SELECT event_type,submission_id,channel,call_id FROM core_event_inbox WHERE event_id=?`).get(original.eventId))
+      .toEqual({ event_type: "token_usage", submission_id: null, channel: null, call_id: null });
+    expect(() => stores.coreEvents.ingestBatch(batch("lane-token-replay", replay, "", replay.cursor))).not.toThrow();
+
+    stores.lifecycle.close();
+  });
+
   it("treats a missing legacy Turn identity as the canonical null identity", () => {
     const stores = createTestStoreBundle(":memory:");
     const legacy = event({ turnId: null });

@@ -22,6 +22,20 @@ const identifierSchema = z.string().max(MAX_EVENT_IDENTIFIER_LENGTH);
 const requiredIdentifierSchema = identifierSchema.min(1);
 const messageRoleSchema = z.enum(["assistant", "developer", "system"]);
 const completionChoiceSchema = z.custom<FinalMessageCompletionChoice>(isFinalMessageCompletionChoice, "invalid completion_choice");
+const safeNonNegativeIntegerSchema = z.number().int().nonnegative().refine(Number.isSafeInteger, {
+  message: "must be a safe non-negative integer"
+});
+const safePositiveIntegerSchema = z.number().int().positive().refine(Number.isSafeInteger, {
+  message: "must be a positive safe integer"
+});
+const tokenUsageGroupSchema = z.object({
+  input_tokens: safeNonNegativeIntegerSchema,
+  cached_input_tokens: safeNonNegativeIntegerSchema,
+  cache_creation_input_tokens: safeNonNegativeIntegerSchema,
+  output_tokens: safeNonNegativeIntegerSchema,
+  reasoning_output_tokens: safeNonNegativeIntegerSchema,
+  total_tokens: safeNonNegativeIntegerSchema
+}).strict();
 const choiceSelectionRefSchema = z.object({
   actionSetId: requiredIdentifierSchema,
   optionId: requiredIdentifierSchema,
@@ -60,6 +74,15 @@ export const snakeCaseAgentEventPayloadSchema = z.union([
   }),
   z.object({ type: z.literal("model_changed"), model: z.string().min(1).max(256) }),
   z.object({ type: z.literal("context_compacted") }),
+  z.object({
+    type: z.literal("token_usage"),
+    response_id: requiredIdentifierSchema,
+    response: tokenUsageGroupSchema,
+    turn: tokenUsageGroupSchema.optional(),
+    thread: tokenUsageGroupSchema.optional(),
+    model_context_window: safePositiveIntegerSchema.optional(),
+    auto_compact_limit: safePositiveIntegerSchema.optional()
+  }).strict(),
   z.object({ type: z.literal("tool_call"), call_id: identifierSchema, name: z.string().max(MAX_TOOL_NAME_LENGTH), arguments: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), truncated: z.boolean() }),
   z.object({ type: z.literal("tool_result"), call_id: identifierSchema, text: boundedUtf8String(MAX_FREEFORM_EVENT_TEXT_BYTES), is_error: z.boolean(), truncated: z.boolean() }),
   z.object({

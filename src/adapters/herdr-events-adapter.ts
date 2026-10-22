@@ -55,7 +55,7 @@ const eventEnvelopeSchema = z.object({
 const eventSchema = eventEnvelopeSchema.extend({ payload: snakeCaseAgentEventPayloadSchema });
 const knownPayloadTypes = new Set<string>([
   "turn_started", "turn_completed", "turn_aborted", "human_message", "message", "agent_activity", "model_changed",
-  "context_compacted", "tool_call", "tool_result", "goal_changed", "branch_changed", "submission_receipt",
+  "context_compacted", "token_usage", "tool_call", "tool_result", "goal_changed", "branch_changed", "submission_receipt",
   "runtime_status_changed", "runtime_agent_changed", "runtime_ended", "source_error", "record_skipped"
 ]);
 const batchSchema = z.object({ result: z.object({
@@ -211,6 +211,7 @@ interface HerdrSessionRpc {
 
 type RawAgentEvent = z.infer<typeof eventSchema>;
 type RawAgentEventEnvelope = z.infer<typeof eventEnvelopeSchema>;
+type RawTokenUsagePayload = Extract<RawAgentEvent["payload"], { type: "token_usage" }>;
 
 export function parseHerdrAgentEvent(value: unknown): AgentEvent {
   return normalizeEvent(eventSchema.parse(value));
@@ -550,6 +551,15 @@ function normalizePayload(payload: RawAgentEvent["payload"]): AgentEventPayload 
       ...(payload.result_handoff ? { resultHandoff: payload.result_handoff } : {}),
       state: payload.state
     };
+    case "token_usage": return {
+      type: payload.type,
+      responseId: payload.response_id,
+      response: normalizeTokenUsageGroup(payload.response),
+      ...(payload.turn ? { turn: normalizeTokenUsageGroup(payload.turn) } : {}),
+      ...(payload.thread ? { thread: normalizeTokenUsageGroup(payload.thread) } : {}),
+      ...(payload.model_context_window ? { modelContextWindow: payload.model_context_window } : {}),
+      ...(payload.auto_compact_limit ? { autoCompactLimit: payload.auto_compact_limit } : {})
+    };
     case "tool_call": return { type: payload.type, callId: payload.call_id, name: payload.name, arguments: payload.arguments, truncated: payload.truncated };
     case "tool_result": return { type: payload.type, callId: payload.call_id, text: payload.text, isError: payload.is_error, truncated: payload.truncated };
     case "goal_changed": return {
@@ -567,4 +577,15 @@ function normalizePayload(payload: RawAgentEvent["payload"]): AgentEventPayload 
     case "runtime_ended": return { type: payload.type, paneId: payload.pane_id, reason: payload.reason };
     default: return payload;
   }
+}
+
+function normalizeTokenUsageGroup(group: RawTokenUsagePayload["response"]) {
+  return {
+    inputTokens: group.input_tokens,
+    cachedInputTokens: group.cached_input_tokens,
+    cacheCreationInputTokens: group.cache_creation_input_tokens,
+    outputTokens: group.output_tokens,
+    reasoningOutputTokens: group.reasoning_output_tokens,
+    totalTokens: group.total_tokens
+  };
 }
