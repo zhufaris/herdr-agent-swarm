@@ -32,6 +32,23 @@ describe("Answer Tool render ports", () => {
     })).toEqual({ category: "skill", icon: "🧩", label: "Skill", target: "herdr", summary: "Loaded skill herdr", state: "succeeded" });
   });
 
+  it("prefers semantic action, target, and result summary while retaining legacy fallbacks", () => {
+    expect(projectAnswerToolRenderModel({
+      kind: "tool", id: "tool:semantic", sequence: 1, category: "command", label: "legacy label",
+      action: "Build", target: "npm run build", resultSummary: { outcome: "timeout", text: "deadline exceeded" }, state: "failed"
+    })).toMatchObject({ label: "Build", target: "npm run build", semantic: true, outcome: "timeout", resultSummaryText: "deadline exceeded" });
+    expect(projectAnswerToolRenderModel({
+      kind: "tool", id: "tool:legacy", sequence: 2, category: "command", label: "legacy label", command: "npm test", state: "succeeded"
+    })).toMatchObject({ label: "Command", target: "legacy label", summary: "Ran npm test" });
+  });
+
+  it("keeps private Skill result summaries out of the render model", () => {
+    expect(projectAnswerToolRenderModel({
+      kind: "tool", id: "tool:skill-summary", sequence: 1, category: "skill", label: "herdr",
+      resultSummary: { outcome: "failure", text: "private skill instructions" }, state: "failed"
+    })).not.toMatchObject({ result: expect.anything(), outcome: expect.anything() });
+  });
+
   it("lets the Step port hide internal update_plan activity", () => {
     expect(projectAnswerToolRenderModel({
       kind: "tool", id: "tool:plan", sequence: 1, category: "step", label: "update_plan", result: "{}", state: "succeeded"

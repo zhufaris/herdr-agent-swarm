@@ -16,6 +16,7 @@ import {
   normalizeToolResultForDisplay,
   projectToolCalls,
   projectToolResultState,
+  projectToolResultSummary,
   summarizeToolActivity,
   toolActivityKey,
   type ToolActivityDescriptor
@@ -196,7 +197,7 @@ export class HerdrEventProjector {
             if (activity) toolActivities.push(activity);
           }
           if (isAnswerVisibleToolActivity(entry.descriptor)) {
-            timelineDeltas.push(toolTimeline(entry.id, this.nextSequence(), entry.descriptor.category, entry.descriptor.target, "running", undefined, entry.parentToolId, entry.descriptor.diff));
+            timelineDeltas.push(toolTimeline(entry.id, this.nextSequence(), entry.descriptor, "running", undefined, entry.parentToolId));
           }
         }
         continue;
@@ -206,6 +207,7 @@ export class HerdrEventProjector {
         if (!entries) continue;
         const state = payload.isError ? "failed" : projectToolResultState(payload.text);
         const aggregateResult = normalizeToolResultForDisplay(payload.text, payload.truncated);
+        const resultSummary = projectToolResultSummary(payload.text, { isError: payload.isError, sourceTruncated: payload.truncated });
         const containsSkill = entries.some((entry) => entry.parentToolId && entry.descriptor.category === "Skill");
         for (const entry of entries) {
           if (isStatusVisibleToolActivity(entry.descriptor)) {
@@ -217,12 +219,11 @@ export class HerdrEventProjector {
             timelineDeltas.push(toolTimeline(
               entry.id,
               this.nextSequence(),
-              entry.descriptor.category,
-              entry.descriptor.target,
+              entry.descriptor,
               state === "active" ? "running" : state === "done" ? "succeeded" : "failed",
               result,
               entry.parentToolId,
-              entry.descriptor.diff
+              resultSummary
             ));
           }
         }
@@ -489,7 +490,7 @@ function boundedInline(value: string, limit: number): string {
 function toolActivity(callId: string, category: ToolActivityDescriptor["category"], target: string, state: "active" | "done" | "failed") {
   if (category === "Command" && !target) return null;
   const kind = toolKind(category, target);
-  const key = category === "Agent" ? `agent:${normalizedAgentIdentity(target)}` : toolActivityKey(callId, { category, target, skillNames: [] });
+  const key = category === "Agent" ? `agent:${normalizedAgentIdentity(target)}` : toolActivityKey(callId, { category, action: category, target, skillNames: [] });
   return { key, kind, label: safe(`${category} · ${target}`), state } as const;
 }
 
@@ -506,18 +507,20 @@ function timelineCategory(category: string, target: string): AnswerTimelineToolC
   return toolKind(category, target);
 }
 
-function toolTimeline(id: string, sequence: number, category: string, target: string, state: "running" | "succeeded" | "failed", result?: string, parentToolId?: string, diff?: string): AnswerTimelineDelta {
-  const kind = timelineCategory(category, target);
-  const descriptor = { category: category as Parameters<typeof summarizeToolActivity>[0]["category"], target, skillNames: category === "Skill" ? [target] : [] };
+function toolTimeline(id: string, sequence: number, descriptor: ToolActivityDescriptor, state: "running" | "succeeded" | "failed", result?: string, parentToolId?: string, resultSummary?: { outcome: "success" | "failure" | "timeout"; text: string }): AnswerTimelineDelta {
+  const kind = timelineCategory(descriptor.category, descriptor.target);
   return {
     kind: "tool",
     id: `tool:${id}`,
     sequence,
     category: kind,
     label: safe(summarizeToolActivity(descriptor)),
-    ...(category === "Command" ? { command: safe(target) } : {}),
-    ...(diff ? { diff: safeToolResult(diff) } : {}),
+    action: descriptor.action,
+    target: safe(descriptor.target),
+    ...(descriptor.category === "Command" ? { command: safe(descriptor.target) } : {}),
+    ...(descriptor.diff ? { diff: safeToolResult(descriptor.diff) } : {}),
     ...(result && kind !== "skill" ? { result } : {}),
+    ...(resultSummary && descriptor.category !== "Skill" ? { resultSummary } : {}),
     ...(parentToolId ? { parentToolId } : {}),
     state
   };

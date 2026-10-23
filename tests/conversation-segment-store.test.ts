@@ -21,6 +21,7 @@ import { completionChoiceSubmissionIdentity } from "../src/domain/completion-cho
 import { transferDeliveryPrerequisites } from "../src/store/sqlite/delivery-prerequisites.js";
 import { SqliteCompletionReviewStore } from "../src/store/sqlite/completion-review-store.js";
 import { feishuGatewayApplicationPresentation, materializeFeishuPresentationView } from "../src/gateways/feishu/presentation.js";
+import { renderAnswerTimeline } from "../src/cards/answer-timeline.js";
 
 function stores(path = ":memory:") {
   const context = new SqliteContext(path);
@@ -2693,6 +2694,61 @@ describe("conversation segment canonical projection", () => {
     expect(recoveredResult).not.toContain("live-secret");
     expect(recoveredResult?.endsWith(TURN_OUTPUT_TRUNCATION_MARKER)).toBe(true);
     graph.database.close(); rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("reloads semantic Tool fields unchanged and renders older Tool JSON through the fallback", () => {
+    const directory = mkdtempSync(join(tmpdir(), "segment-tool-semantics-")); const path = join(directory, "bridge.db");
+    let graph = new SqliteCapabilityGraph(path);
+    const started = graph.conversationSegments.projectCanonicalEvent({ laneId: "lane-tool-semantics", laneSequence: 1, event: human(1), observedAt: "2026-10-04T00:00:01.000Z" });
+    const semantic = {
+      kind: "tool" as const, id: "tool:semantic", sequence: 1, canonicalPosition: { laneSequence: 2, itemOrdinal: 0 },
+      category: "command" as const, label: "legacy build", action: "Build", target: "npm run build",
+      resultSummary: { outcome: "timeout" as const, text: "deadline exceeded" }, state: "failed" as const
+    };
+    const legacy = {
+      kind: "tool" as const, id: "tool:legacy", sequence: 2, canonicalPosition: { laneSequence: 2, itemOrdinal: 1 },
+      category: "command" as const, label: "legacy checks", command: "npm test", state: "succeeded" as const
+    };
+    graph.conversationSegments.projectCanonicalEvent({
+      laneId: "lane-tool-semantics", laneSequence: 2,
+      event: event(2, { type: "tool_call", call_id: "tool-semantics", name: "exec", arguments: "{}", truncated: false }),
+      observedAt: "2026-10-04T00:00:02.000Z", timelineDeltas: [semantic, legacy]
+    });
+
+    graph.database.close();
+    graph = new SqliteCapabilityGraph(path);
+    const items = graph.conversationSegments.listConversationSegmentItems(started.segmentId!).map(({ item }) => item);
+    expect(items).toContainEqual(semantic);
+    expect(items).toContainEqual(legacy);
+    expect(renderAnswerTimeline(items).at(-1)).toMatchObject({
+      tag: "collapsible_panel", header: { title: { content: "⚙️ Ran npm test" } }
+    });
+
+    graph.database.close(); rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("keeps a frozen legacy Tool page snapshot unchanged while later semantic Tool activity uses compact rendering", () => {
+    const { context, graph, store } = stores();
+    const segmentId = "semantic-tool-freeze";
+    insertSemanticSegmentPage(context, { segmentId });
+    const legacy = { kind: "tool" as const, id: "tool:legacy-frozen", sequence: 1, canonicalPosition: { laneSequence: 2, itemOrdinal: 1 }, category: "command" as const, label: "legacy checks", command: "npm test", state: "succeeded" as const };
+    context.database.prepare(`INSERT INTO conversation_segment_items(segment_id,item_id,lane_sequence,item_ordinal,item_json)
+      VALUES(?,?,?,?,?)`).run(segmentId, legacy.id, 2, 1, JSON.stringify(legacy));
+    const frozenSnapshot = { schemaVersion: 1, elements: renderAnswerTimeline([legacy]) };
+    expect(store.reserveSemanticSnapshot!({
+      transition: "freeze", segmentId, pageIndex: 0, messageId: "message-0", cardId: "card-0",
+      elementId: `turn-card:${segmentId}:page:0`, snapshot: frozenSnapshot,
+      cursor: { itemIndex: 2, markdownOffset: 0 }, cursorAnchor: { position: { laneSequence: 2, itemOrdinal: 1 }, inclusive: false },
+      plannerPolicyVersion: 1, rendererPolicyVersion: 1, gatewayProfileVersion: 1
+    })).toBe("reserved");
+    const frozenReplyId = store.listConversationSegmentPages(segmentId)[0]!.pendingReplyId!;
+    const semantic = { kind: "tool" as const, id: "tool:semantic-later", sequence: 2, canonicalPosition: { laneSequence: 3, itemOrdinal: 0 }, category: "command" as const, label: "legacy build", action: "Build", target: "npm run build", state: "succeeded" as const };
+    store.projectCanonicalEvent({ laneId: segmentId, laneSequence: 3, event: event(3, { type: "tool_call", call_id: "later", name: "exec", arguments: "{}", truncated: false }), observedAt: "2026-10-04T00:00:03.000Z", timelineDeltas: [semantic] });
+
+    expect(graph.preparedDeliveries.hydrateDeliveryInput(frozenReplyId)).toMatchObject({ input: { snapshot: frozenSnapshot } });
+    expect(store.listConversationSegmentPages(segmentId)[0]).toMatchObject({ state: "frozen", pendingReplyId: frozenReplyId });
+    expect(renderAnswerTimeline([semantic])).toEqual([{ tag: "markdown", content: "⚙️ Build · npm run build · ✓ 完成" }]);
+    context.close();
   });
 
   it("redacts and bounds a result recovered through canonical projection", () => {

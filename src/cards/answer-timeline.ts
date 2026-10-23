@@ -24,6 +24,8 @@ const TOOL_STATE: Record<AnswerTimelineToolState, { border: string; label: strin
   failed: { border: "red", label: "✗ 失败", empty: "工具执行失败，无可展示详情。" }
 };
 
+const TIMEOUT_TOOL_STATE = { border: "orange", label: "⏱ 超时", empty: "工具执行超时，无可展示详情。" };
+
 /** Renders a canonical Answer timeline without knowing its Primary or Worker card shell. */
 export function renderAnswerTimeline(items: readonly AnswerTimelineItem[], payloadLimit = MAX_CARD_SERIALIZED_LENGTH, animationFrame?: number): FinalAnswerElement[] {
   const elements: FinalAnswerElement[] = [];
@@ -95,18 +97,23 @@ function statusView(item: Extract<AnswerTimelineItem, { kind: "status" }>): { ic
 
 function renderTool(model: AnswerToolRenderModel, payloadLimit: number, preserveDetail: boolean, animationFrame?: number): FinalAnswerElement {
   const icon = animatedToolIcon(model.icon, model.state, animationFrame);
-  if (model.summary && !model.command && !model.result && !model.diff) {
+  const state = toolState(model.state, model.outcome);
+  if (model.semantic && (model.state === "running" || model.state === "succeeded")) {
+    return { tag: "markdown", content: `${icon} ${safeInline(model.label, TOOL_LABEL_LIMIT)} · ${safeInline(model.target, TOOL_LABEL_LIMIT)} · ${state.label}` };
+  }
+  if (model.summary && !model.command && !model.result && !model.diff && !model.outcome) {
     return { tag: "markdown", content: `${icon} ${safeInline(model.summary, TOOL_LABEL_LIMIT * 2)}` };
   }
-  const state = TOOL_STATE[model.state];
   const group = model.groupChildCount ? ` · ${model.groupChildCount} operations` : "";
   const nested = model.nested ? "↳ " : "";
   const context = model.context ? ` · ${safeInline(model.context, TOOL_LABEL_LIMIT)}` : "";
-  const title = model.summary
+  const title = model.semantic
+    ? `${icon} ${safeInline(model.label, TOOL_LABEL_LIMIT)} · ${safeInline(model.target, TOOL_LABEL_LIMIT)} · ${state.label}`
+    : model.summary
     ? `${icon} ${safeInline(model.summary, TOOL_LABEL_LIMIT * 2)}`
     : `${icon} ${model.label} · ${nested}${safeInline(model.target, TOOL_LABEL_LIMIT)}${context}${group} · ${state.label}`;
   const panel = (resultLimit: number): FinalAnswerElement => ({
-    tag: "collapsible_panel", expanded: false, border: { color: state.border, corner_radius: "6px" },
+    tag: "collapsible_panel", expanded: model.outcome === "failure" || model.outcome === "timeout", border: { color: state.border, corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: title } },
     elements: [{ tag: "markdown", content: toolDetail(model, state.empty, resultLimit) }]
   });
@@ -124,11 +131,11 @@ function renderTool(model: AnswerToolRenderModel, payloadLimit: number, preserve
 }
 
 export function renderAnswerToolGroup(model: AnswerToolRenderGroup, payloadLimit: number, animationFrame?: number): FinalAnswerElement {
-  const state = TOOL_STATE[model.state];
+  const state = toolState(model.state, model.outcome);
   const icon = animatedToolIcon(model.members[0]?.icon ?? "🔧", model.state, animationFrame);
-  const title = `${icon} ${safeInline(model.summary, TOOL_LABEL_LIMIT * 2)}`;
+  const title = `${icon} ${safeInline(model.summary, TOOL_LABEL_LIMIT * 2)}${model.outcome === "timeout" ? " · ⏱ 超时" : ""}`;
   const panel = (detailLimit: number): FinalAnswerElement => ({
-    tag: "collapsible_panel", expanded: false, border: { color: state.border, corner_radius: "6px" },
+    tag: "collapsible_panel", expanded: model.outcome === "failure" || model.outcome === "timeout", border: { color: state.border, corner_radius: "6px" },
     header: { title: { tag: "plain_text", content: title } },
     elements: [{ tag: "markdown", content: toolGroupDetail(model, detailLimit) }]
   });
@@ -145,6 +152,10 @@ export function renderAnswerToolGroup(model: AnswerToolRenderGroup, payloadLimit
   return rendered;
 }
 
+function toolState(state: AnswerTimelineToolState, outcome?: "failure" | "timeout"): { border: string; label: string; empty: string } {
+  return outcome === "timeout" ? TIMEOUT_TOOL_STATE : TOOL_STATE[state];
+}
+
 function animatedToolIcon(icon: string, state: AnswerTimelineToolState, animationFrame?: number): string {
   if (state !== "running" || animationFrame === undefined) return icon;
   const frame = RUNNING_TOOL_FRAMES[Math.abs(Math.trunc(animationFrame)) % RUNNING_TOOL_FRAMES.length]!;
@@ -152,13 +163,16 @@ function animatedToolIcon(icon: string, state: AnswerTimelineToolState, animatio
 }
 
 function toolGroupDetail(model: AnswerToolRenderGroup, detailLimit: number): string {
-  const memberLimit = Math.max(1, Math.floor(detailLimit / model.members.length));
-  return model.members.map((member) => {
+  const members = model.outcome
+    ? model.members.filter((member) => member.state === "failed" || member.outcome === "timeout")
+    : model.members;
+  const memberLimit = Math.max(1, Math.floor(detailLimit / members.length));
+  return members.map((member) => {
     const heading = `${member.label} ${safeInline(member.target, TOOL_LABEL_LIMIT * 2)}`;
     const command = member.command ? safeCommandMarkdown(member.command, Math.min(memberLimit, TOOL_COMMAND_LIMIT)) : "";
     const result = member.result ? safeFence(member.result, memberLimit) : "";
     const diff = member.diff ? safeFence(member.diff, memberLimit) : "";
-    const sections = [heading];
+    const sections = model.outcome && member.resultSummaryText ? [`**Summary**\n\n${safeFence(member.resultSummaryText, memberLimit)}`, heading] : [heading];
     if (command) sections.push(`**Command**\n\n\`\`\`bash\n${command}\n\`\`\``);
     if (result) sections.push(`**Result**\n\n\`\`\`text\n${result}\n\`\`\``);
     if (diff) sections.push(`**Diff**\n\n\`\`\`diff\n${diff}\n\`\`\``);
@@ -171,6 +185,7 @@ function toolDetail(model: AnswerToolRenderModel, empty: string, resultLimit: nu
   const result = model.result ? safeFence(model.result, resultLimit) : "";
   const diff = model.diff ? safeFence(model.diff, resultLimit) : "";
   const sections: string[] = [];
+  if (model.outcome && model.resultSummaryText) sections.push(`**Summary**\n\n${safeFence(model.resultSummaryText, resultLimit)}`);
   if (command) sections.push(`**Command**\n\n\`\`\`bash\n${command}\n\`\`\``);
   if (result) sections.push(`**Result**\n\n\`\`\`text\n${result}\n\`\`\``);
   if (diff) sections.push(`**Diff**\n\n\`\`\`diff\n${diff}\n\`\`\``);

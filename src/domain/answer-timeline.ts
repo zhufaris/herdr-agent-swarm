@@ -1,5 +1,6 @@
 export type AnswerTimelineToolCategory = "read" | "search" | "edit" | "command" | "test" | "skill" | "tool" | "step";
 export type AnswerTimelineToolState = "running" | "succeeded" | "failed";
+export interface AnswerTimelineToolResultSummary { outcome: "success" | "failure" | "timeout"; text: string }
 
 export interface AnswerTimelineCanonicalPosition { laneSequence: number; itemOrdinal: number }
 interface AnswerTimelineItemBase { id: string; sequence: number; canonicalPosition?: AnswerTimelineCanonicalPosition }
@@ -8,7 +9,7 @@ export type AnswerTimelineItem =
   | AnswerTimelineItemBase & { kind: "human_message"; markdown: string }
   | AnswerTimelineItemBase & { kind: "agent_message"; markdown: string }
   | AnswerTimelineItemBase & { kind: "thinking"; label: string; markdown?: string }
-  | AnswerTimelineItemBase & { kind: "tool"; category: AnswerTimelineToolCategory; label: string; context?: string; command?: string; result?: string; resultPreview?: string; diff?: string; parentToolId?: string; continuation?: boolean; groupChildCount?: number; nested?: boolean; state: AnswerTimelineToolState }
+  | AnswerTimelineItemBase & { kind: "tool"; category: AnswerTimelineToolCategory; label: string; action?: string; target?: string; context?: string; command?: string; result?: string; resultPreview?: string; resultSummary?: AnswerTimelineToolResultSummary; diff?: string; parentToolId?: string; continuation?: boolean; groupChildCount?: number; nested?: boolean; state: AnswerTimelineToolState }
   | AnswerTimelineItemBase & { kind: "status"; label: string; detail?: string; detailTruncated?: boolean; state: "running" | "completed" | "blocked" | "failed" | "interrupted" | "cancelled" | "warning" }
   | AnswerTimelineItemBase & { kind: "final_answer"; markdown: string };
 
