@@ -45,7 +45,7 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 
 ## Wave W2: `T2`
 
-### - [ ] T2: Render compact semantic Tool Call cards
+### - [x] T2: Render compact semantic Tool Call cards
 
 | Field | Content |
 | --- | --- |
@@ -65,6 +65,9 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 | Build cache | ./.cache/feat/tool-call-card-hierarchy/target |
 | Direct-child boundary | delegation_allowed = false; main supplies the common implementation brief, retains staging/commit authority, and requires heartbeat evidence. |
 | Acceptance criteria and verification | Semantic fields take precedence over legacy label/command display; legacy JSON falls back deterministically; successful output stays absent from default cards; failure and timeout panels show bounded redacted diagnostics; a group expands when any child fails/times out; focused renderer/store suites, typecheck, build, and diff checks pass. |
+| Verification commands | `npx vitest run tests/conversation-segment-store.test.ts tests/answer-tool-render-ports.test.ts tests/answer-timeline-card.test.ts tests/answer-timeline-page.test.ts`; `npm run typecheck`; `git diff --check` |
+| Verification results | 4 files / 213 tests passed; typecheck passed; diff whitespace check passed; observed by main. |
+| Commits | `6f42e6b5` |
 
 ## Final delivery checks
 
