@@ -19,7 +19,7 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 
 ## Wave W1: `T1`
 
-### - [ ] T1: Persist semantic Tool Call presentation fields
+### - [x] T1: Persist semantic Tool Call presentation fields
 
 | Field | Content |
 | --- | --- |
@@ -39,6 +39,9 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 | Build cache | ./.cache/feat/tool-call-card-hierarchy/target |
 | Direct-child boundary | delegation_allowed = false; main supplies the common implementation brief, retains staging/commit authority, and requires heartbeat evidence. |
 | Acceptance criteria and verification | Recognized Tool Calls persist action and target; structured success, failure, and timeout results persist bounded redacted summaries with the correct outcome; free text alone cannot classify a timeout; legacy fields remain present; focused projector/event suites and `npm run typecheck` pass. |
+| Verification commands | `npx vitest run tests/tool-activity-projector.test.ts tests/traex-transcript-projector.test.ts tests/herdr-events-reader.test.ts`; `npm run typecheck`; `git diff --check` |
+| Verification results | 3 files / 111 tests passed; typecheck passed; diff whitespace check passed; observed by main. |
+| Commits | `4f305965` |
 
 ## Wave W2: `T2`
 
