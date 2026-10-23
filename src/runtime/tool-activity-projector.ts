@@ -5,6 +5,7 @@ export type ToolActivityCategory = "Skill" | "Read" | "Search" | "Edit" | "Comma
 
 export interface ToolActivityDescriptor {
   category: ToolActivityCategory;
+  action: string;
   target: string;
   skillNames: string[];
   diff?: string;
@@ -48,7 +49,7 @@ export function projectToolCall(name: string, argumentsJson: string): ProjectedT
   const parsed = parseArguments(argumentsJson);
   const skillNames = skillNamesFromArguments(parsed === null ? argumentsJson : parsed);
   if (skillNames.length > 0) {
-    return { descriptor: { category: "Skill", target: skillNames.join(", "), skillNames } };
+    return { descriptor: { category: "Skill", action: "Skill", target: skillNames.join(", "), skillNames } };
   }
   const descriptor = describeCall(name, parsed, parsed === null ? argumentsJson : undefined);
   return { descriptor };
@@ -69,7 +70,7 @@ export function projectToolCalls(name: string, argumentsJson: string): Projected
     .map((call, nestedIndex) => {
       const skillNames = skillNamesFromArguments(call.source);
       const projectedDescriptor = skillNames.length > 0
-        ? { category: "Skill" as const, target: skillNames.join(", "), skillNames }
+        ? { category: "Skill" as const, action: "Skill", target: skillNames.join(", "), skillNames }
         : call.name.toLowerCase().includes("apply_patch")
           ? descriptor("Edit", nestedPatchTarget(input) || call.name, nestedPatchDiff(input) ?? undefined)
           : describeCall(call.name, call.arguments);
@@ -84,6 +85,15 @@ export function projectToolResultState(output: unknown): "active" | "done" | "fa
   const normalized = normalizeToolOutput(output);
   const status = explicitStatus(output, normalized);
   return status.kind === "success" ? "done" : status.kind === "running" ? "active" : "failed";
+}
+
+/** Produces the durable, bounded and redacted terminal outcome without inferring timeouts from prose. */
+export function projectToolResultSummary(output: unknown, options: { isError?: boolean; sourceTruncated?: boolean } = {}): { outcome: "success" | "failure" | "timeout"; text: string } {
+  const parsed = typeof output === "string" ? parseArguments(output) : output;
+  const record = asRecord(parsed);
+  const timeout = structuredTimeout(record);
+  const outcome = options.isError ? "failure" : timeout ? "timeout" : projectToolResultState(output) === "failed" ? "failure" : "success";
+  return { outcome, text: normalizeToolResultForDisplay(output, options.sourceTruncated) };
 }
 
 export function summarizeToolActivity(descriptor: ToolActivityDescriptor): string {
@@ -140,7 +150,13 @@ function describeCall(name: string, parsed: unknown, rawArguments?: string): Too
 }
 
 function descriptor(category: ToolActivityCategory, target: string, diff?: string): ToolActivityDescriptor {
-  return { category, target: boundTarget(target, category !== "Command"), skillNames: [], ...(diff ? { diff } : {}) };
+  const boundedTarget = boundTarget(target, category !== "Command");
+  return { category, action: toolAction(category, boundedTarget), target: boundedTarget, skillNames: [], ...(diff ? { diff } : {}) };
+}
+
+function toolAction(category: ToolActivityCategory, target: string): string {
+  if (category === "Command") return summarizeToolActivity({ category, action: "", target, skillNames: [] }).split(" · ", 1)[0] || "Command";
+  return category;
 }
 
 function nestedPatchTarget(input: string): string {
@@ -329,7 +345,7 @@ function collectStructuredOutputs(value: unknown, depth = 0): string[] {
   if (depth > 8 || !value || typeof value !== "object") return [];
   if (Array.isArray(value)) return value.flatMap((item) => collectStructuredOutputs(item, depth + 1));
   const record = value as Record<string, unknown>;
-  const isResultEnvelope = ["exit_code", "chunk_id", "session_id", "cell_id", "wall_time_seconds", "original_token_count"].some((key) => key in record);
+  const isResultEnvelope = ["exit_code", "chunk_id", "session_id", "cell_id", "wall_time_seconds", "original_token_count", "timed_out", "status", "code", "error"].some((key) => key in record);
   if (isResultEnvelope && typeof record.output === "string") return record.output.trim() ? [record.output.trim()] : [];
   return Object.values(record).flatMap((item) => collectStructuredOutputs(item, depth + 1));
 }
@@ -339,6 +355,7 @@ function explicitStatus(output: unknown, normalized: string): { kind: "success" 
   const record = asRecord(parsed);
   const exitCode = typeof record?.exit_code === "number" ? record.exit_code : null;
   if (exitCode !== null && exitCode !== 0) return { kind: "failed", summary: "exit " + exitCode };
+  if (structuredTimeout(record)) return { kind: "failed", summary: "timeout" };
   const status = typeof record?.status === "string" ? record.status.toLowerCase() : "";
   if (["failed", "failure", "error"].includes(status) || record?.error) return { kind: "failed", summary: status || "失败" };
   const textualExit = /Process exited with code\s+(-?\d+)/i.exec(normalized);
@@ -346,6 +363,15 @@ function explicitStatus(output: unknown, normalized: string): { kind: "success" 
   if (/^Script failed\b/m.test(normalized)) return { kind: "failed", summary: "失败" };
   if (record && (record.session_id !== undefined || record.cell_id !== undefined) && record.exit_code === undefined) return { kind: "running", summary: "仍在运行" };
   return { kind: "success", summary: "成功" };
+}
+
+function structuredTimeout(record: Record<string, unknown> | null): boolean {
+  const status = typeof record?.status === "string" ? record.status.trim().toLowerCase() : "";
+  const code = typeof record?.code === "string" ? record.code.trim().toUpperCase() : "";
+  const error = asRecord(record?.error);
+  const errorCode = typeof error?.code === "string" ? error.code.trim().toUpperCase() : "";
+  return record?.timed_out === true || ["timeout", "timed_out"].includes(status)
+    || ["TIMEOUT", "TIMED_OUT", "ETIMEDOUT"].includes(code) || ["TIMEOUT", "TIMED_OUT", "ETIMEDOUT"].includes(errorCode);
 }
 
 export function redactToolActivitySecrets(value: string): string {

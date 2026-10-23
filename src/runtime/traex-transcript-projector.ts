@@ -3,7 +3,7 @@ import type { AgentTranscriptMainStatus, AgentTranscriptObservation, AgentTransc
 import type { AnswerTimelineDelta, AnswerTimelineToolCategory } from "../domain/answer-timeline.js";
 import { boundTranscriptMarkdown } from "./agent-transcript-codec.js";
 import { createBoundedTurnOutput } from "./bounded-turn-output.js";
-import { isAnswerVisibleToolActivity, isStatusVisibleToolActivity, normalizeToolOutput, projectToolCall, projectToolResultState, summarizeToolActivity, toolActivityKey, type ToolActivityDescriptor } from "./tool-activity-projector.js";
+import { isAnswerVisibleToolActivity, isStatusVisibleToolActivity, normalizeToolOutput, projectToolCall, projectToolResultState, projectToolResultSummary, summarizeToolActivity, toolActivityKey, type ToolActivityDescriptor } from "./tool-activity-projector.js";
 import { redactSecrets } from "./redact-secrets.js";
 import { sanitizeCompletionChoiceMarkdown } from "../domain/completion-choice.js";
 
@@ -213,7 +213,8 @@ function toolTimelineItem(id: string, sequence: number, descriptor: ToolActivity
   const category = toolCategory(descriptor);
   const result = descriptor.category === "Skill" || output === undefined ? "" : safeToolResult(normalizeToolOutput(output));
   const parentCallId = nestedCommandParentCallId(id);
-  return { kind: "tool", id: `tool:${id}`, sequence, category, label: safeTimelineText(summarizeToolActivity(descriptor), 160), ...(context ? { context: safeTimelineText(context, 240) } : {}), ...(descriptor.category === "Command" ? { command: safeTimelineText(descriptor.target, 1_000) } : {}), ...(descriptor.diff ? { diff: safeToolResult(descriptor.diff) } : {}), ...(result ? { result } : {}), ...(parentCallId ? { parentToolId: `tool:${parentCallId}` } : {}), state };
+  const resultSummary = output === undefined || descriptor.category === "Skill" ? undefined : projectToolResultSummary(output);
+  return { kind: "tool", id: `tool:${id}`, sequence, category, label: safeTimelineText(summarizeToolActivity(descriptor), 160), action: descriptor.action, target: safeTimelineText(descriptor.target, 1_000), ...(context ? { context: safeTimelineText(context, 240) } : {}), ...(descriptor.category === "Command" ? { command: safeTimelineText(descriptor.target, 1_000) } : {}), ...(descriptor.diff ? { diff: safeToolResult(descriptor.diff) } : {}), ...(result ? { result } : {}), ...(resultSummary ? { resultSummary } : {}), ...(parentCallId ? { parentToolId: `tool:${parentCallId}` } : {}), state };
 }
 
 function nestedCommandParentCallId(id: string): string | null {

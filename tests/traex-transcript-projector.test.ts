@@ -104,8 +104,8 @@ describe("TraexTranscriptProjector", () => {
 
     expect(result.observation.timelineDeltas).toEqual([
       { kind: "agent_message", id: "message:assistant-before", sequence: 1, markdown: "Inspecting files" },
-      { kind: "tool", id: "tool:call-1", sequence: 2, category: "test", label: "Test · project", command: "npm test", state: "running" },
-      { kind: "tool", id: "tool:call-1", sequence: 2, category: "test", label: "Test · project", command: "npm test", result: expect.stringContaining("2 tests passed"), state: "succeeded" },
+      { kind: "tool", id: "tool:call-1", sequence: 2, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", state: "running" },
+      { kind: "tool", id: "tool:call-1", sequence: 2, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", result: expect.stringContaining("2 tests passed"), resultSummary: { outcome: "success", text: expect.stringContaining("2 tests passed") }, state: "succeeded" },
       { kind: "agent_message", id: "message:assistant-after", sequence: 3, markdown: "Tests are green" },
       { kind: "final_answer", id: "final:turn-1", sequence: 4, markdown: "Final answer" }
     ]);
@@ -351,10 +351,10 @@ describe("TraexTranscriptProjector", () => {
 
     expect(result.observation.answerDelta).toBe("");
     expect(result.observation.timelineDeltas).toEqual([
-      { kind: "tool", id: "tool:success-1", sequence: 1, category: "test", label: "Test · project", command: "npm test", state: "running" },
-      { kind: "tool", id: "tool:success-1", sequence: 1, category: "test", label: "Test · project", command: "npm test", result: expect.stringContaining("all tests passed"), state: "succeeded" },
-      { kind: "tool", id: "tool:failed-1", sequence: 2, category: "command", label: "Build · project", command: "npm run build", state: "running" },
-      { kind: "tool", id: "tool:failed-1", sequence: 2, category: "command", label: "Build · project", command: "npm run build", result: expect.stringContaining("compile failed"), state: "failed" }
+      { kind: "tool", id: "tool:success-1", sequence: 1, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", state: "running" },
+      { kind: "tool", id: "tool:success-1", sequence: 1, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", result: expect.stringContaining("all tests passed"), resultSummary: { outcome: "success", text: expect.stringContaining("all tests passed") }, state: "succeeded" },
+      { kind: "tool", id: "tool:failed-1", sequence: 2, category: "command", label: "Build · project", action: "Build", target: "npm run build", command: "npm run build", state: "running" },
+      { kind: "tool", id: "tool:failed-1", sequence: 2, category: "command", label: "Build · project", action: "Build", target: "npm run build", command: "npm run build", result: expect.stringContaining("compile failed"), resultSummary: { outcome: "failure", text: expect.stringContaining("compile failed") }, state: "failed" }
     ]);
   });
 
@@ -422,7 +422,7 @@ describe("TraexTranscriptProjector", () => {
 
     expect(result.observation.answerDelta).toBe("");
     expect(result.observation.timelineDeltas).toEqual([
-      { kind: "tool", id: "tool:command-1", sequence: 1, category: "test", label: "Test · project", command: "npm test", state: "succeeded" }
+      { kind: "tool", id: "tool:command-1", sequence: 1, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", state: "succeeded" }
     ]);
   });
 
@@ -501,8 +501,8 @@ describe("TraexTranscriptProjector", () => {
     });
 
     expect(result.observation.timelineDeltas).toEqual([
-      { kind: "tool", id: "tool:skill-1", sequence: 1, category: "skill", label: "herdr", state: "running" },
-      { kind: "tool", id: "tool:skill-1", sequence: 1, category: "skill", label: "herdr", state: "succeeded" }
+      { kind: "tool", id: "tool:skill-1", sequence: 1, category: "skill", label: "herdr", action: "Skill", target: "herdr", state: "running" },
+      { kind: "tool", id: "tool:skill-1", sequence: 1, category: "skill", label: "herdr", action: "Skill", target: "herdr", state: "succeeded" }
     ]);
     expect(JSON.stringify(result.observation.timelineDeltas)).not.toContain("large private skill instructions");
   });

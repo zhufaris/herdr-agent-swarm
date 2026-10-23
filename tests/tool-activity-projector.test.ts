@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAnswerVisibleToolActivity, isStatusVisibleToolActivity, nestedExecCommands, nestedPatchFiles, normalizeToolOutput, normalizeToolResultForDisplay, projectToolCall, projectToolCalls, projectToolResultState, summarizeToolActivity, toolActivityKey } from "../src/runtime/tool-activity-projector.js";
+import { isAnswerVisibleToolActivity, isStatusVisibleToolActivity, nestedExecCommands, nestedPatchFiles, normalizeToolOutput, normalizeToolResultForDisplay, projectToolCall, projectToolCalls, projectToolResultState, projectToolResultSummary, summarizeToolActivity, toolActivityKey } from "../src/runtime/tool-activity-projector.js";
 
 describe("tool activity projector", () => {
   it.each([
@@ -132,6 +132,7 @@ describe("tool activity projector", () => {
     expect(projected).toHaveLength(1);
     expect(projected[0]).toEqual({ descriptor: {
       category: "Edit",
+      action: "Edit",
       target: "main.test.ts (+2 -0)",
       skillNames: [],
       diff: [
@@ -167,6 +168,26 @@ describe("tool activity projector", () => {
     expect(isAnswerVisibleToolActivity(agent)).toBe(true);
     expect(toolActivityKey("poll-1", wait)).toBe("wait:session 42");
     expect(toolActivityKey("poll-2", wait)).toBe("wait:session 42");
+  });
+
+  it("projects stable action and target semantics without requiring card renderers to parse labels", () => {
+    expect(projectToolCall("exec_command", JSON.stringify({ cmd: "npm test" })).descriptor).toMatchObject({
+      category: "Command", action: "Test", target: "npm test"
+    });
+    expect(projectToolCall("read_file", JSON.stringify({ path: "src/main.ts" })).descriptor).toMatchObject({
+      category: "Read", action: "Read", target: "src/main.ts"
+    });
+  });
+
+  it("classifies only structured timeout evidence as a timeout summary", () => {
+    expect(projectToolResultSummary(JSON.stringify({ timed_out: true, output: "still waiting" })))
+      .toEqual({ outcome: "timeout", text: "still waiting" });
+    expect(projectToolResultSummary(JSON.stringify({ exit_code: 2, output: "compile failed" })))
+      .toEqual({ outcome: "failure", text: "compile failed" });
+    expect(projectToolResultSummary("the word timeout appears in ordinary output"))
+      .toEqual({ outcome: "success", text: "the word timeout appears in ordinary output" });
+    expect(projectToolResultState(JSON.stringify({ status: "timed_out", output: "structured timeout" }))).toBe("failed");
+    expect(projectToolResultSummary(JSON.stringify({ exit_code: 0, output: "Bearer private-token" }))).toEqual({ outcome: "success", text: "Bearer [REDACTED]" });
   });
 
   it("redacts secrets from command targets", () => {
