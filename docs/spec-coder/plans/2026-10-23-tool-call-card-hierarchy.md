@@ -56,7 +56,7 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 | Delegation eligibility | A bounded CardKit presentation slice with pure renderer and SQLite reload seams; no provider delivery or lifecycle effect is invoked. |
 | Delegation mode | Default direct worker |
 | Ownership and implementation path | Answer Tool render ports define compatibility fallback and render model; Answer Timeline renderer owns compact-row versus expanded-panel policy; existing SQLite timeline JSON loading proves restart compatibility. |
-| Mutation ownership | src/cards/answer-tool-render-ports.ts, src/cards/answer-timeline.ts, tests/answer-tool-render-ports.test.ts, tests/answer-timeline-page.test.ts, tests/conversation-segment-store.test.ts |
+| Mutation ownership | src/cards/answer-tool-render-ports.ts, src/cards/answer-timeline.ts, tests/answer-tool-render-ports.test.ts, tests/answer-timeline-card.test.ts, tests/answer-timeline-page.test.ts, tests/conversation-segment-store.test.ts |
 | Exclusions | Tool event parsing, Core event order, outbox delivery, card interaction controls, historical-row backfill, and frozen Answer page rewrites. |
 | Isolation | Serial W2 follows accepted T1 in the same authoritative isolated worktree; no parallel mutation is allowed because it consumes T1's domain contract. |
 | Concurrency conflicts | T1 |
