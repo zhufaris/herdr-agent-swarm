@@ -36,7 +36,7 @@ describe("Answer Tool render ports", () => {
     expect(projectAnswerToolRenderModel({
       kind: "tool", id: "tool:semantic", sequence: 1, category: "command", label: "legacy label",
       action: "Build", target: "npm run build", resultSummary: { outcome: "timeout", text: "deadline exceeded" }, state: "failed"
-    })).toMatchObject({ label: "Build", target: "npm run build", semantic: true, outcome: "timeout", result: "deadline exceeded" });
+    })).toMatchObject({ label: "Build", target: "npm run build", semantic: true, outcome: "timeout", resultSummaryText: "deadline exceeded" });
     expect(projectAnswerToolRenderModel({
       kind: "tool", id: "tool:legacy", sequence: 2, category: "command", label: "legacy label", command: "npm test", state: "succeeded"
     })).toMatchObject({ label: "Command", target: "legacy label", summary: "Ran npm test" });

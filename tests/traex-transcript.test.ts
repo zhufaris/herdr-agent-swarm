@@ -739,7 +739,7 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readObservation?.()).resolves.toEqual({
       turnId,
       answerDelta: "",
-      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "Test · project", command: "npm test", state: "running" }],
+      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", state: "running" }],
       toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "active" }],
       turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
     });
@@ -752,7 +752,7 @@ describe("TraexTranscriptReader", () => {
     await expect(cursor.readObservation?.()).resolves.toEqual({
       turnId,
       answerDelta: "",
-      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "Test · project", command: "npm test", result: expect.stringContaining("Test Files 2 passed"), state: "succeeded" }],
+      timelineDeltas: [{ kind: "tool", id: "tool:call-test", sequence: 1, category: "test", label: "Test · project", action: "Test", target: "npm test", command: "npm test", result: expect.stringContaining("Test Files 2 passed"), resultSummary: { outcome: "success", text: expect.stringContaining("Test Files 2 passed") }, state: "succeeded" }],
       toolActivities: [{ key: "tool:call-test", kind: "test", label: "Command · npm test", state: "done" }],
       turnLifecycle: { turnId, state: "active", startedAt: "2026-08-29T20:28:24.000Z" }
     });

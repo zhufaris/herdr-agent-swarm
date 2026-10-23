@@ -2727,6 +2727,30 @@ describe("conversation segment canonical projection", () => {
     graph.database.close(); rmSync(directory, { recursive: true, force: true });
   });
 
+  it("keeps a frozen legacy Tool page snapshot unchanged while later semantic Tool activity uses compact rendering", () => {
+    const { context, graph, store } = stores();
+    const segmentId = "semantic-tool-freeze";
+    insertSemanticSegmentPage(context, { segmentId });
+    const legacy = { kind: "tool" as const, id: "tool:legacy-frozen", sequence: 1, canonicalPosition: { laneSequence: 2, itemOrdinal: 1 }, category: "command" as const, label: "legacy checks", command: "npm test", state: "succeeded" as const };
+    context.database.prepare(`INSERT INTO conversation_segment_items(segment_id,item_id,lane_sequence,item_ordinal,item_json)
+      VALUES(?,?,?,?,?)`).run(segmentId, legacy.id, 2, 1, JSON.stringify(legacy));
+    const frozenSnapshot = { schemaVersion: 1, elements: renderAnswerTimeline([legacy]) };
+    expect(store.reserveSemanticSnapshot!({
+      transition: "freeze", segmentId, pageIndex: 0, messageId: "message-0", cardId: "card-0",
+      elementId: `turn-card:${segmentId}:page:0`, snapshot: frozenSnapshot,
+      cursor: { itemIndex: 2, markdownOffset: 0 }, cursorAnchor: { position: { laneSequence: 2, itemOrdinal: 1 }, inclusive: false },
+      plannerPolicyVersion: 1, rendererPolicyVersion: 1, gatewayProfileVersion: 1
+    })).toBe("reserved");
+    const frozenReplyId = store.listConversationSegmentPages(segmentId)[0]!.pendingReplyId!;
+    const semantic = { kind: "tool" as const, id: "tool:semantic-later", sequence: 2, canonicalPosition: { laneSequence: 3, itemOrdinal: 0 }, category: "command" as const, label: "legacy build", action: "Build", target: "npm run build", state: "succeeded" as const };
+    store.projectCanonicalEvent({ laneId: segmentId, laneSequence: 3, event: event(3, { type: "tool_call", call_id: "later", name: "exec", arguments: "{}", truncated: false }), observedAt: "2026-10-04T00:00:03.000Z", timelineDeltas: [semantic] });
+
+    expect(graph.preparedDeliveries.hydrateDeliveryInput(frozenReplyId)).toMatchObject({ input: { snapshot: frozenSnapshot } });
+    expect(store.listConversationSegmentPages(segmentId)[0]).toMatchObject({ state: "frozen", pendingReplyId: frozenReplyId });
+    expect(renderAnswerTimeline([semantic])).toEqual([{ tag: "markdown", content: "⚙️ Build · npm run build · ✓ 完成" }]);
+    context.close();
+  });
+
   it("redacts and bounds a result recovered through canonical projection", () => {
     const { context, store } = stores();
     const humanResult = store.projectCanonicalEvent({ laneId: "lane-a", laneSequence: 1, event: human(1), observedAt: "2026-10-04T00:00:01.000Z" });

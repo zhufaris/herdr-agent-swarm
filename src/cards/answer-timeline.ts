@@ -101,7 +101,7 @@ function renderTool(model: AnswerToolRenderModel, payloadLimit: number, preserve
   if (model.semantic && (model.state === "running" || model.state === "succeeded")) {
     return { tag: "markdown", content: `${icon} ${safeInline(model.label, TOOL_LABEL_LIMIT)} · ${safeInline(model.target, TOOL_LABEL_LIMIT)} · ${state.label}` };
   }
-  if (model.summary && !model.command && !model.result && !model.diff) {
+  if (model.summary && !model.command && !model.result && !model.diff && !model.outcome) {
     return { tag: "markdown", content: `${icon} ${safeInline(model.summary, TOOL_LABEL_LIMIT * 2)}` };
   }
   const group = model.groupChildCount ? ` · ${model.groupChildCount} operations` : "";
@@ -163,13 +163,16 @@ function animatedToolIcon(icon: string, state: AnswerTimelineToolState, animatio
 }
 
 function toolGroupDetail(model: AnswerToolRenderGroup, detailLimit: number): string {
-  const memberLimit = Math.max(1, Math.floor(detailLimit / model.members.length));
-  return model.members.map((member) => {
+  const members = model.outcome
+    ? model.members.filter((member) => member.state === "failed" || member.outcome === "timeout")
+    : model.members;
+  const memberLimit = Math.max(1, Math.floor(detailLimit / members.length));
+  return members.map((member) => {
     const heading = `${member.label} ${safeInline(member.target, TOOL_LABEL_LIMIT * 2)}`;
     const command = member.command ? safeCommandMarkdown(member.command, Math.min(memberLimit, TOOL_COMMAND_LIMIT)) : "";
     const result = member.result ? safeFence(member.result, memberLimit) : "";
     const diff = member.diff ? safeFence(member.diff, memberLimit) : "";
-    const sections = [heading];
+    const sections = model.outcome && member.resultSummaryText ? [`**Summary**\n\n${safeFence(member.resultSummaryText, memberLimit)}`, heading] : [heading];
     if (command) sections.push(`**Command**\n\n\`\`\`bash\n${command}\n\`\`\``);
     if (result) sections.push(`**Result**\n\n\`\`\`text\n${result}\n\`\`\``);
     if (diff) sections.push(`**Diff**\n\n\`\`\`diff\n${diff}\n\`\`\``);
@@ -182,6 +185,7 @@ function toolDetail(model: AnswerToolRenderModel, empty: string, resultLimit: nu
   const result = model.result ? safeFence(model.result, resultLimit) : "";
   const diff = model.diff ? safeFence(model.diff, resultLimit) : "";
   const sections: string[] = [];
+  if (model.outcome && model.resultSummaryText) sections.push(`**Summary**\n\n${safeFence(model.resultSummaryText, resultLimit)}`);
   if (command) sections.push(`**Command**\n\n\`\`\`bash\n${command}\n\`\`\``);
   if (result) sections.push(`**Result**\n\n\`\`\`text\n${result}\n\`\`\``);
   if (diff) sections.push(`**Diff**\n\n\`\`\`diff\n${diff}\n\`\`\``);

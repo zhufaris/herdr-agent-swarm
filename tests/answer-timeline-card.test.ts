@@ -32,6 +32,26 @@ describe("answer timeline card renderer", () => {
     expect(JSON.stringify(group)).toContain("deadline exceeded");
   });
 
+  it("expands a semantic failed Tool without a result summary", () => {
+    const [failed] = renderAnswerTimeline([{
+      kind: "tool", id: "tool:failed", sequence: 1, category: "command", label: "legacy label",
+      action: "Build", target: "npm run build", state: "failed"
+    }]);
+    expect(failed).toMatchObject({ tag: "collapsible_panel", expanded: true, border: { color: "red" } });
+  });
+
+  it("shows only failed child diagnostics in an expanded aggregate and puts Summary first", () => {
+    const [group] = renderAnswerTimeline([
+      { kind: "tool", id: "tool:outer", sequence: 1, category: "tool", label: "exec", action: "Tool", target: "exec", state: "succeeded" },
+      { kind: "tool", id: "tool:success-child", parentToolId: "tool:outer", sequence: 2, category: "command", label: "npm test", action: "Test", target: "npm test", result: "SUCCESS-SHOULD-STAY-HIDDEN", resultSummary: { outcome: "success", text: "all tests passed" }, state: "succeeded" },
+      { kind: "tool", id: "tool:failure-child", parentToolId: "tool:outer", sequence: 3, category: "command", label: "npm run build", action: "Build", target: "npm run build", result: "RAW-FAILURE-DETAIL", resultSummary: { outcome: "failure", text: "SUMMARY-FIRST" }, state: "failed" }
+    ]);
+    const content = group?.tag === "collapsible_panel" ? group.elements[0]?.content ?? "" : "";
+    expect(content).toContain("**Summary**\n\nSUMMARY-FIRST");
+    expect(content.indexOf("SUMMARY-FIRST")).toBeLessThan(content.indexOf("RAW-FAILURE-DETAIL"));
+    expect(content).not.toContain("SUCCESS-SHOULD-STAY-HIDDEN");
+  });
+
   it("uses canonical sequence rather than lexicographic item IDs", () => {
     expect(() => renderAnswerTimeline([
       { kind: "agent_message", id: "z-item", sequence: 2, canonicalPosition: { laneSequence: 2, itemOrdinal: 0 }, markdown: "second" },

@@ -475,7 +475,7 @@ describe("HerdrEventsReader", () => {
     }));
   });
 
-  it("keeps the Step emoji and fenced command in final payloads projected from raw Core events", async () => {
+  it("renders raw Core Step activity as compact semantic rows", async () => {
     const input = "const r = await tools.exec_command({cmd: 'git status --short'}); text(r.output);";
     const { reader } = harness([{ type: "agent_events_batch", events: [
       event("c1", "turn-1", "2026-09-26T00:00:00Z", { type: "turn_started" }),
@@ -487,9 +487,9 @@ describe("HerdrEventsReader", () => {
     const items = (await opened.cursor.readObservation()).timelineDeltas ?? [];
 
     const cardkit = JSON.stringify(renderAnswerTimeline(items));
-    expect(cardkit).toContain("🛠️ Step");
-    expect(cardkit).toContain("git status --short");
-    expect(cardkit).toContain("```bash");
+    expect(cardkit).toContain("🛠️ Run · git status --short · … 运行中");
+    expect(cardkit).toContain("🛠️ Run · git status --short · ✓ 完成");
+    expect(cardkit).not.toContain("```bash");
   });
 
   it("projects every nested Tool in one raw Code Mode exec as a stable grouped timeline item", async () => {
@@ -521,12 +521,12 @@ describe("HerdrEventsReader", () => {
       expect.objectContaining({ id: "tool:batch-1:nested:4", parentToolId: "tool:batch-1", category: "tool", label: "custom_widget", state: "running" })
     ]);
     const cardkit = JSON.stringify(renderAnswerTimeline(items));
-    expect(cardkit).toContain("🔧 Tool · exec · 5 operations");
-    expect(cardkit).toContain("📖 ↳ Reading /tmp/screen.png…");
-    expect(cardkit).toContain("🔍 ↳ Searching for CardKit…");
-    expect(cardkit).toContain("✏️ ↳ Editing main.ts (+1 -1)…");
-    expect(cardkit).toContain("🧪 ↳ Running npm test…");
-    expect(cardkit).toContain("🔧 Tool · ↳ custom_widget");
+    expect(cardkit).toContain("🔧 Tool · exec · … 运行中");
+    expect(cardkit).toContain("📖 Read · /tmp/screen.png · … 运行中");
+    expect(cardkit).toContain("🔍 Search · CardKit · … 运行中");
+    expect(cardkit).toContain("✏️ Edit · main.ts (+1 -1) · … 运行中");
+    expect(cardkit).toContain("🧪 Test · npm test · … 运行中");
+    expect(cardkit).toContain("🔧 Tool · custom_widget · … 运行中");
   });
 
   it("renders raw Core Search and Read calls as one Herdr-style compact group", async () => {
@@ -573,8 +573,8 @@ describe("HerdrEventsReader", () => {
 
     expect(items).toContainEqual(expect.objectContaining({ category: "edit", label: "herdr-events-reader.ts (+1 -1)", state: "succeeded" }));
     const payload = JSON.stringify(renderAnswerTimeline(items));
-    expect(payload).toContain("✏️ Edited herdr-events-reader.ts (+1 -1)");
-    expect(payload).toContain("**Diff**\\n\\n```diff\\n*** Update File: /workspace/project/src/runtime/herdr-events-reader.ts\\n@@\\n-old\\n+new\\n```");
+    expect(payload).toContain("✏️ Edit · herdr-events-reader.ts (+1 -1) · ✓ 完成");
+    expect(payload).not.toContain("**Diff**");
     expect(payload).not.toContain("*** Begin Patch");
     expect(payload).not.toContain("Result");
   });
@@ -649,7 +649,7 @@ describe("HerdrEventsReader", () => {
     const items = (await opened.cursor.readObservation()).timelineDeltas ?? [];
 
     const cardkit = JSON.stringify(renderAnswerTimeline(items));
-    expect(cardkit).toContain("🧩 Loaded skill herdr");
+    expect(cardkit).toContain("🧩 Skill · herdr · ✓ 完成");
     expect(cardkit).not.toContain("private skill instructions");
     expect(cardkit).not.toContain("Result");
   });

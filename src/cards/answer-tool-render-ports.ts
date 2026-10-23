@@ -9,6 +9,7 @@ export interface AnswerToolRenderModel {
   target: string;
   semantic?: boolean;
   outcome?: "failure" | "timeout";
+  resultSummaryText?: string;
   summary?: string;
   state: AnswerTimelineToolState;
   context?: string;
@@ -135,14 +136,17 @@ export function projectAnswerToolRenderGroupAt(items: readonly AnswerTimelineIte
 function model(category: AnswerTimelineToolCategory, icon: string, label: string, item: AnswerTimelineToolItem): AnswerToolRenderModel {
   const summary = standaloneSummary(category, item);
   const semantic = item.action !== undefined || item.target !== undefined || item.resultSummary !== undefined;
-  const result = item.result ?? item.resultPreview ?? item.resultSummary?.text;
+  const outcome = item.resultSummary?.outcome === "timeout"
+    ? "timeout"
+    : semantic && (item.state === "failed" || item.resultSummary?.outcome === "failure") ? "failure" : undefined;
   return {
     category, icon, label: item.action ?? label, target: item.target ?? item.label, ...(semantic ? { semantic: true } : {}), state: item.state,
     ...(summary ? { summary } : {}),
     ...(item.context ? { context: item.context } : {}),
     ...(item.command ? { command: item.command } : {}),
-    ...(result ? { result } : {}),
-    ...(item.resultSummary?.outcome === "failure" || item.resultSummary?.outcome === "timeout" ? { outcome: item.resultSummary.outcome } : {}),
+    ...(item.result ?? item.resultPreview ? { result: item.result ?? item.resultPreview } : {}),
+    ...(item.resultSummary?.text ? { resultSummaryText: item.resultSummary.text } : {}),
+    ...(outcome ? { outcome } : {}),
     ...(item.diff ? { diff: item.diff } : {}),
     ...(item.nested ? { nested: true } : {}),
     ...(item.continuation ? { continuation: true } : {}),
