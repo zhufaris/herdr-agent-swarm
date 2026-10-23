@@ -21,6 +21,7 @@ import { completionChoiceSubmissionIdentity } from "../src/domain/completion-cho
 import { transferDeliveryPrerequisites } from "../src/store/sqlite/delivery-prerequisites.js";
 import { SqliteCompletionReviewStore } from "../src/store/sqlite/completion-review-store.js";
 import { feishuGatewayApplicationPresentation, materializeFeishuPresentationView } from "../src/gateways/feishu/presentation.js";
+import { renderAnswerTimeline } from "../src/cards/answer-timeline.js";
 
 function stores(path = ":memory:") {
   const context = new SqliteContext(path);
@@ -2692,6 +2693,37 @@ describe("conversation segment canonical projection", () => {
     expect(recoveredResult).toContain("api_key=[REDACTED]");
     expect(recoveredResult).not.toContain("live-secret");
     expect(recoveredResult?.endsWith(TURN_OUTPUT_TRUNCATION_MARKER)).toBe(true);
+    graph.database.close(); rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("reloads semantic Tool fields unchanged and renders older Tool JSON through the fallback", () => {
+    const directory = mkdtempSync(join(tmpdir(), "segment-tool-semantics-")); const path = join(directory, "bridge.db");
+    let graph = new SqliteCapabilityGraph(path);
+    const started = graph.conversationSegments.projectCanonicalEvent({ laneId: "lane-tool-semantics", laneSequence: 1, event: human(1), observedAt: "2026-10-04T00:00:01.000Z" });
+    const semantic = {
+      kind: "tool" as const, id: "tool:semantic", sequence: 1, canonicalPosition: { laneSequence: 2, itemOrdinal: 0 },
+      category: "command" as const, label: "legacy build", action: "Build", target: "npm run build",
+      resultSummary: { outcome: "timeout" as const, text: "deadline exceeded" }, state: "failed" as const
+    };
+    const legacy = {
+      kind: "tool" as const, id: "tool:legacy", sequence: 2, canonicalPosition: { laneSequence: 2, itemOrdinal: 1 },
+      category: "command" as const, label: "legacy checks", command: "npm test", state: "succeeded" as const
+    };
+    graph.conversationSegments.projectCanonicalEvent({
+      laneId: "lane-tool-semantics", laneSequence: 2,
+      event: event(2, { type: "tool_call", call_id: "tool-semantics", name: "exec", arguments: "{}", truncated: false }),
+      observedAt: "2026-10-04T00:00:02.000Z", timelineDeltas: [semantic, legacy]
+    });
+
+    graph.database.close();
+    graph = new SqliteCapabilityGraph(path);
+    const items = graph.conversationSegments.listConversationSegmentItems(started.segmentId!).map(({ item }) => item);
+    expect(items).toContainEqual(semantic);
+    expect(items).toContainEqual(legacy);
+    expect(renderAnswerTimeline(items).at(-1)).toMatchObject({
+      tag: "collapsible_panel", header: { title: { content: "⚙️ Ran npm test" } }
+    });
+
     graph.database.close(); rmSync(directory, { recursive: true, force: true });
   });
 

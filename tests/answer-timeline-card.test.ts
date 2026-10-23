@@ -3,6 +3,35 @@ import { renderAnswerTimeline } from "../src/cards/answer-timeline.js";
 import type { AnswerTimelineItem } from "../src/domain/answer-timeline.js";
 
 describe("answer timeline card renderer", () => {
+  it("renders semantic successes as compact rows and expands timeout diagnostics", () => {
+    const [success] = renderAnswerTimeline([{
+      kind: "tool", id: "tool:success", sequence: 1, category: "test", label: "legacy label",
+      action: "Test", target: "npm test", result: "240 tests passed",
+      resultSummary: { outcome: "success", text: "240 tests passed" }, state: "succeeded"
+    }]);
+    expect(success).toEqual({ tag: "markdown", content: "🧪 Test · npm test · ✓ 完成" });
+
+    const [timeout] = renderAnswerTimeline([{
+      kind: "tool", id: "tool:timeout", sequence: 1, category: "command", label: "legacy label",
+      action: "Build", target: "npm run build", command: "npm run build", result: "connection timed out",
+      resultSummary: { outcome: "timeout", text: "connection timed out" }, state: "failed"
+    }]);
+    expect(timeout).toMatchObject({
+      tag: "collapsible_panel", expanded: true, border: { color: "orange" },
+      header: { title: { content: "⚙️ Build · npm run build · ⏱ 超时" } },
+      elements: [{ content: expect.stringContaining("connection timed out") }]
+    });
+  });
+
+  it("expands an aggregate Tool when a child reports a timeout", () => {
+    const [group] = renderAnswerTimeline([
+      { kind: "tool", id: "tool:outer", sequence: 1, category: "tool", label: "exec", action: "Tool", target: "exec", state: "succeeded" },
+      { kind: "tool", id: "tool:child", parentToolId: "tool:outer", sequence: 2, category: "command", label: "npm run build", action: "Build", target: "npm run build", resultSummary: { outcome: "timeout", text: "deadline exceeded" }, state: "failed" }
+    ]);
+    expect(group).toMatchObject({ tag: "collapsible_panel", expanded: true, border: { color: "orange" } });
+    expect(JSON.stringify(group)).toContain("deadline exceeded");
+  });
+
   it("uses canonical sequence rather than lexicographic item IDs", () => {
     expect(() => renderAnswerTimeline([
       { kind: "agent_message", id: "z-item", sequence: 2, canonicalPosition: { laneSequence: 2, itemOrdinal: 0 }, markdown: "second" },
@@ -389,12 +418,12 @@ describe("answer timeline card renderer", () => {
     expect(serialized).toContain("**Result**\\n\\n```text\\nclean\\n```");
   });
 
-  it("keeps a failed parent Tool group collapsed while retaining its failure state", () => {
+  it("expands a failed parent Tool group while retaining its failure state", () => {
     const [parent] = renderAnswerTimeline([
       { kind: "tool", id: "tool:outer", sequence: 1, category: "step", label: "code mode", state: "succeeded" },
       { kind: "tool", id: "tool:child", parentToolId: "tool:outer", sequence: 2, category: "command", label: "build", state: "failed" }
     ]);
-    expect(parent).toMatchObject({ tag: "collapsible_panel", expanded: false, border: { color: "red" } });
+    expect(parent).toMatchObject({ tag: "collapsible_panel", expanded: true, border: { color: "red" } });
     expect(JSON.stringify(parent)).toContain("⚙️ Failed build");
   });
 

@@ -7,6 +7,8 @@ export interface AnswerToolRenderModel {
   icon: string;
   label: string;
   target: string;
+  semantic?: boolean;
+  outcome?: "failure" | "timeout";
   summary?: string;
   state: AnswerTimelineToolState;
   context?: string;
@@ -28,6 +30,7 @@ export interface AnswerToolRenderPort {
 export interface AnswerToolRenderGroup {
   summary: string;
   state: AnswerTimelineToolState;
+  outcome?: "failure" | "timeout";
   members: AnswerToolRenderModel[];
 }
 
@@ -50,7 +53,7 @@ export const toolToolRenderPort = standardPort("tool", "🔧", "Tool");
 export const skillToolRenderPort: AnswerToolRenderPort = {
   category: "skill", icon: "🧩", label: "Skill",
   project: (item) => {
-    const { command: _command, result: _result, resultPreview: _resultPreview, ...visible } = item;
+    const { command: _command, result: _result, resultPreview: _resultPreview, resultSummary: _resultSummary, ...visible } = item;
     return model("skill", "🧩", "Skill", visible);
   }
 };
@@ -85,6 +88,7 @@ export function projectAnswerToolRenderGroup(parent: AnswerTimelineToolItem, chi
   const skills = members.filter((member) => member.category === "skill");
   const commands = members.filter((member) => member.category === "command" || member.category === "test");
   const state = groupState(parent, children);
+  const outcome = groupOutcome(parent, children);
   let summary: string;
   if (searches.length === 0 && reads.length === members.length) {
     const readTarget = reads.length === 1 ? reads[0]!.target : `${reads.length} files`;
@@ -110,6 +114,7 @@ export function projectAnswerToolRenderGroup(parent: AnswerTimelineToolItem, chi
   return {
     summary,
     state,
+    ...(outcome ? { outcome } : {}),
     members
   };
 }
@@ -129,12 +134,15 @@ export function projectAnswerToolRenderGroupAt(items: readonly AnswerTimelineIte
 
 function model(category: AnswerTimelineToolCategory, icon: string, label: string, item: AnswerTimelineToolItem): AnswerToolRenderModel {
   const summary = standaloneSummary(category, item);
+  const semantic = item.action !== undefined || item.target !== undefined || item.resultSummary !== undefined;
+  const result = item.result ?? item.resultPreview ?? item.resultSummary?.text;
   return {
-    category, icon, label, target: item.label, state: item.state,
+    category, icon, label: item.action ?? label, target: item.target ?? item.label, ...(semantic ? { semantic: true } : {}), state: item.state,
     ...(summary ? { summary } : {}),
     ...(item.context ? { context: item.context } : {}),
     ...(item.command ? { command: item.command } : {}),
-    ...(item.result ?? item.resultPreview ? { result: item.result ?? item.resultPreview } : {}),
+    ...(result ? { result } : {}),
+    ...(item.resultSummary?.outcome === "failure" || item.resultSummary?.outcome === "timeout" ? { outcome: item.resultSummary.outcome } : {}),
     ...(item.diff ? { diff: item.diff } : {}),
     ...(item.nested ? { nested: true } : {}),
     ...(item.continuation ? { continuation: true } : {}),
@@ -156,4 +164,10 @@ function standaloneSummary(category: AnswerTimelineToolCategory, item: AnswerTim
 function groupState(parent: AnswerTimelineToolItem, children: readonly AnswerTimelineToolItem[]): AnswerTimelineToolState {
   const states = [parent.state, ...children.map((child) => child.state)];
   return states.includes("failed") ? "failed" : states.includes("running") ? "running" : "succeeded";
+}
+
+function groupOutcome(parent: AnswerTimelineToolItem, children: readonly AnswerTimelineToolItem[]): "failure" | "timeout" | undefined {
+  const items = [parent, ...children];
+  if (items.some((item) => item.resultSummary?.outcome === "timeout")) return "timeout";
+  return items.some((item) => item.state === "failed" || item.resultSummary?.outcome === "failure") ? "failure" : undefined;
 }
