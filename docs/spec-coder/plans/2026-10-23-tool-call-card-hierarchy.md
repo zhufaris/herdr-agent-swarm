@@ -45,7 +45,7 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 
 ## Wave W2: `T2`
 
-### - [ ] T2: Render compact semantic Tool Call cards
+### - [x] T2: Render compact semantic Tool Call cards
 
 | Field | Content |
 | --- | --- |
@@ -66,8 +66,8 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 | Direct-child boundary | delegation_allowed = false; main supplies the common implementation brief, retains staging/commit authority, and requires heartbeat evidence. |
 | Acceptance criteria and verification | Semantic fields take precedence over legacy label/command display; legacy JSON falls back deterministically; successful output stays absent from default cards and expanded groups omit successful sibling result bodies; failed items expand even without a resultSummary; failure/timeout panels render an independent bounded redacted Summary before command/result/diff; a timeout group is orange and expands, otherwise any failed group is red and expands; frozen pages are not rewritten when later semantic items arrive; focused, full-suite, typecheck, build, and diff checks pass. |
 | Verification commands | `npx vitest run tests/conversation-segment-store.test.ts tests/answer-tool-render-ports.test.ts tests/answer-timeline-card.test.ts tests/answer-timeline-page.test.ts tests/traex-transcript.test.ts tests/herdr-events-reader.test.ts`; `npm test`; `npm run typecheck`; `npm run build`; `git diff --check` |
-| Verification results | Initial renderer evidence was 4 files / 213 tests passed, but Delivery Review found P1/P2 gaps and a fresh full suite produced 5 failing stale/insufficient assertions. Repair evidence is pending. |
-| Commits | `6f42e6b5`; repair commit pending |
+| Verification results | Initial renderer evidence was 4 files / 213 tests passed, but Delivery Review found P1/P2 gaps and a fresh full suite produced 5 failing stale/insufficient assertions. Repair evidence: 6 files / 331 tests passed; typecheck, build, and diff whitespace check passed; observed by main. Full-suite delivery verification remains pending. |
+| Commits | `6f42e6b5`, `b93ee451` |
 
 ## Final delivery checks
 
