@@ -98,7 +98,8 @@ function statusView(item: Extract<AnswerTimelineItem, { kind: "status" }>): { ic
 function renderTool(model: AnswerToolRenderModel, payloadLimit: number, preserveDetail: boolean, animationFrame?: number): FinalAnswerElement {
   const icon = animatedToolIcon(model.icon, model.state, animationFrame);
   const state = toolState(model.state, model.outcome);
-  if (model.semantic && (model.state === "running" || model.state === "succeeded")) {
+  const hasDetail = Boolean(model.command || model.result || model.diff || model.resultSummaryText);
+  if (model.semantic && (model.state === "running" || model.state === "succeeded") && !hasDetail) {
     return { tag: "markdown", content: `${icon} ${safeInline(model.label, TOOL_LABEL_LIMIT)} · ${safeInline(model.target, TOOL_LABEL_LIMIT)} · ${state.label}` };
   }
   if (model.summary && !model.command && !model.result && !model.diff && !model.outcome) {

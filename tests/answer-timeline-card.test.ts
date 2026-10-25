@@ -3,13 +3,17 @@ import { renderAnswerTimeline } from "../src/cards/answer-timeline.js";
 import type { AnswerTimelineItem } from "../src/domain/answer-timeline.js";
 
 describe("answer timeline card renderer", () => {
-  it("renders semantic successes as compact rows and expands timeout diagnostics", () => {
+  it("renders semantic successes without detail as compact rows and expands timeout diagnostics", () => {
     const [success] = renderAnswerTimeline([{
       kind: "tool", id: "tool:success", sequence: 1, category: "test", label: "legacy label",
       action: "Test", target: "npm test", result: "240 tests passed",
       resultSummary: { outcome: "success", text: "240 tests passed" }, state: "succeeded"
     }]);
-    expect(success).toEqual({ tag: "markdown", content: "🧪 Test · npm test · ✓ 完成" });
+    expect(success).toMatchObject({
+      tag: "collapsible_panel", expanded: false, border: { color: "grey" },
+      header: { title: { content: "🧪 Test · npm test · ✓ 完成" } },
+      elements: [{ content: expect.stringContaining("240 tests passed") }]
+    });
 
     const [timeout] = renderAnswerTimeline([{
       kind: "tool", id: "tool:timeout", sequence: 1, category: "command", label: "legacy label",
@@ -21,6 +25,20 @@ describe("answer timeline card renderer", () => {
       header: { title: { content: "⚙️ Build · npm run build · ⏱ 超时" } },
       elements: [{ content: expect.stringContaining("connection timed out") }]
     });
+  });
+
+  it("renders a successful semantic Tool with command and result as a collapsed detail panel", () => {
+    const [success] = renderAnswerTimeline([{
+      kind: "tool", id: "tool:success-detail", sequence: 1, category: "command", label: "legacy label",
+      action: "Run", target: "npm run swarm:status", command: "npm run swarm:status", result: "ready",
+      resultSummary: { outcome: "success", text: "ready" }, state: "succeeded"
+    }]);
+    expect(success).toMatchObject({
+      tag: "collapsible_panel", expanded: false, border: { color: "grey" },
+      header: { title: { content: "⚙️ Run · npm run swarm:status · ✓ 完成" } },
+      elements: [{ content: expect.stringContaining("**Command**\n\n```bash\nnpm run swarm:status\n```") }]
+    });
+    expect(JSON.stringify(success)).toContain("**Result**\\n\\n```text\\nready\\n```");
   });
 
   it("expands an aggregate Tool when a child reports a timeout", () => {
