@@ -36,7 +36,7 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 | Concurrency conflicts | None |
 | Verification seam | Table-driven projector classification plus canonical TraeX/Herdr event delta assertions; structural typecheck proves all producers satisfy the expanded domain contract. |
 | Host capacity | One direct-child slot; recheck before dispatch. |
-| Build cache | ./.cache/feat/tool-call-card-hierarchy/target |
+| Build cache | `./.cache/feat/tool-call-card-hierarchy/target` |
 | Direct-child boundary | delegation_allowed = false; main supplies the common implementation brief, retains staging/commit authority, and requires heartbeat evidence. |
 | Acceptance criteria and verification | Recognized Tool Calls persist action and target; structured success, failure, and timeout results persist bounded redacted summaries with the correct outcome; free text alone cannot classify a timeout; legacy fields remain present; focused projector/event suites and `npm run typecheck` pass. |
 | Verification commands | `npx vitest run tests/tool-activity-projector.test.ts tests/traex-transcript-projector.test.ts tests/herdr-events-reader.test.ts`; `npm run typecheck`; `git diff --check` |
@@ -62,7 +62,7 @@ observed baseline records `7b674f6228174ee8bee72dabadad9e75` and
 | Concurrency conflicts | T1 |
 | Verification seam | Render-port and page tests inspect CardKit shape/content for compact success/running rows and expanded failure/timeout groups; SQLite store reload verifies old and new item JSON render without mutation. |
 | Host capacity | One direct-child slot; recheck before dispatch. |
-| Build cache | ./.cache/feat/tool-call-card-hierarchy/target |
+| Build cache | `./.cache/feat/tool-call-card-hierarchy/target` |
 | Direct-child boundary | delegation_allowed = false; main supplies the common implementation brief, retains staging/commit authority, and requires heartbeat evidence. |
 | Acceptance criteria and verification | Semantic fields take precedence over legacy label/command display; legacy JSON falls back deterministically; successful output stays absent from default cards and expanded groups omit successful sibling result bodies; failed items expand even without a resultSummary; failure/timeout panels render an independent bounded redacted Summary before command/result/diff; a timeout group is orange and expands, otherwise any failed group is red and expands; frozen pages are not rewritten when later semantic items arrive; focused, full-suite, typecheck, build, and diff checks pass. |
 | Verification commands | `npx vitest run tests/conversation-segment-store.test.ts tests/answer-tool-render-ports.test.ts tests/answer-timeline-card.test.ts tests/answer-timeline-page.test.ts tests/traex-transcript.test.ts tests/herdr-events-reader.test.ts`; `npm test`; `npm run typecheck`; `npm run build`; `git diff --check` |
