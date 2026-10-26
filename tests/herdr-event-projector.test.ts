@@ -773,7 +773,7 @@ describe("HerdrEventProjector", () => {
     expect(projected.timelineDeltas).toEqual([
       { kind: "status", id: "model:source-1:2", sequence: 1, label: "🧠 Model · GPT-5.6-Sol", state: "completed" },
       { kind: "status", id: "context-compacted:source-1:3", sequence: 2, label: "🗜️ Context compacted", state: "completed" },
-      { kind: "tool", id: "tool:spawn-1", sequence: 3, category: "step", label: "reviewer", state: "running" }
+      { kind: "tool", id: "tool:spawn-1", sequence: 3, category: "step", label: "reviewer", action: "Agent", target: "reviewer", state: "running" }
     ]);
     expect(JSON.stringify(projected)).not.toMatch(/private|inferred-model/);
   });
@@ -815,7 +815,7 @@ describe("HerdrEventProjector", () => {
     ]);
 
     expect(projected.timelineDeltas).toEqual([
-      { kind: "tool", id: "tool:spawn-1", sequence: 1, category: "step", label: "reviewer", state: "running" }
+      { kind: "tool", id: "tool:spawn-1", sequence: 1, category: "step", label: "reviewer", action: "Agent", target: "reviewer", state: "running" }
     ]);
     expect(JSON.stringify(projected.timelineDeltas)).not.toContain("private task");
 
@@ -893,7 +893,7 @@ describe("HerdrEventProjector", () => {
       { key: "agent:reviewer", kind: "step", label: "Agent · Review Agent · requested model: GPT-5.4", state: "active" }
     ]);
     expect(spawned.timelineDeltas).toEqual([
-      { kind: "tool", id: "tool:spawn-1", sequence: 1, category: "step", label: "reviewer", state: "running" }
+      { kind: "tool", id: "tool:spawn-1", sequence: 1, category: "step", label: "reviewer", action: "Agent", target: "reviewer", state: "running" }
     ]);
     expect(started.timelineDeltas).toBeUndefined();
     expect(collidingLeaf.toolActivities).toEqual([

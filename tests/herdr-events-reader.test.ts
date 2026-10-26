@@ -489,7 +489,7 @@ describe("HerdrEventsReader", () => {
     const cardkit = JSON.stringify(renderAnswerTimeline(items));
     expect(cardkit).toContain("🛠️ Run · git status --short · … 运行中");
     expect(cardkit).toContain("🛠️ Run · git status --short · ✓ 完成");
-    expect(cardkit).not.toContain("```bash");
+    expect(cardkit).toContain("```bash\\ngit status --short\\n```");
   });
 
   it("projects every nested Tool in one raw Code Mode exec as a stable grouped timeline item", async () => {
@@ -574,8 +574,8 @@ describe("HerdrEventsReader", () => {
     expect(items).toContainEqual(expect.objectContaining({ category: "edit", label: "herdr-events-reader.ts (+1 -1)", state: "succeeded" }));
     const payload = JSON.stringify(renderAnswerTimeline(items));
     expect(payload).toContain("✏️ Edit · herdr-events-reader.ts (+1 -1) · ✓ 完成");
-    expect(payload).not.toContain("**Diff**");
-    expect(payload).not.toContain("*** Begin Patch");
+    expect(payload).toContain("**Diff**");
+    expect(payload).toContain("*** Update File: /workspace/project/src/runtime/herdr-events-reader.ts");
     expect(payload).not.toContain("Result");
   });
 
